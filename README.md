@@ -151,7 +151,23 @@ MIRROR_PASSWORD = "env:MY_MIRROR_PASSWORD"
 
 ## Install
 
-The static binary, one file per architecture, from a [release](https://github.com/stackhands/eb-local/releases), or `zig build --release=safe` with Zig 0.17.1.
+On a cluster whose site installs eb-local, load its module and skip the rest of this section.
+
+Otherwise, download the static binary, one file per architecture, from a [release](https://github.com/stackhands/eb-local/releases):
+
+```sh
+v=2.1.2; f=eb-local-$v-$(uname -m)-linux-musl
+mkdir -p ~/.local/bin && cd ~/.local/bin
+curl -fLO "https://github.com/stackhands/eb-local/releases/download/v$v/$f"
+curl -fL "https://github.com/stackhands/eb-local/releases/download/v$v/SHA256SUMS" | sha256sum -c --ignore-missing
+mv "$f" eb-local && chmod 755 eb-local
+eb-local --version
+```
+
+`env` and `dev` work once `~/.local/bin` is on `PATH`.
+Building with EasyBuild also needs the `[storage]` settings shown under Configuration, in `config.toml` beside the program, mode 644.
+To build from source: `zig build --release=safe` with Zig 0.17.1.
+
 The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no configuration files, profiles or secrets.
 A site's easyconfig installs the program and its site configuration.
 
