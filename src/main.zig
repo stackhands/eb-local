@@ -390,7 +390,9 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
     }
-    if (llvmToolchain(s.dev_buildenv.value) == null) {
+    // Only the GCC build environment is known to lack LLVM wrappers; a site's
+    // own buildenv may wrap clang under any name.
+    if (gccBuildenv(s.dev_buildenv.value)) {
         for (mods.items) |m| if (llvmToolchain(m)) |tc| {
             warn("{s} belongs to the {s} toolchain, but {s} wraps only the GCC compilers;", .{ m, tc, s.dev_buildenv.value });
             cli.err("  clang and flang get no run paths for its libraries. Name an lfoss build environment with --buildenv.\n", .{});
@@ -400,10 +402,19 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     return 0;
 }
 
+/// A build environment of the GCC toolchains, as EasyBuild names them.
+fn gccBuildenv(module: []const u8) bool {
+    if (llvmToolchain(module) != null) return false;
+    for ([_][]const u8{ "-foss-", "-gompi-", "-gfbf-", "-GCC-", "-GCCcore-" }) |tc| {
+        if (std.mem.indexOf(u8, module, tc) != null or std.mem.endsWith(u8, module, tc[0 .. tc.len - 1])) return true;
+    }
+    return false;
+}
+
 /// The LLVM toolchain of the lfoss hierarchy a module name belongs to, as
 /// EasyBuild names it in the module's version suffix, if any.
 fn llvmToolchain(module: []const u8) ?[]const u8 {
-    for ([_][]const u8{ "llvm-compilers", "lompi", "lfbf", "lfoss" }) |tc| {
+    for ([_][]const u8{ "llvm-compilers", "lompi", "lfbf", "lfoss", "lmpflf" }) |tc| {
         var from: usize = 0;
         while (std.mem.indexOfPos(u8, module, from, tc)) |at| {
             const end = at + tc.len;
@@ -424,6 +435,16 @@ test "llvmToolchain names the lfoss hierarchy and nothing else" {
     try std.testing.expect(llvmToolchain("FFTW/3.3.10-GCC-15.2.0") == null);
     try std.testing.expect(llvmToolchain("buildenv/default-foss-2026.1") == null);
     try std.testing.expect(llvmToolchain("Xlfossy/1.0") == null);
+    try std.testing.expectEqualStrings("lmpflf", llvmToolchain("X/1.0-lmpflf-2026.1").?);
+}
+
+test "gccBuildenv names the GCC build environments only" {
+    try std.testing.expect(gccBuildenv("buildenv/default-foss-2026.1"));
+    try std.testing.expect(gccBuildenv("buildenv/default-foss-2026.1-CUDA-13.3.0"));
+    try std.testing.expect(gccBuildenv("buildenv/default-GCC-15.2.0"));
+    try std.testing.expect(!gccBuildenv("buildenv/default-lfoss-2026.1"));
+    try std.testing.expect(!gccBuildenv("buildenv/site-llvm"));
+    try std.testing.expect(!gccBuildenv("buildenv/default-intel-2026.1"));
 }
 
 fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {

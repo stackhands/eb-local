@@ -128,7 +128,8 @@ class Commands(StorageFixture):
         self.assertIn("--buildenv", run.stderr)
         self.assertTrue(run.stdout.rstrip().endswith("module load buildenv/default-foss-2026.1"), run.stdout)
         for argv in (["dev", "FFTW/3.3.10-GCC-15.2.0"],
-                     ["dev", "--buildenv", "buildenv/default-lfoss-2026.1", "FFTW.MPI/3.3.10-lompi-2026.1"]):
+                     ["dev", "--buildenv", "buildenv/default-lfoss-2026.1", "FFTW.MPI/3.3.10-lompi-2026.1"],
+                     ["dev", "--buildenv", "buildenv/site-llvm", "FFTW.MPI/3.3.10-lompi-2026.1"]):
             with self.subTest(argv=argv):
                 run = self.run_wrapper(argv, SLURM_JOB_ID="")
                 self.assertEqual(run.returncode, 0, run.stderr)
