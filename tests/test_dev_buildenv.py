@@ -24,7 +24,8 @@ module() {
             shift
             for m in "$@"; do
                 case $m in
-                    llvm-compilers/*) export EBROOTLLVMMINUSCOMPILERS=/eessi/llvm ;;
+                    llvm-compilers/*) export EBROOTLLVMMINCOMPILERS=/eessi/llvm ;;
+                    intel-compilers/*) export EBROOTINTELMINCOMPILERS=/eessi/intel ;;
                     CUDA/*) export EBROOTCUDA=/eessi/cuda ;;
                     NVHPC/*) export EBROOTNVHPC=/eessi/nvhpc ;;
                 esac

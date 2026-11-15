@@ -59,13 +59,30 @@ pub const Settings = struct {
 
 /// The compiler families dev tells apart after the modules load, each by the
 /// EBROOT variable of its compiler module, in rising precedence. GCC is the
-/// rest and uses dev.buildenv.
+/// rest and uses dev.buildenv. The names are EasyBuild's: a hyphen in the
+/// software name becomes "min", so llvm-compilers sets EBROOTLLVMMINCOMPILERS.
 pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8 }{
     .{ .name = "cuda", .ebroot = "EBROOTCUDA", .env = "EB_LOCAL_DEV_BUILDENV_FOR_CUDA" },
-    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINUSCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM" },
-    .{ .name = "intel", .ebroot = "EBROOTINTELMINUSCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL" },
+    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM" },
+    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL" },
     .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC" },
 };
+
+/// The `EBROOT` name EasyBuild writes for `software`. `convert_name` replaces
+/// `+` with `plus`, `-` with `min` and drops `.`, then the result is
+/// uppercased. `llvm-compilers` is `EBROOTLLVMMINCOMPILERS`.
+pub fn ebRoot(a: Allocator, software: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    try out.appendSlice(a, "EBROOT");
+    for (software) |ch| switch (ch) {
+        '+' => try out.appendSlice(a, "PLUS"),
+        '-' => try out.appendSlice(a, "MIN"),
+        '.' => {},
+        else => try out.append(a, std.ascii.toUpper(ch)),
+    };
+    return out.toOwnedSlice(a);
+}
 
 /// The EB_LOCAL_DEV_BUILDENV_FOR_* word for "no build environment".
 pub const no_buildenv = "none";
@@ -785,6 +802,27 @@ test "dev.buildenv_for per compiler family" {
     try std.testing.expectEqualStrings("site site.toml:2", s.buildenv_for[3].from);
     try t.refuse(&.{.{ .path = "c.toml", .text = "[dev.buildenv_for]\nrocm = \"x\"\n", .layer = .user }}, "unknown key dev.buildenv_for.rocm");
     try t.refuse(&.{.{ .path = "c.toml", .text = "[dev.buildenv_for]\nllvm = \"a;b\"\n", .layer = .user }}, "not a module name");
+}
+
+test "family EBROOT names are the ones EasyBuild writes" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { software: []const u8, ebroot: []const u8 }{
+        .{ .software = "CUDA", .ebroot = families[0].ebroot },
+        .{ .software = "llvm-compilers", .ebroot = families[1].ebroot },
+        .{ .software = "intel-compilers", .ebroot = families[2].ebroot },
+        .{ .software = "NVHPC", .ebroot = families[3].ebroot },
+    };
+    for (cases) |c| {
+        const got = try ebRoot(a, c.software);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c.ebroot, got);
+    }
+    const dotted = try ebRoot(a, "foo.bar");
+    defer a.free(dotted);
+    try std.testing.expectEqualStrings("EBROOTFOOBAR", dotted);
+    const plus = try ebRoot(a, "C++");
+    defer a.free(plus);
+    try std.testing.expectEqualStrings("EBROOTCPLUSPLUS", plus);
 }
 
 test "module names" {
