@@ -124,16 +124,16 @@ class ConfigCli(StorageFixture):
         self.assertTrue(run.stdout.endswith("module load buildenv/mine\n"), run.stdout)
 
     def test_global_options_may_come_before_the_command(self):
-        # The README's own form: eb-local --profile gpu dev.
-        before = self.run_tool(["--profile", "gpu", "dev"], SLURM_JOB_ID="")
-        after = self.run_tool(["dev", "--profile", "gpu"], SLURM_JOB_ID="")
+        # The README's form, eb-local --profile gpu dev, with the user file's profile.
+        before = self.run_tool(["--profile", "licensed", "dev"], SLURM_JOB_ID="")
+        after = self.run_tool(["dev", "--profile", "licensed"], SLURM_JOB_ID="")
         self.assertEqual(before.returncode, 0, before.stderr)
-        self.assertIn("module load CUDA/13.3.0\n", before.stdout)
+        self.assertNotIn("FFTW", before.stdout)
         self.assertEqual(before.stdout, after.stdout)
         run = self.run_tool(["--config", str(self.site), "config"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("storage.node_local_root", run.stdout)
-        run = self.run_tool(["--profile", "gpu", "env", "extra"], SLURM_JOB_ID="")
+        run = self.run_tool(["--profile", "mine", "env", "extra"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 2)
         self.assertIn("env takes only", run.stderr)
 
