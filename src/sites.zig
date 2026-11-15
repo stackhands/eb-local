@@ -137,7 +137,11 @@ test "every rendered template loads as a site file" {
     var env = std.process.Environ.Map.init(a);
     for (all) |t| {
         var sets: std.ArrayList(Set) = .empty;
-        for (try placeholders(a, t.text)) |n| try sets.append(a, .{ .name = n, .value = "/srv/x" });
+        // Required placeholders get a path; the others keep their defaults.
+        for (try placeholders(a, t.text)) |n| {
+            const bare = try std.fmt.allocPrint(a, "{{{{{s}}}}}", .{n});
+            if (std.mem.indexOf(u8, t.text, bare) != null) try sets.append(a, .{ .name = n, .value = "/srv/x" });
+        }
         var d: Diagnostic = .{};
         const text = try render(a, t, sets.items, &d);
         var cd: config.Diagnostic = .{};
