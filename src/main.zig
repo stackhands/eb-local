@@ -650,7 +650,12 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
     // [eessi] settings are environment for EESSI already; they travel as
     // themselves.
-    for (s.eessi.items) |e| line(a, &out, e.name, e.value);
+    // An empty [eessi] value is a profile clearing a site setting. line()
+    // skips empty strings, which is how an unset EB_LOCAL_* default is left
+    // out; the clear has to be exported or the site value stays in the job.
+    for (s.eessi.items) |e| {
+        out.appendSlice(a, str(a, "export {s}={s}\n", .{ e.name, q(a, e.value) })) catch oom();
+    }
     cli.put(1, out.items);
     return 0;
 }

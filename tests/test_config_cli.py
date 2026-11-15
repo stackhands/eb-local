@@ -245,6 +245,20 @@ class ConfigCli(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("export EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220='1 2'\n", run.stdout)
 
+    def test_an_empty_eessi_override_is_exported(self):
+        self.site.write_text(
+            SITE.format(nodes=self.nodes)
+            + "\n[eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"1\"\n"
+            + "[profile.cleared.eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"\"\n"
+        )
+        run = self.run_tool(["config", "--env", "--config", str(self.site), "--profile", "cleared"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("export EESSI_OVERRIDE_TOOLCHAIN_CHECK=''\n", run.stdout)
+        self.assertNotIn("export EESSI_OVERRIDE_TOOLCHAIN_CHECK='1'\n", run.stdout)
+        run = self.run_tool(["env", "--config", str(self.site), "--profile", "cleared"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("export EESSI_OVERRIDE_TOOLCHAIN_CHECK=''\n", run.stdout)
+
     def test_refusals(self):
         cases = {
             'TOKEN = "hunter2"\n': "never written",
