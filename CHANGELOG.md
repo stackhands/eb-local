@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.2.0
+
+* `build.site_toolchains` in the site file lists NAME/VERSION toolchains
+  that EESSI's hooks accept besides foss and lfoss; a build exports them as
+  `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_<EESSI version>`, replacing a value the
+  caller exported. A user file or a profile cannot set it (#3).
+* `dev` warns when a named module belongs to the lfoss hierarchy
+  (`llvm-compilers`, `lompi`, `lfbf`, `lfoss`) and the build environment
+  wraps only the GCC compilers, and points at `--buildenv` (#2).
+* Global options may come before the command: `eb-local --profile gpu dev`
+  ran as a build of an easyconfig named `dev`.
+* README: a program built with `dev` belongs to one CPU target (#4); a
+  copy-paste install of the release binary with its checksum.
+* CI: every action pinned to a commit SHA, read-only tokens, dependabot.
+
 ## 2.1.2
 
 * `uninstall` with rtrash passes `-r`: `rtrash put` follows rm(1) and

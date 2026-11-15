@@ -171,7 +171,7 @@ On a cluster whose site installs eb-local, load its module and skip the rest of 
 Otherwise, download the static binary, one file per architecture, from a [release](https://github.com/stackhands/eb-local/releases):
 
 ```sh
-v=2.1.2; f=eb-local-$v-$(uname -m)-linux-musl
+v=2.2.0; f=eb-local-$v-$(uname -m)-linux-musl
 mkdir -p ~/.local/bin && cd ~/.local/bin
 curl -fLO "https://github.com/stackhands/eb-local/releases/download/v$v/$f"
 curl -fL "https://github.com/stackhands/eb-local/releases/download/v$v/SHA256SUMS" | sha256sum -c --ignore-missing
