@@ -71,6 +71,8 @@ mkdir -p /path/to/project/eessi && chgrp myproj /path/to/project/eessi && chmod 
 eb-local --project /path/to/project/eessi GSL-2.8-GCC-15.2.0.eb --robot
 ```
 
+eb-local refuses a project directory that others can write to, since anyone could then add module files the group loads, and warns when the setgid bit is missing, since each member's installs would then keep that member's own group.
+
 A successful build removes its workspace; a failed one keeps it for inspection until the allocation ends.
 
 ## Where things go

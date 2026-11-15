@@ -168,6 +168,24 @@ class EnvironmentControls(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stderr)
         self.assertFalse((self.root / "load.json").exists())
 
+    @unittest.skipUnless(binary.BIN, "the project directory mode checks are a feature of the Zig build")
+    def test_project_directory_mode(self):
+        self.prefix.chmod(0o2770)
+        run = self.run_wrapper(["env", "--project", str(self.prefix)], CONTROL_MODE="EESSI_PROJECT_INSTALL")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn("setgid", run.stderr)
+        self.prefix.chmod(0o770)
+        run = self.run_wrapper(["env", "--project", str(self.prefix)], CONTROL_MODE="EESSI_PROJECT_INSTALL")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("chmod g+s", run.stderr)
+        self.assertIn("export EESSI_PROJECT_INSTALL=", run.stdout)
+        self.prefix.chmod(0o2777)
+        run = self.run_wrapper(["env", "--project", str(self.prefix)], CONTROL_MODE="EESSI_PROJECT_INSTALL")
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertEqual(run.stdout, "")
+        self.assertIn("writable by others", run.stderr)
+        self.prefix.chmod(0o755)
+
     def test_allocation_is_required(self):
         env = dict(self.env)
         env.pop("SLURM_JOB_ID")

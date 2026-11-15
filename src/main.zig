@@ -326,6 +326,10 @@ fn place(c: Ctx, s: config.Settings) Place {
             std.process.exit(2);
         };
         if (!st.isDir()) die("project directory {s} is not a directory", .{p});
+        // Anyone could then put module files there that the group loads.
+        if (st.mode & 0o002 != 0) die("project directory {s} is writable by others and is not used; chmod o-w it", .{p});
+        // Without it, each member's installs carry that member's own group.
+        if (st.mode & 0o2000 == 0) warn("project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p});
         return .{ .prefix = storage.canonical(c.a, p, c.cwd) catch oom(), .project = true };
     }
     var raw = s.prefix.value;
