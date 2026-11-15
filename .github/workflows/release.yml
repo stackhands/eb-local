@@ -73,10 +73,31 @@ jobs:
           pattern: bin-*
           merge-multiple: true
           path: dist
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      # One CycloneDX SBOM per binary, from build.zig.zon and the toolchain.
+      - name: SBOMs
+        id: sbom
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          for arch in x86_64 aarch64; do
+            b="dist/eb-local-${v}-${arch}-linux-musl"
+            python3 -I tools/sbom.py --binary "$b" --zon build.zig.zon --zig "$(zig version)" --commit "${GITHUB_SHA}" > "${b}.cdx.json"
+          done
       - run: cd dist && sha256sum eb-local-* > SHA256SUMS && cat SHA256SUMS
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/*
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/eb-local-${{ steps.sbom.outputs.version }}-x86_64-linux-musl
+          sbom-path: dist/eb-local-${{ steps.sbom.outputs.version }}-x86_64-linux-musl.cdx.json
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/eb-local-${{ steps.sbom.outputs.version }}-aarch64-linux-musl
+          sbom-path: dist/eb-local-${{ steps.sbom.outputs.version }}-aarch64-linux-musl.cdx.json
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}

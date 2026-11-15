@@ -218,6 +218,14 @@ eb-local --version
 Building with EasyBuild also needs a site file beside the program: `eb-local site install snellius`, or the `slurm` template with your cluster's paths.
 To build from source: `zig build --release=safe` with Zig 0.17.1.
 
+Each release binary has a build provenance attestation and, from 2.4.0, a CycloneDX SBOM (`$f.cdx.json` beside it) with its own attestation.
+With the GitHub CLI, check both before the `mv`:
+
+```sh
+gh attestation verify "$f" --repo stackhands/eb-local
+gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://cyclonedx.org/bom
+```
+
 The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no configuration files, profiles or secrets.
 A site's easyconfig installs the program and its site configuration.
 
