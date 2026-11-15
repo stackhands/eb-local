@@ -35,6 +35,16 @@ These were checked on Snellius with EESSI 2026.06, each program then run with no
 | R packages into your own library | `eval "$(eb-local dev R/4.6.1-gfbf-2026.1)"`, then `install.packages(..., lib=...)` and `R_LIBS` |
 
 Load EESSI on the node type that will run the program: it picks the binaries for the CPU it finds when it loads.
+A program built with `dev` belongs to that one CPU target, because the wrappers record run paths into `$EESSI_SOFTWARE_SUBDIR`; a binary linked on zen4 loads zen4 libraries wherever it runs and can stop with an illegal instruction on zen2.
+So build once per node type, inside an allocation on that node type, and install into a path that names the target:
+
+```sh
+salloc -p rome -n 4 -t 00:30:00             # one allocation per node type
+eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
+mkdir -p "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR"
+gcc -O2 -fopenmp prog.c -lfftw3 -o "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog"
+readelf -d "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog" | grep -E 'RPATH|RUNPATH'   # names the target
+```
 
 ## Install software with EasyBuild
 
