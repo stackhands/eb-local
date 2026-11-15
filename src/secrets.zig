@@ -28,6 +28,15 @@ pub const Failure = struct {
 
 pub const Error = error{Unavailable} || Allocator.Error;
 
+/// Which nimvault runs and which vault it reads.
+pub const Nimvault = struct {
+    /// An absolute path; empty means the first nimvault on PATH.
+    program: []const u8 = "",
+    /// Passed as --vault; ~/ is HOME. Empty leaves nimvault to find the vault
+    /// from NIMVAULT_VAULT_REPO or the current directory.
+    vault: []const u8 = "",
+};
+
 fn fail(a: Allocator, f: *Failure, comptime fmt: []const u8, args: anytype) Error {
     f.message = try std.fmt.allocPrint(a, fmt, args);
     return error.Unavailable;
@@ -67,11 +76,19 @@ fn fromFile(a: Allocator, f: *Failure, s: config.Secret, raw_path: []const u8, h
     return checked(a, f, s, trimNewline(bytes));
 }
 
-fn fromNimvault(a: Allocator, f: *Failure, s: config.Secret, entry: []const u8, env: *const std.process.Environ.Map, envp: proc.Envp) Error![]const u8 {
-    const path_env = env.get("PATH") orelse "";
-    const exe = (try proc.which(a, "nimvault", path_env)) orelse
-        return fail(a, f, "secret {s}: nimvault is not on PATH", .{s.name});
-    const r = proc.run(a, exe, &.{ exe, "get", entry }, envp, .{
+fn fromNimvault(a: Allocator, f: *Failure, s: config.Secret, entry: []const u8, env: *const std.process.Environ.Map, envp: proc.Envp, nv: Nimvault) Error![]const u8 {
+    const exe = if (nv.program.len > 0) nv.program else (try proc.which(a, "nimvault", env.get("PATH") orelse "")) orelse
+        return fail(a, f, "secret {s}: nimvault is not on PATH (or set nimvault.program)", .{s.name});
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(a, &.{ exe, "get", entry });
+    if (nv.vault.len > 0) {
+        const vault = if (std.mem.startsWith(u8, nv.vault, "~/")) blk: {
+            const h = env.get("HOME") orelse return fail(a, f, "secret {s}: nimvault.vault {s} needs HOME", .{ s.name, nv.vault });
+            break :blk try std.fs.path.join(a, &.{ h, nv.vault[2..] });
+        } else nv.vault;
+        try argv.appendSlice(a, &.{ "--vault", vault });
+    }
+    const r = proc.run(a, exe, argv.items, envp, .{
         .stdout_limit = value_limit,
         .stderr_limit = 4096,
         .timeout_ms = nimvault_timeout_ms,
@@ -97,6 +114,7 @@ pub fn resolve(
     secrets: []const config.Secret,
     env: *const std.process.Environ.Map,
     envp: proc.Envp,
+    nv: Nimvault,
     f: *Failure,
 ) Error![]Resolved {
     var out: std.ArrayList(Resolved) = .empty;
@@ -109,7 +127,7 @@ pub fn resolve(
         else if (std.mem.eql(u8, kind, "file"))
             try fromFile(a, f, s, rest, env.get("HOME"))
         else
-            try fromNimvault(a, f, s, rest, env, envp);
+            try fromNimvault(a, f, s, rest, env, envp, nv);
         try out.append(a, .{ .name = s.name, .value = value });
     }
     return out.items;
@@ -240,6 +258,7 @@ const Scratch = struct {
     arena: std.heap.ArenaAllocator,
     root: []const u8,
     env: std.process.Environ.Map,
+    nv: Nimvault = .{},
 
     fn init() !Scratch {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -271,7 +290,7 @@ const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
 
 fn resolveOne(s: *Scratch, source: []const u8) !struct { value: ?[]const u8, message: []const u8 } {
     var f: Failure = .{};
-    const r = resolve(s.arena.allocator(), &.{.{ .name = "TOKEN", .source = source, .from = "test" }}, &s.env, no_env, &f) catch |e| switch (e) {
+    const r = resolve(s.arena.allocator(), &.{.{ .name = "TOKEN", .source = source, .from = "test" }}, &s.env, no_env, s.nv, &f) catch |e| switch (e) {
         error.Unavailable => return .{ .value = null, .message = f.message },
         else => return e,
     };
@@ -325,6 +344,25 @@ test "nimvault: the value from stdout, the reason from stderr only" {
     try testing.expect(std.mem.indexOf(u8, r.message, "partial-value") == null);
     try s.env.put("PATH", "/nonexistent");
     try testing.expect(std.mem.indexOf(u8, (try resolveOne(&s, "nimvault:ok")).message, "not on PATH") != null);
+}
+
+test "nimvault: a configured program and vault" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    // Prints its arguments, so the test sees the --vault it was given.
+    const prog = try s.write("vault-tool",
+        \\#!/bin/sh
+        \\[ "$1" = get ] || exit 64
+        \\printf '%s|%s|%s\n' "$2" "$3" "$4"
+    , 0o700);
+    try s.env.put("PATH", "/nonexistent");
+    try s.env.put("HOME", "/home/someone");
+    s.nv = .{ .program = prog };
+    try testing.expectEqualStrings("ok||", (try resolveOne(&s, "nimvault:ok")).value.?);
+    s.nv = .{ .program = prog, .vault = "~/private-vault" };
+    try testing.expectEqualStrings("ok|--vault|/home/someone/private-vault", (try resolveOne(&s, "nimvault:ok")).value.?);
+    s.nv = .{ .program = prog, .vault = "/srv/vault" };
+    try testing.expectEqualStrings("ok|--vault|/srv/vault", (try resolveOne(&s, "nimvault:ok")).value.?);
 }
 
 test "logs written during the build are redacted" {

@@ -12,6 +12,7 @@ const cli = common.cli;
 pub const toml = @import("toml.zig");
 pub const config = @import("config.zig");
 pub const secrets = @import("secrets.zig");
+pub const sites = @import("sites.zig");
 pub const storage = @import("storage.zig");
 const Allocator = std.mem.Allocator;
 
@@ -28,12 +29,16 @@ const usage_text =
     \\                                       so gcc, make, cmake and meson just work
     \\  eb-local clean [--logs-older-than DAYS] [--sources] [--workspaces] [--dry-run] [--delete]
     \\                                       remove what eb-local left behind
-    \\  eb-local config [--check]            the settings in force and where each came from;
-    \\                                       --check also reads every secret (values not shown)
+    \\  eb-local config [--check | --env]    the settings in force and where each came from;
+    \\                                       --check also reads every secret (values not shown);
+    \\                                       --env prints them as EB_LOCAL_* lines for export
     \\  eb-local profiles                    the profiles the configuration defines
     \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete]
     \\                                       remove an installation and its module file, for
     \\                                       every CPU target, to the trash with rtrash
+    \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
+    \\                                       the site file templates built in; install writes
+    \\                                       config.toml beside this program, mode 644
     \\  eb-local help | --version
     \\
     \\Every command takes --profile NAME, --project DIR (a shared project directory
@@ -44,7 +49,8 @@ const usage_text =
     \\
     \\Configuration: the site file (/etc/eb-local/config.toml, or config.toml or
     \\eb-local.conf beside this program), then ~/.config/eb-local/config.toml,
-    \\then EB_LOCAL_* variables, then options. Builds use the allocation's own
+    \\then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
+    \\then options. Builds use the allocation's own
     \\node-local mount; a successful build removes its workspace. Secrets reach
     \\eb's environment only, and logs written during a build are cleaned of them.
     \\
@@ -417,6 +423,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
+    row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
+    row("nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
     row("storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
     row("storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
     const scratch = std.mem.join(a, " ", s.shared_scratch.value) catch oom();
@@ -433,7 +441,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
             continue;
         }
         var f: secrets.Failure = .{};
-        if (secrets.resolve(a, &.{sec}, c.env, c.envp, &f)) |_| {
+        if (secrets.resolve(a, &.{sec}, c.env, c.envp, nimvaultOf(s), &f)) |_| {
             say("  {s: <26} {s}   ok", .{ sec.name, sec.source });
         } else |e| switch (e) {
             error.Unavailable => {
@@ -444,6 +452,87 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
         }
     }
     return if (failed) 1 else 0;
+}
+
+fn nimvaultOf(s: config.Settings) secrets.Nimvault {
+    return .{ .program = s.nimvault_program.value, .vault = s.nimvault_vault.value };
+}
+
+/// The settings in force as EB_LOCAL_* lines, so the same configuration can
+/// travel in the environment of a job, a container or CI. Storage and
+/// build.site_toolchains have no variable: only the site file sets them.
+fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
+    const a = c.a;
+    var out: std.ArrayList(u8) = .empty;
+    const line = struct {
+        fn f(al: Allocator, o: *std.ArrayList(u8), name: []const u8, v: []const u8) void {
+            if (v.len == 0) return;
+            o.appendSlice(al, str(al, "export {s}={s}\n", .{ name, q(al, v) })) catch oom();
+        }
+    }.f;
+    out.appendSlice(a, "# eb-local configuration; storage and build.site_toolchains come only from the site file\n") catch oom();
+    if (s.project.value) |p| line(a, &out, "EB_LOCAL_PROJECT", p) else line(a, &out, "EB_LOCAL_PREFIX", s.prefix.value);
+    line(a, &out, "EB_LOCAL_STACK_MODULE", s.stack_module.value);
+    line(a, &out, "EB_LOCAL_STACK_EXTEND", s.extend_module.value);
+    line(a, &out, "EB_LOCAL_DEV_BUILDENV", s.dev_buildenv.value);
+    line(a, &out, "EB_LOCAL_DEV_MODULES", std.mem.join(a, " ", s.dev_modules.value) catch oom());
+    line(a, &out, "EB_LOCAL_BUILD_ALLOCATION_HINT", s.allocation_hint.value);
+    line(a, &out, "EB_LOCAL_CLEAN_TRASH", @tagName(s.trash.value));
+    line(a, &out, "EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS", str(a, "{d}", .{s.logs_older_than_days.value}));
+    line(a, &out, "EB_LOCAL_NIMVAULT_PROGRAM", s.nimvault_program.value);
+    line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
+    for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
+    cli.put(1, out.items);
+    return 0;
+}
+
+const SiteOpts = struct {
+    words: std.ArrayList([]const u8) = .empty,
+    sets: std.ArrayList(sites.Set) = .empty,
+    to: ?[]const u8 = null,
+    force: bool = false,
+};
+
+fn cmdSite(c: Ctx, o: SiteOpts) u8 {
+    const a = c.a;
+    const w = o.words.items;
+    const action = if (w.len > 0) w[0] else "list";
+    if (std.mem.eql(u8, action, "list")) {
+        if (w.len > 1 or o.sets.items.len > 0 or o.to != null or o.force) die("site list takes nothing else", .{});
+        for (sites.all) |t| {
+            const names = sites.placeholders(a, t.text) catch oom();
+            say("{s: <12} placeholders: {s}", .{ t.name, if (names.len == 0) "none" else std.mem.join(a, ", ", names) catch oom() });
+        }
+        return 0;
+    }
+    const show = std.mem.eql(u8, action, "show");
+    if (!show and !std.mem.eql(u8, action, "install")) die("site takes list, show NAME or install NAME; got '{s}'", .{action});
+    if (w.len != 2) die("site {s} takes one template name (eb-local site list shows them)", .{action});
+    if (show and (o.to != null or o.force)) die("site show prints the file; --to and --force are for install", .{});
+    const t = sites.find(w[1]) orelse die("no site template '{s}' (eb-local site list shows them)", .{w[1]});
+    var d: sites.Diagnostic = .{};
+    const text = sites.render(a, t, o.sets.items, &d) catch |e| switch (e) {
+        error.Invalid => die("{s}", .{d.message}),
+        error.OutOfMemory => oom(),
+    };
+    const target = o.to orelse std.fs.path.join(a, &.{ selfDir(a), "config.toml" }) catch oom();
+    // The file must load as the site file it is about to become.
+    var empty = std.process.Environ.Map.init(a);
+    var cd: config.Diagnostic = .{};
+    _ = config.load(a, &.{.{ .path = target, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
+        error.Invalid => die("template {s}: {s}", .{ t.name, cd.message }),
+        error.OutOfMemory => oom(),
+    };
+    if (show) {
+        cli.put(1, text);
+        return 0;
+    }
+    if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
+    var why: common.atomic.Why = .{};
+    common.atomic.atomicWrite(a, target, text, .{ .mode = 0o644 }, &why) catch |e|
+        die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else @errorName(e) });
+    say("wrote {s} from template {s}; eb-local config shows what it sets", .{ target, t.name });
+    return 0;
 }
 
 fn cmdProfiles(c: Ctx, g: Global) u8 {
@@ -791,7 +880,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
     var failure: secrets.Failure = .{};
-    const values = secrets.resolve(a, s.secrets.items, c.env, c.envp, &failure) catch |e| switch (e) {
+    const values = secrets.resolve(a, s.secrets.items, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
         error.Unavailable => die("{s}", .{failure.message}),
         error.OutOfMemory => oom(),
     };
@@ -1003,7 +1092,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, env, dev, clean, config, profiles, uninstall };
+const Command = enum { build, env, dev, clean, config, profiles, uninstall, site };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -1049,6 +1138,8 @@ pub fn main(init: std.process.Init) u8 {
     var clean: CleanOpts = .{};
     var uninstall: UninstallOpts = .{};
     var check = false;
+    var as_env = false;
+    var site: SiteOpts = .{};
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -1081,8 +1172,28 @@ pub fn main(init: std.process.Init) u8 {
             .build => rest.append(a, x) catch oom(),
             .env, .profiles => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
             .config => {
-                if (!std.mem.eql(u8, x, "--check")) die("config does not know '{s}'", .{x});
-                check = true;
+                if (std.mem.eql(u8, x, "--check")) {
+                    check = true;
+                } else if (std.mem.eql(u8, x, "--env")) {
+                    as_env = true;
+                } else die("config does not know '{s}'", .{x});
+                if (check and as_env) die("config takes --check or --env, not both", .{});
+            },
+            .site => {
+                if (std.mem.eql(u8, x, "--set")) {
+                    var d: sites.Diagnostic = .{};
+                    const set = sites.parseSet(a, value(args, &i, "--set"), &d) catch |e| switch (e) {
+                        error.Invalid => die("{s}", .{d.message}),
+                        error.OutOfMemory => oom(),
+                    };
+                    site.sets.append(a, set) catch oom();
+                } else if (std.mem.eql(u8, x, "--to")) {
+                    site.to = value(args, &i, "--to");
+                } else if (std.mem.eql(u8, x, "--force")) {
+                    site.force = true;
+                } else if (x.len > 0 and x[0] == '-') {
+                    die("site does not know '{s}'", .{x});
+                } else site.words.append(a, x) catch oom();
             },
             .dev => {
                 if (std.mem.eql(u8, x, "--buildenv")) {
@@ -1128,15 +1239,17 @@ pub fn main(init: std.process.Init) u8 {
     }
 
     if (command == .profiles) return cmdProfiles(c, g);
+    // A site file can be written while the configuration in force is broken.
+    if (command == .site) return cmdSite(c, site);
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s),
         .dev => cmdDev(c, s, rest.items),
-        .config => cmdConfig(c, s, check),
+        .config => if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check),
         .clean => cmdClean(c, s, clean),
         .build => cmdBuild(c, s, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
-        .profiles => unreachable,
+        .profiles, .site => unreachable,
     };
 }
 
@@ -1144,6 +1257,7 @@ test {
     _ = toml;
     _ = config;
     _ = secrets;
+    _ = sites;
     _ = storage;
 }
 
