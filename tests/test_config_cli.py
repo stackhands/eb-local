@@ -57,7 +57,8 @@ import json, os, sys
 root = os.environ["CONTROL_ROOT"]
 names = ["SOURCE_TOKEN", "OTHER_TOKEN", "LM_LICENSE_FILE"]
 seen = {n: os.environ.get(n) for n in names}
-open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen}))
+site = {n: v for n, v in os.environ.items() if "TOP_LEVEL_TOOLCHAINS" in n or n == "EB_LOCAL_SITE_TOOLCHAINS"}
+open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site}))
 log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-test.log")
 open(log, "w").write("".join(f"{n}={v}\n" for n, v in seen.items()))
 PY
@@ -162,6 +163,28 @@ class ConfigCli(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
         self.assertFalse((self.root / "eb.json").exists())
 
+    def test_site_toolchains_reach_the_eessi_hooks(self):
+        text = self.site.read_text()
+        self.assertIn('allocation_hint = "salloc -p rome -n 16"\n', text)
+        self.site.write_text(text.replace('allocation_hint = "salloc -p rome -n 16"\n',
+                                          'allocation_hint = "salloc -p rome -n 16"\n'
+                                          'site_toolchains = ["intel/2026.1", "nvidia-compilers/26.3"]\n'))
+        # A value the caller exports is replaced by the site's.
+        run = self.run_tool(["--config", str(self.site), "recipe.eb"],
+                            EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06="[]", EB_LOCAL_SITE_TOOLCHAINS="[]")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        site = json.loads((self.root / "eb.json").read_text())["site"]
+        self.assertEqual(site, {"EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06": json.dumps(
+            [{"name": "intel", "version": "2026.1"}, {"name": "nvidia-compilers", "version": "26.3"}])})
+        run = self.run_tool(["config", "--config", str(self.site)], SLURM_JOB_ID="")
+        self.assertRegex(run.stdout, r"build\.site_toolchains\s+intel/2026\.1 nvidia-compilers/26\.3\s+\[site ")
+
+    def test_without_site_toolchains_the_caller_keeps_its_own(self):
+        run = self.run_tool(["--config", str(self.site), "recipe.eb"], EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06="[x]")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        site = json.loads((self.root / "eb.json").read_text())["site"]
+        self.assertEqual(site, {"EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06": "[x]"})
+
     def test_refusals(self):
         cases = {
             'TOKEN = "hunter2"\n': "never written",
@@ -169,6 +192,8 @@ class ConfigCli(StorageFixture):
             '[storage]\nnode_local_root = "/tmp"\n': "site setting",
             '[secrets]\nLD_PRELOAD = "env:X"\n': "not a variable name",
             '[profile.p]\nstack.module = "EESSI;id"\n': "not a module name",
+            '[build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",
+            '[profile.p.build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",
         }
         for text, needle in cases.items():
             with self.subTest(text=text):

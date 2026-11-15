@@ -380,6 +380,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const mods = std.mem.join(a, " ", s.dev_modules.value) catch oom();
     row("dev.modules", if (mods.len == 0) "(none)" else mods, s.dev_modules.from);
     row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
+    const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
+    row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
@@ -698,6 +700,12 @@ const build_script =
     \\export "$install_var=$prefix"
     \\module load "$stack" "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $stack and $extend" >&2; exit 1; }
     \\restore
+    \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.
+    \\if [ -n "${EB_LOCAL_SITE_TOOLCHAINS:-}" ]; then
+    \\    [ -n "${EESSI_VERSION:-}" ] || { echo "eb-local: $stack set no EESSI_VERSION; cannot apply build.site_toolchains" >&2; exit 1; }
+    \\    export "EESSI_SITE_TOP_LEVEL_TOOLCHAINS_${EESSI_VERSION//./_}=$EB_LOCAL_SITE_TOOLCHAINS"
+    \\fi
+    \\unset EB_LOCAL_SITE_TOOLCHAINS
     \\echo "eb-local: installing into $prefix ($mode)"
     \\echo "eb-local: target $EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+ + $EESSI_ACCELERATOR_TARGET}, build space ${saved[EASYBUILD_BUILDPATH]%/build}"
     \\eb --umask=022 "$@"
@@ -773,6 +781,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
 
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
+    _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
+    if (s.site_toolchains.value.len > 0)
+        env.put("EB_LOCAL_SITE_TOOLCHAINS", config.toolchainsJson(a, s.site_toolchains.value) catch oom()) catch oom();
     const tmp = std.fs.path.join(a, &.{ work, "tmp" }) catch oom();
     const pairs = [_][2][]const u8{
         .{ "WORKING_DIR", std.fs.path.join(a, &.{ work, "source-index" }) catch oom() },
