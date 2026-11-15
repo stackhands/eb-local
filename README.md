@@ -239,6 +239,8 @@ python3 -m unittest discover -s tests                    # the Bash script
 zig build unit && zig build -Dtest-ops=true test          # the Zig build: unit tests, then the same suite
 ```
 
+A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
+
 `tests/site/` holds the acceptance scripts run on Snellius: the development tasks above, and a build inside an allocation.
 
 ## License
