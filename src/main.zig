@@ -143,6 +143,9 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
         \\
     );
     add(a, &out, str(a, "export {s}={s}\n", .{ if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", q(a, p.prefix) }));
+    // [eessi] settings before the stack loads: the EESSI module and its
+    // hooks read them then.
+    for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
     // EESSI-extend refuses an install directory that does not exist, and
     // Lmod then undoes the whole load; before the first install there are
     // no modules of yours to show, so the stack is loaded alone.
@@ -151,6 +154,17 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
         add(a, &out, str(a, "module load {s} {s}\n", .{ q(a, s.stack_module.value), q(a, s.extend_module.value) }));
     } else {
         add(a, &out, str(a, "module load {s}\n", .{q(a, s.stack_module.value)}));
+    }
+    // build.site_toolchains under the version the stack set, as a build
+    // exports it, so eb run by hand after env or dev accepts them too.
+    if (s.site_toolchains.value.len > 0) {
+        const json = config.toolchainsJson(a, s.site_toolchains.value) catch oom();
+        add(a, &out, str(a,
+            \\if [ -n "${{EESSI_VERSION-}}" ]; then
+            \\    export "EESSI_SITE_TOP_LEVEL_TOOLCHAINS_$(printf %s "$EESSI_VERSION" | tr . _)="{s}
+            \\fi
+            \\
+        , .{q(a, json)}));
     }
     return out.items;
 }
@@ -570,6 +584,9 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
     const scratch = std.mem.join(a, " ", s.shared_scratch.value) catch oom();
     row("storage.shared_scratch", if (scratch.len == 0) "(none)" else scratch, s.shared_scratch.from);
+    if (s.eessi.items.len == 0) {
+        say("{s: <28} (none)", .{"eessi"});
+    } else for (s.eessi.items) |v| row(str(a, "eessi.{s}", .{v.name}), q(a, v.value), v.from);
     if (s.secrets.items.len == 0) {
         say("{s: <28} (none)", .{"secrets"});
         return 0;
@@ -631,6 +648,9 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     line(a, &out, "EB_LOCAL_NIMVAULT_PROGRAM", s.nimvault_program.value);
     line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
+    // [eessi] settings are environment for EESSI already; they travel as
+    // themselves.
+    for (s.eessi.items) |e| line(a, &out, e.name, e.value);
     cli.put(1, out.items);
     return 0;
 }
@@ -1091,6 +1111,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         .{ "LMOD_EXACT_MATCH", "no" },
     };
     for (pairs) |kv| env.put(kv[0], kv[1]) catch oom();
+    for (s.eessi.items) |v| env.put(v.name, v.value) catch oom();
     for (values) |v| env.put(v.name, v.value) catch oom();
 
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";

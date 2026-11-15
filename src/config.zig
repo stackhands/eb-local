@@ -24,6 +24,14 @@ pub const Secret = struct {
     from: []const u8,
 };
 
+/// An EESSI setting exported before the stack loads, such as
+/// EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220. Not a secret: config shows it.
+pub const EessiVar = struct {
+    name: []const u8,
+    value: []const u8,
+    from: []const u8,
+};
+
 pub const Settings = struct {
     profile: ?[]const u8 = null,
     prefix: Setting([]const u8) = .{ .value = "~/.local/eessi" },
@@ -55,6 +63,7 @@ pub const Settings = struct {
     /// one from NIMVAULT_VAULT_REPO or the current directory.
     nimvault_vault: Setting([]const u8) = .{ .value = "" },
     secrets: std.ArrayList(Secret) = .empty,
+    eessi: std.ArrayList(EessiVar) = .empty,
 };
 
 /// The compiler families dev tells apart after the modules load, each by the
@@ -143,6 +152,28 @@ pub fn validSecretName(name: []const u8) bool {
     const refused_prefixes = [_][]const u8{ "LD_", "EESSI_", "EASYBUILD_", "LMOD_", "SLURM_", "EB_LOCAL_", "BASH_FUNC_" };
     for (refused_prefixes) |r| if (std.mem.startsWith(u8, name, r)) return false;
     return true;
+}
+
+/// The EESSI variables eb-local sets or clears itself: where an install
+/// goes and which CPU or GPU target is used. [eessi] cannot set them.
+pub const eessi_owned = [_][]const u8{
+    "EESSI_CVMFS_INSTALL",               "EESSI_SITE_INSTALL",         "EESSI_USER_INSTALL",
+    "EESSI_PROJECT_INSTALL",             "EESSI_SITE_SOFTWARE_PREFIX", "EESSI_SOFTWARE_SUBDIR_OVERRIDE",
+    "EESSI_ACCELERATOR_TARGET_OVERRIDE", "EESSI_OVERRIDE_GPU_CHECK",
+};
+
+/// A name [eessi] may set: EESSI_ and a shell name, not one eb-local owns
+/// or one build.site_toolchains sets.
+pub fn validEessiName(name: []const u8) bool {
+    if (!std.mem.startsWith(u8, name, "EESSI_") or name.len == "EESSI_".len) return false;
+    if (std.mem.startsWith(u8, name, "EESSI_SITE_TOP_LEVEL_TOOLCHAINS")) return false;
+    if (!validEnvName(name)) return false;
+    for (eessi_owned) |o| if (std.mem.eql(u8, name, o)) return false;
+    return true;
+}
+
+pub fn validEessiValue(v: []const u8) bool {
+    return v.len <= 4096 and std.mem.indexOfAny(u8, v, "\n\r\x00") == null;
 }
 
 pub fn validSecretSource(source: []const u8) bool {
@@ -365,6 +396,20 @@ const Loader = struct {
                         break;
                     };
                     try l.s.secrets.append(l.a, .{ .name = f.key, .source = v, .from = ff });
+                }
+            } else if (std.mem.eql(u8, k, "eessi")) {
+                const sub = try l.table(src, e, "eessi");
+                for (sub.entries.items) |*f| {
+                    if (!validEessiName(f.key))
+                        return l.fail("{s}:{d}: eessi.{s}: [eessi] sets EESSI_* variables other than the install and target ones eb-local sets and the toolchain list build.site_toolchains sets", .{ src.path, f.line, f.key });
+                    const v = try l.string(src, f, "an [eessi] value");
+                    if (!validEessiValue(v)) return l.fail("{s}:{d}: eessi.{s}: one line of at most 4096 bytes", .{ src.path, f.line, f.key });
+                    const ff = try l.where(src, f.line, profile);
+                    for (l.s.eessi.items, 0..) |old, i| if (std.mem.eql(u8, old.name, f.key)) {
+                        _ = l.s.eessi.orderedRemove(i);
+                        break;
+                    };
+                    try l.s.eessi.append(l.a, .{ .name = f.key, .value = v, .from = ff });
                 }
             } else if (std.mem.eql(u8, k, "storage")) {
                 if (src.layer != .site or profile != null)
@@ -823,6 +868,46 @@ test "family EBROOT names are the ones EasyBuild writes" {
     const plus = try ebRoot(a, "C++");
     defer a.free(plus);
     try std.testing.expectEqualStrings("EBROOTCPLUSPLUS", plus);
+}
+
+test "[eessi] settings layer like secrets and refuse the ones eb-local owns" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const site =
+        \\[eessi]
+        \\EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = '{"a": "b"}'
+        \\EESSI_OVERRIDE_TOOLCHAIN_CHECK = "1"
+    ;
+    const user =
+        \\[profile.mine.eessi]
+        \\EESSI_OVERRIDE_TOOLCHAIN_CHECK = ""
+    ;
+    const sources = [_]Source{
+        .{ .path = "site.toml", .text = site, .layer = .site },
+        .{ .path = "user.toml", .text = user, .layer = .user },
+    };
+    var s = try t.load(&sources, .{});
+    try std.testing.expectEqual(@as(usize, 2), s.eessi.items.len);
+    try std.testing.expectEqualStrings("EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220", s.eessi.items[0].name);
+    try std.testing.expectEqualStrings("{\"a\": \"b\"}", s.eessi.items[0].value);
+    try std.testing.expectEqualStrings("site site.toml:2", s.eessi.items[0].from);
+    s = try t.load(&sources, .{ .profile = "mine" });
+    try std.testing.expectEqual(@as(usize, 2), s.eessi.items.len);
+    try std.testing.expectEqualStrings("", s.eessi.items[1].value);
+    try std.testing.expectEqualStrings("user profile mine, user.toml:2", s.eessi.items[1].from);
+
+    const r = struct {
+        fn one(tt: *Fixture, text: []const u8, needle: []const u8) !void {
+            try tt.refuse(&.{.{ .path = "c.toml", .text = text, .layer = .site }}, needle);
+        }
+    };
+    try r.one(&t, "[eessi]\nEESSI_USER_INSTALL = \"/x\"\n", "install and target");
+    try r.one(&t, "[eessi]\nEESSI_SOFTWARE_SUBDIR_OVERRIDE = \"x86_64/generic\"\n", "install and target");
+    try r.one(&t, "[eessi]\nPATH = \"/x\"\n", "install and target");
+    try r.one(&t, "[eessi]\nEESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06 = \"[]\"\n", "build.site_toolchains");
+    try r.one(&t, "[eessi]\nEESSI_ = \"x\"\n", "install and target");
+    try r.one(&t, "[eessi]\nEESSI_X = 1\n", "must be a string");
+    try r.one(&t, "[eessi]\nEESSI_X = \"a\\nb\"\n", "one line");
 }
 
 test "module names" {
