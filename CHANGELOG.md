@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.3.0
+
+* `eb-local site list | show NAME | install NAME`: site file templates
+  built into the program, `snellius` and `slurm`, with placeholders filled
+  by `--set KEY=VALUE`. `install` writes `config.toml` beside the program
+  (or `--to FILE`), mode 644, only after the rendered file loads as a site
+  file; it replaces a file only with `--force` and never writes through a
+  symbolic link.
+* `eb-local config --env` prints the settings in force as `export
+  EB_LOCAL_...` lines; `EB_LOCAL_SECRET_<NAME>=SOURCE` sets a secret's
+  source and is checked as the `[secrets]` table is.
+* `[nimvault] program` and `vault` (`EB_LOCAL_NIMVAULT_PROGRAM`,
+  `EB_LOCAL_NIMVAULT_VAULT`): nimvault runs as `get ENTRY --vault DIR`, so a
+  build started inside another git repository does not read that
+  repository's vault. A nimvault entry starting with `-` is refused.
+
 ## 2.2.0
 
 * `build.site_toolchains` in the site file lists NAME/VERSION toolchains
