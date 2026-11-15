@@ -141,7 +141,7 @@ class ConfigCli(StorageFixture):
         self.assertIn("module load GSL/2.8-GCC-15.2.0\n", run.stdout)
         run = self.run_tool(["dev", "--profile", "mine", "--buildenv", "buildenv/mine"], SLURM_JOB_ID="")
         self.assertIn("module load FFTW/3.3.10-GCC-15.2.0\n", run.stdout)
-        self.assertTrue(run.stdout.endswith("module load buildenv/mine\n"), run.stdout)
+        self.assertIn("\nmodule load buildenv/mine\n", run.stdout)
 
     def test_global_options_may_come_before_the_command(self):
         # The README's form, eb-local --profile gpu dev, with the user file's profile.

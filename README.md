@@ -37,14 +37,24 @@ These were checked on Snellius with EESSI 2026.06, each program then run with no
 
 Load EESSI on the node type that will run the program: it picks the binaries for the CPU it finds when it loads.
 A program built with `dev` belongs to that one CPU target, because the wrappers record run paths into `$EESSI_SOFTWARE_SUBDIR`; a binary linked on zen4 loads zen4 libraries wherever it runs and can stop with an illegal instruction on zen2.
-So build once per node type, inside an allocation on that node type, and install into a path that names the target:
+The build environment also puts `-march=native` in `CFLAGS`, `CXXFLAGS` and `FFLAGS`, so `make` and CMake compile the program for that CPU too.
+So build once per node type, inside an allocation on that node type, and install into a path that names the target.
+`dev` sets `EB_LOCAL_DEV_PREFIX` to one: `<install-prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one.
 
 ```sh
-salloc -p rome -n 4 -t 00:30:00             # one allocation per node type
+salloc -p <partition> -n 4 -t 00:30:00      # one allocation per node type
 eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
-mkdir -p "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR"
-gcc -O2 -fopenmp prog.c -lfftw3 -o "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog"
-readelf -d "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog" | grep -E 'RPATH|RUNPATH'   # names the target
+mkdir -p "$EB_LOCAL_DEV_PREFIX/bin"
+gcc -O2 -fopenmp prog.c -lfftw3 -o "$EB_LOCAL_DEV_PREFIX/bin/prog"
+eb-local check "$EB_LOCAL_DEV_PREFIX/bin/prog"
+```
+
+CMake takes `-DCMAKE_INSTALL_PREFIX="$EB_LOCAL_DEV_PREFIX"`, autotools `--prefix="$EB_LOCAL_DEV_PREFIX"`.
+A job script finds the build for the node it lands on by loading EESSI first:
+
+```sh
+eval "$(eb-local env)"
+"$HOME/.local/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
 ```
 
 ### Other compilers

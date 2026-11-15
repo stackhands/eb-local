@@ -411,6 +411,11 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // stays hidden behind the wrappers.
     out.appendSlice(a, drop_rpath_wrappers) catch oom();
     out.appendSlice(a, buildenvLines(c, s)) catch oom();
+    // A program linked here belongs to this shell's CPU (and GPU) target, so
+    // its install directory names them; the shell fills them in once EESSI
+    // has picked them.
+    const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
+    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
     cli.put(1, out.items);
     if (nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
