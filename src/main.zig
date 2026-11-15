@@ -1005,6 +1005,12 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
 
 const Command = enum { build, env, dev, clean, config, profiles, uninstall };
 
+/// The command a word names, other than the default build.
+fn subcommand(word: []const u8) ?Command {
+    const cmd = std.meta.stringToEnum(Command, word) orelse return null;
+    return if (cmd == .build) null else cmd;
+}
+
 pub fn main(init: std.process.Init) u8 {
     const a = init.arena.allocator();
     const argv_all = init.minimal.args.toSlice(a) catch die("cannot read the arguments", .{});
@@ -1068,6 +1074,9 @@ pub fn main(init: std.process.Init) u8 {
             g.config_file = value(args, &i, "--config");
         } else if (std.mem.eql(u8, x, "--env") and command == .build and rest.items.len == 0) {
             command = .env;
+        } else if (command == .build and rest.items.len == 0 and subcommand(x) != null) {
+            // Global options may come first: eb-local --profile gpu dev.
+            command = subcommand(x).?;
         } else switch (command) {
             .build => rest.append(a, x) catch oom(),
             .env, .profiles => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
