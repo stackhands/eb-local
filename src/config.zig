@@ -40,10 +40,18 @@ pub const Settings = struct {
     node_local_root: Setting([]const u8) = .{ .value = "" },
     node_local_fstype: Setting([]const u8) = .{ .value = "xfs" },
     shared_scratch: Setting([]const []const u8) = .{ .value = &.{} },
+    /// The nimvault program; empty means the first on PATH.
+    nimvault_program: Setting([]const u8) = .{ .value = "" },
+    /// The vault nimvault reads (its --vault); empty leaves nimvault to find
+    /// one from NIMVAULT_VAULT_REPO or the current directory.
+    nimvault_vault: Setting([]const u8) = .{ .value = "" },
     secrets: std.ArrayList(Secret) = .empty,
 };
 
 pub const Layer = enum { site, user };
+
+/// EB_LOCAL_SECRET_NAME=SOURCE names where the secret NAME comes from.
+pub const secret_env_prefix = "EB_LOCAL_SECRET_";
 
 /// One configuration file, already read and trusted.
 pub const Source = struct {
@@ -105,7 +113,8 @@ pub fn validSecretSource(source: []const u8) bool {
             if (rest.len == 0 or std.mem.indexOfAny(u8, rest, "\n\r\x00") != null) return false;
             if (comptime std.mem.eql(u8, kind, "env:")) return validEnvName(rest);
             if (comptime std.mem.eql(u8, kind, "file:")) return rest[0] == '/' or std.mem.startsWith(u8, rest, "~/");
-            return true;
+            // An entry starting with '-' would reach nimvault as an option.
+            return rest[0] != '-';
         }
     }
     return false;
@@ -149,6 +158,16 @@ test "site toolchains" {
     const j = try toolchainsJson(std.testing.allocator, &.{ "intel/2026.1", "NVHPC/26.3" });
     defer std.testing.allocator.free(j);
     try std.testing.expectEqualStrings("[{\"name\": \"intel\", \"version\": \"2026.1\"}, {\"name\": \"NVHPC\", \"version\": \"26.3\"}]", j);
+}
+
+/// An absolute path, or one under HOME written ~/..., without a trailing
+/// slash or a control character.
+fn validHomePath(path: []const u8) bool {
+    if (std.mem.startsWith(u8, path, "~/")) {
+        if (path.len < 3 or path[path.len - 1] == '/') return false;
+        return std.mem.indexOfAny(u8, path, "\t\n\r\x00") == null;
+    }
+    return validAbsolute(path);
 }
 
 fn validAbsolute(path: []const u8) bool {
@@ -268,6 +287,20 @@ const Loader = struct {
                         if (v < 0 or v > 99999) return l.fail("{s}:{d}: clean.logs_older_than_days is out of range", .{ src.path, f.line });
                         l.s.logs_older_than_days = .{ .value = @intCast(v), .from = ff };
                     } else return l.fail("{s}:{d}: unknown key clean.{s}", .{ src.path, f.line, f.key });
+                }
+            } else if (std.mem.eql(u8, k, "nimvault")) {
+                const sub = try l.table(src, e, "nimvault");
+                for (sub.entries.items) |*f| {
+                    const ff = try l.where(src, f.line, profile);
+                    if (std.mem.eql(u8, f.key, "program")) {
+                        const v = try l.string(src, f, "nimvault.program");
+                        if (!validAbsolute(v)) return l.fail("{s}:{d}: nimvault.program must be an absolute path", .{ src.path, f.line });
+                        l.s.nimvault_program = .{ .value = v, .from = ff };
+                    } else if (std.mem.eql(u8, f.key, "vault")) {
+                        const v = try l.string(src, f, "nimvault.vault");
+                        if (!validHomePath(v)) return l.fail("{s}:{d}: nimvault.vault must be an absolute path or start with ~/", .{ src.path, f.line });
+                        l.s.nimvault_vault = .{ .value = v, .from = ff };
+                    } else return l.fail("{s}:{d}: unknown key nimvault.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "secrets")) {
                 const sub = try l.table(src, e, "secrets");
@@ -442,6 +475,39 @@ pub fn load(
         if (n > 99999) return l.fail("EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS is out of range", .{});
         s.logs_older_than_days = .{ .value = n, .from = "environment EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS" };
     };
+
+    if (env.get("EB_LOCAL_NIMVAULT_PROGRAM")) |v| if (v.len > 0) {
+        if (!validAbsolute(v)) return l.fail("EB_LOCAL_NIMVAULT_PROGRAM must be an absolute path", .{});
+        s.nimvault_program = .{ .value = v, .from = "environment EB_LOCAL_NIMVAULT_PROGRAM" };
+    };
+    if (env.get("EB_LOCAL_NIMVAULT_VAULT")) |v| if (v.len > 0) {
+        if (!validHomePath(v)) return l.fail("EB_LOCAL_NIMVAULT_VAULT must be an absolute path or start with ~/", .{});
+        s.nimvault_vault = .{ .value = v, .from = "environment EB_LOCAL_NIMVAULT_VAULT" };
+    };
+    // EB_LOCAL_SECRET_NAME=SOURCE adds or replaces the secret NAME, in name
+    // order so the result does not depend on the order of the environment.
+    {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (env.keys()) |k| if (std.mem.startsWith(u8, k, secret_env_prefix)) try names.append(a, k);
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.lt);
+        for (names.items) |k| {
+            const name = k[secret_env_prefix.len..];
+            const v = env.get(k).?;
+            if (v.len == 0) continue;
+            if (!validSecretName(name)) return l.fail("{s}: {s} is not a variable name a secret may set", .{ k, name });
+            if (!validSecretSource(v))
+                return l.fail("{s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable", .{k});
+            for (s.secrets.items, 0..) |old, i| if (std.mem.eql(u8, old.name, name)) {
+                _ = s.secrets.orderedRemove(i);
+                break;
+            };
+            try s.secrets.append(a, .{ .name = name, .source = v, .from = try std.fmt.allocPrint(a, "environment {s}", .{k}) });
+        }
+    }
 
     if (cli.prefix) |v| s.prefix = .{ .value = v, .from = "option" };
     if (cli.project) |v| s.project = .{ .value = v, .from = "option --project" };

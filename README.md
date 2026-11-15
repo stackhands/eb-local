@@ -126,7 +126,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile.
-The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH` and `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`.
+The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file (`/etc/eb-local/config.toml`, or `config.toml` beside the program) also holds the storage settings, which only it may set:
@@ -143,6 +143,30 @@ site_toolchains = ["intel/2026.1"]       # toolchains EESSI's hooks accept besid
 ```
 
 `site_toolchains` reaches EasyBuild as `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_<EESSI version>`, so users build recipes on those toolchains without setting the variable; `eb-local config` shows it.
+
+### Site files from a template
+
+eb-local carries site file templates: `snellius`, and `slurm` for any Slurm cluster whose jobs get a node-local disk.
+
+```sh
+eb-local site list                                  # templates and their placeholders
+eb-local site show snellius --set partition=genoa   # the file, rendered and checked
+eb-local site install slurm --set node_local_root=/local --set shared_scratch=/scratch
+```
+
+`install` writes `config.toml` beside the program (or `--to FILE`), mode 644, only after the rendered file loads as a site file; it never replaces an existing file without `--force`, and never through a symbolic link.
+A `--set` value cannot hold a quote, a backslash or a control character.
+
+### The configuration as variables
+
+`eb-local config --env` prints the settings in force as `export EB_LOCAL_...` lines, secrets as `EB_LOCAL_SECRET_<NAME>=<source>`, so a job script, a container or CI carries the same configuration without the files:
+
+```sh
+eb-local --profile gpu config --env > eb-local.env   # sources only, never values
+. ./eb-local.env && eb-local config                  # each setting now says [environment ...]
+```
+
+`EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
 
 A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the program's owner or you (a site file) or by you (your file); otherwise eb-local stops.
 A 1.x `eb-local.conf` is read as before.
@@ -163,6 +187,16 @@ MIRROR_PASSWORD = "env:MY_MIRROR_PASSWORD"
 - After the build, the logs written during it (in `.eb-local/logs` and each installation's `easybuild/`) have each value, and its base64 and percent-encoded forms, replaced with `<secret NAME removed by eb-local>`; the log directory is private meanwhile. A value shorter than 4 bytes, or a log that is too large or too deep to check, is reported instead. A secret reaches every program the build runs, and a build killed before it ends leaves its logs unchecked.
 - A secret cannot set `PATH`, `LD_*`, `EESSI_*`, `EASYBUILD_*` or another variable the build depends on.
 - [nimvault](https://github.com/HaoZeke/nimvault) runs with a 30-second deadline; on failure eb-local shows its error output, never what it printed as the value.
+- nimvault finds its vault from `NIMVAULT_VAULT_REPO` or the current git repository, so a build started inside another repository reads that one. Name the vault, and the program if it is not on `PATH`:
+
+  ```toml
+  # ~/.config/eb-local/config.toml
+  [nimvault]
+  vault = "~/vault"                     # passed as nimvault get ENTRY --vault ~/vault
+  program = "/opt/nimvault/bin/nimvault"
+  ```
+
+  A profile may name its own vault. An entry starting with `-` is refused, since nimvault would read it as an option.
 
 ## Install
 
@@ -180,7 +214,7 @@ eb-local --version
 ```
 
 `env` and `dev` work once `~/.local/bin` is on `PATH`.
-Building with EasyBuild also needs the `[storage]` settings shown under Configuration, in `config.toml` beside the program, mode 644.
+Building with EasyBuild also needs a site file beside the program: `eb-local site install snellius`, or the `slurm` template with your cluster's paths.
 To build from source: `zig build --release=safe` with Zig 0.17.1.
 
 The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no configuration files, profiles or secrets.
