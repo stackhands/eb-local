@@ -105,6 +105,7 @@ eb-local uninstall pigz/2.8-GCCcore-15.2.0      # to the trash with rtrash, or -
 ```
 
 EasyBuild leaves installations read-only, so `rm -rf` fails on them; `uninstall` makes them writable first, and removes the module files with them.
+If another module you installed loads the one you name, `uninstall` lists it and removes nothing, because that module would then fail to load; name both in the same command to remove both.
 
 ## Configuration
 
