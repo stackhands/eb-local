@@ -111,6 +111,9 @@ class SitesCli(StorageFixture):
                         '[nimvault]\nvault = "~/vault"\n'
                         '[secrets]\nTOKEN = "nimvault:tokens/mirror"\n')
         user.chmod(0o600)
+        # A named configuration file replaces the user file (as in 1.x), so
+        # none is named here.
+        self.env["EB_LOCAL_CONFIG"] = ""
         first = self.run_tool(["config", "--env"])
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertIn("export EB_LOCAL_DEV_MODULES=FFTW/3.3.10-GCC-15.2.0\n", first.stdout)
