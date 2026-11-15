@@ -326,6 +326,10 @@ fn place(c: Ctx, s: config.Settings) Place {
             std.process.exit(2);
         };
         if (!st.isDir()) die("project directory {s} is not a directory", .{p});
+        // Anyone could then put module files there that the group loads.
+        if (st.mode & 0o002 != 0) die("project directory {s} is writable by others and is not used; chmod o-w it", .{p});
+        // Without it, each member's installs carry that member's own group.
+        if (st.mode & 0o2000 == 0) warn("project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p});
         return .{ .prefix = storage.canonical(c.a, p, c.cwd) catch oom(), .project = true };
     }
     var raw = s.prefix.value;
@@ -1011,6 +1015,79 @@ fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, fou
     }
 }
 
+/// Below `path`, in each target root's modules/all, the module files that
+/// load one of `wanted` (NAME/VERSION), other than those in `skip`. A file
+/// reached through a symbolic link is not read.
+fn findDependents(c: Ctx, path: []const u8, wanted: []const []const u8, skip: []const []const u8, out: *std.ArrayList([]const u8), depth: usize) void {
+    if (depth > 12) return;
+    const fd = fsx.openDir(fsx.cwd, path, false) catch return;
+    defer sys.close(fd);
+    if (isDirAt(fd, "software") and isDirAt(fd, "modules")) {
+        const all = std.fs.path.join(c.a, &.{ path, "modules", "all" }) catch oom();
+        const afd = fsx.openDir(fsx.cwd, all, false) catch return;
+        defer sys.close(afd);
+        var names = fsx.DirIter.init(c.a, afd) catch return;
+        while (names.next() catch null) |n| {
+            const name = c.a.dupe(u8, n.name) catch oom();
+            const nfd = fsx.openDir(afd, name, false) catch continue;
+            defer sys.close(nfd);
+            var files = fsx.DirIter.init(c.a, nfd) catch continue;
+            while (files.next() catch null) |f| {
+                if (!std.mem.endsWith(u8, f.name, ".lua")) continue;
+                const file = std.fs.path.join(c.a, &.{ all, name, f.name }) catch oom();
+                if (listed(skip, file)) continue;
+                const opened = fsx.openRegular(nfd, f.name, false) catch continue;
+                defer sys.close(opened.fd);
+                const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch continue;
+                if (loadsAny(text, wanted)) out.append(c.a, file) catch oom();
+            }
+        }
+        return;
+    }
+    var it = fsx.DirIter.init(c.a, fd) catch return;
+    while (it.next() catch null) |e| {
+        const st = fsx.statAt(fd, e.name, false) catch continue;
+        if (!st.isDir()) continue;
+        findDependents(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), wanted, skip, out, depth + 1);
+    }
+}
+
+fn listed(xs: []const []const u8, x: []const u8) bool {
+    for (xs) |y| if (std.mem.eql(u8, x, y)) return true;
+    return false;
+}
+
+/// Whether a Lua module file loads one of `wanted`. EasyBuild writes a
+/// dependency as depends_on("NAME/VERSION") or, guarded by isloaded,
+/// load("NAME/VERSION"), one call to a line.
+fn loadsAny(text: []const u8, wanted: []const []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        for ([_][]const u8{ "depends_on(\"", "load(\"" }) |call| {
+            if (!std.mem.startsWith(u8, line, call)) continue;
+            const rest = line[call.len..];
+            const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+            if (listed(wanted, rest[0..end])) return true;
+        }
+    }
+    return false;
+}
+
+test "loadsAny reads the dependency lines EasyBuild writes" {
+    const lua =
+        \\help([==[ load("GSL/2.8-GCC-15.2.0") in the help text ]==])
+        \\depends_on("FFTW/3.3.10-GCC-15.2.0")
+        \\if not ( isloaded("pigz/2.8-GCCcore-15.2.0") ) then
+        \\    load("pigz/2.8-GCCcore-15.2.0")
+        \\end
+    ;
+    try std.testing.expect(loadsAny(lua, &.{"FFTW/3.3.10-GCC-15.2.0"}));
+    try std.testing.expect(loadsAny(lua, &.{"pigz/2.8-GCCcore-15.2.0"}));
+    try std.testing.expect(!loadsAny(lua, &.{"GSL/2.8-GCC-15.2.0"}));
+    try std.testing.expect(!loadsAny(lua, &.{"FFTW/3.3.10"}));
+}
+
 /// EasyBuild installs are read-only; the owner may make them writable again.
 fn makeWritable(c: Ctx, path: []const u8, depth: usize) void {
     if (depth > 64) return;
@@ -1043,6 +1120,15 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         const before = found.installs.items.len + found.modules.items.len;
         findInstalls(c, versions, name, ver, &found, 0);
         if (found.installs.items.len + found.modules.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
+    }
+    // A module another installed module loads stays, unless that one goes
+    // in the same command; Lmod would otherwise fail to load the dependent.
+    var dependents: std.ArrayList([]const u8) = .empty;
+    findDependents(c, versions, modules, found.modules.items, &dependents, 0);
+    if (dependents.items.len > 0) {
+        warn("these installed modules load what you named; uninstall them in the same command, or keep it:", .{});
+        for (dependents.items) |f| warn("  {s}", .{f});
+        return 2;
     }
     for (found.installs.items) |d| {
         if (!storage.under(d, versions)) die("{s} is outside {s}", .{ d, versions });

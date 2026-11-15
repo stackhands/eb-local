@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+* `eb-local uninstall` keeps a module that another installed module
+  loads (`depends_on` or `load` in its Lua module file) and lists the
+  dependents; naming them in the same command removes them all.
+* A project directory (`--project`, `project`) writable by others is
+  refused, and one without the setgid bit gets a warning naming
+  `chmod g+s`.
+* Releases carry a CycloneDX 1.6 SBOM per binary
+  (`eb-local-VERSION-ARCH-linux-musl.cdx.json`), written by
+  `tools/sbom.py` from `build.zig.zon` and attested with
+  `actions/attest-sbom`.
+
 ## 2.3.0
 
 * `eb-local site list | show NAME | install NAME`: site file templates

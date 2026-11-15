@@ -107,6 +107,36 @@ class Uninstall(StorageFixture):
         self.assertEqual(self.run_tool(["uninstall"]).returncode, 2)
         self.assertTrue(all(p.exists() for p in self.installs + self.modules))
 
+    def dependent(self, text):
+        module = self.modules[0].parent.parent / "parallel-gzip-user" / "1.0.lua"
+        module.parent.mkdir()
+        module.write_text(text)
+        return module
+
+    def test_a_module_another_loads_stays(self):
+        dependent = self.dependent('depends_on("pigz/2.8-GCCcore-15.2.0")\n')
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn(str(dependent), run.stderr)
+        self.assertIn("same command", run.stderr)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--dry-run"])
+        self.assertEqual(run.returncode, 2)
+        # Named together, both go.
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "parallel-gzip-user/1.0", "--delete"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse(dependent.exists())
+        self.assertFalse(any(p.exists() for p in self.installs + self.modules))
+
+    def test_a_guarded_load_counts_and_a_mention_does_not(self):
+        dependent = self.dependent('if not ( isloaded("pigz/2.8-GCCcore-15.2.0") ) then\n'
+                                   '    load("pigz/2.8-GCCcore-15.2.0")\nend\n')
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--dry-run"])
+        self.assertEqual(run.returncode, 2, run.stdout)
+        dependent.write_text('help([==[ works well with pigz/2.8-GCCcore-15.2.0 ]==])\n')
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--dry-run"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def test_a_symlinked_tree_is_not_followed(self):
         outside = self.root / "outside"
         outside.mkdir()

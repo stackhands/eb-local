@@ -71,6 +71,8 @@ mkdir -p /path/to/project/eessi && chgrp myproj /path/to/project/eessi && chmod 
 eb-local --project /path/to/project/eessi GSL-2.8-GCC-15.2.0.eb --robot
 ```
 
+eb-local refuses a project directory that others can write to, since anyone could then add module files the group loads, and warns when the setgid bit is missing, since each member's installs would then keep that member's own group.
+
 A successful build removes its workspace; a failed one keeps it for inspection until the allocation ends.
 
 ## Where things go
@@ -105,6 +107,7 @@ eb-local uninstall pigz/2.8-GCCcore-15.2.0      # to the trash with rtrash, or -
 ```
 
 EasyBuild leaves installations read-only, so `rm -rf` fails on them; `uninstall` makes them writable first, and removes the module files with them.
+If another module you installed loads the one you name, `uninstall` lists it and removes nothing, because that module would then fail to load; name both in the same command to remove both.
 
 ## Configuration
 
@@ -216,6 +219,14 @@ eb-local --version
 `env` and `dev` work once `~/.local/bin` is on `PATH`.
 Building with EasyBuild also needs a site file beside the program: `eb-local site install snellius`, or the `slurm` template with your cluster's paths.
 To build from source: `zig build --release=safe` with Zig 0.17.1.
+
+Each release binary has a build provenance attestation and, from 2.4.0, a CycloneDX SBOM (`$f.cdx.json` beside it) with its own attestation.
+With the GitHub CLI, check both before the `mv`:
+
+```sh
+gh attestation verify "$f" --repo stackhands/eb-local
+gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://cyclonedx.org/bom
+```
 
 The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no configuration files, profiles or secrets.
 A site's easyconfig installs the program and its site configuration.
