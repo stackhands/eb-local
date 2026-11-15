@@ -33,6 +33,8 @@ pub const Settings = struct {
     dev_buildenv: Setting([]const u8) = .{ .value = "buildenv/default-foss-2026.1" },
     dev_modules: Setting([]const []const u8) = .{ .value = &.{} },
     allocation_hint: Setting([]const u8) = .{ .value = "" },
+    /// NAME/VERSION toolchains the EESSI hooks accept besides foss and lfoss.
+    site_toolchains: Setting([]const []const u8) = .{ .value = &.{} },
     trash: Setting(Trash) = .{ .value = .auto },
     logs_older_than_days: Setting(u32) = .{ .value = 30 },
     node_local_root: Setting([]const u8) = .{ .value = "" },
@@ -113,6 +115,40 @@ fn validEnvName(name: []const u8) bool {
     if (name.len == 0 or !(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
     for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
     return true;
+}
+
+/// NAME/VERSION, each part letters, digits, '.', '_' or '-'.
+pub fn validToolchain(tc: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, tc, '/') orelse return false;
+    for ([_][]const u8{ tc[0..slash], tc[slash + 1 ..] }) |part| {
+        if (part.len == 0) return false;
+        for (part) |c| if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-')) return false;
+    }
+    return true;
+}
+
+/// The JSON list the EESSI hooks read, [{"name": N, "version": V}, ...];
+/// the parts were checked by validToolchain, so nothing needs escaping.
+pub fn toolchainsJson(a: Allocator, tcs: []const []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, '[');
+    for (tcs, 0..) |tc, i| {
+        const slash = std.mem.indexOfScalar(u8, tc, '/').?;
+        if (i > 0) try out.appendSlice(a, ", ");
+        try out.print(a, "{{\"name\": \"{s}\", \"version\": \"{s}\"}}", .{ tc[0..slash], tc[slash + 1 ..] });
+    }
+    try out.append(a, ']');
+    return out.toOwnedSlice(a);
+}
+
+test "site toolchains" {
+    try std.testing.expect(validToolchain("intel/2026.1"));
+    try std.testing.expect(validToolchain("nvidia-compilers/26.3"));
+    for ([_][]const u8{ "intel", "/2026.1", "intel/", "a/b/c", "intel/2026.1\"", "in tel/1" }) |bad|
+        try std.testing.expect(!validToolchain(bad));
+    const j = try toolchainsJson(std.testing.allocator, &.{ "intel/2026.1", "NVHPC/26.3" });
+    defer std.testing.allocator.free(j);
+    try std.testing.expectEqualStrings("[{\"name\": \"intel\", \"version\": \"2026.1\"}, {\"name\": \"NVHPC\", \"version\": \"26.3\"}]", j);
 }
 
 fn validAbsolute(path: []const u8) bool {
@@ -207,6 +243,13 @@ const Loader = struct {
                 for (sub.entries.items) |*f| {
                     if (std.mem.eql(u8, f.key, "allocation_hint")) {
                         l.s.allocation_hint = .{ .value = try l.string(src, f, "build.allocation_hint"), .from = try l.where(src, f.line, profile) };
+                    } else if (std.mem.eql(u8, f.key, "site_toolchains")) {
+                        if (src.layer != .site or profile != null)
+                            return l.fail("{s}:{d}: build.site_toolchains is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
+                        const v = try l.stringList(src, f, "build.site_toolchains");
+                        for (v) |tc| if (!validToolchain(tc))
+                            return l.fail("{s}:{d}: build.site_toolchains: '{s}' is not NAME/VERSION", .{ src.path, f.line, tc });
+                        l.s.site_toolchains = .{ .value = v, .from = try l.where(src, f.line, null) };
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {

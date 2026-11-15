@@ -37,7 +37,7 @@ module() {
     fi
     if [ "$1" = load ]; then
         python3 "$CONTROL_ROOT/capture.py" load "$@" || return
-        export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4 EESSI_ACCELERATOR_TARGET=
+        export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4 EESSI_ACCELERATOR_TARGET= EESSI_VERSION=2026.06
         export EASYBUILD_HOOKS=/selected/hooks.py
         export TMPDIR=/scratch-shared/module WORKING_DIR=/scratch-shared/module
         export EASYBUILD_BUILDPATH=/scratch-shared/module
