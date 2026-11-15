@@ -14,6 +14,7 @@ pub const config = @import("config.zig");
 pub const secrets = @import("secrets.zig");
 pub const sites = @import("sites.zig");
 pub const storage = @import("storage.zig");
+pub const rpath = @import("rpath.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -27,6 +28,10 @@ const usage_text =
     \\  eb-local env                         lines that make your installed modules visible
     \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work
+    \\  eb-local rpath-wrappers [--for FAMILY]
+    \\                                       lines that put RPATH wrappers for the compilers
+    \\                                       on PATH first; dev uses them when no build
+    \\                                       environment exists for the loaded compilers
     \\  eb-local clean [--logs-older-than DAYS] [--sources] [--workspaces] [--dry-run] [--delete]
     \\                                       remove what eb-local left behind
     \\  eb-local config [--check | --env]    the settings in force and where each came from;
@@ -384,7 +389,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         for (mods.items) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
         out.append(a, '\n') catch oom();
     }
-    out.appendSlice(a, str(a, "module load {s}\n", .{q(a, s.dev_buildenv.value)})) catch oom();
+    out.appendSlice(a, buildenvLines(c, s)) catch oom();
     cli.put(1, out.items);
     if (nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
@@ -392,7 +397,9 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     }
     // Only the GCC build environment is known to lack LLVM wrappers; a site's
     // own buildenv may wrap clang under any name.
-    if (gccBuildenv(s.dev_buildenv.value)) {
+    // With the default, buildenvLines picks the build environment for the
+    // compilers; a chosen GCC one is loaded as it is, so say what it misses.
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default") and gccBuildenv(s.dev_buildenv.value)) {
         for (mods.items) |m| if (llvmToolchain(m)) |tc| {
             warn("{s} belongs to the {s} toolchain, but {s} wraps only the GCC compilers;", .{ m, tc, s.dev_buildenv.value });
             cli.err("  clang and flang get no run paths for its libraries. Name an lfoss build environment with --buildenv.\n", .{});
@@ -447,6 +454,68 @@ test "gccBuildenv names the GCC build environments only" {
     try std.testing.expect(!gccBuildenv("buildenv/default-intel-2026.1"));
 }
 
+/// The lines that load the build environment. A dev.buildenv the caller
+/// chose is loaded as it is. The default depends on the compilers the
+/// modules brought in, which only the shell knows after it loads them: the
+/// family's buildenv when Lmod has it, else the GCC one for CUDA (nvcc
+/// links through gcc), else eb-local's RPATH wrappers, so nothing links
+/// without run paths.
+fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
+    const a = c.a;
+    const gcc = q(a, s.dev_buildenv.value);
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n", .{gcc});
+    var out: std.ArrayList(u8) = .empty;
+    const add = struct {
+        fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
+            o.appendSlice(al, text) catch oom();
+        }
+    }.f;
+    add(a, &out, "eb_local_family=gcc\n");
+    for (config.families) |f|
+        add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
+    add(a, &out, "case $eb_local_family in\n");
+    for (config.families, s.buildenv_for) |f, b|
+        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value) }));
+    add(a, &out, "    *) eb_local_buildenv= ;;\nesac\n");
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const exe = q(a, selfExe(&exe_buf) orelse tool);
+    add(a, &out, str(a,
+        \\if [ "$eb_local_family" = gcc ]; then
+        \\    module load {s}
+        \\elif [ -n "$eb_local_buildenv" ] && module is-avail "$eb_local_buildenv" >/dev/null 2>&1; then
+        \\    module load "$eb_local_buildenv"
+        \\elif [ "$eb_local_family" = cuda ]; then
+        \\    module load {s}
+        \\else
+        \\    eval "$({s} rpath-wrappers --for "$eb_local_family")"
+        \\fi
+        \\unset eb_local_family eb_local_buildenv
+        \\
+    , .{ gcc, gcc, exe }));
+    return out.items;
+}
+
+fn cmdRpathWrappers(c: Ctx, family: []const u8) u8 {
+    const a = c.a;
+    const found = rpath.present(a, c.env.get("PATH") orelse "") catch oom();
+    if (found.len == 0) {
+        warn("no compiler or linker on PATH to wrap", .{});
+        return 1;
+    }
+    const dir = rpath.directory(a, c.env, found) catch |e| switch (e) {
+        error.NoCacheDir => die("rpath-wrappers needs an absolute XDG_CACHE_HOME or HOME", .{}),
+        else => die("cannot work out the wrapper directory ({s})", .{@errorName(e)}),
+    };
+    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, @errorName(e) });
+    const names = std.mem.join(a, " ", found) catch oom();
+    if (family.len > 0) {
+        warn("no build environment module for the {s} compilers is available;", .{family});
+        cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
+    }
+    cli.put(1, str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }));
+    return 0;
+}
+
 fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const a = c.a;
     const p = place(c, s);
@@ -460,6 +529,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("stack.module", s.stack_module.value, s.stack_module.from);
     row("stack.extend", s.extend_module.value, s.extend_module.from);
     row("dev.buildenv", s.dev_buildenv.value, s.dev_buildenv.from);
+    for (config.families, s.buildenv_for) |f, b|
+        row(str(a, "dev.buildenv_for.{s}", .{f.name}), if (b.value.len == 0) "(none: RPATH wrappers)" else b.value, b.from);
     const mods = std.mem.join(a, " ", s.dev_modules.value) catch oom();
     row("dev.modules", if (mods.len == 0) "(none)" else mods, s.dev_modules.from);
     row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
@@ -522,7 +593,11 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     if (p.project) line(a, &out, "EB_LOCAL_PROJECT", p.prefix) else line(a, &out, "EB_LOCAL_PREFIX", p.prefix);
     line(a, &out, "EB_LOCAL_STACK_MODULE", s.stack_module.value);
     line(a, &out, "EB_LOCAL_STACK_EXTEND", s.extend_module.value);
-    line(a, &out, "EB_LOCAL_DEV_BUILDENV", s.dev_buildenv.value);
+    // Left at its default, dev.buildenv lets dev choose by compiler family;
+    // exporting the default would turn that choice off.
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) line(a, &out, "EB_LOCAL_DEV_BUILDENV", s.dev_buildenv.value);
+    for (config.families, s.buildenv_for) |f, b| if (!std.mem.eql(u8, b.from, "default"))
+        line(a, &out, f.env, if (b.value.len == 0) config.no_buildenv else b.value);
     line(a, &out, "EB_LOCAL_DEV_MODULES", std.mem.join(a, " ", s.dev_modules.value) catch oom());
     line(a, &out, "EB_LOCAL_BUILD_ALLOCATION_HINT", s.allocation_hint.value);
     line(a, &out, "EB_LOCAL_CLEAN_TRASH", @tagName(s.trash.value));
@@ -1271,7 +1346,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, env, dev, clean, config, profiles, uninstall, site };
+const Command = enum { build, env, dev, clean, config, profiles, uninstall, site, @"rpath-wrappers" };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -1319,6 +1394,7 @@ pub fn main(init: std.process.Init) u8 {
     var check = false;
     var as_env = false;
     var site: SiteOpts = .{};
+    var family: []const u8 = "";
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -1349,6 +1425,12 @@ pub fn main(init: std.process.Init) u8 {
             command = subcommand(x).?;
         } else switch (command) {
             .build => rest.append(a, x) catch oom(),
+            .@"rpath-wrappers" => {
+                if (std.mem.eql(u8, x, "--for")) {
+                    family = value(args, &i, "--for");
+                    for (family) |ch| if (!std.ascii.isAlphanumeric(ch)) die("--for takes a compiler family name", .{});
+                } else die("rpath-wrappers takes only --for FAMILY; got '{s}'", .{x});
+            },
             .env, .profiles => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
             .config => {
                 if (std.mem.eql(u8, x, "--check")) {
@@ -1420,6 +1502,7 @@ pub fn main(init: std.process.Init) u8 {
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
     if (command == .site) return cmdSite(c, site);
+    if (command == .@"rpath-wrappers") return cmdRpathWrappers(c, family);
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s, g),
@@ -1428,7 +1511,7 @@ pub fn main(init: std.process.Init) u8 {
         .clean => cmdClean(c, s, clean),
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
-        .profiles, .site => unreachable,
+        .profiles, .site, .@"rpath-wrappers" => unreachable,
     };
 }
 
@@ -1438,6 +1521,7 @@ test {
     _ = secrets;
     _ = sites;
     _ = storage;
+    _ = rpath;
 }
 
 test "the replay line repeats the options that selected this environment" {
