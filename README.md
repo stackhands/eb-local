@@ -73,6 +73,20 @@ llvm = ""
 
 Setting `dev.buildenv` (or `--buildenv`) loads that module whatever the compilers.
 
+### Check a program
+
+`eb-local check FILE...` reads a program or library and says whether it runs here without `LD_LIBRARY_PATH`.
+It prints the loader, the run paths and where each needed library resolves, ignoring the shell's `LD_LIBRARY_PATH`, and it reports these problems:
+
+- the file is built for another architecture;
+- with EESSI loaded, the loader or a library comes from the host rather than the compatibility layer;
+- the file records `RUNPATH`, which `LD_LIBRARY_PATH` overrides and the libraries' own dependencies ignore, rather than `RPATH`;
+- a run path points into the software tree of another CPU target than `$EESSI_SOFTWARE_SUBDIR`;
+- a library is not found, or is found only through `LD_LIBRARY_PATH`.
+
+It exits 0 with no problems, 1 with problems and 2 when a file cannot be read.
+It checks the libraries the file names itself; run it on a library to check that one's.
+
 ## Install software with EasyBuild
 
 Build inside a Slurm allocation on the node type that will run the software, because EasyBuild targets the CPU of the node it runs on:

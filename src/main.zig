@@ -15,6 +15,7 @@ pub const secrets = @import("secrets.zig");
 pub const sites = @import("sites.zig");
 pub const storage = @import("storage.zig");
 pub const rpath = @import("rpath.zig");
+pub const elfcheck = @import("elfcheck.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -32,6 +33,8 @@ const usage_text =
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
     \\                                       environment exists for the loaded compilers
+    \\  eb-local check FILE...               whether a program or library built here runs here:
+    \\                                       its architecture, loader, run paths and libraries
     \\  eb-local clean [--logs-older-than DAYS] [--sources] [--workspaces] [--dry-run] [--delete]
     \\                                       remove what eb-local left behind
     \\  eb-local config [--check | --env]    the settings in force and where each came from;
@@ -553,6 +556,197 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8) u8 {
         cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
     }
     cli.put(1, str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }));
+    return 0;
+}
+
+// ---- check ----------------------------------------------------------------
+
+const Check = struct {
+    problems: usize = 0,
+
+    fn problem(k: *Check, comptime fmt: []const u8, args: anytype) void {
+        say("  problem: " ++ fmt, args);
+        k.problems += 1;
+    }
+};
+
+/// Where the loader looks for a library named without a slash, in its order.
+const Search = struct {
+    dirs: std.ArrayList([]const u8) = .empty,
+    /// Which list each directory came from, for the report.
+    whence: std.ArrayList([]const u8) = .empty,
+
+    const Hit = struct { path: []const u8, why: []const u8 };
+
+    /// The first directory holding `name`, skipping LD_LIBRARY_PATH unless
+    /// `env` is set.
+    fn find(sr: Search, a: Allocator, name: []const u8, env: bool) ?Hit {
+        for (sr.dirs.items, sr.whence.items) |d, why| {
+            if (!env and std.mem.eql(u8, why, "LD_LIBRARY_PATH")) continue;
+            const p = std.fs.path.join(a, &.{ d, name }) catch oom();
+            if (isFile(p)) return .{ .path = p, .why = why };
+        }
+        return null;
+    }
+
+    fn add(sr: *Search, a: Allocator, list: ?[]const u8, origin: []const u8, why: []const u8) void {
+        var it = std.mem.splitScalar(u8, list orelse return, ':');
+        while (it.next()) |d| if (d.len > 0) {
+            sr.dirs.append(a, elfcheck.expandOrigin(a, d, origin) catch oom()) catch oom();
+            sr.whence.append(a, why) catch oom();
+        };
+    }
+};
+
+fn isFile(path: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, path, true) catch return false;
+    return st.isReg();
+}
+
+/// The directories the loader under `root` searches last: those its
+/// ld.so.conf names, one level of `include DIR/*.conf` deep, then its
+/// built-in ones. The loader reads a cache built from the same list.
+fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    var includes: std.ArrayList([]const u8) = .empty;
+    const conf = std.fs.path.join(a, &.{ root, "etc/ld.so.conf" }) catch oom();
+    if (readSmall(a, conf)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &includes) catch oom();
+    for (includes.items) |pat| {
+        // Only the DIR/*.SUFFIX form; anything else is skipped.
+        const slash = std.mem.lastIndexOfScalar(u8, pat, '/') orelse continue;
+        const base = pat[slash + 1 ..];
+        if (!std.mem.startsWith(u8, base, "*") or std.mem.indexOfAny(u8, base[1..], "*?[") != null) continue;
+        const dir = if (slash == 0) "/" else pat[0..slash];
+        const fd = fsx.openDir(fsx.cwd, dir, true) catch continue;
+        defer sys.close(fd);
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = fsx.DirIter.init(a, fd) catch oom();
+        while (it.next() catch null) |e| if (std.mem.endsWith(u8, e.name, base[1..]))
+            names.append(a, a.dupe(u8, e.name) catch oom()) catch oom();
+        std.mem.sort([]const u8, names.items, {}, lessThanStr);
+        var none: std.ArrayList([]const u8) = .empty;
+        for (names.items) |n| {
+            const p = std.fs.path.join(a, &.{ dir, n }) catch oom();
+            if (readSmall(a, p)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &none) catch oom();
+        }
+    }
+    for ([_][]const u8{ "lib64", "usr/lib64", "lib", "usr/lib" }) |sub|
+        dirs.append(a, std.fs.path.join(a, &.{ root, sub }) catch oom()) catch oom();
+    return dirs.items;
+}
+
+fn lessThanStr(_: void, x: []const u8, y: []const u8) bool {
+    return std.mem.lessThan(u8, x, y);
+}
+
+fn readSmall(a: Allocator, path: []const u8) ?[]const u8 {
+    const f = fsx.openRegular(fsx.cwd, path, true) catch return null;
+    defer sys.close(f.fd);
+    return fsx.readAll(a, f.fd, 64 * 1024) catch null;
+}
+
+fn cmdCheck(c: Ctx, files: []const []const u8) u8 {
+    const a = c.a;
+    if (files.len == 0) die("check needs one or more programs or libraries", .{});
+    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
+    var k: Check = .{};
+    var unreadable = false;
+    for (files) |f| {
+        const opened = fsx.openRegular(fsx.cwd, f, true) catch |e| {
+            warn("cannot open {s} ({s})", .{ f, @errorName(e) });
+            unreadable = true;
+            continue;
+        };
+        defer sys.close(opened.fd);
+        const elf = elfcheck.parse(a, opened.fd) catch |e| {
+            switch (e) {
+                error.NotElf64, error.Unsupported => warn("{s} is not a 64-bit little-endian ELF file", .{f}),
+                else => warn("cannot read {s} as ELF ({s})", .{ f, @errorName(e) }),
+            }
+            unreadable = true;
+            continue;
+        };
+        say("{s}: {s}", .{ f, elfcheck.machineName(elf.machine) });
+        if (elf.machine != elfcheck.hostMachine())
+            k.problem("built for {s}; this node is {s}", .{ elfcheck.machineName(elf.machine), elfcheck.machineName(elfcheck.hostMachine()) });
+        var buf: [sys.path_max]u8 = undefined;
+        const real = fsx.realpath(fsx.cwd, f, &buf) catch f;
+        const origin = a.dupe(u8, std.fs.path.dirname(real) orelse "/") catch oom();
+        if (elf.interp) |interp| {
+            say("  loader   {s}", .{interp});
+            if (eprefix) |ep| if (!storage.under(interp, ep))
+                k.problem("the loader is the host's, not the compatibility layer's under {s}", .{ep});
+        }
+        if (elf.rpath) |r| say("  RPATH    {s}", .{r});
+        if (elf.runpath) |r| {
+            say("  RUNPATH  {s}", .{r});
+            k.problem("RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH", .{});
+        }
+        if (elf.interp == null and elf.needed.len == 0) {
+            say("  static: no loader and no libraries", .{});
+            continue;
+        }
+
+        var sr: Search = .{};
+        if (elf.runpath == null) sr.add(a, elf.rpath, origin, "RPATH");
+        sr.add(a, c.env.get("LD_LIBRARY_PATH"), origin, "LD_LIBRARY_PATH");
+        sr.add(a, elf.runpath, origin, "RUNPATH");
+        // The loader's own directories: <root>/lib64 and the rest, where
+        // <root> is the compatibility layer for its loader, / for the host's.
+        const root = if (elf.interp) |i| (std.fs.path.dirname(std.fs.path.dirname(i) orelse "/") orelse "/") else "/";
+        for (loaderDirs(a, root)) |d| {
+            sr.dirs.append(a, d) catch oom();
+            sr.whence.append(a, "the loader's directories") catch oom();
+        }
+
+        var seen_targets: std.ArrayList([]const u8) = .empty;
+        for (sr.dirs.items, sr.whence.items) |d, why| {
+            if (std.mem.eql(u8, why, "the loader's directories")) continue;
+            const t = elfcheck.targetOf(d) orelse continue;
+            const want = target orelse continue;
+            if (std.mem.eql(u8, t, want)) continue;
+            for (seen_targets.items) |s0| {
+                if (std.mem.eql(u8, s0, t)) break;
+            } else {
+                seen_targets.append(a, t) catch oom();
+                k.problem("run paths into the {s} software tree; this shell is {s}: build it again on this node type", .{ t, want });
+            }
+        }
+
+        for (elf.needed) |n| {
+            if (std.mem.indexOfScalar(u8, n, '/') != null) {
+                say("  needs    {s}", .{n});
+                if (!isFile(n)) k.problem("{s} does not exist", .{n});
+                continue;
+            }
+            // The job may run without this shell's LD_LIBRARY_PATH, so the
+            // pick without it is the one that counts.
+            const clean = sr.find(a, n, false);
+            const with = sr.find(a, n, true);
+            const h = clean orelse {
+                if (with) |w| {
+                    say("  needs    {s} => {s}   [LD_LIBRARY_PATH]", .{ n, w.path });
+                    k.problem("{s} is found only through LD_LIBRARY_PATH", .{n});
+                } else {
+                    say("  needs    {s} => not found", .{n});
+                    k.problem("{s} is not found", .{n});
+                }
+                continue;
+            };
+            say("  needs    {s} => {s}   [{s}]", .{ n, h.path, h.why });
+            if (with) |w| if (!std.mem.eql(u8, w.path, h.path))
+                say("           LD_LIBRARY_PATH in this shell picks {s} instead", .{w.path});
+            if (eprefix != null and elfcheck.isHostPath(h.path))
+                k.problem("{s} comes from the host, not from EESSI", .{n});
+        }
+    }
+    if (k.problems > 0) {
+        say("eb-local check: {d} problem(s)", .{k.problems});
+        return 1;
+    }
+    if (unreadable) return 2;
+    say("eb-local check: no problems", .{});
     return 0;
 }
 
@@ -1398,7 +1592,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, env, dev, clean, config, profiles, uninstall, site, @"rpath-wrappers" };
+const Command = enum { build, env, dev, clean, config, profiles, uninstall, site, @"rpath-wrappers", check };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -1483,6 +1677,7 @@ pub fn main(init: std.process.Init) u8 {
                     for (family) |ch| if (!std.ascii.isAlphanumeric(ch)) die("--for takes a compiler family name", .{});
                 } else die("rpath-wrappers takes only --for FAMILY; got '{s}'", .{x});
             },
+            .check => rest.append(a, x) catch oom(),
             .env, .profiles => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
             .config => {
                 if (std.mem.eql(u8, x, "--check")) {
@@ -1555,6 +1750,7 @@ pub fn main(init: std.process.Init) u8 {
     // A site file can be written while the configuration in force is broken.
     if (command == .site) return cmdSite(c, site);
     if (command == .@"rpath-wrappers") return cmdRpathWrappers(c, family);
+    if (command == .check) return cmdCheck(c, rest.items);
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s, g),
@@ -1563,7 +1759,7 @@ pub fn main(init: std.process.Init) u8 {
         .clean => cmdClean(c, s, clean),
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
-        .profiles, .site, .@"rpath-wrappers" => unreachable,
+        .profiles, .site, .@"rpath-wrappers", .check => unreachable,
     };
 }
 
@@ -1574,6 +1770,7 @@ test {
     _ = sites;
     _ = storage;
     _ = rpath;
+    _ = elfcheck;
 }
 
 test "the replay line repeats the options that selected this environment" {
