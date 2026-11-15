@@ -123,6 +123,20 @@ class ConfigCli(StorageFixture):
         self.assertIn("module load FFTW/3.3.10-GCC-15.2.0\n", run.stdout)
         self.assertTrue(run.stdout.endswith("module load buildenv/mine\n"), run.stdout)
 
+    def test_global_options_may_come_before_the_command(self):
+        # The README's own form: eb-local --profile gpu dev.
+        before = self.run_tool(["--profile", "gpu", "dev"], SLURM_JOB_ID="")
+        after = self.run_tool(["dev", "--profile", "gpu"], SLURM_JOB_ID="")
+        self.assertEqual(before.returncode, 0, before.stderr)
+        self.assertIn("module load CUDA/13.3.0\n", before.stdout)
+        self.assertEqual(before.stdout, after.stdout)
+        run = self.run_tool(["--config", str(self.site), "config"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("storage.node_local_root", run.stdout)
+        run = self.run_tool(["--profile", "gpu", "env", "extra"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("env takes only", run.stderr)
+
     def test_profiles_lists_every_profile(self):
         run = self.run_tool(["profiles"])
         self.assertEqual(run.returncode, 0, run.stderr)
