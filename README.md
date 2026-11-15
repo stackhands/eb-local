@@ -23,6 +23,8 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 `eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
 The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
 Load the modules you link against on the `dev` line, not after it.
+The build environment is `buildenv/default-foss-2026.1`, the only one EESSI 2026.06 ships, so `dev` covers the GCC toolchains of foss/2026.1.
+Its wrappers do not cover `clang` and `flang`: with lfoss/2026.1 modules, `dev` warns, and a site that installs an lfoss build environment names it with `--buildenv` or `dev.buildenv`.
 
 These were checked on Snellius with EESSI 2026.06, each program then run with no modules at all:
 

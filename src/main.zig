@@ -361,7 +361,40 @@ fn cmdDev(c: Ctx, s: config.Settings, extra: []const []const u8) u8 {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
     }
+    if (llvmToolchain(s.dev_buildenv.value) == null) {
+        for (mods.items) |m| if (llvmToolchain(m)) |tc| {
+            warn("{s} belongs to the {s} toolchain, but {s} wraps only the GCC compilers;", .{ m, tc, s.dev_buildenv.value });
+            cli.err("  clang and flang get no run paths for its libraries. Name an lfoss build environment with --buildenv.\n", .{});
+            break;
+        };
+    }
     return 0;
+}
+
+/// The LLVM toolchain of the lfoss hierarchy a module name belongs to, as
+/// EasyBuild names it in the module's version suffix, if any.
+fn llvmToolchain(module: []const u8) ?[]const u8 {
+    for ([_][]const u8{ "llvm-compilers", "lompi", "lfbf", "lfoss" }) |tc| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, module, from, tc)) |at| {
+            const end = at + tc.len;
+            const before_ok = at == 0 or module[at - 1] == '/' or module[at - 1] == '-';
+            const after_ok = end == module.len or module[end] == '/' or module[end] == '-';
+            if (before_ok and after_ok) return tc;
+            from = at + 1;
+        }
+    }
+    return null;
+}
+
+test "llvmToolchain names the lfoss hierarchy and nothing else" {
+    try std.testing.expectEqualStrings("lfoss", llvmToolchain("ScaLAPACK/2.2.2-lfoss-2026.1-fb").?);
+    try std.testing.expectEqualStrings("lompi", llvmToolchain("FFTW.MPI/3.3.10-lompi-2026.1").?);
+    try std.testing.expectEqualStrings("llvm-compilers", llvmToolchain("llvm-compilers/21.1.8").?);
+    try std.testing.expectEqualStrings("lfbf", llvmToolchain("lfbf/2026.1").?);
+    try std.testing.expect(llvmToolchain("FFTW/3.3.10-GCC-15.2.0") == null);
+    try std.testing.expect(llvmToolchain("buildenv/default-foss-2026.1") == null);
+    try std.testing.expect(llvmToolchain("Xlfossy/1.0") == null);
 }
 
 fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
