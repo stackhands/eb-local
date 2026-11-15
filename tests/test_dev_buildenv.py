@@ -110,6 +110,35 @@ class DevBuildenv(StorageFixture):
         self.assertEqual(calls[-1], "load NVHPC/26.7")
         self.assertIn("RPATH wrappers for clang ld", replay.stderr)
 
+    def test_a_later_dev_drops_the_previous_rpath_wrappers(self):
+        first = self.run_wrapper(["dev", "NVHPC/26.7"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        script = self.root / "replay.sh"
+        script.write_text(
+            MODULE + first.stdout
+            + 'printf %s "$EB_LOCAL_RPATH_WRAPPERS" > "$CONTROL_ROOT/wrap1"\n'
+            + 'printf %s "$PATH" > "$CONTROL_ROOT/path1"\n'
+            # The NVHPC module left EBROOTNVHPC set. Unloading it, as a later
+            # dev of a GCC module does in a real Lmod session, must not leave
+            # the wrappers in front of the build environment.
+            + 'unset EBROOTNVHPC\n'
+            + second.stdout
+            + 'printf %s "${EB_LOCAL_RPATH_WRAPPERS-unset}" > "$CONTROL_ROOT/wrap2"\n'
+            + 'printf %s "$PATH" > "$CONTROL_ROOT/path2"\n'
+            + 'command -v clang > "$CONTROL_ROOT/clang"\n'
+        )
+        replay = subprocess.run([BASH, str(script)], env=self.env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        wrap = Path((self.root / "wrap1").read_text())
+        self.assertTrue(wrap.is_dir(), wrap)
+        self.assertTrue((self.root / "path1").read_text().startswith(str(wrap) + ":"))
+        self.assertEqual((self.root / "wrap2").read_text(), "unset")
+        path2 = (self.root / "path2").read_text()
+        self.assertNotIn(str(wrap), path2)
+        self.assertEqual((self.root / "clang").read_text().strip(), str(self.bin / "clang"))
+
     def test_a_chosen_buildenv_is_loaded_whatever_the_compilers(self):
         calls, _ = self.dev("llvm-compilers/21.1.8", "--buildenv", "buildenv/site-llvm")
         self.assertEqual(calls[-1], "load buildenv/site-llvm")

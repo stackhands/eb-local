@@ -389,6 +389,10 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         for (mods.items) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
         out.append(a, '\n') catch oom();
     }
+    // A previous dev may have put RPATH wrappers first on PATH. Drop that
+    // directory before this dev chooses again, or a later build environment
+    // stays hidden behind the wrappers.
+    out.appendSlice(a, drop_rpath_wrappers) catch oom();
     out.appendSlice(a, buildenvLines(c, s)) catch oom();
     cli.put(1, out.items);
     if (nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
@@ -453,6 +457,28 @@ test "gccBuildenv names the GCC build environments only" {
     try std.testing.expect(!gccBuildenv("buildenv/site-llvm"));
     try std.testing.expect(!gccBuildenv("buildenv/default-intel-2026.1"));
 }
+
+/// Remove the wrapper directory a previous `dev` prepended. The new dev
+/// adds its own afterwards when it still needs wrappers.
+const drop_rpath_wrappers =
+    \\if [ -n "${EB_LOCAL_RPATH_WRAPPERS-}" ]; then
+    \\    _eb_local_path=
+    \\    _eb_local_rest=$PATH
+    \\    while [ -n "$_eb_local_rest" ]; do
+    \\        case $_eb_local_rest in
+    \\            *:*) _eb_local_ent=${_eb_local_rest%%:*}; _eb_local_rest=${_eb_local_rest#*:} ;;
+    \\            *) _eb_local_ent=$_eb_local_rest; _eb_local_rest= ;;
+    \\        esac
+    \\        if [ "$_eb_local_ent" != "$EB_LOCAL_RPATH_WRAPPERS" ]; then
+    \\            _eb_local_path=${_eb_local_path:+$_eb_local_path:}$_eb_local_ent
+    \\        fi
+    \\    done
+    \\    PATH=$_eb_local_path
+    \\    export PATH
+    \\    unset EB_LOCAL_RPATH_WRAPPERS _eb_local_path _eb_local_rest _eb_local_ent
+    \\fi
+    \\
+;
 
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
