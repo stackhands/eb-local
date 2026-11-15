@@ -17,7 +17,7 @@ pub const storage = @import("storage.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
-pub const version = "2.3.0";
+pub const version = "2.4.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a

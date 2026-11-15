@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4.0
 
 * `eb-local uninstall` keeps a module that another installed module
   loads (`depends_on` or `load` in its Lua module file) and lists the
