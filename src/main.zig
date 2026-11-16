@@ -1256,7 +1256,8 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\unset EB_LOCAL_SITE_TOOLCHAINS
     \\echo "eb-local: installing into $prefix ($mode)"
     \\echo "eb-local: target $EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+ + $EESSI_ACCELERATOR_TARGET}, build space ${saved[EASYBUILD_BUILDPATH]%/build}"
-    \\eb --umask=022 "$@"
+    \\# A project install keeps the umask EESSI-extend sets for one (002).
+    \\if [ "$mode" = project ]; then eb "$@"; else eb --umask=022 "$@"; fi
 ;
 
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
@@ -1274,6 +1275,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const job_root = checkedJobRoot(c, s);
     var p = place(c, s);
+    // EESSI-extend gives a project install umask 002, so that every member
+    // can write the directories builds share; what eb-local makes there
+    // takes it too.
+    if (p.project) _ = linux.syscall1(.umask, 0o002);
     // The refused trees as the kernel resolves them, so an alias (a symbolic
     // link to shared scratch) is refused as the tree itself is.
     var refused: std.ArrayList([]const u8) = .empty;

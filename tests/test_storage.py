@@ -58,7 +58,8 @@ result={"paths":{name:os.environ.get(name) for name in names},"argv":sys.argv[2:
         "project":os.environ.get("EESSI_PROJECT_INSTALL"),
         "hooks":os.environ.get("EASYBUILD_HOOKS"),
         "ld_library_path":os.environ.get("LD_LIBRARY_PATH"),
-        "ld_preload":os.environ.get("LD_PRELOAD")}
+        "ld_preload":os.environ.get("LD_PRELOAD"),
+        "umask":os.umask(0)}
 (root/(sys.argv[1]+".json")).write_text(json.dumps(result))
 if sys.argv[1]=="eb":sys.exit(int(os.environ.get("CONTROL_EB_STATUS","0")))
 '''
@@ -197,6 +198,22 @@ class StorageControls(StorageFixture):
         self.assertEqual(built["argv"], ["--umask=022"] + args)
         self.assertEqual(built["user"], str(self.prefix))
         self.assertEqual(built["hooks"], "/selected/hooks.py")
+
+    def test_a_project_build_keeps_the_project_umask(self):
+        # EESSI-extend gives a project install umask 002, so that a second
+        # member's build can write the sources, logs, locks and module
+        # directories the first one made.
+        self.prefix.mkdir(parents=True)
+        self.prefix.chmod(0o2770)
+        argv, env = binary.command(self.script, ["--project", str(self.prefix), "recipe.eb"], dict(self.env))
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True, umask=0o022)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(built["project"], str(self.prefix))
+        self.assertEqual(built["argv"], ["recipe.eb"])
+        self.assertEqual(built["umask"], 0o002)
+        for name in DURABLE:
+            self.assertEqual(Path(built["paths"][name]).stat().st_mode & 0o070, 0o070, name)
 
     def test_build_failure_status_is_retained(self):
         run = self.run_wrapper(CONTROL_EB_STATUS="37")
