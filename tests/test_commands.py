@@ -96,11 +96,14 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         replay = self.replay(run.stdout)
         self.assertEqual(replay.returncode, 0, replay.stderr)
-        return (self.root / "module-calls").read_text().splitlines()[-3:]
+        calls = (self.root / "module-calls").read_text().splitlines()
+        return [call for call in calls if call.startswith("load ")]
 
     def test_dev_loads_the_named_modules_then_the_build_environment_last(self):
         self.prefix.mkdir(parents=True)
-        self.assertEqual(self.dev_calls(), ["load EESSI/2026.06 EESSI-extend/2026.06-easybuild",
+        # EESSI-extend is found only once EESSI is loaded, so it is a load of its own.
+        self.assertEqual(self.dev_calls(), ["load EESSI/2026.06",
+                                            "load EESSI-extend/2026.06-easybuild",
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
 
@@ -116,8 +119,8 @@ class Commands(StorageFixture):
                          f"{self.prefix}/dev/2026.06/x86_64/amd/zen4/accel/nvidia/cc90")
 
     def test_dev_before_the_first_install_loads_the_stack_without_the_extension(self):
-        # EESSI-extend refuses a missing install directory and Lmod then undoes
-        # the whole load, so with no prefix yet only the stack is loaded.
+        # EESSI-extend refuses a missing install directory, so with no prefix
+        # yet only the stack is loaded.
         self.assertEqual(self.dev_calls(), ["load EESSI/2026.06",
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
@@ -152,7 +155,7 @@ class Commands(StorageFixture):
         self.prefix.mkdir(parents=True)
         self.config.write_text(self.config.read_text() + "dev_buildenv = buildenv/mine\nstack_module = 2026\n")
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
-        self.assertIn("module load 2026 EESSI-extend/2026.06-easybuild", run.stdout)
+        self.assertIn("module load 2026\nmodule load EESSI-extend/2026.06-easybuild\n", run.stdout)
         self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
 
     def test_configured_module_names_are_checked(self):

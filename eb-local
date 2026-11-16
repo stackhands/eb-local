@@ -223,13 +223,14 @@ print_environment() {
     else
         printf 'export EESSI_USER_INSTALL=%q\n' "$prefix"
     fi
-    # EESSI-extend refuses an install directory that does not exist, and Lmod
-    # then undoes the whole load; before the first install there are no
-    # modules of yours to show, so the stack is loaded alone.
+    # Lmod finds every module of a load before it loads any, and the extension
+    # is on MODULEPATH only once the stack is loaded, so each has a load of
+    # its own. EESSI-extend refuses an install directory that does not exist;
+    # before the first install there are no modules of yours to show, so the
+    # stack is loaded alone.
+    printf 'module load %q\n' "$stack_module"
     if [ -d "$prefix" ]; then
-        printf 'module load %q %q\n' "$stack_module" "$extend_module"
-    else
-        printf 'module load %q\n' "$stack_module"
+        printf 'module load %q\n' "$extend_module"
     fi
 }
 
@@ -490,8 +491,17 @@ if [ "$mode" = project ]; then
 else
     export EESSI_USER_INSTALL="$prefix"
 fi
-module load "$stack_module" "$extend_module" >/dev/null 2>&1 || {
-    echo "eb-local: could not load $stack_module and $extend_module" >&2
+# Lmod finds every module of a load before it loads any; the extension is on
+# MODULEPATH only once the stack is loaded. The extension reads WORKING_DIR
+# and EASYBUILD_SOURCEPATH as it loads, so whatever the stack module set, the
+# paths go back first.
+module load "$stack_module" >/dev/null 2>&1 || {
+    echo "eb-local: could not load $stack_module" >&2
+    exit 1
+}
+select_storage_environment
+module load "$extend_module" >/dev/null 2>&1 || {
+    echo "eb-local: could not load $extend_module" >&2
     exit 1
 }
 select_storage_environment

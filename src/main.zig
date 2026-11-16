@@ -162,15 +162,14 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
     // [eessi] settings before the stack loads: the EESSI module and its
     // hooks read them then.
     for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
-    // EESSI-extend refuses an install directory that does not exist, and
-    // Lmod then undoes the whole load; before the first install there are
-    // no modules of yours to show, so the stack is loaded alone.
+    // Lmod finds every module of a load before it loads any, and the
+    // extension is on MODULEPATH only once the stack is loaded, so each has
+    // a load of its own. EESSI-extend refuses an install directory that does
+    // not exist; before the first install there are no modules of yours to
+    // show, so the stack is loaded alone.
+    add(a, &out, str(a, "module load {s}\n", .{q(a, s.stack_module.value)}));
     const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
-    if (exists_dir) {
-        add(a, &out, str(a, "module load {s} {s}\n", .{ q(a, s.stack_module.value), q(a, s.extend_module.value) }));
-    } else {
-        add(a, &out, str(a, "module load {s}\n", .{q(a, s.stack_module.value)}));
-    }
+    if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
     // build.site_toolchains under the version the stack set, as a build
     // exports it, so eb run by hand after env or dev accepts them too.
     if (s.site_toolchains.value.len > 0) {
@@ -1343,7 +1342,13 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
     \\restore
     \\export "$install_var=$prefix"
-    \\module load "$stack" "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $stack and $extend" >&2; exit 1; }
+    \\# Lmod finds every module of a load before it loads any; the extension
+    \\# is on MODULEPATH only once the stack is loaded. The extension reads
+    \\# WORKING_DIR and EASYBUILD_SOURCEPATH as it loads, so whatever the
+    \\# stack module set, the paths go back first.
+    \\module load "$stack" >/dev/null 2>&1 || { echo "eb-local: could not load $stack" >&2; exit 1; }
+    \\restore
+    \\module load "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $extend" >&2; exit 1; }
     \\restore
     \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.
     \\if [ -n "${EB_LOCAL_SITE_TOOLCHAINS:-}" ]; then

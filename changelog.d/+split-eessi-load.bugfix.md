@@ -1,0 +1,1 @@
+`env`, `dev` and a build load the stack and EESSI-extend in two `module load` calls, in the Zig build and the Bash script. Lmod 9.4.5 finds every module of a load before it loads any, and EESSI-extend is on `MODULEPATH` only once EESSI is loaded, so the single call exited 1 and loaded nothing unless EESSI was already loaded.
