@@ -31,6 +31,15 @@ pub const Settings = struct {
     stack_module: Setting([]const u8) = .{ .value = "EESSI/2026.06" },
     extend_module: Setting([]const u8) = .{ .value = "EESSI-extend/2026.06-easybuild" },
     dev_buildenv: Setting([]const u8) = .{ .value = "buildenv/default-foss-2026.1" },
+    /// The build environment for each compiler family other than GCC, used
+    /// when dev.buildenv is left at its default; "" means none exists and
+    /// eb-local's RPATH wrappers stand in.
+    buildenv_for: [families.len]Setting([]const u8) = .{
+        .{ .value = "buildenv/default-foss-2026.1-CUDA-13.3.0" },
+        .{ .value = "buildenv/default-lfoss-2026.1" },
+        .{ .value = "buildenv/default-intel-2026.1" },
+        .{ .value = "" },
+    },
     dev_modules: Setting([]const []const u8) = .{ .value = &.{} },
     allocation_hint: Setting([]const u8) = .{ .value = "" },
     /// NAME/VERSION toolchains the EESSI hooks accept besides foss and lfoss.
@@ -47,6 +56,36 @@ pub const Settings = struct {
     nimvault_vault: Setting([]const u8) = .{ .value = "" },
     secrets: std.ArrayList(Secret) = .empty,
 };
+
+/// The compiler families dev tells apart after the modules load, each by the
+/// EBROOT variable of its compiler module, in rising precedence. GCC is the
+/// rest and uses dev.buildenv. The names are EasyBuild's: a hyphen in the
+/// software name becomes "min", so llvm-compilers sets EBROOTLLVMMINCOMPILERS.
+pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8 }{
+    .{ .name = "cuda", .ebroot = "EBROOTCUDA", .env = "EB_LOCAL_DEV_BUILDENV_FOR_CUDA" },
+    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM" },
+    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL" },
+    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC" },
+};
+
+/// The `EBROOT` name EasyBuild writes for `software`. `convert_name` replaces
+/// `+` with `plus`, `-` with `min` and drops `.`, then the result is
+/// uppercased. `llvm-compilers` is `EBROOTLLVMMINCOMPILERS`.
+pub fn ebRoot(a: Allocator, software: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    try out.appendSlice(a, "EBROOT");
+    for (software) |ch| switch (ch) {
+        '+' => try out.appendSlice(a, "PLUS"),
+        '-' => try out.appendSlice(a, "MIN"),
+        '.' => {},
+        else => try out.append(a, std.ascii.toUpper(ch)),
+    };
+    return out.toOwnedSlice(a);
+}
+
+/// The EB_LOCAL_DEV_BUILDENV_FOR_* word for "no build environment".
+pub const no_buildenv = "none";
 
 pub const Layer = enum { site, user };
 
@@ -251,6 +290,16 @@ const Loader = struct {
                     const ff = try l.where(src, f.line, profile);
                     if (std.mem.eql(u8, f.key, "buildenv")) {
                         l.s.dev_buildenv = .{ .value = try l.module(src, f, "dev.buildenv"), .from = ff };
+                    } else if (std.mem.eql(u8, f.key, "buildenv_for")) {
+                        const per = try l.table(src, f, "dev.buildenv_for");
+                        for (per.entries.items) |*g| {
+                            const i = for (families, 0..) |fam, i| {
+                                if (std.mem.eql(u8, fam.name, g.key)) break i;
+                            } else return l.fail("{s}:{d}: unknown key dev.buildenv_for.{s} (cuda, llvm, intel or nvhpc)", .{ src.path, g.line, g.key });
+                            const v = try l.string(src, g, "dev.buildenv_for");
+                            if (v.len > 0 and !validModule(v)) return l.fail("{s}:{d}: dev.buildenv_for.{s} '{s}' is not a module name", .{ src.path, g.line, g.key, v });
+                            l.s.buildenv_for[i] = .{ .value = v, .from = try l.where(src, g.line, profile) };
+                        }
                     } else if (std.mem.eql(u8, f.key, "modules")) {
                         const mods = try l.stringList(src, f, "dev.modules");
                         for (mods) |m| if (!validModule(m)) return l.fail("{s}:{d}: dev.modules: '{s}' is not a module name", .{ src.path, f.line, m });
@@ -449,6 +498,13 @@ pub fn load(
         if (env.get(pair[0])) |v| if (v.len > 0) {
             if (!validModule(v)) return l.fail("{s}: '{s}' is not a module name", .{ pair[0], v });
             @field(s, pair[1]) = .{ .value = v, .from = "environment " ++ pair[0] };
+        };
+    }
+    inline for (families, 0..) |f, i| {
+        if (env.get(f.env)) |v| if (v.len > 0) {
+            const none = std.mem.eql(u8, v, no_buildenv);
+            if (!none and !validModule(v)) return l.fail("{s}: '{s}' is not a module name", .{ f.env, v });
+            s.buildenv_for[i] = .{ .value = if (none) "" else v, .from = "environment " ++ f.env };
         };
     }
     if (env.get("EB_LOCAL_DEV_MODULES")) |v| if (v.len > 0) {
@@ -715,6 +771,58 @@ test "refusals" {
     try r.one(&t, "x = 1\nx = 2\n", .user, "c.toml:2");
     t.env.put("EB_LOCAL_STACK_MODULE", "a b") catch unreachable;
     try r.one(&t, "", .user, "EB_LOCAL_STACK_MODULE");
+}
+
+test "dev.buildenv_for from the environment" {
+    var t = Fixture.init();
+    defer t.deinit();
+    try t.env.put("EB_LOCAL_DEV_BUILDENV_FOR_CUDA", "none");
+    try t.env.put("EB_LOCAL_DEV_BUILDENV_FOR_NVHPC", "buildenv/site-nvhpc-26.7");
+    const s = try t.load(&.{}, .{});
+    try std.testing.expectEqualStrings("", s.buildenv_for[0].value);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_DEV_BUILDENV_FOR_CUDA", s.buildenv_for[0].from);
+    try std.testing.expectEqualStrings("buildenv/site-nvhpc-26.7", s.buildenv_for[3].value);
+    try t.env.put("EB_LOCAL_DEV_BUILDENV_FOR_LLVM", "x;y");
+    try t.refuse(&.{}, "EB_LOCAL_DEV_BUILDENV_FOR_LLVM");
+}
+
+test "dev.buildenv_for per compiler family" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const text =
+        \\[dev.buildenv_for]
+        \\nvhpc = "buildenv/site-nvhpc-26.7"
+        \\llvm = ""
+    ;
+    const s = try t.load(&.{.{ .path = "site.toml", .text = text, .layer = .site }}, .{});
+    try std.testing.expectEqualStrings("buildenv/default-foss-2026.1-CUDA-13.3.0", s.buildenv_for[0].value);
+    try std.testing.expectEqualStrings("default", s.buildenv_for[0].from);
+    try std.testing.expectEqualStrings("", s.buildenv_for[1].value);
+    try std.testing.expectEqualStrings("buildenv/site-nvhpc-26.7", s.buildenv_for[3].value);
+    try std.testing.expectEqualStrings("site site.toml:2", s.buildenv_for[3].from);
+    try t.refuse(&.{.{ .path = "c.toml", .text = "[dev.buildenv_for]\nrocm = \"x\"\n", .layer = .user }}, "unknown key dev.buildenv_for.rocm");
+    try t.refuse(&.{.{ .path = "c.toml", .text = "[dev.buildenv_for]\nllvm = \"a;b\"\n", .layer = .user }}, "not a module name");
+}
+
+test "family EBROOT names are the ones EasyBuild writes" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { software: []const u8, ebroot: []const u8 }{
+        .{ .software = "CUDA", .ebroot = families[0].ebroot },
+        .{ .software = "llvm-compilers", .ebroot = families[1].ebroot },
+        .{ .software = "intel-compilers", .ebroot = families[2].ebroot },
+        .{ .software = "NVHPC", .ebroot = families[3].ebroot },
+    };
+    for (cases) |c| {
+        const got = try ebRoot(a, c.software);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c.ebroot, got);
+    }
+    const dotted = try ebRoot(a, "foo.bar");
+    defer a.free(dotted);
+    try std.testing.expectEqualStrings("EBROOTFOOBAR", dotted);
+    const plus = try ebRoot(a, "C++");
+    defer a.free(plus);
+    try std.testing.expectEqualStrings("EBROOTCPLUSPLUS", plus);
 }
 
 test "module names" {

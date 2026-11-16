@@ -23,8 +23,7 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 `eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
 The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
 Load the modules you link against on the `dev` line, not after it.
-The build environment is `buildenv/default-foss-2026.1`, the only one EESSI 2026.06 ships, so `dev` covers the GCC toolchains of foss/2026.1.
-Its wrappers do not cover `clang` and `flang`: with lfoss/2026.1 modules, `dev` warns, and a site that installs an lfoss build environment names it with `--buildenv` or `dev.buildenv`.
+EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
 These were checked on Snellius with EESSI 2026.06, each program then run with no modules at all:
 
@@ -47,6 +46,32 @@ mkdir -p "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR"
 gcc -O2 -fopenmp prog.c -lfftw3 -o "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog"
 readelf -d "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog" | grep -E 'RPATH|RUNPATH'   # names the target
 ```
+
+### Other compilers
+
+The build environment `dev` loads depends on the compilers the named modules bring in:
+
+| modules from | build environment |
+|---|---|
+| GCC (the default) | `buildenv/default-foss-2026.1` |
+| CUDA | `buildenv/default-foss-2026.1-CUDA-13.3.0`, else the GCC one |
+| `llvm-compilers` (lfoss) | `buildenv/default-lfoss-2026.1` |
+| `intel-compilers` | `buildenv/default-intel-2026.1` |
+| NVHPC | none |
+
+When Lmod has no such module, `dev` writes small RPATH wrappers for the compilers and linkers on `PATH` into `~/.cache/eb-local` and puts them first, and says so.
+Like EasyBuild's own wrappers, they add a run path for each library directory a link names with `-L` or finds through `LIBRARY_PATH`, leaving out system and compatibility-layer directories.
+`eb-local rpath-wrappers` prints the same lines on their own.
+
+A site that installs its own build environments names them per family; an empty name means none:
+
+```toml
+[dev.buildenv_for]
+nvhpc = "buildenv/site-nvhpc-26.7"
+llvm = ""
+```
+
+Setting `dev.buildenv` (or `--buildenv`) loads that module whatever the compilers.
 
 ## Install software with EasyBuild
 
@@ -130,7 +155,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile.
-The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file (`/etc/eb-local/config.toml`, or `config.toml` beside the program) also holds the storage settings, which only it may set:

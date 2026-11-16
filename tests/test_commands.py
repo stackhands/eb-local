@@ -122,13 +122,18 @@ class Commands(StorageFixture):
 
     @unittest.skipUnless(binary.BIN, "the lfoss warning is a feature of the Zig build")
     def test_dev_warns_when_an_lfoss_module_meets_the_foss_build_environment(self):
-        run = self.run_wrapper(["dev", "ScaLAPACK/2.2.2-lfoss-2026.1-fb"], SLURM_JOB_ID="")
+        # With the default, dev picks the build environment for the compilers
+        # (test_dev_buildenv); a chosen GCC one is loaded as it is, with a warning.
+        run = self.run_wrapper(["dev", "--buildenv", "buildenv/default-foss-2026.1",
+                                "ScaLAPACK/2.2.2-lfoss-2026.1-fb"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("belongs to the lfoss toolchain", run.stderr)
         self.assertIn("--buildenv", run.stderr)
         self.assertTrue(run.stdout.rstrip().endswith("module load buildenv/default-foss-2026.1"), run.stdout)
         for argv in (["dev", "FFTW/3.3.10-GCC-15.2.0"],
-                     ["dev", "--buildenv", "buildenv/default-lfoss-2026.1", "FFTW.MPI/3.3.10-lompi-2026.1"]):
+                     ["dev", "ScaLAPACK/2.2.2-lfoss-2026.1-fb"],
+                     ["dev", "--buildenv", "buildenv/default-lfoss-2026.1", "FFTW.MPI/3.3.10-lompi-2026.1"],
+                     ["dev", "--buildenv", "buildenv/site-llvm", "FFTW.MPI/3.3.10-lompi-2026.1"]):
             with self.subTest(argv=argv):
                 run = self.run_wrapper(argv, SLURM_JOB_ID="")
                 self.assertEqual(run.returncode, 0, run.stderr)
