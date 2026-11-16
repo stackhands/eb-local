@@ -91,6 +91,47 @@ class Uninstall(StorageFixture):
         self.assertEqual(sorted(trashed), sorted(str(p) for p in self.installs + self.modules))
         self.assertFalse(any(p.exists() for p in self.installs + self.modules))
 
+    def class_link(self, module, moduleclass, target):
+        link = module.parent.parent.parent / moduleclass / "pigz" / module.name
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target)
+        return link
+
+    def test_the_class_links_to_a_module_file_go_with_it(self):
+        # EasyBuild links modules/<class>/NAME/VERSION.lua to the module file
+        # in modules/all by its absolute path; a relative link counts too,
+        # and a link to another file stays.
+        links = [self.class_link(m, "tools", m) for m in self.modules]
+        links.append(self.class_link(self.modules[0], "lib", Path("..") / ".." / "all" / "pigz" / self.modules[0].name))
+        other = self.class_link(self.modules[0], "devel", self.root / "elsewhere.lua")
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--dry-run"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        for link in links:
+            self.assertIn(str(link), run.stdout)
+        self.assertNotIn(str(other), run.stdout)
+        (self.bin / "rtrash").write_text(RTRASH)
+        (self.bin / "rtrash").chmod(0o755)
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"], PATH=f"{self.bin}:/usr/bin:/bin")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        trashed = (self.root / "trashed").read_text().splitlines()
+        self.assertEqual(sorted(trashed), sorted(str(p) for p in self.installs + self.modules + links))
+        for link in links:
+            self.assertFalse(os.path.lexists(link), link)
+            # The NAME directory it leaves empty goes too.
+            self.assertFalse(link.parent.exists(), link.parent)
+        self.assertTrue(os.path.lexists(other))
+
+    def test_a_link_an_earlier_uninstall_left_dangling_goes(self):
+        link = self.class_link(self.modules[0], "tools", self.modules[0])
+        for path in self.installs:
+            subprocess.run(["chmod", "-R", "u+w", str(path)], check=True)
+            subprocess.run(["rm", "-rf", str(path)], check=True)
+        for path in self.modules:
+            path.unlink()
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse(os.path.lexists(link))
+
     def test_a_refused_trash_leaves_the_module_files(self):
         # An rtrash that refuses the installations: the module files stay.
         (self.bin / "rtrash").write_text('#!/bin/sh\necho refused >&2\nexit 1\n')
