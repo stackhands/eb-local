@@ -116,9 +116,12 @@ class Submit(StorageFixture):
     def test_config_shows_the_targets(self):
         run = self.run_tool(["config"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
-        line = [l for l in run.stdout.splitlines() if l.startswith("build.targets")][0]
-        self.assertIn("rome (-p rome -n 16 -t 02:00:00 --constraint=scratch-node)", line)
-        self.assertIn("genoa (-p genoa -n 16 -t 02:00:00)", line)
+        rows = {l.split()[0]: l for l in run.stdout.splitlines() if l.startswith("build.targets")}
+        self.assertIn("-p rome -n 16 -t 02:00:00 --constraint=scratch-node", rows["build.targets.rome"])
+        self.assertIn("-p genoa -n 16 -t 02:00:00", rows["build.targets.genoa"])
+        self.write_site("")
+        run = self.run_tool(["config"], SLURM_JOB_ID="")
+        self.assertRegex(run.stdout, r"(?m)^build\.targets\s+\(none\)")
 
 
 if __name__ == "__main__":

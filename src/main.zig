@@ -859,9 +859,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
     const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
     row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
-    var tnames: std.ArrayList([]const u8) = .empty;
-    for (s.targets.value) |t| tnames.append(a, str(a, "{s} ({s})", .{ t.name, t.sbatch })) catch oom();
-    row("build.targets", if (tnames.items.len == 0) "(none)" else std.mem.join(a, ", ", tnames.items) catch oom(), s.targets.from);
+    if (s.targets.value.len == 0) row("build.targets", "(none)", s.targets.from);
+    for (s.targets.value) |t| row(str(a, "build.targets.{s}", .{t.name}), t.sbatch, s.targets.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
