@@ -155,7 +155,9 @@ class Commands(StorageFixture):
         self.prefix.mkdir(parents=True)
         self.config.write_text(self.config.read_text() + "dev_buildenv = buildenv/mine\nstack_module = 2026\n")
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
-        self.assertIn("module load 2026\nmodule load EESSI-extend/2026.06-easybuild\n", run.stdout)
+        self.assertIn("module load 2026\n"
+                      'if command -v eessi-arch-guard >/dev/null 2>&1; then eval "$(eessi-arch-guard --shell)"; fi\n'
+                      "module load EESSI-extend/2026.06-easybuild\n", run.stdout)
         self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
 
     def test_configured_module_names_are_checked(self):

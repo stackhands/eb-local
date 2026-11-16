@@ -170,6 +170,10 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
     // not exist; before the first install there are no modules of yours to
     // show, so the stack is loaded alone.
     add(a, &out, str(a, "module load {s}\n", .{q(a, s.stack_module.value)}));
+    // Tasks run with the CPU target eessi-arch-guard selects, which can be
+    // below the one EESSI detects; where the guard is installed, it moves the
+    // stack there before EESSI-extend reads its install path.
+    add(a, &out, "if command -v eessi-arch-guard >/dev/null 2>&1; then eval \"$(eessi-arch-guard --shell)\"; fi\n");
     const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
     if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
     // build.site_toolchains under the version the stack set, as a build
@@ -1350,6 +1354,20 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\# stack module set, the paths go back first.
     \\module load "$stack" >/dev/null 2>&1 || { echo "eb-local: could not load $stack" >&2; exit 1; }
     \\restore
+    \\# Tasks run with the CPU target eessi-arch-guard selects, which can be
+    \\# below the one EESSI detects: on a CPU without a flag GCC enables for the
+    \\# detected target, the guard takes the next one. Where the guard is
+    \\# installed, the build installs for its target, and a guard that cannot
+    \\# select one stops the build. --strict restores in a private directory,
+    \\# which the workspace is.
+    \\if command -v eessi-arch-guard >/dev/null 2>&1; then
+    \\    delta=$(EESSI_ARCH_GUARD_WORKDIR="${saved[EASYBUILD_BUILDPATH]%/build}" eessi-arch-guard --strict --shell) || {
+    \\        echo "eb-local: eessi-arch-guard could not select this node's target; nothing was built" >&2
+    \\        exit 1
+    \\    }
+    \\    eval "$delta"
+    \\    restore
+    \\fi
     \\module load "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $extend" >&2; exit 1; }
     \\restore
     \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.

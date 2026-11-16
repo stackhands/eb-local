@@ -97,11 +97,13 @@ class StorageFixture(unittest.TestCase):
         write_config(self.config, self.nodes)
         (self.root / "doubles.sh").write_text(DOUBLE)
         (self.root / "capture.py").write_text(CAPTURE)
+        # EESSI_ARCH_GUARD=0 keeps a guard installed on the test host off the doubles.
         self.env = dict(os.environ, BASH_ENV=str(self.root / "doubles.sh"),
                         CONTROL_ROOT=str(self.root), CONTROL_JOB_ROOT=str(self.job),
                         CONTROL_PATH_NAMES=" ".join(MUTABLE + DURABLE),
                         EB_LOCAL_PREFIX=str(self.prefix), SLURM_JOB_ID="123",
-                        TMPDIR=str(self.job), EB_LOCAL_CONFIG=str(self.config))
+                        TMPDIR=str(self.job), EB_LOCAL_CONFIG=str(self.config),
+                        EESSI_ARCH_GUARD="0")
         for name in ("EESSI_USER_INSTALL", "EESSI_PROJECT_INSTALL",
                      "EESSI_SITE_INSTALL", "EESSI_CVMFS_INSTALL"):
             self.env.pop(name, None)

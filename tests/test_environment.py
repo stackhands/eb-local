@@ -4,13 +4,16 @@
 The module and eb doubles verify wrapper routing and argument preservation.
 They do not establish the destination chosen by a native EESSI extension.
 The module double refuses, as Lmod 9.4.5 does, a load that names
-EESSI-extend while EESSI is not loaded yet.
+EESSI-extend while EESSI is not loaded yet; the EESSI load sets the CPU
+target. The eessi-arch-guard double selects another target, as the guard
+does on a CPU that lacks a flag GCC enables for the detected one.
 """
 import json
 import os
 import pwd
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -34,8 +37,10 @@ module() {
     if [ "$1" = load ]; then
         python3 "$CONTROL_ROOT/capture.py" load "$@" || return
         export CONTROL_LOADED="${CONTROL_LOADED-} ${*:2}"
-        export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4
-        export EESSI_ACCELERATOR_TARGET=
+        if [ "$2" = EESSI/2026.06 ]; then
+            export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4
+            export EESSI_ACCELERATOR_TARGET=
+        fi
         export EASYBUILD_HOOKS=/selected/eessi/eb_hooks.py
         return 0
     fi
@@ -100,8 +105,26 @@ else:
         sys.exit(98)
     (root / "eb.json").write_text(json.dumps({"argv": sys.argv[2:],
                                             "hooks": os.environ["EASYBUILD_HOOKS"],
-                                            "umask": os.umask(0)}))
+                                            "umask": os.umask(0),
+                                            "target": os.environ.get("EESSI_SOFTWARE_SUBDIR")}))
     sys.exit(int(os.environ.get("CONTROL_EB_STATUS", "0")))
+'''
+GUARD = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ["CONTROL_ROOT"])
+record = root / "load.json"
+loaded = json.loads(record.read_text())
+loaded["calls"].append(["eessi-arch-guard"] + sys.argv[1:])
+record.write_text(json.dumps(loaded))
+workdir = os.environ.get("EESSI_ARCH_GUARD_WORKDIR")
+(root / "guard.json").write_text(json.dumps({
+    "loaded_target": os.environ.get("EESSI_SOFTWARE_SUBDIR"),
+    "workdir_mode": oct(os.stat(workdir).st_mode & 0o777) if workdir else None}))
+status = int(os.environ.get("CONTROL_GUARD_STATUS", "0"))
+if status == 0:
+    print("export EESSI_SOFTWARE_SUBDIR=x86_64/intel/icelake")
+sys.exit(status)
 '''
 
 class EnvironmentControls(unittest.TestCase):
@@ -121,12 +144,13 @@ class EnvironmentControls(unittest.TestCase):
         (self.root / "capture.py").write_text(CAPTURE)
         self.prefix = self.root / "owned space 'quote' $(touch injected)"
         self.prefix.mkdir()
+        # EESSI_ARCH_GUARD=0 keeps a guard installed on the test host off the doubles.
         self.env = dict(os.environ, BASH_ENV=str(self.root / "doubles.sh"),
                         CONTROL_ROOT=str(self.root), CONTROL_CLEAR=" ".join(CLEAR),
                         CONTROL_PREFIX=str(self.prefix), CONTROL_MODE="EESSI_USER_INSTALL",
                         EB_LOCAL_PREFIX=str(self.prefix), USER="fixture",
                         SLURM_JOB_ID="123", TMPDIR=str(self.job), CONTROL_JOB_ROOT=str(self.job),
-                        EB_LOCAL_CONFIG=str(self.config))
+                        EB_LOCAL_CONFIG=str(self.config), EESSI_ARCH_GUARD="0")
         self.env.update({name: "inherited" for name in CLEAR})
 
     def run_wrapper(self, arguments, umask=-1, **extra):
@@ -189,6 +213,68 @@ class EnvironmentControls(unittest.TestCase):
 
     def test_project_env_is_shell_safe_and_selects_only_project_mode(self):
         self.check_environment("EESSI_PROJECT_INSTALL")
+
+    # -- eessi-arch-guard ----------------------------------------------------
+
+    def with_guard(self):
+        """An eessi-arch-guard double first on PATH."""
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        guard = bin_dir / "eessi-arch-guard"
+        guard.write_text(GUARD)
+        guard.chmod(0o755)
+        self.env["PATH"] = f"{bin_dir}:{self.env['PATH']}"
+
+    def test_build_installs_for_the_target_the_arch_guard_selects(self):
+        self.with_guard()
+        run = self.run_wrapper(["recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # The guard sees the target EESSI detected and runs before EESSI-extend
+        # reads the install path from the stack.
+        self.assertEqual(json.loads((self.root / "load.json").read_text())["calls"],
+                         [["EESSI/2026.06"], ["eessi-arch-guard", "--strict", "--shell"],
+                          ["EESSI-extend/2026.06-easybuild"]])
+        guard = json.loads((self.root / "guard.json").read_text())
+        self.assertEqual(guard["loaded_target"], "x86_64/amd/zen4")
+        # --strict restores only in a workspace private to the user.
+        self.assertEqual(guard["workdir_mode"], "0o700")
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["target"], "x86_64/intel/icelake")
+        self.assertIn("eb-local: target x86_64/intel/icelake,", run.stdout)
+
+    def test_a_failed_arch_guard_stops_the_build(self):
+        self.with_guard()
+        run = self.run_wrapper(["recipe.eb"], CONTROL_GUARD_STATUS="78")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("eb-local: eessi-arch-guard could not select this node's target", run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+        self.assertEqual(json.loads((self.root / "load.json").read_text())["calls"],
+                         [["EESSI/2026.06"], ["eessi-arch-guard", "--strict", "--shell"]])
+
+    def test_env_runs_the_arch_guard_between_the_stack_and_the_extension(self):
+        self.with_guard()
+        run = self.run_wrapper(["env"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        env_script = self.root / "selected-env.sh"
+        env_script.write_text(run.stdout)
+        replay = subprocess.run(["bash", "-c", 'source "$1"; printf "%s\\n" "$EESSI_SOFTWARE_SUBDIR"',
+                                 "environment", str(env_script)],
+                                env=self.env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        self.assertEqual(replay.stdout.splitlines()[-1], "x86_64/intel/icelake")
+        self.assertEqual(json.loads((self.root / "load.json").read_text())["calls"],
+                         [["EESSI/2026.06"], ["eessi-arch-guard", "--shell"],
+                          ["EESSI-extend/2026.06-easybuild"]])
+
+    def test_env_without_the_arch_guard_loads_the_stack_and_the_extension(self):
+        run = self.run_wrapper(["env"], PATH="/usr/bin:/bin")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        env_script = self.root / "selected-env.sh"
+        env_script.write_text(run.stdout)
+        replay = subprocess.run(["bash", "-c", 'source "$1"', "environment", str(env_script)],
+                                env=dict(self.env, PATH=f"/usr/bin:/bin:{os.path.dirname(sys.executable)}"),
+                                cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        self.check_loads("EESSI_USER_INSTALL")
 
     def test_project_directory_must_exist(self):
         run = self.run_wrapper(["--project", str(self.root / "absent"), "recipe.eb"])

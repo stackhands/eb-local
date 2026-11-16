@@ -229,6 +229,11 @@ print_environment() {
     # before the first install there are no modules of yours to show, so the
     # stack is loaded alone.
     printf 'module load %q\n' "$stack_module"
+    # Tasks run with the CPU target eessi-arch-guard selects, which can be
+    # below the one EESSI detects; where the guard is installed, it moves the
+    # stack there before EESSI-extend reads its install path.
+    # shellcheck disable=SC2016  # expanded by the shell that runs the lines
+    printf '%s\n' 'if command -v eessi-arch-guard >/dev/null 2>&1; then eval "$(eessi-arch-guard --shell)"; fi'
     if [ -d "$prefix" ]; then
         printf 'module load %q\n' "$extend_module"
     fi
@@ -500,6 +505,19 @@ module load "$stack_module" >/dev/null 2>&1 || {
     exit 1
 }
 select_storage_environment
+# Tasks run with the CPU target eessi-arch-guard selects, which can be below
+# the one EESSI detects: on a CPU without a flag GCC enables for the detected
+# target, the guard takes the next one. Where the guard is installed, the
+# build installs for its target, and a guard that cannot select one stops the
+# build. --strict restores in a private directory, which the workspace is.
+if command -v eessi-arch-guard >/dev/null 2>&1; then
+    delta=$(EESSI_ARCH_GUARD_WORKDIR="$work" eessi-arch-guard --strict --shell) || {
+        echo "eb-local: eessi-arch-guard could not select this node's target; nothing was built" >&2
+        exit 1
+    }
+    eval "$delta"
+    select_storage_environment
+fi
 module load "$extend_module" >/dev/null 2>&1 || {
     echo "eb-local: could not load $extend_module" >&2
     exit 1
