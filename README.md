@@ -197,20 +197,21 @@ Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link ali
 ## Build for every node type
 
 A module is built for the CPU target of the node that built it, so a site with several node types needs one build on each.
-When the site file lists them in `[build.targets]`, `eb-local submit` sends one batch job to each, every job running this eb-local with the same recipe, options and configuration:
+When the site file lists them in `[build.node_types]`, `eb-local submit` sends one batch job to each, every job running this eb-local with the same recipe, options and configuration:
 
 ```sh
-eb-local submit GSL-2.8-GCC-15.2.0.eb --robot             # every target
+eb-local submit GSL-2.8-GCC-15.2.0.eb --robot             # every node type
 eb-local submit --on gpu GSL-2.8-GCC-15.2.0.eb --robot    # only these
 eb-local submit --print GSL-2.8-GCC-15.2.0.eb               # show the jobs, submit nothing
 ```
 
 `--on` and `--print` come before the recipe; options after it are eb's.
-The batch scripts go to `<install-prefix>/.eb-local/jobs`, each job's output to `<install-prefix>/.eb-local/logs/submit-TARGET-JOBID.out`, and `eb-local list` then shows the module on each target.
-The site file sets the targets, as sbatch options separated by spaces; only the site file may:
+The batch scripts go to `<install-prefix>/.eb-local/jobs`, each job's output to `<install-prefix>/.eb-local/logs/submit-NODETYPE-JOBID.out`, and `eb-local list` then shows the module on each CPU target.
+The site file sets the node types, as sbatch options separated by spaces; only the site file may.
+Before eb-local 3.2 the table was `[build.targets]`; eb-local reads that name, and warns, until 4.0.0.
 
 ```toml
-[build.targets]
+[build.node_types]
 cpu = "-p cpu -n 16 -t 02:00:00"
 gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
 ```
@@ -287,7 +288,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile; without either, `default_profile` does, from your file if it sets one, else from the site file.
-The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` and `build.targets` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` and `build.node_types` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file is the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, and a 1.x `eb-local.conf` beside the program or in `/etc`.

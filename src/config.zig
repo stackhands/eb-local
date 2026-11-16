@@ -17,16 +17,17 @@ pub fn Setting(comptime T: type) type {
     };
 }
 
-pub const Target = struct {
+/// A node type: a name, and the sbatch options that place a job on it.
+pub const NodeType = struct {
     name: []const u8,
     /// sbatch options, words separated by spaces.
     sbatch: []const u8,
-    /// The file and line that set this target.
+    /// The file and line that set this node type.
     from: []const u8 = "",
 };
 
-/// A target name: what --on names and a job name carries.
-pub fn validTargetName(n: []const u8) bool {
+/// A node type's name: what --on names and a job name carries.
+pub fn validNodeTypeName(n: []const u8) bool {
     if (n.len == 0 or n.len > 32) return false;
     for (n) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_')) return false;
     return true;
@@ -87,7 +88,10 @@ pub const Settings = struct {
     site_toolchains: Setting([]const []const u8) = .{ .value = &.{} },
     /// Node types `eb-local submit` sends a build to: a name and the sbatch
     /// options that place a job on that node type. Site file only.
-    targets: Setting([]const Target) = .{ .value = &.{} },
+    node_types: Setting([]const NodeType) = .{ .value = &.{} },
+    /// Where the site file listed them as `[build.targets]`, their name
+    /// before 3.2.0, which is read until 4.0.0.
+    node_types_old_key: ?[]const u8 = null,
     trash: Setting(Trash) = .{ .value = .auto },
     logs_older_than_days: Setting(u32) = .{ .value = 30 },
     node_local_root: Setting([]const u8) = .{ .value = "" },
@@ -377,6 +381,7 @@ const Loader = struct {
                 }
             } else if (std.mem.eql(u8, k, "build")) {
                 const sub = try l.table(src, e, "build");
+                var node_types_line: ?usize = null;
                 for (sub.entries.items) |*f| {
                     if (std.mem.eql(u8, f.key, "allocation_hint")) {
                         l.s.allocation_hint = .{ .value = try l.string(src, f, "build.allocation_hint"), .from = try l.where(src, f.line, profile) };
@@ -387,19 +392,25 @@ const Loader = struct {
                         for (v) |tc| if (!validToolchain(tc))
                             return l.fail("{s}:{d}: build.site_toolchains: '{s}' is not NAME/VERSION", .{ src.path, f.line, tc });
                         l.s.site_toolchains = .{ .value = v, .from = try l.where(src, f.line, null) };
-                    } else if (std.mem.eql(u8, f.key, "targets")) {
+                    } else if (std.mem.eql(u8, f.key, "node_types") or std.mem.eql(u8, f.key, "targets")) {
+                        const old = std.mem.eql(u8, f.key, "targets");
+                        const key = if (old) "build.targets" else "build.node_types";
                         if (src.layer != .site or profile != null)
-                            return l.fail("{s}:{d}: build.targets is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
-                        const per = try l.table(src, f, "build.targets");
-                        var list: std.ArrayList(Target) = .empty;
+                            return l.fail("{s}:{d}: {s} is a site setting; a user file or a profile cannot change it", .{ src.path, f.line, key });
+                        if (node_types_line) |first|
+                            return l.fail("{s}:{d}: build.targets is the old name of build.node_types, which line {d} sets; keep one", .{ src.path, f.line, first });
+                        node_types_line = f.line;
+                        const per = try l.table(src, f, key);
+                        var list: std.ArrayList(NodeType) = .empty;
                         for (per.entries.items) |*g| {
-                            if (!validTargetName(g.key)) return l.fail("{s}:{d}: build.targets.{s}: a target name is letters, digits, - and _", .{ src.path, g.line, g.key });
-                            const v = try l.string(src, g, "build.targets");
+                            if (!validNodeTypeName(g.key)) return l.fail("{s}:{d}: {s}.{s}: a node type's name is letters, digits, - and _", .{ src.path, g.line, key, g.key });
+                            const v = try l.string(src, g, key);
                             if (!validSbatchOptions(v))
-                                return l.fail("{s}:{d}: build.targets.{s}: sbatch options, separated by spaces, with no quotes, $, ; or other shell characters", .{ src.path, g.line, g.key });
+                                return l.fail("{s}:{d}: {s}.{s}: sbatch options, separated by spaces, with no quotes, $, ; or other shell characters", .{ src.path, g.line, key, g.key });
                             try list.append(l.a, .{ .name = g.key, .sbatch = v, .from = try l.where(src, g.line, null) });
                         }
-                        l.s.targets = .{ .value = list.items, .from = try l.where(src, f.line, null) };
+                        l.s.node_types = .{ .value = list.items, .from = try l.where(src, f.line, null) };
+                        l.s.node_types_old_key = if (old) l.s.node_types.from else null;
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
@@ -1044,32 +1055,54 @@ test "the 1.x site file" {
     try std.testing.expectError(error.Invalid, legacyToToml(a, "source_me = $(touch x)\n", &d));
 }
 
-test "each build target is where its own line is" {
+test "each node type is where its own line is" {
     var t = Fixture.init();
     defer t.deinit();
     const site =
         \\[build]
         \\allocation_hint = "salloc -p cpu -n 16"
         \\
-        \\[build.targets]
+        \\[build.node_types]
         \\cpu = "-p cpu -n 16 -t 02:00:00"
         \\gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
     ;
     const s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
-    try std.testing.expectEqual(@as(usize, 2), s.targets.value.len);
-    try std.testing.expectEqualStrings("cpu", s.targets.value[0].name);
-    try std.testing.expectEqualStrings("site site.toml:5", s.targets.value[0].from);
-    try std.testing.expectEqualStrings("gpu", s.targets.value[1].name);
-    try std.testing.expectEqualStrings("site site.toml:6", s.targets.value[1].from);
+    try std.testing.expectEqual(@as(usize, 2), s.node_types.value.len);
+    try std.testing.expectEqualStrings("cpu", s.node_types.value[0].name);
+    try std.testing.expectEqualStrings("site site.toml:5", s.node_types.value[0].from);
+    try std.testing.expectEqualStrings("gpu", s.node_types.value[1].name);
+    try std.testing.expectEqualStrings("site site.toml:6", s.node_types.value[1].from);
+    try std.testing.expect(s.node_types_old_key == null);
 }
 
-test "build.targets" {
+test "build.targets is read as build.node_types until 4.0.0, and not with it" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const old =
+        \\[build.targets]
+        \\cpu = "-p cpu -n 16 -t 02:00:00"
+    ;
+    const s = try t.load(&.{.{ .path = "site.toml", .text = old, .layer = .site }}, .{});
+    try std.testing.expectEqual(@as(usize, 1), s.node_types.value.len);
+    try std.testing.expectEqualStrings("-p cpu -n 16 -t 02:00:00", s.node_types.value[0].sbatch);
+    try std.testing.expectEqualStrings("site site.toml:1", s.node_types_old_key.?);
+    const both =
+        \\[build.node_types]
+        \\cpu = "-p cpu"
+        \\[build.targets]
+        \\gpu = "-p gpu"
+    ;
+    try t.refuse(&.{.{ .path = "site.toml", .text = both, .layer = .site }}, "site.toml:3: build.targets is the old name of build.node_types, which line 1 sets; keep one");
+    try t.refuse(&.{.{ .path = "user.toml", .text = old, .layer = .user }}, "user.toml:1: build.targets is a site setting");
+}
+
+test "build.node_types" {
     try std.testing.expect(validSbatchOptions("-p rome -n 16 -t 02:00:00 --constraint=scratch-node"));
     try std.testing.expect(!validSbatchOptions("-p rome; rm -rf ~"));
     try std.testing.expect(!validSbatchOptions("-p '$(id)'"));
     try std.testing.expect(!validSbatchOptions("rome"));
     try std.testing.expect(!validSbatchOptions(" "));
-    try std.testing.expect(validTargetName("genoa_h100"));
-    try std.testing.expect(!validTargetName("a b"));
-    try std.testing.expect(!validTargetName(""));
+    try std.testing.expect(validNodeTypeName("genoa_h100"));
+    try std.testing.expect(!validNodeTypeName("a b"));
+    try std.testing.expect(!validNodeTypeName(""));
 }

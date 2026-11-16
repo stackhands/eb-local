@@ -20,7 +20,7 @@ allocation_hint = "salloc -p {{partition:rome}} -n 16 -t 02:00:00 --constraint=s
 # eb-local submit sends one build job to each: Zen2 (rome) and Zen4 (genoa).
 # The Ice Lake target is on the A100 nodes, whose partitions charge GPU time
 # for a CPU build; a site enables them when its users need that target.
-[build.targets]
+[build.node_types]
 rome = "-p rome -n 16 -t 02:00:00 --constraint=scratch-node"
 genoa = "-p genoa -n 16 -t 02:00:00 --constraint=scratch-node"
 # icelake = "-p gpu_a100 --gpus-per-node=1 -n 18 -t 02:00:00 --constraint=scratch-node"
