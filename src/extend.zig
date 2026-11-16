@@ -74,7 +74,10 @@ pub fn apply(env: *std.process.Environ.Map) void {
 /// `$1` is the umask, `$2` is the mode, and the rest are eb's arguments.
 /// EESSI's init is not safe under `nounset`. The compat-layer `ld` goes on
 /// `PATH` even when `rustc` is absent: a failing command substitution under
-/// `pipefail` would exit before the module loads.
+/// `pipefail` would exit before the module loads. `WORKING_DIR` is the
+/// caller's: unset, the module's default is `/tmp/$USER`, one per user,
+/// where a shared default would leave every other user's build unable to
+/// write the first one's directories.
 pub const script =
     \\set -eo pipefail
     \\unset EB_LOCAL_EESSI_EXTEND || true
@@ -103,7 +106,6 @@ pub const script =
     \\if [[ $mode == user && -n ${EESSI_USER_INSTALL:-} ]]; then
     \\  mkdir -p -- "$EESSI_USER_INSTALL"
     \\fi
-    \\export WORKING_DIR=${WORKING_DIR:-/tmp}
     \\unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
     \\  CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER CMAKE_Fortran_COMPILER_LAUNCHER || true
     \\eval "$(env | awk -F= '/^CARGO_TARGET_[A-Z0-9_]*_(LINKER|RUSTFLAGS)=/{print "unset "$1}')"
@@ -253,9 +255,9 @@ const Run = struct {
         try sys.fchmod(fd, mode);
     }
 
-    /// A repository whose init defines `module` and, on load, the hooks and
-    /// the EasyBuild umask the real module sets. `eb` prints the process
-    /// umask and then the environment.
+    /// A repository whose init defines `module` and, on load, the hooks,
+    /// the EasyBuild umask and the EasyBuild prefix the real module sets.
+    /// `eb` prints the process umask and then the environment.
     fn fake(self: *Run, version: []const u8, eprefix: ?[]const u8) !void {
         var init_text: std.ArrayList(u8) = .empty;
         errdefer init_text.deinit(self.arena.allocator());
@@ -266,6 +268,7 @@ const Run = struct {
             \\    export EASYBUILD_HOOKS=/eessi/init/easybuild/eb_hooks.py
             \\    export EASYBUILD_RPATH=1
             \\    export EASYBUILD_UMASK=from-the-module
+            \\    export EASYBUILD_PREFIX="${WORKING_DIR:-/tmp/$USER}/easybuild"
             \\  fi
             \\}
             \\
@@ -503,6 +506,23 @@ test "a missing version is reported" {
     const out = try r.launch(&.{});
     try testing.expectEqual(@as(u32, 2), out.term.code());
     try testing.expect(std.mem.indexOf(u8, out.stderr, "versions/2025.06/init") != null);
+}
+
+test "the build directory is the caller's WORKING_DIR or one of the user's own" {
+    var r = try Run.init();
+    defer r.deinit();
+    try r.fake("2026.06", null);
+    try r.env.put("USER", "alice");
+    const out = try r.launch(&.{});
+    try ok(out);
+    try testing.expect(envVar(out.stdout, "WORKING_DIR") == null);
+    try testing.expectEqualStrings("/tmp/alice/easybuild", envVar(out.stdout, "EASYBUILD_PREFIX").?);
+
+    try r.env.put("WORKING_DIR", "/local/alice");
+    const chosen = try r.launch(&.{});
+    try ok(chosen);
+    try testing.expectEqualStrings("/local/alice", envVar(chosen.stdout, "WORKING_DIR").?);
+    try testing.expectEqualStrings("/local/alice/easybuild", envVar(chosen.stdout, "EASYBUILD_PREFIX").?);
 }
 
 test "rustc is optional and a host wrapper does not reach eb" {
