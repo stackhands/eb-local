@@ -990,8 +990,9 @@ fn literalPath(c: Ctx, path: []const u8) bool {
 
 /// Below `path`, never through a symbolic link, the target roots (a
 /// directory holding both software/ and modules/, one per CPU target as
-/// EESSI-extend lays them out), and in each, software/NAME/VERSION and
-/// modules/all/NAME/VERSION.lua. Installed software is never searched.
+/// EESSI-extend lays them out), and in each, software/NAME/VERSION,
+/// modules/all/NAME/VERSION.lua and the links to it from the other
+/// modules/ directories. Installed software is never searched.
 fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, found: *Found, depth: usize) void {
     if (depth > 12) return;
     const fd = fsx.openDir(fsx.cwd, path, false) catch return;
@@ -1005,6 +1006,7 @@ fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, fou
         if (fsx.statAt(fsx.cwd, file, false)) |st| {
             if (st.isReg() and literalPath(c, file)) found.modules.append(c.a, file) catch oom();
         } else |_| {}
+        findClassLinks(c, path, name, ver, file, found);
         return;
     }
     var it = fsx.DirIter.init(c.a, fd) catch return;
@@ -1012,6 +1014,32 @@ fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, fou
         const st = fsx.statAt(fd, e.name, false) catch continue;
         if (!st.isDir()) continue;
         findInstalls(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), name, ver, found, depth + 1);
+    }
+}
+
+/// EasyBuild links modules/<class>/NAME/VERSION.lua to `file`, the module
+/// file in modules/all, by its absolute path. A link whose target names
+/// `file`, or that leads to it, goes with it, and so does one an earlier
+/// uninstall left dangling; a link to anything else stays.
+fn findClassLinks(c: Ctx, root: []const u8, name: []const u8, ver: []const u8, file: []const u8, found: *Found) void {
+    const modules = std.fs.path.join(c.a, &.{ root, "modules" }) catch oom();
+    const fd = fsx.openDir(fsx.cwd, modules, false) catch return;
+    defer sys.close(fd);
+    var it = fsx.DirIter.init(c.a, fd) catch return;
+    while (it.next() catch null) |e| {
+        if (std.mem.eql(u8, e.name, "all") or !isDirAt(fd, e.name)) continue;
+        const parent = std.fs.path.join(c.a, &.{ modules, e.name, name }) catch oom();
+        const link = std.fs.path.join(c.a, &.{ parent, str(c.a, "{s}.lua", .{ver}) }) catch oom();
+        const st = fsx.statAt(fsx.cwd, link, false) catch continue;
+        if (!st.isLink() or !literalPath(c, parent)) continue;
+        var zb: [sys.path_max:0]u8 = undefined;
+        var buf: [sys.path_max]u8 = undefined;
+        const n: isize = @bitCast(linux.readlinkat(linux.AT.FDCWD, (sys.z(&zb, link) catch continue).ptr, &buf, buf.len));
+        if (n <= 0 or n >= buf.len) continue;
+        const named = std.fs.path.resolveAllocPosix(c.a, &.{ parent, buf[0..@intCast(n)] }) catch oom();
+        var real: [sys.path_max]u8 = undefined;
+        const leads = fsx.realpath(fsx.cwd, link, &real) catch "";
+        if (std.mem.eql(u8, named, file) or std.mem.eql(u8, leads, file)) found.modules.append(c.a, link) catch oom();
     }
 }
 

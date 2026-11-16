@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+* `uninstall` removes the links EasyBuild makes to a module file from
+  `modules/<class>/NAME/VERSION.lua`, with the module file, and the
+  `NAME` directories they leave empty. It left them dangling; naming the
+  module again now removes a link an earlier `uninstall` left.
+
 ## 2.4.0
 
 * `eb-local uninstall` keeps a module that another installed module
