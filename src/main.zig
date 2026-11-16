@@ -373,23 +373,41 @@ fn loadSettings(c: Ctx, g: Global) config.Settings {
     };
 }
 
-/// The installation directory, absolute even before it exists.
+/// The installation directory, absolute even before it exists. A project
+/// directory that cannot be used stops eb-local.
 fn place(c: Ctx, s: config.Settings) Place {
-    if (s.project.value) |p| {
-        const st = fsx.statAt(fsx.cwd, p, true) catch {
-            cli.err("eb-local: project directory {s} does not exist.\n", .{p});
-            cli.err("  The project owner creates it once, with the project group and g+s:\n", .{});
-            const qp = q(c.a, p);
-            cli.err("  mkdir -p {s} && chgrp <group> {s} && chmod 2770 {s}\n", .{ qp, qp, qp });
-            std.process.exit(2);
-        };
-        if (!st.isDir()) die("project directory {s} is not a directory", .{p});
-        // Anyone could then put module files there that the group loads.
-        if (st.mode & 0o002 != 0) die("project directory {s} is writable by others and is not used; chmod o-w it", .{p});
-        // Without it, each member's installs carry that member's own group.
-        if (st.mode & 0o2000 == 0) warn("project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p});
-        return .{ .prefix = storage.canonical(c.a, p, c.cwd) catch oom(), .project = true };
+    if (s.project.value) |p| if (!projectUsable(c, p)) std.process.exit(2);
+    return locate(c, s);
+}
+
+/// Whether the project directory p can be used; what is wrong with it goes
+/// to stderr.
+fn projectUsable(c: Ctx, p: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, p, true) catch {
+        warn("project directory {s} does not exist.", .{p});
+        cli.err("  The project owner creates it once, with the project group and g+s:\n", .{});
+        const qp = q(c.a, p);
+        cli.err("  mkdir -p {s} && chgrp <group> {s} && chmod 2770 {s}\n", .{ qp, qp, qp });
+        return false;
+    };
+    if (!st.isDir()) {
+        warn("project directory {s} is not a directory", .{p});
+        return false;
     }
+    // Anyone could then put module files there that the group loads.
+    if (st.mode & 0o002 != 0) {
+        warn("project directory {s} is writable by others and is not used; chmod o-w it", .{p});
+        return false;
+    }
+    // Without it, each member's installs carry that member's own group.
+    if (st.mode & 0o2000 == 0) warn("project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p});
+    return true;
+}
+
+/// The installation directory place gives, without checking a project
+/// directory.
+fn locate(c: Ctx, s: config.Settings) Place {
+    if (s.project.value) |p| return .{ .prefix = storage.canonical(c.a, p, c.cwd) catch oom(), .project = true };
     var raw = s.prefix.value;
     if (std.mem.startsWith(u8, raw, "~/") or std.mem.eql(u8, raw, "~")) {
         const home = nonEmpty(c.env.get("HOME")) orelse die("prefix {s} needs HOME", .{raw});
@@ -784,7 +802,7 @@ fn cmdCheck(c: Ctx, files: []const []const u8) u8 {
 
 fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const a = c.a;
-    const p = place(c, s);
+    const p = locate(c, s);
     const row = struct {
         fn f(key: []const u8, value: []const u8, from: []const u8) void {
             say("{s: <28} {s}   [{s}]", .{ key, value, from });
@@ -813,12 +831,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     if (s.eessi.items.len == 0) {
         say("{s: <28} (none)", .{"eessi"});
     } else for (s.eessi.items) |v| row(str(a, "eessi.{s}", .{v.name}), q(a, v.value), v.from);
-    if (s.secrets.items.len == 0) {
-        say("{s: <28} (none)", .{"secrets"});
-        return 0;
-    }
-    say("secrets (values are never shown)", .{});
     var failed = false;
+    if (s.secrets.items.len == 0) say("{s: <28} (none)", .{"secrets"}) else say("secrets (values are never shown)", .{});
     for (s.secrets.items) |sec| {
         if (!check) {
             say("  {s: <26} {s}   [{s}]", .{ sec.name, sec.source, sec.from });
@@ -834,6 +848,11 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
             },
             error.OutOfMemory => oom(),
         }
+    }
+    // Every other command stops on a project directory it cannot use; config
+    // shows the settings first, so the profile that names it can be read.
+    if (s.project.value) |dir| {
+        if (!projectUsable(c, dir) and check) failed = true;
     }
     return if (failed) 1 else 0;
 }

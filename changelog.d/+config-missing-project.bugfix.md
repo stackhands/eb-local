@@ -1,0 +1,1 @@
+`config` prints every setting when the project directory is missing, not a directory or writable by others, and then warns; it stopped before printing anything, so the profile that named the directory could not be read. `config --check` reads the secrets too and exits 1. Every other command still stops.
