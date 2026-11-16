@@ -209,7 +209,7 @@ bigmem = "-p bigmem -n 16 -t 02:00:00"
 Each CPU target has its own tree, so a module built on one node type is not there on another.
 `eb-local list` shows every module you installed, with a column per CPU target, and, with EESSI loaded, which of them this node's target lacks:
 
-```sh
+```console
 $ eval "$(eb-local env)"
 $ eb-local list
 /home/u/eessi: 2 module(s) for 2 CPU target(s)
