@@ -168,8 +168,14 @@ pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator
         for (raw, 0..) |b, i| name[i] = alphabet[b % alphabet.len];
         const path = try std.fmt.allocPrint(a, "{s}/eb-local.{s}", .{ job_root, name });
         var zb: [sys.path_max:0]u8 = undefined;
+        // mkdir applies the process umask. With umask 0777 the directory
+        // would be mode 000 and could not be opened to correct it, so the
+        // umask is cleared for this one call. eb-local is one thread.
+        const previous: linux.mode_t = @intCast(linux.syscall1(.umask, 0));
         const rc = linux.mkdirat(linux.AT.FDCWD, (try sys.z(&zb, path)).ptr, 0o700);
-        switch (linux.errno(rc)) {
+        const created = linux.errno(rc);
+        _ = linux.syscall1(.umask, previous);
+        switch (created) {
             .SUCCESS => return path,
             .EXIST => continue,
             else => return error.AccessDenied,
@@ -222,6 +228,21 @@ test "canonical paths" {
     try testing.expect(under("/a/b", "/a"));
     try testing.expect(under("/a", "/a"));
     try testing.expect(!under("/ab", "/a"));
+}
+
+test "a workspace is private even when the umask clears every bit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/umask-ws-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const old: linux.mode_t = @intCast(linux.syscall1(.umask, 0o777));
+    defer _ = linux.syscall1(.umask, old);
+    const path = try makeWorkspace(a, root);
+    try testing.expectEqual(@as(u32, 0o700), (try fsx.statAt(fsx.cwd, path, false)).perm());
 }
 
 test "the job mount is refused when another user owns it" {
