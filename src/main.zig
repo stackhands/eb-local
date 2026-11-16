@@ -1712,48 +1712,57 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
     const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
         die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
-    var installs: std.ArrayList(Trashed) = .empty;
-    var files: std.ArrayList(Trashed) = .empty;
+    // Installations, the module files in modules/all, and EasyBuild's links
+    // to them from modules/<class>/, in the order they come back: nothing
+    // is back before what it needs.
+    var found = [_]std.ArrayList(Trashed){ .empty, .empty, .empty };
     for (modules, 0..) |m, idx| {
         if (listed(modules[0..idx], m)) continue;
         var parts = std.mem.splitScalar(u8, m, '/');
         const name = parts.next().?;
         const ver = parts.next() orelse die("restore needs NAME/VERSION; '{s}' has no version", .{m});
         if (parts.next() != null) die("restore needs NAME/VERSION; '{s}' has more parts", .{m});
-        const tails = [_][]const u8{ str(a, "/software/{s}/{s}", .{ name, ver }), str(a, "/modules/all/{s}/{s}.lua", .{ name, ver }) };
-        const before = installs.items.len + files.items.len;
-        for (entries) |e| for (tails, [_]*std.ArrayList(Trashed){ &installs, &files }) |tail, out| {
-            if (!std.mem.endsWith(u8, e.original, tail)) continue;
-            const root = e.original[0 .. e.original.len - tail.len];
-            if (storage.under(root, versions) and targetRoot(c, root)) out.append(a, e) catch oom();
-        };
-        if (installs.items.len + files.items.len == before) die("{s} is not in the trash for {s}", .{ m, p.prefix });
+        const install_tail = str(a, "/software/{s}/{s}", .{ name, ver });
+        const module_tail = str(a, "/{s}/{s}.lua", .{ name, ver });
+        const before = found[0].items.len + found[1].items.len + found[2].items.len;
+        for (entries) |e| {
+            var root: []const u8 = undefined;
+            var kind: usize = 0;
+            if (std.mem.endsWith(u8, e.original, install_tail)) {
+                root = e.original[0 .. e.original.len - install_tail.len];
+            } else if (std.mem.endsWith(u8, e.original, module_tail)) {
+                const class = e.original[0 .. e.original.len - module_tail.len];
+                const dir = std.fs.path.dirname(class) orelse continue;
+                if (!std.mem.eql(u8, std.fs.path.basename(dir), "modules")) continue;
+                root = std.fs.path.dirname(dir) orelse continue;
+                kind = if (std.mem.eql(u8, std.fs.path.basename(class), "all")) 1 else 2;
+            } else continue;
+            if (storage.under(root, versions) and targetRoot(c, root)) found[kind].append(a, e) catch oom();
+        }
+        if (found[0].items.len + found[1].items.len + found[2].items.len == before) die("{s} is not in the trash for {s}", .{ m, p.prefix });
     }
-    for ([_][]const Trashed{ installs.items, files.items }) |list| for (list, 0..) |e, i| {
-        for (list[i + 1 ..]) |o| if (std.mem.eql(u8, e.original, o.original))
+    for (found) |list| for (list.items, 0..) |e, i| {
+        for (list.items[i + 1 ..]) |o| if (std.mem.eql(u8, e.original, o.original))
             die("{s} is in the trash more than once; restore the one you want with: rtrash restore {s}", .{ e.original, q(a, e.original) });
         if (fsx.statAt(fsx.cwd, e.original, false)) |_| {
             die("{s} exists; restore replaces nothing, so nothing was restored", .{e.original});
         } else |_| {}
     };
-    for (installs.items) |e| say("  {s}/", .{e.original});
-    for (files.items) |e| say("  {s}", .{e.original});
+    for (found, 0..) |list, kind| for (list.items) |e| say("  {s}{s}", .{ e.original, if (kind == 0) "/" else "" });
     if (dry_run) {
         say("eb-local: dry run, nothing restored", .{});
         return 0;
     }
-    // The installations come back first, so that no module file is back
-    // without its installation. rtrash restore takes no --; every path is
-    // absolute.
-    for ([_][]const Trashed{ installs.items, files.items }, 0..) |list, k| for (list) |e| {
+    // rtrash restore takes no --; every path is absolute.
+    for (found, 0..) |list, kind| for (list.items) |e| {
         const run = runAttached(a, &.{ rtrash, "restore", str(a, "--trash-dir={s}", .{e.trash_dir}), e.original }, c.envp);
         switch (run) {
             .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
             .signal => return stop(run),
         }
-        if (k == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
+        if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
-    say("eb-local: restored {d} installation(s), read-only again, and {d} module file(s)", .{ installs.items.len, files.items.len });
+    say("eb-local: restored {d} installation(s), read-only again, and {d} module file(s)", .{ found[0].items.len, found[1].items.len + found[2].items.len });
     return 0;
 }
 
