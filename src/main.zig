@@ -63,12 +63,14 @@ const usage_text =
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
     \\
-    \\Configuration: the site file (/etc/eb-local/config.toml, or config.toml or
-    \\eb-local.conf beside this program), then ~/.config/eb-local/config.toml,
+    \\Configuration: the site file (the first of config.toml beside this program,
+    \\/etc/eb-local/config.toml, eb-local.conf beside this program and
+    \\/etc/eb-local.conf), then ~/.config/eb-local/config.toml,
     \\then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
     \\then options. Builds use the allocation's own
-    \\node-local mount; a successful build removes its workspace. Secrets reach
-    \\eb's environment only, and logs written during a build are cleaned of them.
+    \\node-local mount; a successful build removes its workspace unless
+    \\EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
+    \\written during a build are cleaned of them.
     \\
     \\--config FILE, or EB_LOCAL_CONFIG=FILE without it, is read in place of the
     \\site file when root or this program's owner owns it, otherwise in place of

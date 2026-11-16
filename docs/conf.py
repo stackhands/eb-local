@@ -46,6 +46,11 @@ html_theme_options = {
                     "summary": "Keep a failed build's EasyBuild log and command output; rotate a pipeline's log tree",
                 },
                 {
+                    "title": "eb-pipeline",
+                    "url": "https://github.com/stackhands/eb-pipeline#readme",
+                    "summary": "Run a build list through a site's EasyBuild pipeline, described in one per-site TOML file",
+                },
+                {
                     "title": "rfc9162",
                     "url": "https://stackhands.github.io/rfc9162/",
                     "summary": "Append-only Merkle logs hashed as RFC 9162, with tiled storage and signed checkpoints",

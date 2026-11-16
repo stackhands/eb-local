@@ -17,10 +17,10 @@
 #   eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
 #
 # Builds use the allocation's own node-local mount, named in the site
-# configuration (eb-local.conf); a successful build removes its workspace.
-# Sources and logs persist beside the installation; clean moves old ones to
-# the trash with rtrash when it is installed. EESSI-extend supplies EESSI's
-# hooks, RPATH and compat layer.
+# configuration (eb-local.conf); a successful build removes its workspace
+# unless EB_LOCAL_KEEP_WORK=1. Sources and logs persist beside the
+# installation; clean moves old ones to the trash with rtrash when it is
+# installed. EESSI-extend supplies EESSI's hooks, RPATH and compat layer.
 set -eo pipefail   # no -u: the Lmod init reads unset variables
 
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }

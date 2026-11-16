@@ -22,7 +22,7 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 
 `eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
 The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
-Load the modules you link against on the `dev` line, not after it.
+Load the modules you link against on the `dev` line, not after it: the build environment, loaded last, puts its compiler wrappers ahead of every module's programs on `PATH`, so that no module's `gcc` or `ld` runs in their place, and `dev` checks only the modules it is given.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
 These were checked on Snellius with EESSI 2026.06, each program then run with no modules at all:
@@ -125,7 +125,7 @@ eb-local refuses a project directory that others can write to, since anyone coul
 
 A project build runs with the umask EESSI-extend sets for a project install, 002, so that each member can write the directories the others' builds made: `software/`, `modules/`, EasyBuild's locks and `.eb-local/`. EasyBuild still leaves each installation read-only. A user install is made with umask 022.
 
-A successful build removes its workspace; a failed one keeps it for inspection until the allocation ends.
+A successful build removes its workspace, unless `EB_LOCAL_KEEP_WORK=1` is set; a failed one keeps it for inspection until the allocation ends.
 The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
 
 ## EESSI-extend, without a site file
@@ -210,11 +210,12 @@ project = "/projects/0/myproj/eessi"
 dev.modules = ["CUDA/13.3.0"]
 ```
 
-`eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile.
-The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+`eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile; without either, `default_profile` does, from your file if it sets one, else from the site file.
+The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
-The site file (`/etc/eb-local/config.toml`, or `config.toml` beside the program) also holds the storage settings, which only it may set:
+The site file is the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, and a 1.x `eb-local.conf` beside the program or in `/etc`.
+It also holds the storage settings, which only it may set:
 
 ```toml
 [storage]
@@ -324,7 +325,9 @@ gh attestation verify "$f" --repo stackhands/eb-local
 gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://cyclonedx.org/bom
 ```
 
-The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no configuration files, profiles or secrets.
+The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
+It reads one site file, `eb-local.conf`: the file `EB_LOCAL_CONFIG` names, else the one beside the script, else `/etc/eb-local.conf`, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
+Its `key = value` lines set `node_local_root`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
 A site's easyconfig installs the program and its site configuration.
 
 ## Test
@@ -354,6 +357,7 @@ eb-local is one of the [stackhands](https://github.com/stackhands) tools for bui
 | [eessi-arch-guard](https://github.com/stackhands/eessi-arch-guard) | Reload EESSI in a Slurm task that inherited it for another CPU or GPU | [docs](https://stackhands.github.io/eessi-arch-guard/) |
 | **eb-local** | Install software with EasyBuild on top of EESSI into a directory a user or project owns | [docs](https://stackhands.github.io/eb-local/) |
 | [eb-keep-logs](https://github.com/stackhands/eb-keep-logs) | Keep a failed build's EasyBuild log and command output; rotate a pipeline's log tree | [docs](https://stackhands.github.io/eb-keep-logs/) |
+| [eb-pipeline](https://github.com/stackhands/eb-pipeline) | Run a build list through a site's EasyBuild pipeline, described in one per-site TOML file | [docs](https://github.com/stackhands/eb-pipeline#readme) |
 | [rfc9162](https://github.com/stackhands/rfc9162) | Append-only Merkle logs hashed as RFC 9162, with tiled storage and signed checkpoints | [docs](https://stackhands.github.io/rfc9162/) |
 | [zig-common](https://github.com/stackhands/zig-common) | The shared Zig library under the Zig tools: system calls, checked files, child processes | [docs](https://stackhands.github.io/zig-common/) |
 <!-- stackhands:end -->
