@@ -6,9 +6,9 @@
 #
 # clean moves an old log to the trash and rtrash restore brings it back;
 # uninstall moves a read-only installation and its module file to the trash,
-# restore brings both back and the program runs again. The trash lives under
-# DIR (XDG_DATA_HOME). DIR holds eb-local.conf; remove DIR afterwards (in a
-# batch job on Snellius).
+# eb-local restore brings both back read-only and the program runs again, and
+# a trashed installation empties. The trash lives under DIR (XDG_DATA_HOME).
+# DIR holds eb-local.conf; remove DIR afterwards (in a batch job on Snellius).
 #SBATCH --job-name=eb-local-rtrash
 #SBATCH --partition=rome
 #SBATCH --nodes=1
@@ -51,13 +51,15 @@ echo "== uninstall goes to the trash, restore brings it back"
 check "$EL" uninstall pigz/2.8-GCCcore-15.2.0
 check test ! -e "$inst"
 check test ! -e "$mod"
-check rtrash restore "$inst"
-check rtrash restore "$mod"
+check "$EL" restore pigz/2.8-GCCcore-15.2.0
+check test -e "$mod"
+check test -z "$(find "$inst" -perm /222)"
 check env -i PATH=/usr/bin:/bin "$inst/bin/pigz" --version
 rc=0; ( eval "$("$EL" env)"; module load pigz/2.8-GCCcore-15.2.0; [ "$(command -v pigz)" = "$inst/bin/pigz" ] ) || rc=$?
 check test "$rc" -eq 0
 
-echo "== the trash empties"
+echo "== the trash empties, an installation in it too"
+check "$EL" uninstall pigz/2.8-GCCcore-15.2.0
 check rtrash empty
 check test -z "$(rtrash list 2>/dev/null)"
 

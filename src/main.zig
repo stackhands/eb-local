@@ -50,6 +50,8 @@ const usage_text =
     \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete]
     \\                                       remove an installation and its module file, for
     \\                                       every CPU target, to the trash with rtrash
+    \\  eb-local restore NAME/VERSION... [--dry-run]
+    \\                                       bring them back from the trash, read-only again
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
     \\                                       the site file templates built in; install writes
     \\                                       config.toml beside this program, mode 644
@@ -1564,18 +1566,38 @@ test "loadsAny reads the dependency lines EasyBuild writes" {
 }
 
 /// EasyBuild installs are read-only; the owner may make them writable again.
+/// Only the directories, which rtrash needs writable to move a directory
+/// and to empty the trash; the files keep their read-only modes, in the
+/// trash too.
 fn makeWritable(c: Ctx, path: []const u8, depth: usize) void {
     if (depth > 64) return;
     const st = fsx.statAt(fsx.cwd, path, false) catch return;
-    if (st.isLink() or st.uid != linux.getuid()) return;
+    if (!st.isDir() or st.uid != linux.getuid()) return;
     var zb: [sys.path_max:0]u8 = undefined;
     const zp = sys.z(&zb, path) catch return;
     _ = linux.fchmodat(linux.AT.FDCWD, zp.ptr, @intCast((st.mode & 0o7777) | 0o200));
-    if (!st.isDir()) return;
     const fd = fsx.openDir(fsx.cwd, path, false) catch return;
     defer sys.close(fd);
     var it = fsx.DirIter.init(c.a, fd) catch return;
     while (it.next() catch null) |e| makeWritable(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), depth + 1);
+}
+
+/// Takes write permission from everyone, as EasyBuild does to an
+/// installation (EESSI-extend sets EASYBUILD_READ_ONLY_INSTALLDIR); a
+/// symbolic link is not followed.
+fn makeReadOnly(c: Ctx, path: []const u8, depth: usize) void {
+    if (depth > 64) return;
+    const st = fsx.statAt(fsx.cwd, path, false) catch return;
+    if (st.isLink() or st.uid != linux.getuid()) return;
+    if (st.isDir()) {
+        const fd = fsx.openDir(fsx.cwd, path, false) catch return;
+        defer sys.close(fd);
+        var it = fsx.DirIter.init(c.a, fd) catch return;
+        while (it.next() catch null) |e| makeReadOnly(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), depth + 1);
+    }
+    var zb: [sys.path_max:0]u8 = undefined;
+    const zp = sys.z(&zb, path) catch return;
+    _ = linux.fchmodat(linux.AT.FDCWD, zp.ptr, @intCast(st.mode & 0o7555));
 }
 
 fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
@@ -1640,7 +1662,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
                 .signal => return stop(run),
             }
         }
-        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (rtrash restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
+        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
     } else {
         for (found.installs.items) |d| fsx.deleteTree(a, fsx.cwd, d) catch |e| die("cannot remove {s} ({s})", .{ d, @errorName(e) });
         for (found.modules.items) |f| sys.unlinkat(fsx.cwd, f, 0) catch |e| die("cannot remove {s} ({s})", .{ f, @errorName(e) });
@@ -1654,9 +1676,90 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     return 0;
 }
 
+// ---- restore --------------------------------------------------------------
+
+/// An entry of `rtrash list --json`.
+const Trashed = struct { original: []const u8, trash_dir: []const u8 };
+
+fn trashList(c: Ctx, rtrash: []const u8) []Trashed {
+    const r = proc.run(c.a, rtrash, &.{ rtrash, "list", "--json" }, c.envp, .{ .stdout_limit = 64 << 20, .stderr_limit = 4096, .timeout_ms = 120_000 }) catch |e|
+        die("cannot run rtrash list ({s})", .{@errorName(e)});
+    if (r.term.code() != 0) die("rtrash list --json exited {d}: {s}", .{ r.term.code(), std.mem.trim(u8, r.stderr, " \n") });
+    return std.json.parseFromSliceLeaky([]Trashed, c.a, r.stdout, .{ .ignore_unknown_fields = true }) catch
+        die("cannot read what rtrash list --json printed", .{});
+}
+
+/// A directory holding both software/ and modules/, as findInstalls takes
+/// a target root, named without a symbolic link.
+fn targetRoot(c: Ctx, path: []const u8) bool {
+    if (!literalPath(c, path)) return false;
+    const fd = fsx.openDir(fsx.cwd, path, false) catch return false;
+    defer sys.close(fd);
+    return isDirAt(fd, "software") and isDirAt(fd, "modules");
+}
+
+/// Brings back from the trash what uninstall moved there, for every CPU
+/// target, and makes each installation read-only again: rtrash restore
+/// alone brings one back with the writable directories rtrash needs.
+fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
+    } else |_| die("nothing was installed in {s}", .{p.prefix});
+    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
+        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
+    const entries = trashList(c, rtrash);
+    var installs: std.ArrayList(Trashed) = .empty;
+    var files: std.ArrayList(Trashed) = .empty;
+    for (modules, 0..) |m, idx| {
+        if (listed(modules[0..idx], m)) continue;
+        var parts = std.mem.splitScalar(u8, m, '/');
+        const name = parts.next().?;
+        const ver = parts.next() orelse die("restore needs NAME/VERSION; '{s}' has no version", .{m});
+        if (parts.next() != null) die("restore needs NAME/VERSION; '{s}' has more parts", .{m});
+        const tails = [_][]const u8{ str(a, "/software/{s}/{s}", .{ name, ver }), str(a, "/modules/all/{s}/{s}.lua", .{ name, ver }) };
+        const before = installs.items.len + files.items.len;
+        for (entries) |e| for (tails, [_]*std.ArrayList(Trashed){ &installs, &files }) |tail, out| {
+            if (!std.mem.endsWith(u8, e.original, tail)) continue;
+            const root = e.original[0 .. e.original.len - tail.len];
+            if (storage.under(root, versions) and targetRoot(c, root)) out.append(a, e) catch oom();
+        };
+        if (installs.items.len + files.items.len == before) die("{s} is not in the trash for {s}", .{ m, p.prefix });
+    }
+    for ([_][]const Trashed{ installs.items, files.items }) |list| for (list, 0..) |e, i| {
+        for (list[i + 1 ..]) |o| if (std.mem.eql(u8, e.original, o.original))
+            die("{s} is in the trash more than once; restore the one you want with: rtrash restore {s}", .{ e.original, q(a, e.original) });
+        if (fsx.statAt(fsx.cwd, e.original, false)) |_| {
+            die("{s} exists; restore replaces nothing, so nothing was restored", .{e.original});
+        } else |_| {}
+    };
+    for (installs.items) |e| say("  {s}/", .{e.original});
+    for (files.items) |e| say("  {s}", .{e.original});
+    if (dry_run) {
+        say("eb-local: dry run, nothing restored", .{});
+        return 0;
+    }
+    // The installations come back first, so that no module file is back
+    // without its installation. rtrash restore takes no --; every path is
+    // absolute.
+    for ([_][]const Trashed{ installs.items, files.items }, 0..) |list, k| for (list) |e| {
+        const run = runAttached(a, &.{ rtrash, "restore", str(a, "--trash-dir={s}", .{e.trash_dir}), e.original }, c.envp);
+        switch (run) {
+            .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
+            .signal => return stop(run),
+        }
+        if (k == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
+    };
+    say("eb-local: restored {d} installation(s), read-only again, and {d} module file(s)", .{ installs.items.len, files.items.len });
+    return 0;
+}
+
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, site, @"rpath-wrappers", check };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -1803,13 +1906,13 @@ pub fn main(init: std.process.Init) u8 {
                     clean.delete = true;
                 } else die("clean does not know '{s}'", .{x});
             },
-            .uninstall => {
+            .uninstall, .restore => {
                 if (std.mem.eql(u8, x, "--dry-run")) {
                     uninstall.dry_run = true;
-                } else if (std.mem.eql(u8, x, "--delete")) {
+                } else if (command == .uninstall and std.mem.eql(u8, x, "--delete")) {
                     uninstall.delete = true;
                 } else if (x.len > 0 and x[0] == '-') {
-                    die("uninstall does not know '{s}'", .{x});
+                    die("{s} does not know '{s}'", .{ @tagName(command), x });
                 } else if (!config.validModule(x)) {
                     die("'{s}' is not a module name", .{x});
                 } else rest.append(a, x) catch oom();
@@ -1836,6 +1939,7 @@ pub fn main(init: std.process.Init) u8 {
         .clean => cmdClean(c, s, clean),
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
+        .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
         .eb, .profiles, .site, .@"rpath-wrappers", .check => unreachable,
     };
 }
