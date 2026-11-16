@@ -1,0 +1,1 @@
+`eb-local doctor` says whether eessi-arch-guard is on `PATH` and, inside a job with EESSI loaded, which CPU target it selects, which builds, `env` and `dev` then use. It asks the guard as a build does, with `--strict --shell` and a private directory that it removes after; a guard that cannot select a target is a `warn`.

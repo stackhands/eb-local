@@ -1208,6 +1208,65 @@ fn envpOf(a: Allocator, map: *const std.process.Environ.Map) proc.Envp {
     return @ptrCast(list.items.ptr);
 }
 
+/// The line for eessi-arch-guard, whose target builds, env and dev load
+/// EESSI for. Inside a job with EESSI loaded the guard is asked as a build
+/// asks it, strictly, with a private directory that is removed after.
+fn noteGuard(c: Ctx, out: *std.ArrayList(u8)) void {
+    const a = c.a;
+    const guard = (proc.which(a, "eessi-arch-guard", c.env.get("PATH") orelse "") catch null) orelse
+        return note(a, out, "info", "eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects", .{});
+    if (std.mem.eql(u8, c.env.get("EESSI_ARCH_GUARD") orelse "", "0"))
+        return note(a, out, "info", "eessi-arch-guard is on PATH, and EESSI_ARCH_GUARD=0 turns it off", .{});
+    const loaded = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR")) orelse "";
+    if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null or loaded.len == 0)
+        return note(a, out, "info", "eessi-arch-guard is on PATH; builds, env and dev load EESSI for the target it selects, which doctor shows inside a job with EESSI loaded", .{});
+    const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
+    const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
+    const dir = storage.makeWorkspace(a, base) catch
+        return note(a, out, "warn", "eessi-arch-guard was not asked: doctor could not make a private directory in {s}", .{base});
+    defer fsx.deleteTree(a, fsx.cwd, dir) catch {};
+    var env = c.env.clone(a) catch oom();
+    env.put("EESSI_ARCH_GUARD_WORKDIR", dir) catch oom();
+    const r = proc.run(a, guard, &.{ guard, "--strict", "--shell" }, envpOf(a, &env), .{ .stdout_limit = 1 << 20, .stderr_limit = 64 << 10, .timeout_ms = 120_000 }) catch |e|
+        return note(a, out, "warn", "eessi-arch-guard could not be run: {s}", .{@errorName(e)});
+    if (r.term.code() != 0) {
+        var lines = std.mem.splitScalar(u8, std.mem.trim(u8, r.stderr, " \n"), '\n');
+        const why = lines.first();
+        return note(a, out, "warn", "eessi-arch-guard cannot select a target here (exit {d}{s}{s}); builds stop when it cannot, and EESSI_ARCH_GUARD=0 turns it off", .{ r.term.code(), if (why.len > 0) ": " else "", why });
+    }
+    const chosen = shellExport(a, r.stdout, "EESSI_SOFTWARE_SUBDIR") orelse loaded;
+    if (std.mem.eql(u8, chosen, loaded)) {
+        note(a, out, "ok  ", "eessi-arch-guard selects {s}, the target EESSI is loaded for", .{chosen});
+    } else note(a, out, "ok  ", "eessi-arch-guard selects {s} here, not {s}, which EESSI is loaded for; builds, env and dev use {s}", .{ chosen, loaded, chosen });
+}
+
+/// The value `export NAME=VALUE` gives NAME in the output of
+/// eessi-arch-guard --shell, without the quotes Python's shlex.quote adds.
+fn shellExport(a: Allocator, text: []const u8, name: []const u8) ?[]const u8 {
+    const head = str(a, "export {s}=", .{name});
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (!std.mem.startsWith(u8, line, head)) continue;
+        const v = line[head.len..];
+        if (v.len >= 2 and v[0] == '\'' and v[v.len - 1] == '\'')
+            return std.mem.replaceOwned(u8, a, v[1 .. v.len - 1], "'\"'\"'", "'") catch oom();
+        return v;
+    }
+    return null;
+}
+
+test "the value eessi-arch-guard --shell gives a variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = "export EESSI_ARCH_GUARD_RELOADED='x86_64/amd/zen4->x86_64/amd/zen2'\nexport EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen2\nunset EESSI_ARCHDETECT_OPTIONS\n";
+    try std.testing.expectEqualStrings("x86_64/amd/zen2", shellExport(a, text, "EESSI_SOFTWARE_SUBDIR").?);
+    try std.testing.expectEqualStrings("x86_64/amd/zen4->x86_64/amd/zen2", shellExport(a, text, "EESSI_ARCH_GUARD_RELOADED").?);
+    try std.testing.expectEqualStrings("it's", shellExport(a, "export X='it'\"'\"'s'\n", "X").?);
+    try std.testing.expect(shellExport(a, text, "EESSI_ARCHDETECT_OPTIONS") == null);
+    try std.testing.expect(shellExport(a, text, "EESSI_SOFTWARE") == null);
+}
+
 fn userName(c: Ctx) []const u8 {
     // A static binary has no NSS; id(1) asks the system's.
     const id = (proc.which(c.a, "id", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/usr/bin/id";
@@ -2093,6 +2152,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     if (nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"))) |sub| {
         note(a, &out, "ok  ", "EESSI {s} is loaded for {s}", .{ c.env.get("EESSI_VERSION") orelse "?", sub });
     } else note(a, &out, "info", "EESSI is not loaded in this shell; eval \"$(eb-local env)\" loads it with your modules", .{});
+    noteGuard(c, &out);
     const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
     if (fsx.statAt(fsx.cwd, versions, false)) |_| {
         const mp = c.env.get("MODULEPATH") orelse "";
