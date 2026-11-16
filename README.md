@@ -25,7 +25,7 @@ The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can m
 The build environment has to be loaded; when, relative to the libraries, does not matter, because the modules set `LIBRARY_PATH` and the wrappers read it when you link.
 On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RPATH entries, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
 Its `gcc` and `ld` wrappers each record the run paths, so one real `gcc` or one real `ld` ahead of them on `PATH` does no harm.
-A program loses its run paths only when both are bypassed, or when its compiler has no wrapper, such as `clang` from the `LLVM` module.
+A program loses its run paths only when both are bypassed, or when its compiler has no wrapper, such as `clang` from the `LLVM` module loaded by hand; `dev` gives such a compiler a wrapper (see [Other compilers](#other-compilers)).
 The link still succeeds and the program fails when it starts; `eb-local check PROGRAM` shows this first.
 `dev` chooses the build environment from the compilers loaded when it runs, so name every module you link against on the `dev` line, not after it.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
@@ -76,7 +76,10 @@ The build environment `dev` loads depends on the compilers the named modules bri
 
 When Lmod has no such module, `dev` writes small RPATH wrappers for the compilers and linkers on `PATH` into `~/.cache/eb-local` and puts them first, and says so.
 Like EasyBuild's own wrappers, they add a run path for each library directory a link names with `-L` or finds through `LIBRARY_PATH`, leaving out system and compatibility-layer directories.
-`eb-local rpath-wrappers` prints the same lines on their own.
+Whichever build environment loads, `dev` then puts these wrappers first for each `clang`, `clang++`, `flang`, `flang-new` or `ld.lld` on `PATH` that no wrapper covers, and says so.
+Those find their linker themselves, so an `ld` wrapper never sees what they link.
+The `LLVM` module, which other modules also load, ships `clang` but is not `llvm-compilers`: with it, `dev` loads the GCC build environment, which wraps `gcc` and `ld` but not `clang`.
+`eb-local rpath-wrappers` prints the same lines on their own; with `--unwrapped`, only those for the compilers no wrapper covers.
 
 A site that installs its own build environments names them per family; an empty name means none:
 
