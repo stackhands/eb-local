@@ -121,7 +121,8 @@ class Submit(StorageFixture):
         shown = re.search(r"```console\n\$ (.*?)\n(.*?)```", section, re.S)
         run = self.run_tool(shlex.split(shown.group(1))[1:], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
-        printed = run.stdout.replace(str(Path(binary.BIN).resolve()), "/usr/local/bin/eb-local")
+        printed = (run.stdout.replace(str(Path(binary.BIN).resolve()), "/usr/local/bin/eb-local")
+                   .replace(f"--chdir={self.root} ", "--chdir=/home/alice "))
         for line in shown.group(2).splitlines():
             self.assertIn(line + "\n", printed)
 
@@ -134,6 +135,7 @@ class Submit(StorageFixture):
         lines = self.batch_lines(explained.stdout, "#   ")
         self.assertEqual([l[:3] for l in lines], [["sbatch", "-p", "rome"], ["sbatch", "-p", "genoa"]])
         self.assertIn("--job-name=eb-local-rome-my_recipe.eb", lines[0])
+        self.assertIn(f"--chdir={self.root}", lines[0])
         self.assertIn("--output=%x-%j.out", lines[0])
         refused = self.run_tool(["my recipe.eb", "--robot"], SLURM_JOB_ID="")
         self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)

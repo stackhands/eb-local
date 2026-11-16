@@ -209,12 +209,12 @@ gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
 
 ```console
 $ eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
-# The same build as a batch job, on each node type the site file lists:
-#   sbatch -p cpu -n 16 -t 02:00:00 --job-name=eb-local-cpu-GSL-2.8-GCC-15.2.0.eb --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
-#   sbatch -p gpu -n 16 -t 02:00:00 --gpus=1 --job-name=eb-local-gpu-GSL-2.8-GCC-15.2.0.eb --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
+# On each node type the site file lists in [build.node_types], the same build as a batch job:
+#   sbatch -p cpu -n 16 -t 02:00:00 --job-name=eb-local-cpu-GSL-2.8-GCC-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
+#   sbatch -p gpu -n 16 -t 02:00:00 --gpus=1 --job-name=eb-local-gpu-GSL-2.8-GCC-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
 ```
 
-Only those lines of the explanation are shown here. Each job runs this eb-local with the same recipe, options and configuration, and its output goes to the directory `sbatch` runs in; `eb-local list` then shows the module on each CPU target.
+Only those lines of the explanation are shown here. Each job runs this eb-local with the same recipe, options and configuration, in the directory `--explain` ran in, and writes its output there; `eb-local list` then shows the module on each CPU target.
 Before eb-local 3.2 the table was `[build.targets]`; eb-local reads that name, and warns, until 4.0.0.
 
 `eb-local submit` sends those jobs itself. It is deprecated, and is removed in 4.0.0:

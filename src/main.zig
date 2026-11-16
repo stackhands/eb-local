@@ -1599,7 +1599,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n") catch oom();
     const jobs = batchLines(c, s, g, p, args);
     if (jobs.len > 0) {
-        out.appendSlice(a, "# The same build as a batch job, on each node type the site file lists:\n") catch oom();
+        out.appendSlice(a, "# On each node type the site file lists in [build.node_types], the same build as a batch job:\n") catch oom();
         for (jobs) |line| out.print(a, "#   {s}\n", .{line}) catch oom();
     }
     out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
@@ -2152,8 +2152,9 @@ fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []c
 }
 
 /// An sbatch line for each node type the site file lists, which runs the
-/// build as a batch job there. The job's output goes to the directory
-/// sbatch runs in, as JOBNAME-JOBID.out.
+/// build as a batch job there. The job runs, and writes its output as
+/// JOBNAME-JOBID.out, in the directory eb-local runs in, as a job of submit
+/// runs there.
 fn batchLines(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []const u8) []const []const u8 {
     const a = c.a;
     const types = nodeTypes(s);
@@ -2161,7 +2162,8 @@ fn batchLines(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []c
     const wrap = q(a, jobCommand(c, s, g, p, args));
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     var lines: std.ArrayList([]const u8) = .empty;
-    for (types) |t| lines.append(a, str(a, "sbatch {s} --job-name=eb-local-{s}-{s} --output=%x-%j.out --wrap={s}", .{ t.sbatch, t.name, recipe, wrap })) catch oom();
+    const dir = q(a, c.cwd);
+    for (types) |t| lines.append(a, str(a, "sbatch {s} --job-name=eb-local-{s}-{s} --chdir={s} --output=%x-%j.out --wrap={s}", .{ t.sbatch, t.name, recipe, dir, wrap })) catch oom();
     return lines.items;
 }
 
