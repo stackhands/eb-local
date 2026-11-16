@@ -6,11 +6,14 @@ target; doctor reports what would stop a build or a module load.
 """
 import os
 from pathlib import Path
+import re
 import subprocess
 import unittest
 
 import binary
 from test_storage import StorageFixture
+
+README = Path(__file__).resolve().parents[1] / "README.md"
 
 
 @unittest.skipUnless(binary.BIN, "list and doctor are features of the Zig build")
@@ -99,6 +102,24 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("warn EASYBUILD_INSTALLPATH=/elsewhere is set in this shell", run.stdout)
         self.assertIn("warn LD_LIBRARY_PATH is set", run.stdout)
         self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
+
+    def test_the_readme_default_for_a_site_is_one_prefix_for_eb_local_and_eessi_extend(self):
+        text = README.read_text()
+        section = text[text.index("\n## A site Lmod hook\n"):]
+        line = re.search(r"```toml\n(prefix = .*)\n```", section).group(1)
+        home = self.root / "home"
+        home.mkdir()
+        site = self.root / "site.toml"
+        site.write_text(f'{line}\n\n[storage]\nnode_local_root = "{self.nodes}"\nnode_local_fstype = "xfs"\n'
+                        'shared_scratch = ["/scratch"]\n')
+        site.chmod(0o644)
+        del self.env["EB_LOCAL_PREFIX"]
+        run = self.run_tool(["doctor"], HOME=str(home), EB_LOCAL_CONFIG=str(site),
+                            EESSI_USER_INSTALL=str(home / ".local" / "eessi"))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"ok   installs go to {home}/.local/eessi: a user install, prefix from site {site}:1\n", run.stdout)
+        self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
+        self.assertNotIn("warn EESSI_USER_INSTALL", run.stdout)
 
     def test_doctor_fails_on_a_project_directory_others_can_write(self):
         project = self.root / "durable" / "project"
