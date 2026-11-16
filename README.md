@@ -209,7 +209,7 @@ bigmem = "-p bigmem -n 16 -t 02:00:00"
 Each CPU target has its own tree, so a module built on one node type is not there on another.
 `eb-local list` shows every module you installed, with a column per CPU target, and, with EESSI loaded, which of them this node's target lacks:
 
-```sh
+```console
 $ eval "$(eb-local env)"
 $ eb-local list
 /home/u/eessi: 2 module(s) for 2 CPU target(s)
@@ -400,8 +400,10 @@ A site's easyconfig installs the program and its site configuration.
 
 ```sh
 python3 -m unittest discover -s tests                    # the Bash script
-zig build unit && zig build -Dtest-ops=true test          # the Zig build: unit tests, then the same suite
+zig build unit && zig build test                          # the Zig build: unit tests, then the same suite
 ```
+
+`zig build test` runs the suite against a debug build with the test seams; with `-Dtest-ops=true`, as CI runs it, against the binary it builds.
 
 A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
 

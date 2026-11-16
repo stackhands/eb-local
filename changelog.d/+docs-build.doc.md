@@ -1,0 +1,1 @@
+The README's `eb-local list` transcript is a `console` block, so the documentation builds with warnings as errors again: as an `sh` block, the apostrophe in its output stopped the highlighter, and `sphinx -W` failed.
