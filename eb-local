@@ -117,7 +117,10 @@ fi
 #   trash = auto|rtrash|none   how clean removes durable files (auto: rtrash if found)
 node_local_root=""
 node_local_fstype=xfs
-shared_scratch=""
+# The paths as written. Pathname expansion would turn a glob in one of them
+# into whatever names happen to match, and the tree that was named would not
+# be the tree that is refused.
+scratch_paths=()
 allocation_hint=""
 stack_module="EESSI/2026.06"
 extend_module="EESSI-extend/2026.06-easybuild"
@@ -157,10 +160,14 @@ read_config() {
                 node_local_fstype="$value" ;;
             shared_scratch)
                 local path
+                scratch_paths=()
+                set -f
                 for path in $value; do
-                    [[ "$path" =~ ^/.*[^/]$ ]] || fail_storage "$file: shared_scratch takes absolute paths without a trailing slash."
+                    [[ "$path" =~ ^/.*[^/]$ ]] || { set +f; fail_storage "$file: shared_scratch takes absolute paths without a trailing slash."; }
+                    scratch_paths+=("$path")
                 done
-                shared_scratch="$value" ;;
+                set +f
+                ;;
             allocation_hint) allocation_hint="$value" ;;
             stack_module|extend_module|dev_buildenv)
                 valid_module "$value" || fail_storage "$file: $key must be one module name."
@@ -386,7 +393,7 @@ fi
 check_job_root
 
 prefix=$(readlink -m -- "$prefix") || fail_storage 'cannot resolve installation prefix.'
-for refused in "$node_local_root" $shared_scratch; do
+for refused in "$node_local_root" "${scratch_paths[@]}"; do
     case "$prefix" in
         "$refused"|"$refused"/*)
             fail_storage 'installation, source and log paths must use durable owned storage.' ;;
