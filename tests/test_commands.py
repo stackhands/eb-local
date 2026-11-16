@@ -57,6 +57,7 @@ class Commands(StorageFixture):
         kept = self.workspaces()
         self.assertEqual(len(kept), 1)
         self.assertIn(str(self.job / kept[0]), run.stderr)
+        self.assertEqual(run.stderr.count("build workspace kept"), 1)
 
     def test_keep_work_keeps_a_successful_workspace(self):
         run = self.run_wrapper(EB_LOCAL_KEEP_WORK="1")
