@@ -37,14 +37,24 @@ These were checked on Snellius with EESSI 2026.06, each program then run with no
 
 Load EESSI on the node type that will run the program: it picks the binaries for the CPU it finds when it loads.
 A program built with `dev` belongs to that one CPU target, because the wrappers record run paths into `$EESSI_SOFTWARE_SUBDIR`; a binary linked on zen4 loads zen4 libraries wherever it runs and can stop with an illegal instruction on zen2.
-So build once per node type, inside an allocation on that node type, and install into a path that names the target:
+The build environment also puts `-march=native` in `CFLAGS`, `CXXFLAGS` and `FFLAGS`, so `make` and CMake compile the program for that CPU too.
+So build once per node type, inside an allocation on that node type, and install into a path that names the target.
+`dev` sets `EB_LOCAL_DEV_PREFIX` to one: `<install-prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one.
 
 ```sh
-salloc -p rome -n 4 -t 00:30:00             # one allocation per node type
+salloc -p <partition> -n 4 -t 00:30:00      # one allocation per node type
 eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
-mkdir -p "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR"
-gcc -O2 -fopenmp prog.c -lfftw3 -o "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog"
-readelf -d "$HOME/opt/prog/$EESSI_SOFTWARE_SUBDIR/prog" | grep -E 'RPATH|RUNPATH'   # names the target
+mkdir -p "$EB_LOCAL_DEV_PREFIX/bin"
+gcc -O2 -fopenmp prog.c -lfftw3 -o "$EB_LOCAL_DEV_PREFIX/bin/prog"
+eb-local check "$EB_LOCAL_DEV_PREFIX/bin/prog"
+```
+
+CMake takes `-DCMAKE_INSTALL_PREFIX="$EB_LOCAL_DEV_PREFIX"`, autotools `--prefix="$EB_LOCAL_DEV_PREFIX"`.
+A job script finds the build for the node it lands on by loading EESSI first:
+
+```sh
+eval "$(eb-local env)"
+"$HOME/.local/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
 ```
 
 ### Other compilers
@@ -72,6 +82,20 @@ llvm = ""
 ```
 
 Setting `dev.buildenv` (or `--buildenv`) loads that module whatever the compilers.
+
+### Check a program
+
+`eb-local check FILE...` reads a program or library and says whether it runs here without `LD_LIBRARY_PATH`.
+It prints the loader, the run paths and where each needed library resolves, ignoring the shell's `LD_LIBRARY_PATH`, and it reports these problems:
+
+- the file is built for another architecture;
+- with EESSI loaded, the loader or a library comes from the host rather than the compatibility layer;
+- the file records `RUNPATH`, which `LD_LIBRARY_PATH` overrides and the libraries' own dependencies ignore, rather than `RPATH`;
+- a run path points into the software tree of another CPU target than `$EESSI_SOFTWARE_SUBDIR`;
+- a library is not found, or is found only through `LD_LIBRARY_PATH`.
+
+It exits 0 with no problems, 1 with problems and 2 when a file cannot be read.
+It checks the libraries the file names itself; run it on a library to check that one's.
 
 ## Install software with EasyBuild
 

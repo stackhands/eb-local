@@ -21,6 +21,11 @@ for f in "$@"; do printf '%s\n' "$f" >> "$CONTROL_ROOT/trashed"; rm -f -- "$f"; 
 '''
 
 
+def last_load(printed):
+    """The last module load line of what env or dev printed."""
+    return [l for l in printed.splitlines() if l.startswith("module load ")][-1]
+
+
 class Commands(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -79,6 +84,17 @@ class Commands(StorageFixture):
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
 
+    @unittest.skipUnless(binary.BIN, "the install prefix is a feature of the Zig build")
+    def test_dev_names_an_install_prefix_for_the_target(self):
+        self.prefix.mkdir(parents=True)
+        run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.env.update(EESSI_VERSION="2026.06", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4", EESSI_ACCELERATOR_TARGET="accel/nvidia/cc90")
+        replay = self.replay(run.stdout + 'printf %s "$EB_LOCAL_DEV_PREFIX" > "$CONTROL_ROOT/dev-prefix"\n')
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual((self.root / "dev-prefix").read_text(),
+                         f"{self.prefix}/dev/2026.06/x86_64/amd/zen4/accel/nvidia/cc90")
+
     def test_dev_before_the_first_install_loads_the_stack_without_the_extension(self):
         # EESSI-extend refuses a missing install directory and Lmod then undoes
         # the whole load, so with no prefix yet only the stack is loaded.
@@ -101,12 +117,12 @@ class Commands(StorageFixture):
 
     def test_dev_buildenv_comes_from_the_option_or_the_configuration(self):
         run = self.run_wrapper(["dev", "--buildenv", "buildenv/default-gompi-2026.1"], SLURM_JOB_ID="")
-        self.assertTrue(run.stdout.rstrip().endswith("module load buildenv/default-gompi-2026.1"), run.stdout)
+        self.assertEqual(last_load(run.stdout), "module load buildenv/default-gompi-2026.1", run.stdout)
         self.prefix.mkdir(parents=True)
         self.config.write_text(self.config.read_text() + "dev_buildenv = buildenv/mine\nstack_module = 2026\n")
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
         self.assertIn("module load 2026 EESSI-extend/2026.06-easybuild", run.stdout)
-        self.assertTrue(run.stdout.rstrip().endswith("module load buildenv/mine"), run.stdout)
+        self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
 
     def test_configured_module_names_are_checked(self):
         self.config.write_text(self.config.read_text() + "stack_module = EESSI;touch injected\n")
@@ -129,7 +145,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("belongs to the lfoss toolchain", run.stderr)
         self.assertIn("--buildenv", run.stderr)
-        self.assertTrue(run.stdout.rstrip().endswith("module load buildenv/default-foss-2026.1"), run.stdout)
+        self.assertEqual(last_load(run.stdout), "module load buildenv/default-foss-2026.1", run.stdout)
         for argv in (["dev", "FFTW/3.3.10-GCC-15.2.0"],
                      ["dev", "ScaLAPACK/2.2.2-lfoss-2026.1-fb"],
                      ["dev", "--buildenv", "buildenv/default-lfoss-2026.1", "FFTW.MPI/3.3.10-lompi-2026.1"],
