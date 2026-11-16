@@ -168,14 +168,16 @@ eb-local eb -- example.eb --robot
 
 ### What a build runs
 
-`eb-local --explain` prints the commands a build would run, as shell lines, with the checks it makes first as comments, and creates and runs nothing:
+`eb-local --explain` prints the script a build runs, and creates and runs nothing.
+The checks eb-local makes first are comments, then come the variables it sets for the script, a `set --` line with the script's arguments, and the script itself.
+A build names this command in its first line, as in `eb-local: what this runs: eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot`:
 
 ```sh
 eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
 ```
 
-The lines are what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, and run `eb`.
-`$W` stands for the workspace a build makes in the allocation's node-local mount.
+The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, and run `eb`.
+`$W` stands for the workspace a build makes in the allocation's node-local mount. With `W` set to a directory, `bash` runs the printed text as a build runs its script; the checks before it and the cleaning of logs after it are eb-local's own.
 
 ## Where things go
 

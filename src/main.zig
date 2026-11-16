@@ -1526,62 +1526,93 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\if [ "$mode" = project ]; then exec eb "$@"; else exec eb --umask=022 "$@"; fi
 ;
 
-/// What a build runs, as the shell commands a person would type, with the
-/// checks it makes first as comments. Nothing is created and nothing runs, so
-/// it also works outside an allocation. $W stands for the workspace a build
-/// makes in the allocation's node-local mount.
+/// What bash would run before the script could unset it: bash runs BASH_ENV
+/// first, and SHELLOPTS=xtrace prints the commands into the job log.
+const shell_startup = [_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" };
+
+/// Host loader settings, which select libraries ahead of the toolchain's
+/// RPATH.
+const host_loader = [_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" };
+
+/// The variables a build sets for its script: build and temporary space in
+/// the workspace `work`, sources and logs beside the install.
+fn buildVariables(a: Allocator, work: []const u8, d: Durable) [11][2][]const u8 {
+    const tmp = std.fs.path.join(a, &.{ work, "tmp" }) catch oom();
+    return .{
+        .{ "WORKING_DIR", std.fs.path.join(a, &.{ work, "source-index" }) catch oom() },
+        .{ "TMPDIR", tmp },
+        .{ "TMP", tmp },
+        .{ "TEMP", tmp },
+        .{ "EASYBUILD_BUILDPATH", std.fs.path.join(a, &.{ work, "build" }) catch oom() },
+        .{ "EASYBUILD_TMPDIR", tmp },
+        .{ "XDG_CACHE_HOME", std.fs.path.join(a, &.{ work, "cache" }) catch oom() },
+        .{ "CARGO_HOME", std.fs.path.join(a, &.{ work, "cargo" }) catch oom() },
+        .{ "EASYBUILD_SOURCEPATH", d.sources },
+        .{ "EASYBUILD_TMP_LOGDIR", d.logs },
+        .{ "LMOD_EXACT_MATCH", "no" },
+    };
+}
+
+/// The command a build runs: `build_script` in a clean bash, with the stack,
+/// the extension, the install variable, the prefix and the mode as its first
+/// five arguments, and eb's after them.
+fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []const []const u8) []const []const u8 {
+    const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.appendSlice(a, &.{
+        bash,                 "--noprofile",         "--norc",                                                         "-c",     build_script,                         "eb-local",
+        s.stack_module.value, s.extend_module.value, if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix, if (p.project) "project" else "user",
+    }) catch oom();
+    argv.appendSlice(a, args) catch oom();
+    return argv.items;
+}
+
+/// What a build runs: its script, after the variables eb-local sets for it
+/// and a `set --` line with its arguments, and the checks eb-local makes
+/// first as comments. Nothing is created and nothing runs, so it also works
+/// outside an allocation. $W stands for the workspace a build makes in the
+/// allocation's node-local mount.
 fn explainBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const a = c.a;
     const p = place(c, s);
     const d = durableDirs(c, p.prefix);
-    const install_var = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
     var out: std.ArrayList(u8) = .empty;
-    const add = struct {
-        fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
-            o.appendSlice(al, text) catch oom();
-        }
-    }.f;
-    add(a, &out, "# eb-local --explain: the commands a build runs. Nothing was created or run.\n");
-    add(a, &out, str(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
+    out.appendSlice(a, "# eb-local --explain: the script a build runs, with its environment and arguments. Nothing was created or run.\n") catch oom();
+    out.print(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
         if (p.project) "project" else "user", p.prefix, if (p.project) s.project.from else s.prefix.from,
-    }));
+    }) catch oom();
     if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
-        add(a, &out, str(a, "# Checks first: Slurm job {s}, its own node-local {s} mount under {s},\n", .{ job, s.node_local_fstype.value, s.node_local_root.value }));
+        out.print(a, "# Checks first: Slurm job {s}, its own node-local {s} mount under {s},\n", .{ job, s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     } else {
-        add(a, &out, "# Checks first: a Slurm job (there is none here, so a build would stop now),\n");
-        if (s.allocation_hint.value.len > 0) add(a, &out, str(a, "#   for example: {s}\n", .{s.allocation_hint.value}));
-        add(a, &out, str(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }));
+        out.appendSlice(a, "# Checks first: a Slurm job (there is none here, so a build would stop now),\n") catch oom();
+        if (s.allocation_hint.value.len > 0) out.print(a, "#   for example: {s}\n", .{s.allocation_hint.value}) catch oom();
+        out.print(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     }
-    add(a, &out, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n");
-    add(a, &out, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n");
-    add(a, &out, "# The commands run in a clean bash (no profile, no rc file, no BASH_ENV).\n\n");
-
-    add(a, &out, "# Clear what a login shell may carry, so it cannot redirect the install:\n");
-    add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
-    add(a, &out, "unset");
-    for (install_vars) |v| add(a, &out, str(a, " {s}", .{v}));
-    add(a, &out, "\nunset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT\n\n");
-
-    add(a, &out, "# Build and temporary space in the workspace; sources and logs beside the install:\n");
-    add(a, &out, "export WORKING_DIR=\"$W/source-index\" TMPDIR=\"$W/tmp\" TMP=\"$W/tmp\" TEMP=\"$W/tmp\"\n");
-    add(a, &out, "export EASYBUILD_BUILDPATH=\"$W/build\" EASYBUILD_TMPDIR=\"$W/tmp\" XDG_CACHE_HOME=\"$W/cache\" CARGO_HOME=\"$W/cargo\"\n");
-    add(a, &out, str(a, "export EASYBUILD_SOURCEPATH={s} EASYBUILD_TMP_LOGDIR={s} LMOD_EXACT_MATCH=no\n", .{ q(a, d.sources), q(a, d.logs) }));
-    for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
-    add(a, &out, "\n# Exactly one install variable; EESSI-extend reads it when it loads:\n");
-    add(a, &out, str(a, "export {s}={s}\n", .{ install_var, q(a, p.prefix) }));
-    add(a, &out, str(a, "module load {s}\n", .{q(a, s.stack_module.value)}));
-    add(a, &out, "if command -v eessi-arch-guard >/dev/null 2>&1; then eval \"$(eessi-arch-guard --strict --shell)\"; fi\n");
-    add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
-    add(a, &out, "# Each load above may change WORKING_DIR and the temporary directories,\n");
-    add(a, &out, "# so eb-local sets the workspace lines again after every load.\n");
-    if (s.site_toolchains.value.len > 0) {
-        const json = config.toolchainsJson(a, s.site_toolchains.value) catch oom();
-        add(a, &out, str(a, "export \"EESSI_SITE_TOP_LEVEL_TOOLCHAINS_${{EESSI_VERSION//./_}}\"={s}\n", .{q(a, json)}));
+    out.appendSlice(a, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n") catch oom();
+    out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
+    for (s.secrets.items) |sec| out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
+    out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
+    for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
+    out.appendSlice(a, ",\n# and with these:\n") catch oom();
+    for (buildVariables(a, "$W", d)) |kv| {
+        if (std.mem.startsWith(u8, kv[1], "$W/")) {
+            out.print(a, "export {s}=\"{s}\"\n", .{ kv[0], kv[1] }) catch oom();
+        } else {
+            out.print(a, "export {s}={s}\n", .{ kv[0], q(a, kv[1]) }) catch oom();
+        }
     }
-    for (s.secrets.items) |sec| add(a, &out, str(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }));
-    add(a, &out, if (p.project) "eb" else "eb --umask=022");
-    for (args) |x| add(a, &out, str(a, " {s}", .{q(a, x)}));
-    add(a, &out, "\n");
+    for (s.eessi.items) |v| out.print(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }) catch oom();
+    if (s.site_toolchains.value.len > 0)
+        out.print(a, "export EB_LOCAL_SITE_TOOLCHAINS={s}\n", .{q(a, config.toolchainsJson(a, s.site_toolchains.value) catch oom())}) catch oom();
+    if (p.project) out.appendSlice(a, "umask 002\n") catch oom();
+    const argv = buildCommand(a, c, s, p, args);
+    out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
+    for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
+    out.appendSlice(a, " \"$SCRIPT\"") catch oom();
+    for (argv[5..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
+    for (argv[6..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    out.print(a, "\n{s}\n", .{build_script}) catch oom();
     cli.put(1, out.items);
     return 0;
 }
@@ -1635,6 +1666,13 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             die("{s}/{s} leads onto shared or node-local storage; installation, source and log paths must use durable owned storage.", .{ p.prefix, sub });
     }
 
+    {
+        var shown: std.ArrayList(u8) = .empty;
+        shown.appendSlice(a, replay(a, "--explain", s, g, p.prefix, &.{})) catch oom();
+        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
+        say("eb-local: what this runs: eb-local {s}", .{shown.items});
+    }
+
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
     var failure: secrets.Failure = .{};
@@ -1662,12 +1700,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
-    // bash runs BASH_ENV before the script, and SHELLOPTS=xtrace prints the
-    // commands into the job log. Neither may reach the build.
-    for ([_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" }) |name| _ = env.swapRemove(name);
-    // Host loader settings select libraries ahead of the toolchain's RPATH.
+    for (shell_startup) |name| _ = env.swapRemove(name);
     var dropped_loader = false;
-    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |name| {
+    for (host_loader) |name| {
         if (env.swapRemove(name)) dropped_loader = true;
     }
     if (dropped_loader) {
@@ -1676,35 +1711,14 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     if (s.site_toolchains.value.len > 0)
         env.put("EB_LOCAL_SITE_TOOLCHAINS", config.toolchainsJson(a, s.site_toolchains.value) catch oom()) catch oom();
-    const tmp = std.fs.path.join(a, &.{ work, "tmp" }) catch oom();
-    const pairs = [_][2][]const u8{
-        .{ "WORKING_DIR", std.fs.path.join(a, &.{ work, "source-index" }) catch oom() },
-        .{ "TMPDIR", tmp },
-        .{ "TMP", tmp },
-        .{ "TEMP", tmp },
-        .{ "EASYBUILD_BUILDPATH", std.fs.path.join(a, &.{ work, "build" }) catch oom() },
-        .{ "EASYBUILD_TMPDIR", tmp },
-        .{ "XDG_CACHE_HOME", std.fs.path.join(a, &.{ work, "cache" }) catch oom() },
-        .{ "CARGO_HOME", std.fs.path.join(a, &.{ work, "cargo" }) catch oom() },
-        .{ "EASYBUILD_SOURCEPATH", d.sources },
-        .{ "EASYBUILD_TMP_LOGDIR", d.logs },
-        .{ "LMOD_EXACT_MATCH", "no" },
-    };
-    for (pairs) |kv| env.put(kv[0], kv[1]) catch oom();
+    for (buildVariables(a, work, d)) |kv| env.put(kv[0], kv[1]) catch oom();
     for (s.eessi.items) |v| env.put(v.name, v.value) catch oom();
     for (values) |v| env.put(v.name, v.value) catch oom();
 
-    const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
-    var argv: std.ArrayList([]const u8) = .empty;
-    argv.appendSlice(a, &.{
-        bash,                 "--noprofile",         "--norc",                                                         "-c",     build_script,                         "eb-local",
-        s.stack_module.value, s.extend_module.value, if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix, if (p.project) "project" else "user",
-    }) catch oom();
-    argv.appendSlice(a, args) catch oom();
     // The guard stays until the logs are clean: a signal stops the build, but
     // eb-local first waits for EasyBuild, which writes them, to exit.
     const guard = Guard.hold();
-    const ran = guard.run(a, argv.items, envpOf(a, &env));
+    const ran = guard.run(a, buildCommand(a, c, s, p, args), envpOf(a, &env));
     const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
