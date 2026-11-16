@@ -176,7 +176,8 @@ class EnvironmentControls(unittest.TestCase):
             for sub in ("sources", "logs"):
                 self.assertEqual((self.prefix / ".eb-local" / sub).stat().st_mode & 0o070, 0o070, sub)
         else:
-            self.assertEqual(built["argv"], ["--umask=022"] + arguments)
+            # The Bash 1.x script keeps passing --umask=022 for a user install.
+            self.assertEqual(built["argv"], arguments if binary.BIN else ["--umask=022"] + arguments)
             self.assertEqual(built["umask"], 0o077)
         self.check_loads(mode)
 
@@ -190,6 +191,19 @@ class EnvironmentControls(unittest.TestCase):
 
     def test_project_mode_clears_inherited_and_unload_restored_values(self):
         self.check_build("EESSI_PROJECT_INSTALL")
+
+    @unittest.skipUnless(binary.BIN, "EESSI-extend's umask for a user build is a feature of the Zig build")
+    def test_a_user_build_keeps_eessi_extends_umask_as_eb_local_eb_does(self):
+        run = self.run_wrapper(["recipe.eb"], umask=0o022)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        # No --umask, so the umask and sticky bit the module gives EasyBuild
+        # stand, and the process umask is the module's too.
+        self.assertEqual(built["argv"], ["recipe.eb"])
+        self.assertEqual(built["umask"], 0o077)
+        for sub in ("", "sources", "logs"):
+            path = self.prefix / ".eb-local" / sub
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700, path)
 
     def test_eb_failure_exit_is_preserved(self):
         self.check_build("EESSI_USER_INSTALL", status=37)

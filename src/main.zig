@@ -1520,10 +1520,11 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\unset EB_LOCAL_SITE_TOOLCHAINS
     \\echo "eb-local: installing into $prefix ($mode)"
     \\echo "eb-local: target $EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+ + $EESSI_ACCELERATOR_TARGET}, build space ${saved[EASYBUILD_BUILDPATH]%/build}"
-    \\# A project install keeps the umask EESSI-extend sets for one (002).
+    \\# EasyBuild keeps the umask EESSI-extend sets for the install, 077 and the
+    \\# sticky bit for a user one, 002 and the setgid bit for a project.
     \\# eb replaces this shell, so the program eb-local waits for, and passes
     \\# a signal on to, is EasyBuild, which writes the logs it then cleans.
-    \\if [ "$mode" = project ]; then exec eb "$@"; else exec eb --umask=022 "$@"; fi
+    \\exec eb "$@"
 ;
 
 /// What bash would run before the script could unset it: bash runs BASH_ENV
@@ -1551,6 +1552,10 @@ fn buildVariables(a: Allocator, work: []const u8, d: Durable) [11][2][]const u8 
         .{ "EASYBUILD_TMP_LOGDIR", d.logs },
         .{ "LMOD_EXACT_MATCH", "no" },
     };
+}
+
+fn buildUmask(p: Place) u32 {
+    return if (p.project) 0o002 else 0o077;
 }
 
 /// The command a build runs: `build_script` in a clean bash, with the stack,
@@ -1604,7 +1609,7 @@ fn explainBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     for (s.eessi.items) |v| out.print(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }) catch oom();
     if (s.site_toolchains.value.len > 0)
         out.print(a, "export EB_LOCAL_SITE_TOOLCHAINS={s}\n", .{q(a, config.toolchainsJson(a, s.site_toolchains.value) catch oom())}) catch oom();
-    if (p.project) out.appendSlice(a, "umask 002\n") catch oom();
+    out.print(a, "umask {o:0>3}\n", .{buildUmask(p)}) catch oom();
     const argv = buildCommand(a, c, s, p, args);
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
@@ -1633,10 +1638,11 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const job_root = checkedJobRoot(c, s);
     var p = place(c, s);
-    // EESSI-extend gives a project install umask 002, so that every member
-    // can write the directories builds share; what eb-local makes there
-    // takes it too.
-    if (p.project) _ = linux.syscall1(.umask, 0o002);
+    // The process umask EESSI-extend gives the install, as `eb-local eb`
+    // sets it: 002 for a project, so that every member can write the
+    // directories builds share, and 077 for a user. What eb-local makes
+    // there takes it too.
+    _ = linux.syscall1(.umask, buildUmask(p));
     // The refused trees as the kernel resolves them, so an alias (a symbolic
     // link to shared scratch) is refused as the tree itself is.
     var refused: std.ArrayList([]const u8) = .empty;
@@ -2833,6 +2839,16 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
     cli.put(1, out.items);
     return 0;
+}
+
+test "a build has the process umask eb-local eb has for the same install" {
+    for ([_]Place{ .{ .prefix = "/x", .project = false }, .{ .prefix = "/x", .project = true } }) |p| {
+        var env = std.process.Environ.Map.init(std.testing.allocator);
+        defer env.deinit();
+        try env.put(if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix);
+        const sel = try extend.select(&env);
+        try std.testing.expectEqual(try std.fmt.parseInt(u32, sel.umask, 8), buildUmask(p));
+    }
 }
 
 test "eb is the EESSI-extend command" {
