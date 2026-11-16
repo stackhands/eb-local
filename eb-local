@@ -252,8 +252,15 @@ if [ "$command" = dev ]; then
     # The modules the program uses first, the build environment last: its
     # compiler wrappers then come first on PATH and record a run path for the
     # library directory of every loaded module, so the program runs without
-    # LD_LIBRARY_PATH.
-    [ ${#dev_modules[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${dev_modules[@]}"; printf '\n'; }
+    # LD_LIBRARY_PATH. A module is loaded once, where it is first named; the
+    # build environment only last.
+    load=()
+    for m in "${dev_modules[@]}"; do
+        [ "$m" != "$dev_buildenv" ] || continue
+        case " ${load[*]} " in *" $m "*) continue ;; esac
+        load+=("$m")
+    done
+    [ ${#load[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${load[@]}"; printf '\n'; }
     printf 'module load %q\n' "$dev_buildenv"
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
         echo "eb-local: LD_LIBRARY_PATH is set in this shell; programs built here do not need it," >&2

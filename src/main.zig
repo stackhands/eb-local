@@ -409,9 +409,17 @@ fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
 
 fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const a = c.a;
+    // A module is loaded once, where it is first named; a chosen build
+    // environment only last. Left at the default, the build environment that
+    // comes last depends on the compilers, so one named here stays.
+    const chosen = !std.mem.eql(u8, s.dev_buildenv.from, "default");
     var mods: std.ArrayList([]const u8) = .empty;
-    mods.appendSlice(a, s.dev_modules.value) catch oom();
-    mods.appendSlice(a, extra) catch oom();
+    for ([_][]const []const u8{ s.dev_modules.value, extra }) |names| for (names) |m| {
+        if (chosen and std.mem.eql(u8, m, s.dev_buildenv.value)) continue;
+        for (mods.items) |seen| {
+            if (std.mem.eql(u8, seen, m)) break;
+        } else mods.append(a, m) catch oom();
+    };
     const installed = place(c, s);
     evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
