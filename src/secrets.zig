@@ -300,11 +300,114 @@ pub const log_limit: usize = 1 << 30;
 /// Deepest directory searched; anything deeper is reported.
 pub const max_depth = 16;
 
+/// How long a decompressor or compressor may take over one log.
+pub const codec_timeout_ms = 30 * 60_000;
+
+pub const Failed = struct {
+    path: []const u8,
+    why: []const u8,
+};
+
 pub const RedactReport = struct {
     files: usize = 0,
     too_large: std.ArrayList([]const u8) = .empty,
     too_deep: std.ArrayList([]const u8) = .empty,
+    /// Logs that could not be read, or decompressed, to check them.
+    unchecked: std.ArrayList(Failed) = .empty,
+    /// Logs that hold a value and could not be rewritten without it.
+    unchanged: std.ArrayList(Failed) = .empty,
 };
+
+/// Where the programs for compressed logs are found, and their environment.
+pub const Tools = struct {
+    path: []const u8,
+    envp: proc.Envp,
+};
+
+/// EasyBuild compresses the log it keeps in an installation with its
+/// zip-logs command (gzip; bzip2 under EESSI-extend). A log with one of
+/// these suffixes goes through the program named, which reads stdin and
+/// writes stdout with -c, and decompresses with -d.
+const codecs = [_]struct { suffix: []const u8, program: []const u8 }{
+    .{ .suffix = ".bz2", .program = "bzip2" },
+    .{ .suffix = ".gz", .program = "gzip" },
+    .{ .suffix = ".xz", .program = "xz" },
+    .{ .suffix = ".zst", .program = "zstd" },
+};
+
+fn codecOf(name: []const u8) ?[]const u8 {
+    for (codecs) |k| if (std.mem.endsWith(u8, name, k.suffix)) return k.program;
+    return null;
+}
+
+const CodecError = error{ Failed, TooLarge } || Allocator.Error;
+
+/// `program flags` on `input`, for its output; error.Failed sets `why`.
+fn runCodec(a: Allocator, tools: Tools, program: []const u8, flags: []const u8, input: []const u8, limit: usize, why: *[]const u8) CodecError![]u8 {
+    const exe = (try proc.which(a, program, tools.path)) orelse {
+        why.* = try std.fmt.allocPrint(a, "no {s} on PATH", .{program});
+        return error.Failed;
+    };
+    const r = proc.run(a, exe, &.{ exe, flags }, tools.envp, .{
+        .stdin = input,
+        .stdout_limit = limit,
+        .stderr_limit = 4096,
+        .timeout_ms = codec_timeout_ms,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.StreamTooLong => return error.TooLarge,
+        else => {
+            why.* = try std.fmt.allocPrint(a, "{s} {s}: {s}", .{ program, flags, @errorName(e) });
+            return error.Failed;
+        },
+    };
+    if (r.term.code() != 0) {
+        const said = std.mem.trim(u8, r.stderr, " \t\r\n");
+        why.* = try std.fmt.allocPrint(a, "{s} {s} exited {d}{s}{s}", .{ program, flags, r.term.code(), if (said.len > 0) ": " else "", said });
+        return error.Failed;
+    }
+    return r.stdout;
+}
+
+/// Replace `dir/name`. EasyBuild leaves an installation's easybuild/
+/// read-only; its owner gets write permission back for the rename only.
+fn replace(a: Allocator, dir: sys.fd_t, name: []const u8, bytes: []const u8) (fsx.Error || Allocator.Error)!void {
+    const st = try fsx.fstat(dir);
+    const lend = st.mode & 0o200 == 0 and st.uid == linux.getuid();
+    if (lend) try sys.fchmod(dir, st.perm() | 0o200);
+    defer if (lend) sys.fchmod(dir, st.perm()) catch {};
+    try fsx.replaceContents(a, dir, name, bytes);
+}
+
+fn redactFile(a: Allocator, dir: sys.fd_t, name: []const u8, path: []const u8, values: []const Resolved, tools: Tools, report: *RedactReport) Allocator.Error!void {
+    const opened = fsx.openRegular(dir, name, false) catch |e|
+        return report.unchecked.append(a, .{ .path = path, .why = @errorName(e) });
+    const bytes = fsx.readAll(a, opened.fd, log_limit) catch |e| {
+        sys.close(opened.fd);
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        return report.unchecked.append(a, .{ .path = path, .why = @errorName(e) });
+    };
+    sys.close(opened.fd);
+    const program = codecOf(name);
+    var why: []const u8 = "";
+    var text: []const u8 = bytes;
+    if (program) |p| text = runCodec(a, tools, p, "-dc", bytes, log_limit, &why) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.TooLarge => return report.too_large.append(a, path),
+        error.Failed => return report.unchecked.append(a, .{ .path = path, .why = why }),
+    };
+    var out: []const u8 = try redactText(a, text, values) orelse return;
+    if (program) |p| out = runCodec(a, tools, p, "-c", out, 2 * log_limit, &why) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.TooLarge => return report.unchanged.append(a, .{ .path = path, .why = "compressed, it is too large" }),
+        error.Failed => return report.unchanged.append(a, .{ .path = path, .why = why }),
+    };
+    replace(a, dir, name, out) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        return report.unchanged.append(a, .{ .path = path, .why = @errorName(e) });
+    };
+    report.files += 1;
+}
 
 pub const Filter = enum {
     /// Every regular file.
@@ -315,18 +418,19 @@ pub const Filter = enum {
 };
 
 /// Redact regular files below `dir` (never through a symbolic link)
-/// modified at or after `since` (seconds).
-pub fn redactTree(a: Allocator, dir_path: []const u8, since: i64, values: []const Resolved, filter: Filter, report: *RedactReport) (fsx.Error || Allocator.Error)!void {
+/// modified at or after `since` (seconds); compressed ones through the
+/// program their suffix names, from `tools`.
+pub fn redactTree(a: Allocator, dir_path: []const u8, since: i64, values: []const Resolved, filter: Filter, tools: Tools, report: *RedactReport) (fsx.Error || Allocator.Error)!void {
     if (values.len == 0) return;
     const dir = fsx.openDir(fsx.cwd, dir_path, false) catch |e| switch (e) {
         error.NotFound => return,
         else => return e,
     };
     defer sys.close(dir);
-    try redactDir(a, dir, dir_path, since, values, filter, report, 0);
+    try redactDir(a, dir, dir_path, since, values, filter, tools, report, 0);
 }
 
-fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: []const Resolved, filter: Filter, report: *RedactReport, depth: usize) (fsx.Error || Allocator.Error)!void {
+fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: []const Resolved, filter: Filter, tools: Tools, report: *RedactReport, depth: usize) (fsx.Error || Allocator.Error)!void {
     const in_easybuild = std.mem.eql(u8, std.fs.path.basename(path), "easybuild");
     if (filter == .easybuild_dirs and !in_easybuild) {
         // An installation's root holds easybuild/; only that is searched,
@@ -335,7 +439,7 @@ fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: 
         if (is_root) {
             const sub = fsx.openDir(dir, "easybuild", false) catch return;
             defer sys.close(sub);
-            return redactDir(a, sub, try std.fs.path.join(a, &.{ path, "easybuild" }), since, values, filter, report, depth + 1);
+            return redactDir(a, sub, try std.fs.path.join(a, &.{ path, "easybuild" }), since, values, filter, tools, report, depth + 1);
         }
     }
     var it = try fsx.DirIter.init(a, dir);
@@ -349,7 +453,7 @@ fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: 
             }
             const sub = fsx.openDir(dir, e.name, false) catch continue;
             defer sys.close(sub);
-            try redactDir(a, sub, child, since, values, filter, report, depth + 1);
+            try redactDir(a, sub, child, since, values, filter, tools, report, depth + 1);
             continue;
         }
         if (!st.isReg() or st.mtime.sec < since) continue;
@@ -358,16 +462,7 @@ fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: 
             try report.too_large.append(a, child);
             continue;
         }
-        const opened = fsx.openRegular(dir, e.name, false) catch continue;
-        const bytes = fsx.readAll(a, opened.fd, log_limit) catch {
-            sys.close(opened.fd);
-            continue;
-        };
-        sys.close(opened.fd);
-        if (try redactText(a, bytes, values)) |clean| {
-            try fsx.replaceContents(a, dir, e.name, clean);
-            report.files += 1;
-        }
+        try redactFile(a, dir, e.name, child, values, tools, report);
     }
 }
 
@@ -495,7 +590,7 @@ test "logs written during the build are redacted" {
     _ = try s.write("logs/clean.log", "nothing here\n", 0o644);
     const values = [_]Resolved{ .{ .name = "TOKEN", .value = "s3cret-value" }, .{ .name = "SHORT", .value = "ab" } };
     var report: RedactReport = .{};
-    try redactTree(a, try std.fs.path.join(a, &.{ s.root, "logs" }), 0, &values, .all, &report);
+    try redactTree(a, try std.fs.path.join(a, &.{ s.root, "logs" }), 0, &values, .all, .{ .path = "", .envp = no_env }, &report);
     try testing.expectEqual(@as(usize, 1), report.files);
     const opened = try fsx.openRegular(fsx.cwd, log, false);
     defer sys.close(opened.fd);
@@ -503,6 +598,32 @@ test "logs written during the build are redacted" {
     try testing.expect(std.mem.indexOf(u8, text, "s3cret-value") == null);
     try testing.expect(std.mem.indexOf(u8, text, "<secret TOKEN removed by eb-local>") != null);
     try testing.expectEqual(@as(u32, 0o640), opened.stat.perm());
+}
+
+test "a log in a read-only directory, and one without its decompressor" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const a = s.arena.allocator();
+    const dir = try std.fs.path.join(a, &.{ s.root, "easybuild" });
+    try common.atomic.makedirs(dir);
+    const log = try s.write("easybuild/plain.log", "token s3cret-value\n", 0o444);
+    _ = try s.write("easybuild/zipped.log.bz2", "s3cret-value\n", 0o444);
+    const dfd = try fsx.openDir(fsx.cwd, dir, false);
+    defer sys.close(dfd);
+    try sys.fchmod(dfd, 0o1555);
+    defer sys.fchmod(dfd, 0o755) catch {};
+    const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
+    var report: RedactReport = .{};
+    try redactTree(a, dir, 0, &values, .all, .{ .path = "/nonexistent", .envp = no_env }, &report);
+    try testing.expectEqual(@as(usize, 1), report.files);
+    const opened = try fsx.openRegular(fsx.cwd, log, false);
+    defer sys.close(opened.fd);
+    try testing.expectEqualStrings("token <secret TOKEN removed by eb-local>\n", try fsx.readAll(a, opened.fd, 4096));
+    try testing.expectEqual(@as(u32, 0o444), opened.stat.perm());
+    try testing.expectEqual(@as(u32, 0o1555), (try fsx.fstat(dfd)).perm());
+    try testing.expectEqual(@as(usize, 1), report.unchecked.items.len);
+    try testing.expect(std.mem.endsWith(u8, report.unchecked.items[0].path, "/zipped.log.bz2"));
+    try testing.expectEqualStrings("no bzip2 on PATH", report.unchecked.items[0].why);
 }
 
 test "a value is removed as it is, in base64 and percent-encoded" {
@@ -560,7 +681,7 @@ test "an installation log nested past the search depth is reported" {
     try sys.writeAll(fd, "copied s3cret-value\n");
     const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
     var report: RedactReport = .{};
-    try redactTree(a, s.root, 0, &values, .easybuild_dirs, &report);
+    try redactTree(a, s.root, 0, &values, .easybuild_dirs, .{ .path = "", .envp = no_env }, &report);
     try testing.expect(report.too_deep.items.len > 0);
     try testing.expectEqual(@as(usize, 0), report.files);
     const opened = try fsx.openRegular(fsx.cwd, log, false);
