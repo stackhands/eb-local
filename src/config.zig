@@ -789,6 +789,30 @@ test "the environment overrides files and options override the environment" {
     try std.testing.expectEqualStrings("group", s.profile.?);
 }
 
+test "an empty variable empties a setting that may be empty and is ignored by one that may not" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const sources = [_]Source{
+        .{ .path = "/etc/eb-local/config.toml", .text = site_text, .layer = .site },
+        .{ .path = "u.toml", .text = "[nimvault]\nprogram = \"/opt/nimvault/bin/nimvault\"\nvault = \"~/vault\"\n", .layer = .user },
+    };
+    for ([_][]const u8{
+        "EB_LOCAL_DEV_MODULES",    "EB_LOCAL_BUILD_ALLOCATION_HINT", "EB_LOCAL_NIMVAULT_PROGRAM",
+        "EB_LOCAL_NIMVAULT_VAULT", "EB_LOCAL_PREFIX",                "EB_LOCAL_STACK_MODULE",
+        "EB_LOCAL_CLEAN_TRASH",
+    }) |name| try t.env.put(name, "");
+    const s = try t.load(&sources, .{ .profile = "gpu" });
+    try std.testing.expectEqual(@as(usize, 0), s.dev_modules.value.len);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_DEV_MODULES", s.dev_modules.from);
+    try std.testing.expectEqualStrings("", s.allocation_hint.value);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_BUILD_ALLOCATION_HINT", s.allocation_hint.from);
+    try std.testing.expectEqualStrings("", s.nimvault_program.value);
+    try std.testing.expectEqualStrings("", s.nimvault_vault.value);
+    try std.testing.expectEqualStrings("~/.local/eessi", s.prefix.value);
+    try std.testing.expectEqualStrings("EESSI/2026.06", s.stack_module.value);
+    try std.testing.expectEqual(Trash.auto, s.trash.value);
+}
+
 test "refusals" {
     var t = Fixture.init();
     defer t.deinit();

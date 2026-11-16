@@ -20,6 +20,16 @@ printf 'vault-value\n'
 '''
 
 
+def exported(text):
+    """The variables config --env output sets when a shell sources it."""
+    carried = {}
+    for line in text.splitlines():
+        if line.startswith("export "):
+            name, _, value = line[len("export "):].partition("=")
+            carried[name] = shlex.split(value)[0]
+    return carried
+
+
 @unittest.skipUnless(binary.BIN, "site templates and EB_LOCAL_SECRET_* are features of the Zig build")
 class SitesCli(StorageFixture):
     def setUp(self):
@@ -118,16 +128,40 @@ class SitesCli(StorageFixture):
         self.assertIn("export EB_LOCAL_SECRET_TOKEN=nimvault:tokens/mirror\n", first.stdout)
         # Without the user file, the exported lines alone give the same settings.
         user.unlink()
-        carried = {}
-        for line in first.stdout.splitlines():
-            if line.startswith("export "):
-                name, _, value = line[len("export "):].partition("=")
-                carried[name] = shlex.split(value)[0]
+        carried = exported(first.stdout)
         second = self.run_tool(["config", "--env"], **carried)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(second.stdout, first.stdout)
         shown = self.run_tool(["config"], **carried)
         self.assertRegex(shown.stdout, r"TOKEN\s+nimvault:tokens/mirror\s+\[environment EB_LOCAL_SECRET_TOKEN\]")
+
+    def test_config_env_carries_empty_values_and_selects_no_profile(self):
+        # A job that sources the lines still has the files: neither the
+        # default profile nor a value the chosen profile cleared may come back
+        # beneath the variables.
+        user = self.home / ".config" / "eb-local" / "config.toml"
+        user.parent.mkdir(parents=True)
+        user.write_text('default_profile = "mine"\n'
+                        'build.allocation_hint = "salloc -p rome"\n'
+                        '[profile.mine]\ndev.modules = ["FFTW/3.3.10-GCC-15.2.0"]\n'
+                        '[profile.mine.secrets]\nMINE_TOKEN = "env:MY_TOKEN"\n'
+                        '[profile.bare]\nbuild.allocation_hint = ""\n')
+        user.chmod(0o600)
+        self.env["EB_LOCAL_CONFIG"] = ""
+        first = self.run_tool(["--profile", "bare", "config", "--env"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        for line in ("EB_LOCAL_PROFILE=''", "EB_LOCAL_DEV_MODULES=''", "EB_LOCAL_BUILD_ALLOCATION_HINT=''"):
+            self.assertIn(f"export {line}\n", first.stdout)
+        carried = exported(first.stdout)
+        second = self.run_tool(["config", "--env"], **carried)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(exported(second.stdout), carried)
+        shown = self.run_tool(["config"], **carried)
+        self.assertRegex(shown.stdout, r"build\.allocation_hint\s+\(none\)\s+\[environment EB_LOCAL_BUILD_ALLOCATION_HINT\]")
+        self.assertNotIn("MINE_TOKEN", shown.stdout)
+        dev = self.run_tool(["dev"], **carried)
+        self.assertEqual(dev.returncode, 0, dev.stderr)
+        self.assertNotIn("FFTW", dev.stdout)
 
     def test_secret_variables_are_checked_like_the_file(self):
         cases = {
