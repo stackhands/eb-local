@@ -261,6 +261,8 @@ eb-local --profile gpu config --env > eb-local.env   # sources only, never value
 . ./eb-local.env && eb-local config                  # each setting now says [environment ...]
 ```
 
+Empty settings are printed too, and `EB_LOCAL_PROFILE` is printed empty, which selects no profile, not even `default_profile`: the lines already hold every setting of the profile in force, and they work where that profile is not defined.
+An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` empties its setting; any other empty `EB_LOCAL_*` variable is ignored.
 `EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. `[eessi]` settings come out as the `EESSI_*` variables themselves, which reach EESSI as they are. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
 
 A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root or the program's owner (a site file) or by you (your file); otherwise eb-local stops.

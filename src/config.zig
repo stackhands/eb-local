@@ -552,7 +552,11 @@ pub fn load(
             s.buildenv_for[i] = .{ .value = if (none) "" else v, .from = "environment " ++ f.env };
         };
     }
-    if (env.get("EB_LOCAL_DEV_MODULES")) |v| if (v.len > 0) {
+    // An empty variable is ignored, as in 1.x, except by the settings an empty
+    // value means something to (no modules, no hint, nimvault's own program
+    // and vault): it empties those, so the lines config --env writes carry a
+    // value a profile cleared.
+    if (env.get("EB_LOCAL_DEV_MODULES")) |v| {
         var out: std.ArrayList([]const u8) = .empty;
         var it = std.mem.tokenizeAny(u8, v, " \t");
         while (it.next()) |m| {
@@ -560,10 +564,10 @@ pub fn load(
             try out.append(a, m);
         }
         s.dev_modules = .{ .value = out.items, .from = "environment EB_LOCAL_DEV_MODULES" };
-    };
-    if (env.get("EB_LOCAL_BUILD_ALLOCATION_HINT")) |v| if (v.len > 0) {
+    }
+    if (env.get("EB_LOCAL_BUILD_ALLOCATION_HINT")) |v| {
         s.allocation_hint = .{ .value = v, .from = "environment EB_LOCAL_BUILD_ALLOCATION_HINT" };
-    };
+    }
     // EB_LOCAL_TRASH is the 1.x name.
     inline for (.{ "EB_LOCAL_TRASH", "EB_LOCAL_CLEAN_TRASH" }) |name| {
         if (env.get(name)) |v| if (v.len > 0) {
@@ -577,14 +581,14 @@ pub fn load(
         s.logs_older_than_days = .{ .value = n, .from = "environment EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS" };
     };
 
-    if (env.get("EB_LOCAL_NIMVAULT_PROGRAM")) |v| if (v.len > 0) {
-        if (!validAbsolute(v)) return l.fail("EB_LOCAL_NIMVAULT_PROGRAM must be an absolute path", .{});
+    if (env.get("EB_LOCAL_NIMVAULT_PROGRAM")) |v| {
+        if (v.len > 0 and !validAbsolute(v)) return l.fail("EB_LOCAL_NIMVAULT_PROGRAM must be an absolute path", .{});
         s.nimvault_program = .{ .value = v, .from = "environment EB_LOCAL_NIMVAULT_PROGRAM" };
-    };
-    if (env.get("EB_LOCAL_NIMVAULT_VAULT")) |v| if (v.len > 0) {
-        if (!validHomePath(v)) return l.fail("EB_LOCAL_NIMVAULT_VAULT must be an absolute path or start with ~/", .{});
+    }
+    if (env.get("EB_LOCAL_NIMVAULT_VAULT")) |v| {
+        if (v.len > 0 and !validHomePath(v)) return l.fail("EB_LOCAL_NIMVAULT_VAULT must be an absolute path or start with ~/", .{});
         s.nimvault_vault = .{ .value = v, .from = "environment EB_LOCAL_NIMVAULT_VAULT" };
-    };
+    }
     // EB_LOCAL_SECRET_NAME=SOURCE adds or replaces the secret NAME, in name
     // order so the result does not depend on the order of the environment.
     {
