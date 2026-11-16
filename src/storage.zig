@@ -6,7 +6,6 @@ const linux = std.os.linux;
 const common = @import("zig_common");
 const sys = common.sys;
 const fsx = common.fsx;
-const proc = common.proc;
 const Allocator = std.mem.Allocator;
 
 pub const Refusal = struct {
@@ -317,14 +316,6 @@ test "canonical paths" {
     try testing.expect(!under("/ab", "/a"));
 }
 
-/// What GNU readlink -m prints, newline stripped. The contract of canonical.
-fn readlinkM(a: Allocator, path: []const u8) ![]const u8 {
-    const envp: proc.Envp = &[_:null]?[*:0]const u8{};
-    const r = try proc.run(a, "/usr/bin/readlink", &.{ "readlink", "-m", path }, envp, .{});
-    try testing.expectEqual(@as(u32, 0), r.term.code());
-    return std.mem.trim(u8, r.stdout, "\n");
-}
-
 test "canonical matches readlink -m, including a link whose target is missing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -350,20 +341,25 @@ test "canonical matches readlink -m, including a link whose target is missing" {
     try link(a, try std.fmt.allocPrint(a, "{s}/a", .{root}), try std.fmt.allocPrint(a, "{s}/b", .{root}));
     try link(a, try std.fmt.allocPrint(a, "{s}/b", .{root}), try std.fmt.allocPrint(a, "{s}/a", .{root}));
     try link(a, try std.fmt.allocPrint(a, "{s}/toscratch", .{root}), try std.fmt.allocPrint(a, "{s}/scratch/not-yet", .{root}));
-    const cases = [_][]const u8{
-        try std.fmt.allocPrint(a, "{s}/lnk/../eessi", .{root}),
-        try std.fmt.allocPrint(a, "{s}/dangling/../eessi", .{root}),
-        try std.fmt.allocPrint(a, "{s}/dangling", .{root}),
-        try std.fmt.allocPrint(a, "{s}/rel/../eessi", .{root}),
-        try std.fmt.allocPrint(a, "{s}/loop/x", .{root}),
-        try std.fmt.allocPrint(a, "{s}/a/x", .{root}),
-        try std.fmt.allocPrint(a, "{s}/no/such/./x/../place", .{root}),
-        try std.fmt.allocPrint(a, "{s}/toscratch/sources", .{root}),
-        try std.fmt.allocPrint(a, "{s}/deep/target/../../scratch/real", .{root}),
+    // Each path below root, and what GNU readlink -m prints for it: the
+    // contract of canonical. The host's readlink is not asked, because uutils
+    // readlink, /usr/bin/readlink on Ubuntu 26.04, exits 1 on a link cycle
+    // where GNU readlink -m keeps the name.
+    const cases = [_][2][]const u8{
+        .{ "lnk/../eessi", "deep/eessi" },
+        .{ "dangling/../eessi", "missing/eessi" },
+        .{ "dangling", "missing/target" },
+        .{ "rel/../eessi", "missing/eessi" },
+        .{ "loop/x", "loop/x" },
+        .{ "a/x", "a/x" },
+        .{ "no/such/./x/../place", "no/such/place" },
+        .{ "toscratch/sources", "scratch/not-yet/sources" },
+        .{ "deep/target/../../scratch/real", "scratch/real" },
     };
-    for (cases) |path| {
+    for (cases) |case| {
+        const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, case[0] });
+        const want = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, case[1] });
         const got = try canonical(a, path, "/");
-        const want = try readlinkM(a, path);
         if (!std.mem.eql(u8, got, want)) {
             std.debug.print("canonical {s}\nreadlink  {s}\npath      {s}\n", .{ got, want, path });
             return error.TestUnexpectedResult;
