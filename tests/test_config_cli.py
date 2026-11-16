@@ -157,6 +157,27 @@ class ConfigCli(StorageFixture):
         self.assertEqual(run.returncode, 2)
         self.assertIn("env takes only", run.stderr)
 
+    def test_a_named_file_replaces_only_its_own_layer(self):
+        # --config FILE, or EB_LOCAL_CONFIG=FILE without it, is read in place
+        # of the site file when root or the program's owner owns it (the
+        # caller owns the program here), and in place of the user file when
+        # only the caller does; the other file is still read.
+        for how, extra in ((["--config", str(self.site)], {}), ([], {"EB_LOCAL_CONFIG": str(self.site)})):
+            with self.subTest(how=how or extra):
+                run = self.run_tool(how + ["config"], SLURM_JOB_ID="", **extra)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertRegex(run.stdout, r"storage\.node_local_root\s+\S+\s+\[site .*site\.toml:")
+                self.assertIn("profile                      mine", run.stdout)
+                self.assertRegex(run.stdout, r"dev\.modules\s+FFTW/3\.3\.10-GCC-15\.2\.0\s+\[user profile mine, ")
+        mine = self.root / "mine.toml"
+        mine.write_text('dev.modules = ["GSL/2.8-GCC-15.2.0"]\n')
+        mine.chmod(0o600)
+        run = self.run_tool(["--config", str(mine), "config"], SLURM_JOB_ID="",
+                            EB_LOCAL_TEST_SELF_OWNER=str(os.getuid() + 1))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("profile                      (none)", run.stdout)
+        self.assertRegex(run.stdout, r"dev\.modules\s+GSL/2\.8-GCC-15\.2\.0\s+\[user .*mine\.toml:1\]")
+
     def test_profiles_lists_every_profile(self):
         run = self.run_tool(["profiles"])
         self.assertEqual(run.returncode, 0, run.stderr)
