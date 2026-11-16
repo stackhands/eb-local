@@ -118,7 +118,7 @@ class ConfigCli(StorageFixture):
         cases = {
             "does not exist": lambda: None,
             "is not a directory": lambda: project.write_text(""),
-            "writable by others": lambda: (project.mkdir(), project.chmod(0o2777)),
+            "is writable by others": lambda: (project.mkdir(), project.chmod(0o2777)),
         }
         for needle, make in cases.items():
             if project.is_dir():
