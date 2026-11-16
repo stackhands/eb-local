@@ -179,10 +179,13 @@ To remove something you installed, for every CPU target you built it for:
 ```sh
 eb-local uninstall pigz/2.8-GCCcore-15.2.0 --dry-run
 eb-local uninstall pigz/2.8-GCCcore-15.2.0      # to the trash with rtrash, or --delete
+eb-local restore pigz/2.8-GCCcore-15.2.0        # back from the trash, read-only again
 ```
 
-EasyBuild leaves installations read-only, so `rm -rf` fails on them; `uninstall` makes them writable first, and removes the module files with them, along with the links EasyBuild makes to each from `modules/<class>/`.
+EasyBuild leaves installations read-only, so `rm -rf` fails on them; `uninstall` makes their directories writable first, and removes the module files with them, along with the links EasyBuild makes to each from `modules/<class>/`.
 If another module you installed loads the one you name, `uninstall` lists it and removes nothing, because that module would then fail to load; name both in the same command to remove both.
+`restore` brings back what `uninstall` moved to the trash, for every CPU target, with `rtrash restore`, and takes write permission away again, as EasyBuild does.
+`rtrash restore` on one path brings back read-only files in writable directories: rtrash moves a directory, and empties the trash, only when its directories are writable.
 
 ## Configuration
 
