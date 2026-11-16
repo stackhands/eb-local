@@ -261,7 +261,8 @@ eb-local --profile gpu config --env > eb-local.env   # sources only, never value
 
 `EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. `[eessi]` settings come out as the `EESSI_*` variables themselves, which reach EESSI as they are. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
 
-A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the program's owner or you (a site file) or by you (your file); otherwise eb-local stops.
+A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root or the program's owner (a site file) or by you (your file); otherwise eb-local stops.
+A site file you own is refused unless you own the program too, since only the site file sets the storage settings and `build.site_toolchains`.
 A 1.x `eb-local.conf` is read as before.
 
 ## Secrets
