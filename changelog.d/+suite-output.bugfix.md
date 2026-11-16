@@ -1,0 +1,1 @@
+`zig build -Dtest-ops=true test` no longer shows a passing command-line suite as a failed command: the suite step inherits stdio, so unittest's report reaches the terminal as it is, and the step runs every time instead of being skipped while the binary is unchanged, which left an edited test unrun.
