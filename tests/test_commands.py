@@ -123,6 +123,17 @@ class Commands(StorageFixture):
                                             "load buildenv/default-foss-2026.1"])
         self.assertFalse(self.prefix.exists())
 
+    def test_dev_loads_a_module_once_and_the_build_environment_only_last(self):
+        # With the default, dev picks the build environment for the compilers
+        # (test_dev_buildenv); a chosen one is loaded last on its own line.
+        run = self.run_wrapper(["dev", "--buildenv", "buildenv/default-foss-2026.1",
+                                "GSL/2.8-GCC-15.2.0", "buildenv/default-foss-2026.1",
+                                "FFTW/3.3.10-GCC-15.2.0", "GSL/2.8-GCC-15.2.0"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        loads = [l for l in run.stdout.splitlines() if l.startswith("module load ")]
+        self.assertEqual(loads[-2:], ["module load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
+                                      "module load buildenv/default-foss-2026.1"], run.stdout)
+
     def test_a_relative_prefix_is_printed_absolute(self):
         run = self.run_wrapper(["env"], SLURM_JOB_ID="", EB_LOCAL_PREFIX="relative/prefix")
         self.assertIn(f"export EESSI_USER_INSTALL={self.root}/relative/prefix", run.stdout)

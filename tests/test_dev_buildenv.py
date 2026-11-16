@@ -144,6 +144,15 @@ class DevBuildenv(StorageFixture):
         calls, _ = self.dev("llvm-compilers/21.1.8", "--buildenv", "buildenv/site-llvm")
         self.assertEqual(calls[-1], "load buildenv/site-llvm")
 
+    def test_a_buildenv_named_among_the_modules_stays_there(self):
+        # Only a chosen build environment is sure to come last; the GCC one
+        # is not loaded for LLVM compilers unless it stays among the modules.
+        calls, _ = self.dev("buildenv/default-foss-2026.1", "llvm-compilers/21.1.8",
+                            CONTROL_AVAILABLE="buildenv/default-lfoss-2026.1")
+        self.assertEqual(calls[-3:], ["load buildenv/default-foss-2026.1 llvm-compilers/21.1.8",
+                                      "is-avail buildenv/default-lfoss-2026.1",
+                                      "load buildenv/default-lfoss-2026.1"])
+
     def test_a_site_buildenv_for_a_family(self):
         toml = self.root / "site.toml"
         toml.write_text('[storage]\nnode_local_root = "%s"\n[dev.buildenv_for]\nnvhpc = "buildenv/site-nvhpc"\n'
