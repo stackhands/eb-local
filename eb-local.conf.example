@@ -1,8 +1,10 @@
 # eb-local site configuration. Install as eb-local.conf beside the eb-local
 # script or as /etc/eb-local.conf, not writable by group or others.
-# node_local_root: allocation mounts are <root>/<user>.<job id>.
+# node_local_root: where allocation mounts are; node_local_mount: each
+# allocation's mount below it, %u the user and %j the job id (%u.%j when unset).
 node_local_root = /local/scratch
+node_local_mount = %u.%j
 node_local_fstype = xfs
 # Shared scratch trees; refused as installation prefix.
-shared_scratch = /scratch /scratch-shared
+shared_scratch = /scratch /work
 allocation_hint = salloc -p <partition> -n 16 -t 02:00:00

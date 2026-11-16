@@ -1,21 +1,22 @@
 #!/bin/bash
 # Site acceptance: eb-local with the real rtrash, in an allocation.
 #
-#   sbatch --export=ALL,EB_LOCAL_TEST_ROOT=DIR,EB_LOCAL_BIN=/path/eb-local,RTRASH=/path/rtrash \
+#   sbatch [-p PARTITION] [--constraint=FEATURE] \
+#       --export=ALL,EB_LOCAL_TEST_ROOT=DIR,EB_LOCAL_BIN=/path/eb-local,RTRASH=/path/rtrash \
 #       tests/site/rtrash-job.sh
 #
 # clean moves an old log to the trash and rtrash restore brings it back;
 # uninstall moves a read-only installation and its module file to the trash,
 # eb-local restore brings both back read-only and the program runs again, and
 # a trashed installation empties. The trash lives under DIR (XDG_DATA_HOME).
-# DIR holds eb-local.conf; remove DIR afterwards (in a batch job on Snellius).
+# DIR holds eb-local.conf; remove DIR afterwards (in a batch job).
+# PARTITION and FEATURE select a node with a node-local disk, where the site
+# needs them.
 #SBATCH --job-name=eb-local-rtrash
-#SBATCH --partition=rome
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:30:00
-#SBATCH --constraint=scratch-node
 # No -u: the Lmod init reads unset variables.
 set -eo pipefail
 module purge

@@ -1,0 +1,1 @@
+The acceptance scripts in `tests/site/` name no partition or node feature, which go on the `sbatch` line, and find the allocation's mount from `node_local_root` and `node_local_mount` in the site file, so they run at any site.

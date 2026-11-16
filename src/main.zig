@@ -24,7 +24,7 @@ pub const version = "2.4.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
-    \\directory you own. The 2026 replacement for eblocalinstall.
+    \\directory you own.
     \\
     \\  eb-local <easyconfig> [eb options]   build and install with EasyBuild
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
@@ -53,8 +53,9 @@ const usage_text =
     \\  eb-local restore NAME/VERSION... [--dry-run]
     \\                                       bring them back from the trash, read-only again
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
-    \\                                       the site file templates built in; install writes
-    \\                                       config.toml beside this program, mode 644
+    \\                                       a site file from a template built in, or from a
+    \\                                       template file (a NAME with a slash); install
+    \\                                       writes config.toml beside this program, mode 644
     \\  eb-local help | --version
     \\
     \\Every command takes --profile NAME, --project DIR (a shared project directory
@@ -830,6 +831,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
     row("nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
     row("storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
+    row("storage.node_local_mount", s.node_local_mount.value, s.node_local_mount.from);
     row("storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
     const scratch = std.mem.join(a, " ", s.shared_scratch.value) catch oom();
     row("storage.shared_scratch", if (scratch.len == 0) "(none)" else scratch, s.shared_scratch.from);
@@ -918,6 +920,18 @@ const SiteOpts = struct {
     force: bool = false,
 };
 
+/// The template `eb-local site` renders: one built in, or a site's own
+/// template file, named with a slash so that it is never taken for a
+/// built-in name. The file is read as a configuration file is.
+fn siteTemplate(c: Ctx, name: []const u8) sites.Template {
+    if (std.mem.indexOfScalar(u8, name, '/') == null)
+        return sites.find(name) orelse die("no site template '{s}' (eb-local site list shows them; a template file is named with a slash, as ./{s})", .{ name, name });
+    const opened = openConfig(name);
+    defer sys.close(opened.fd);
+    const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ name, @errorName(e) });
+    return .{ .name = name, .text = text };
+}
+
 fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const a = c.a;
     const w = o.words.items;
@@ -932,9 +946,9 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     }
     const show = std.mem.eql(u8, action, "show");
     if (!show and !std.mem.eql(u8, action, "install")) die("site takes list, show NAME or install NAME; got '{s}'", .{action});
-    if (w.len != 2) die("site {s} takes one template name (eb-local site list shows them)", .{action});
+    if (w.len != 2) die("site {s} takes one template, a name (eb-local site list shows them) or a file", .{action});
     if (show and (o.to != null or o.force)) die("site show prints the file; --to and --force are for install", .{});
-    const t = sites.find(w[1]) orelse die("no site template '{s}' (eb-local site list shows them)", .{w[1]});
+    const t = siteTemplate(c, w[1]);
     var d: sites.Diagnostic = .{};
     const text = sites.render(a, t, o.sets.items, &d) catch |e| switch (e) {
         error.Invalid => die("{s}", .{d.message}),
@@ -1094,7 +1108,7 @@ fn checkedJobRoot(c: Ctx, s: config.Settings) []const u8 {
     if (s.node_local_root.value.len == 0) die("no node-local root is configured; set storage.node_local_root in the site configuration (see the README).", .{});
     var r: storage.Refusal = .{};
     const job_id = c.env.get("SLURM_JOB_ID") orelse "";
-    const jr = storage.jobRoot(c.a, s.node_local_root.value, s.node_local_fstype.value, job_id, userName(c), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
+    const jr = storage.jobRoot(c.a, s.node_local_root.value, s.node_local_mount.value, s.node_local_fstype.value, job_id, userName(c), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
         error.Refused => die("{s}", .{r.message}),
         error.OutOfMemory => oom(),
     };
@@ -2164,7 +2178,7 @@ test "shell quoting reads back as the same word" {
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectEqualStrings("EESSI/2026.06", try shellQuote(a, "EESSI/2026.06"));
-    try std.testing.expectEqualStrings("/gpfs/home3/u/eessi", try shellQuote(a, "/gpfs/home3/u/eessi"));
+    try std.testing.expectEqualStrings("/home/u/eessi", try shellQuote(a, "/home/u/eessi"));
     try std.testing.expectEqualStrings("'owned space'", try shellQuote(a, "owned space"));
     try std.testing.expectEqualStrings("'a'\\''b $(x)'", try shellQuote(a, "a'b $(x)"));
     try std.testing.expectEqualStrings("''", try shellQuote(a, ""));

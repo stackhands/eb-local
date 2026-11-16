@@ -1,6 +1,6 @@
 #!/bin/bash
 # eb-local: install and build software on top of EESSI 2026.06, into a
-# directory you own. The 2026 replacement for eblocalinstall.
+# directory you own.
 #
 #   eb-local <easyconfig> [eb options]   build and install with EasyBuild
 #   eb-local env                         lines that make your installed modules visible
@@ -107,7 +107,8 @@ fi
 # and owned by root, by the owner of this script (the installer), or by the
 # caller (whose builds alone it steers). Search order: EB_LOCAL_CONFIG, then
 # eb-local.conf beside the resolved script, then /etc/eb-local.conf.
-#   node_local_root = /path    allocation mounts are <root>/<user>.<job id>
+#   node_local_root = /path    where allocation mounts are
+#   node_local_mount = %u.%j   each allocation's mount below it: %u the user, %j the job id
 #   node_local_fstype = xfs    file system type the allocation mount must have
 #   shared_scratch = /a /b     shared scratch trees refused as install prefix
 #   allocation_hint = text     example allocation printed outside a job
@@ -116,6 +117,7 @@ fi
 #   dev_buildenv = NAME        the build environment dev loads last
 #   trash = auto|rtrash|none   how clean removes durable files (auto: rtrash if found)
 node_local_root=""
+node_local_mount=%u.%j
 node_local_fstype=xfs
 # The paths as written. Pathname expansion would turn a glob in one of them
 # into whatever names happen to match, and the tree that was named would not
@@ -155,6 +157,10 @@ read_config() {
                 [[ "$value" =~ ^/[^[:space:]]*[^/[:space:]]$ ]] ||
                     fail_storage "$file: node_local_root must be one absolute path without a trailing slash."
                 node_local_root="$value" ;;
+            node_local_mount)
+                [[ "$value" =~ ^([A-Za-z0-9._-]|%[uj])+$ && "$value" == *%j* && ${#value} -le 255 ]] ||
+                    fail_storage "$file: node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it."
+                node_local_mount="$value" ;;
             node_local_fstype)
                 [[ "$value" =~ ^[a-z0-9_.]+$ ]] || fail_storage "$file: node_local_fstype must be a file system type name."
                 node_local_fstype="$value" ;;
@@ -293,7 +299,15 @@ durable_dirs() {
 check_job_root() {
     [[ "$SLURM_JOB_ID" =~ ^[1-9][0-9]*$ ]] || fail_storage 'invalid Slurm allocation identity.'
     job_user=$(id -un) || fail_storage 'cannot determine the allocation user.'
-    job_root="${node_local_root}/${job_user}.${SLURM_JOB_ID}"
+    local pattern="$node_local_mount" name=""
+    while [ -n "$pattern" ]; do
+        case "$pattern" in
+            %u*) name+="$job_user"; pattern=${pattern:2} ;;
+            %j*) name+="$SLURM_JOB_ID"; pattern=${pattern:2} ;;
+            *) name+=${pattern:0:1}; pattern=${pattern:1} ;;
+        esac
+    done
+    job_root="${node_local_root}/${name}"
     case "$job_root" in
         "$node_local_root"/*) ;;
         *) fail_storage "node-local root must name the allocation mount below $node_local_root." ;;

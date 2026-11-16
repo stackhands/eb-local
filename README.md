@@ -25,7 +25,7 @@ The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can m
 Load the modules you link against on the `dev` line, not after it: the build environment, loaded last, puts its compiler wrappers ahead of every module's programs on `PATH`, so that no module's `gcc` or `ld` runs in their place, and `dev` checks only the modules it is given.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
-These were checked on Snellius with EESSI 2026.06, each program then run with no modules at all:
+`tests/site/dev-tasks.sh` checks these on a cluster with EESSI 2026.06, each program then run with no modules at all:
 
 | task | the line before building |
 |---|---|
@@ -164,7 +164,7 @@ eb-local eb -- example.eb --robot
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
 
-A build needs a Slurm allocation whose node-local directory is its own mount, of the configured file system type, owned by you.
+A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
 Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
 
 ## Clean up
@@ -208,7 +208,7 @@ default_profile = "mine"
 dev.modules = ["FFTW/3.3.10-GCC-15.2.0"]
 
 [profile.group]
-project = "/projects/0/myproj/eessi"
+project = "/path/to/project/eessi"
 
 [profile.gpu]
 dev.modules = ["CUDA/13.3.0"]
@@ -223,12 +223,13 @@ It also holds the storage settings, which only it may set:
 
 ```toml
 [storage]
-node_local_root = "/scratch-node"        # allocation mounts are <root>/<user>.<job id>
+node_local_root = "/local"               # where allocation mounts are
+node_local_mount = "%u.%j"               # each allocation's mount below it: %u the user, %j the job id
 node_local_fstype = "xfs"
-shared_scratch = ["/scratch-shared", "/gpfs/scratch1"]
+shared_scratch = ["/scratch", "/work"]
 
 [build]
-allocation_hint = "salloc -p rome -n 16 -t 02:00:00 --constraint=scratch-node"
+allocation_hint = "salloc -p cpu -n 16 -t 02:00:00"
 site_toolchains = ["intel/2026.1"]       # toolchains EESSI's hooks accept besides foss and lfoss
 ```
 
@@ -247,16 +248,18 @@ EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
 
 ### Site files from a template
 
-eb-local carries site file templates: `snellius`, and `slurm` for any Slurm cluster whose jobs get a node-local disk.
+eb-local carries one site file template, `slurm`, for any Slurm cluster whose jobs get a node-local disk.
+A site can keep its own template in a file, named with a slash; `examples/sites/` holds worked examples of such files.
 
 ```sh
-eb-local site list                                  # templates and their placeholders
-eb-local site show snellius --set partition=genoa   # the file, rendered and checked
-eb-local site install slurm --set node_local_root=/local --set shared_scratch=/scratch
+eb-local site list                                  # the built-in templates and their placeholders
+eb-local site show slurm --set node_local_root=/local --set shared_scratch=/scratch   # rendered and checked
+eb-local site install ./site.toml --set partition=gpu   # a template file of the site's own
 ```
 
 `install` writes `config.toml` beside the program (or `--to FILE`), mode 644, only after the rendered file loads as a site file; it never replaces an existing file without `--force`, and never through a symbolic link.
 A `--set` value cannot hold a quote, a backslash or a control character.
+A template file is read only when it is a regular file, not a symbolic link, not writable by group or others.
 
 ### The configuration as variables
 
@@ -318,7 +321,7 @@ eb-local --version
 ```
 
 `env` and `dev` work once `~/.local/bin` is on `PATH`.
-Building with EasyBuild also needs a site file beside the program: `eb-local site install snellius`, or the `slurm` template with your cluster's paths.
+Building with EasyBuild also needs a site file beside the program: `eb-local site install slurm` with your cluster's paths, or the site's own template file.
 To build from source: `zig build --release=safe` with Zig 0.17.1.
 
 Each release binary has a build provenance attestation and, from 2.4.0, a CycloneDX SBOM (`$f.cdx.json` beside it) with its own attestation.
@@ -331,7 +334,7 @@ gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://c
 
 The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
 It reads one site file, `eb-local.conf`: the file `EB_LOCAL_CONFIG` names, else the one beside the script, else `/etc/eb-local.conf`, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
-Its `key = value` lines set `node_local_root`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
+Its `key = value` lines set `node_local_root`, `node_local_mount`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
 A site's easyconfig installs the program and its site configuration.
 
 ## Test
@@ -343,7 +346,7 @@ zig build unit && zig build -Dtest-ops=true test          # the Zig build: unit 
 
 A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
 
-`tests/site/` holds the acceptance scripts run on Snellius: the development tasks above, and a build inside an allocation.
+`tests/site/` holds the site acceptance scripts: the development tasks above, and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
 
 ## License
 

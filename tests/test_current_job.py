@@ -27,7 +27,7 @@ class CurrentJobStorageControls(unittest.TestCase):
         self.assertTrue(Path(paths["WORKING_DIR"]).is_relative_to(self.fixture.job))
 
     def test_shared_tmpdir_does_not_hide_the_current_owned_mount(self):
-        self.successful("/scratch-shared/inherited")
+        self.successful("/scratch/inherited")
 
     def test_nested_tmpdir_does_not_select_a_second_workspace_domain(self):
         self.successful(str(self.fixture.job / "nested"))

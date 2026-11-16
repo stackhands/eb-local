@@ -5,6 +5,7 @@
 //! shared file system. Secrets are named sources, never values.
 const std = @import("std");
 const toml = @import("toml.zig");
+const storage = @import("storage.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Trash = enum { auto, rtrash, none };
@@ -55,6 +56,8 @@ pub const Settings = struct {
     trash: Setting(Trash) = .{ .value = .auto },
     logs_older_than_days: Setting(u32) = .{ .value = 30 },
     node_local_root: Setting([]const u8) = .{ .value = "" },
+    /// Each allocation's mount below node_local_root: %u the user, %j the job id.
+    node_local_mount: Setting([]const u8) = .{ .value = storage.default_mount },
     node_local_fstype: Setting([]const u8) = .{ .value = "xfs" },
     shared_scratch: Setting([]const []const u8) = .{ .value = &.{} },
     /// The nimvault program; empty means the first on PATH.
@@ -421,6 +424,11 @@ const Loader = struct {
                         const v = try l.string(src, f, "storage.node_local_root");
                         if (!validAbsolute(v)) return l.fail("{s}:{d}: storage.node_local_root must be one absolute path without a trailing slash", .{ src.path, f.line });
                         l.s.node_local_root = .{ .value = v, .from = ff };
+                    } else if (std.mem.eql(u8, f.key, "node_local_mount")) {
+                        const v = try l.string(src, f, "storage.node_local_mount");
+                        if (!storage.validMountPattern(v))
+                            return l.fail("{s}:{d}: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it", .{ src.path, f.line });
+                        l.s.node_local_mount = .{ .value = v, .from = ff };
                     } else if (std.mem.eql(u8, f.key, "node_local_fstype")) {
                         const v = try l.string(src, f, "storage.node_local_fstype");
                         for (v) |c| if (!(std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_' or c == '.'))
@@ -645,6 +653,7 @@ pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]c
         const Map = struct { k: []const u8, t: usize, name: []const u8, list: bool = false };
         const map = [_]Map{
             .{ .k = "node_local_root", .t = 0, .name = "node_local_root" },
+            .{ .k = "node_local_mount", .t = 0, .name = "node_local_mount" },
             .{ .k = "node_local_fstype", .t = 0, .name = "node_local_fstype" },
             .{ .k = "shared_scratch", .t = 0, .name = "shared_scratch", .list = true },
             .{ .k = "stack_module", .t = 1, .name = "module" },
@@ -727,13 +736,13 @@ const config_load = load;
 
 const site_text =
     \\[storage]
-    \\node_local_root = "/scratch-node"
-    \\shared_scratch = ["/scratch-shared", "/gpfs/scratch1"]
+    \\node_local_root = "/local"
+    \\shared_scratch = ["/scratch", "/work"]
     \\[stack]
     \\module = "EESSI/2026.06"
     \\[profile.gpu]
     \\dev.modules = ["CUDA/13.3.0"]
-    \\build.allocation_hint = "salloc -p gpu_h100"
+    \\build.allocation_hint = "salloc -p gpu"
 ;
 const user_text =
     \\default_profile = "mine"
@@ -741,7 +750,7 @@ const user_text =
     \\prefix = "/home/u/eessi"
     \\dev.modules = ["FFTW/3.3.10-GCC-15.2.0"]
     \\[profile.group]
-    \\project = "/projects/p/eessi"
+    \\project = "/path/to/project/eessi"
     \\[profile.group.secrets]
     \\LM_LICENSE_FILE = "nimvault:licences/flexlm"
     \\[secrets]
@@ -760,17 +769,17 @@ test "layers, profiles and where each value came from" {
     try std.testing.expectEqualStrings("/home/u/eessi", s.prefix.value);
     try std.testing.expectEqualStrings("user profile mine, /home/u/.config/eb-local/config.toml:3", s.prefix.from);
     try std.testing.expectEqualStrings("FFTW/3.3.10-GCC-15.2.0", s.dev_modules.value[0]);
-    try std.testing.expectEqualStrings("/scratch-node", s.node_local_root.value);
+    try std.testing.expectEqualStrings("/local", s.node_local_root.value);
     try std.testing.expectEqual(@as(usize, 1), s.secrets.items.len);
     try std.testing.expectEqualStrings("SOURCE_TOKEN", s.secrets.items[0].name);
 
     const g = try t.load(&sources, .{ .profile = "group" });
-    try std.testing.expectEqualStrings("/projects/p/eessi", g.project.value.?);
+    try std.testing.expectEqualStrings("/path/to/project/eessi", g.project.value.?);
     try std.testing.expectEqual(@as(usize, 2), g.secrets.items.len);
 
     const gpu = try t.load(&sources, .{ .profile = "gpu" });
     try std.testing.expectEqualStrings("CUDA/13.3.0", gpu.dev_modules.value[0]);
-    try std.testing.expectEqualStrings("salloc -p gpu_h100", gpu.allocation_hint.value);
+    try std.testing.expectEqualStrings("salloc -p gpu", gpu.allocation_hint.value);
 }
 
 test "the environment overrides files and options override the environment" {
@@ -844,6 +853,22 @@ test "refusals" {
     try r.one(&t, "x = 1\nx = 2\n", .user, "c.toml:2");
     t.env.put("EB_LOCAL_STACK_MODULE", "a b") catch unreachable;
     try r.one(&t, "", .user, "EB_LOCAL_STACK_MODULE");
+}
+
+test "storage.node_local_mount" {
+    var t = Fixture.init();
+    defer t.deinit();
+    var s = try t.load(&.{}, .{});
+    try std.testing.expectEqualStrings("%u.%j", s.node_local_mount.value);
+    try std.testing.expectEqualStrings("default", s.node_local_mount.from);
+    s = try t.load(&.{.{ .path = "site.toml", .text = "[storage]\nnode_local_mount = \"job-%j\"\n", .layer = .site }}, .{});
+    try std.testing.expectEqualStrings("job-%j", s.node_local_mount.value);
+    try std.testing.expectEqualStrings("site site.toml:2", s.node_local_mount.from);
+    for ([_][]const u8{ "%u", "../%j", "%u/%j", "%j;id" }) |bad| {
+        const text = try std.fmt.allocPrint(t.arena.allocator(), "[storage]\nnode_local_mount = \"{s}\"\n", .{bad});
+        try t.refuse(&.{.{ .path = "c.toml", .text = text, .layer = .site }}, "storage.node_local_mount must be one file name");
+    }
+    try t.refuse(&.{.{ .path = "c.toml", .text = "[storage]\nnode_local_mount = \"%j\"\n", .layer = .user }}, "site setting");
 }
 
 test "dev.buildenv_for from the environment" {
@@ -952,19 +977,21 @@ test "the 1.x site file" {
     var d: Diagnostic = .{};
     const text = try legacyToToml(a,
         \\# site
-        \\node_local_root = /scratch-node
+        \\node_local_root = /local
+        \\node_local_mount = job-%j
         \\node_local_fstype = xfs
-        \\shared_scratch = /scratch-shared /gpfs/scratch1
-        \\allocation_hint = salloc -p rome -n 16 -t 02:00:00
-        \\stack_module = 2026
+        \\shared_scratch = /scratch /work
+        \\allocation_hint = salloc -p cpu -n 16 -t 02:00:00
+        \\stack_module = stack/mine
         \\extend_module = EESSI-extend/2026.06-easybuild
         \\trash = none
     , &d);
     const s = try t.load(&.{.{ .path = "eb-local.conf", .text = text, .layer = .site }}, .{});
-    try std.testing.expectEqualStrings("/scratch-node", s.node_local_root.value);
+    try std.testing.expectEqualStrings("/local", s.node_local_root.value);
+    try std.testing.expectEqualStrings("job-%j", s.node_local_mount.value);
     try std.testing.expectEqual(@as(usize, 2), s.shared_scratch.value.len);
-    try std.testing.expectEqualStrings("salloc -p rome -n 16 -t 02:00:00", s.allocation_hint.value);
+    try std.testing.expectEqualStrings("salloc -p cpu -n 16 -t 02:00:00", s.allocation_hint.value);
     try std.testing.expectEqual(Trash.none, s.trash.value);
-    try std.testing.expectEqualStrings("2026", s.stack_module.value);
+    try std.testing.expectEqualStrings("stack/mine", s.stack_module.value);
     try std.testing.expectError(error.Invalid, legacyToToml(a, "source_me = $(touch x)\n", &d));
 }
