@@ -21,9 +21,13 @@
 # unless EB_LOCAL_KEEP_WORK=1. Sources and logs persist beside the
 # installation; clean moves old ones to the trash with rtrash when it is
 # installed. EESSI-extend supplies EESSI's hooks, RPATH and compat layer.
+#
+# This is eb-local 1.x, the Bash script. It is frozen: it gains no commands,
+# and it is removed in eb-local 4.0.0. The eb-local program of 2.0.0 and
+# later has these commands and reads the same eb-local.conf.
 set -eo pipefail   # no -u: the Lmod init reads unset variables
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() {
     echo "eb-local: $*" >&2
