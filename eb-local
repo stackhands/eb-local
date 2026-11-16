@@ -329,16 +329,33 @@ if [ "$command" = clean ]; then
         rtrash) command -v rtrash >/dev/null 2>&1 || die "trash = rtrash, but rtrash is not on PATH." ;;
     esac
     targets=()
-    collect() {
-        local dir="$1"; shift
+    top_dir() {
         local canonical
-        [ -d "$dir" ] || return 0
-        canonical=$(readlink -e -- "$dir") || return 0
-        [ "$canonical" = "$dir" ] || fail_storage "$dir is reached through a symbolic link; clean leaves it alone."
-        while IFS= read -r -d '' file; do targets+=("$file"); done < <(find -P "$dir" -xdev -mindepth 1 -type f "$@" -print0)
+        [ -d "$1" ] || return 1
+        canonical=$(readlink -e -- "$1") || return 1
+        [ "$canonical" = "$1" ] || fail_storage "$1 is reached through a symbolic link; clean leaves it alone."
     }
-    if [ "$clean_logs" = true ]; then collect "$durable/logs" -mtime "+$logs_days"; fi
-    if [ "$clean_sources" = true ]; then collect "$durable/sources"; fi
+    collect_files() {
+        top_dir "$1" || return 0
+        while IFS= read -r -d '' file; do targets+=("$file"); done < <(find -P "$1" -xdev -mindepth 1 -type f -print0)
+    }
+    # The files and directories in $1 with nothing in them modified in the
+    # last $logs_days days, each whole: EasyBuild copies a build's easyconfig,
+    # easyblocks and hooks into reprod_<time>_<pid>/ with their own older
+    # times, so a file's age is not its build's. A directory holding another
+    # file system, or one find cannot read through, stays.
+    collect_aged() {
+        local dev entry newer devices
+        top_dir "$1" || return 0
+        dev=$(stat -c %d -- "$1")
+        while IFS= read -r -d '' entry; do
+            newer=$(find -P "$entry" -xdev ! -mtime "+$logs_days" -print -quit 2>/dev/null) || continue
+            devices=$(find -P "$entry" -xdev -printf '%D\n' 2>/dev/null | sort -u) || continue
+            if [ -z "$newer" ] && [ "$devices" = "$dev" ]; then targets+=("$entry"); fi
+        done < <(find -P "$1" -xdev -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -print0)
+    }
+    if [ "$clean_logs" = true ]; then collect_aged "$durable/logs"; fi
+    if [ "$clean_sources" = true ]; then collect_files "$durable/sources"; fi
     workspaces=()
     if [ "$clean_workspaces" = true ]; then
         for dir in "$job_root"/eb-local.*; do own_workspace "$dir" && workspaces+=("$dir"); done
@@ -347,10 +364,18 @@ if [ "$command" = clean ]; then
         echo "eb-local: nothing to clean in $prefix"
         exit 0
     fi
-    for file in "${targets[@]}"; do echo "  $file"; done
+    recursive=()
+    for file in "${targets[@]}"; do
+        if [ -d "$file" ] && [ ! -L "$file" ]; then
+            echo "  $file/"
+            recursive=(-r)
+        else
+            echo "  $file"
+        fi
+    done
     for dir in "${workspaces[@]}"; do echo "  $dir/ (build workspace)"; done
     if [ "$dry_run" = true ]; then
-        echo "eb-local: dry run, nothing removed (${#targets[@]} file(s), ${#workspaces[@]} workspace(s))"
+        echo "eb-local: dry run, nothing removed (${#targets[@]} item(s), ${#workspaces[@]} workspace(s))"
         exit 0
     fi
     # Build workspaces are node-local scratch the scheduler removes anyway;
@@ -358,11 +383,11 @@ if [ "$command" = clean ]; then
     for dir in "${workspaces[@]}"; do remove_workspace "$dir"; done
     if [ ${#targets[@]} -gt 0 ]; then
         if [ "$trash" = rtrash ]; then
-            rtrash put -- "${targets[@]}"
-            echo "eb-local: moved ${#targets[@]} file(s) to the trash (rtrash list, rtrash restore)"
+            rtrash put "${recursive[@]}" -- "${targets[@]}"
+            echo "eb-local: moved ${#targets[@]} item(s) to the trash (rtrash list, rtrash restore)"
         elif [ "$allow_delete" = true ]; then
-            rm -f -- "${targets[@]}"
-            echo "eb-local: deleted ${#targets[@]} file(s)"
+            rm -rf --one-file-system -- "${targets[@]}"
+            echo "eb-local: deleted ${#targets[@]} item(s)"
         else
             echo "eb-local: rtrash is not installed; nothing deleted. Install rtrash, or pass --delete to delete for good." >&2
             exit 1

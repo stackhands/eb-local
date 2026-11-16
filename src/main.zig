@@ -1088,23 +1088,32 @@ const CleanOpts = struct {
     delete: bool = false,
 };
 
+const Target = struct { path: []const u8, dir: bool = false };
+
 const Collect = struct {
     c: Ctx,
-    out: std.ArrayList([]const u8) = .empty,
+    out: std.ArrayList(Target) = .empty,
 
-    /// Regular files below `path`, on its file system, never through a
-    /// symbolic link; `cutoff` keeps only files modified before it.
-    fn dir(self: *Collect, path: []const u8, cutoff: ?i64) void {
-        const st = fsx.statAt(fsx.cwd, path, false) catch return;
+    /// The directory `path` to collect from, never reached through a
+    /// symbolic link; null when there is none.
+    fn top(path: []const u8) ?fsx.Stat {
+        const st = fsx.statAt(fsx.cwd, path, false) catch return null;
         if (st.isLink()) die("{s} is reached through a symbolic link; clean leaves it alone.", .{path});
-        if (!st.isDir()) return;
+        if (!st.isDir()) return null;
         var buf: [sys.path_max]u8 = undefined;
-        const real = fsx.realpath(fsx.cwd, path, &buf) catch return;
+        const real = fsx.realpath(fsx.cwd, path, &buf) catch return null;
         if (!std.mem.eql(u8, real, path)) die("{s} is reached through a symbolic link; clean leaves it alone.", .{path});
-        self.walk(path, st.dev, cutoff, 0);
+        return st;
     }
 
-    fn walk(self: *Collect, path: []const u8, dev: u64, cutoff: ?i64, depth: usize) void {
+    /// Regular files below `path`, on its file system, never through a
+    /// symbolic link.
+    fn files(self: *Collect, path: []const u8) void {
+        const st = top(path) orelse return;
+        self.walk(path, st.dev, 0);
+    }
+
+    fn walk(self: *Collect, path: []const u8, dev: u64, depth: usize) void {
         if (depth > 16) return;
         const fd = fsx.openDir(fsx.cwd, path, false) catch return;
         defer sys.close(fd);
@@ -1114,14 +1123,50 @@ const Collect = struct {
             if (st.dev != dev) continue;
             const child = std.fs.path.join(self.c.a, &.{ path, e.name }) catch oom();
             if (st.isDir()) {
-                self.walk(child, dev, cutoff, depth + 1);
+                self.walk(child, dev, depth + 1);
             } else if (st.isReg()) {
-                if (cutoff) |cut| if (st.mtime.sec >= cut) continue;
-                self.out.append(self.c.a, child) catch oom();
+                self.out.append(self.c.a, .{ .path = child }) catch oom();
             }
         }
     }
+
+    /// The files and directories in `path` with nothing in them modified
+    /// since `cutoff`, each whole: EasyBuild copies a build's easyconfig,
+    /// easyblocks and hooks into reprod_<time>_<pid>/ with their own older
+    /// times, so a file's age is not its build's. A directory holding
+    /// another file system, or one clean cannot read through, stays.
+    fn aged(self: *Collect, path: []const u8, cutoff: i64) void {
+        const st = top(path) orelse return;
+        const fd = fsx.openDir(fsx.cwd, path, false) catch return;
+        defer sys.close(fd);
+        var it = fsx.DirIter.init(self.c.a, fd) catch return;
+        while (it.next() catch null) |e| {
+            const est = fsx.statAt(fd, e.name, false) catch continue;
+            if (est.dev != st.dev or !(est.isDir() or est.isReg())) continue;
+            const child = std.fs.path.join(self.c.a, &.{ path, e.name }) catch oom();
+            var newest = est.mtime.sec;
+            if (est.isDir() and !newestBelow(self.c, child, st.dev, &newest, 0)) continue;
+            if (newest >= cutoff) continue;
+            self.out.append(self.c.a, .{ .path = child, .dir = est.isDir() }) catch oom();
+        }
+    }
 };
+
+/// Raises `newest` to the latest modification below `path`; false when
+/// something there is on another file system or cannot be read.
+fn newestBelow(c: Ctx, path: []const u8, dev: u64, newest: *i64, depth: usize) bool {
+    if (depth > 16) return false;
+    const fd = fsx.openDir(fsx.cwd, path, false) catch return false;
+    defer sys.close(fd);
+    var it = fsx.DirIter.init(c.a, fd) catch return false;
+    while (it.next() catch return false) |e| {
+        const st = fsx.statAt(fd, e.name, false) catch return false;
+        if (st.dev != dev) return false;
+        newest.* = @max(newest.*, st.mtime.sec);
+        if (st.isDir() and !newestBelow(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), dev, newest, depth + 1)) return false;
+    }
+    return true;
+}
 
 fn removeEmptyDirs(c: Ctx, path: []const u8, dev: u64, depth: usize) void {
     if (depth > 16) return;
@@ -1158,8 +1203,8 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
     const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
     const now: i64 = nowSecs();
     var collect: Collect = .{ .c = c };
-    if (o.logs) collect.dir(d.logs, now - (days + 1) * 86400 + 1);
-    if (o.sources) collect.dir(d.sources, null);
+    if (o.logs) collect.aged(d.logs, now - (days + 1) * 86400 + 1);
+    if (o.sources) collect.files(d.sources);
     var spaces: std.ArrayList([]const u8) = .empty;
     if (job_root) |jr| {
         const fd = fsx.openDir(fsx.cwd, jr, false) catch die("cannot read {s}", .{jr});
@@ -1175,10 +1220,10 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
         say("eb-local: nothing to clean in {s}", .{p.prefix});
         return 0;
     }
-    for (targets) |t| say("  {s}", .{t});
+    for (targets) |t| say("  {s}{s}", .{ t.path, if (t.dir) "/" else "" });
     for (spaces.items) |w| say("  {s}/ (build workspace)", .{w});
     if (o.dry_run) {
-        say("eb-local: dry run, nothing removed ({d} file(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
+        say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
@@ -1192,17 +1237,28 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
     if (targets.len > 0) {
         if (trash == .rtrash) {
             var argv: std.ArrayList([]const u8) = .empty;
-            argv.appendSlice(a, &.{ rtrash.?, "put", "--" }) catch oom();
-            argv.appendSlice(a, targets) catch oom();
+            argv.appendSlice(a, &.{ rtrash.?, "put" }) catch oom();
+            for (targets) |t| if (t.dir) {
+                argv.append(a, "-r") catch oom();
+                break;
+            };
+            argv.append(a, "--") catch oom();
+            for (targets) |t| argv.append(a, t.path) catch oom();
             const run = runAttached(a, argv.items, c.envp);
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}", .{rc}),
                 .signal => return stop(run),
             }
-            say("eb-local: moved {d} file(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
+            say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
         } else {
-            for (targets) |t| sys.unlinkat(fsx.cwd, t, 0) catch |e| warn("cannot remove {s} ({s})", .{ t, @errorName(e) });
-            say("eb-local: deleted {d} file(s)", .{targets.len});
+            for (targets) |t| {
+                if (t.dir) {
+                    storage.removeTree(a, t.path) catch |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
+                } else {
+                    sys.unlinkat(fsx.cwd, t.path, 0) catch |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
+                }
+            }
+            say("eb-local: deleted {d} item(s)", .{targets.len});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
