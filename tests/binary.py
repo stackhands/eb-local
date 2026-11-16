@@ -6,7 +6,10 @@ same controls become a mount table file (EB_LOCAL_TEST_MOUNTINFO) and a uid
 (EB_LOCAL_TEST_UID), which only its -Dtest-ops test artifact reads. module
 and eb stay shell functions: the binary runs them in a bash child, which
 reads BASH_ENV as the script did. A build execs eb, and exec runs only a
-program, so a program named eb, first on PATH, runs the eb function.
+program, so a program named eb, first on PATH, runs the eb function. It
+goes in the test's CONTROL_ROOT, beside the doubles: a BASH_ENV a test
+passes on from its caller, such as Lmod's init, is in a directory the
+test cannot write, and has no eb function for the program to run.
 """
 import os
 from pathlib import Path
@@ -28,7 +31,8 @@ def command(script, arguments, env):
     prelude = env.pop("BASH_ENV", None)
     if prelude:
         env["EB_LOCAL_TEST_PRELUDE"] = prelude
-        shims = Path(prelude).parent / "doubles-bin"
+    if prelude and env.get("CONTROL_ROOT"):
+        shims = Path(env["CONTROL_ROOT"]) / "doubles-bin"
         shims.mkdir(exist_ok=True)
         (shims / "eb").write_text('#!/bin/bash\ndeclare -F eb >/dev/null || { echo "no eb double" >&2; exit 127; }\neb "$@"\n')
         (shims / "eb").chmod(0o755)
