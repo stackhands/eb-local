@@ -1700,7 +1700,7 @@ fn listedLess(_: void, x: Listed, y: Listed) bool {
     return std.mem.lessThan(u8, x.module, y.module);
 }
 
-fn wanted(module: []const u8, filters: []const []const u8) bool {
+fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
     if (filters.len == 0) return true;
     for (filters) |f| {
         if (std.mem.eql(u8, module, f)) return true;
@@ -1742,7 +1742,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
         var mods: std.ArrayList([]const u8) = .empty;
         treeModules(c, t, &mods);
         for (mods.items) |m| {
-            if (!wanted(m, filters)) continue;
+            if (!matchesFilter(m, filters)) continue;
             const row = for (rows.items) |*r| {
                 if (std.mem.eql(u8, r.module, m)) break r;
             } else blk: {
