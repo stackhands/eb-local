@@ -125,6 +125,31 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
 
+    def test_doctor_fails_on_a_secret_every_build_would_stop_on(self):
+        secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC")
+        run = self.run_tool(["doctor"], **secret)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("FAIL secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set", run.stdout)
+        self.assertIn("every build stops there, whether or not it uses MY_LICENCE_KEY", run.stdout)
+        self.assertTrue(run.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
+        build = self.run_wrapper(["recipe.eb"], **secret)
+        self.assertEqual(build.returncode, 2, build.stdout + build.stderr)
+        self.assertIn("MY_LICENCE_SRC is not set", build.stderr)
+
+        value = "licence-value-27000"
+        run = self.run_tool(["doctor"], MY_LICENCE_SRC=value, **secret)
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn("ok   secret MY_LICENCE_KEY can be read from env:MY_LICENCE_SRC", run.stdout)
+        self.assertNotIn(value, run.stdout + run.stderr)
+        self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+        run = self.run_tool(["doctor"], MY_LICENCE_SRC="x7q", **secret)
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn("warn secret MY_LICENCE_KEY from env:MY_LICENCE_SRC is shorter than 4 bytes", run.stdout)
+        self.assertNotIn("x7q", run.stdout + run.stderr)
+
+        run = self.without_a_site_file(**secret)
+        self.assertIn("warn secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set", run.stdout)
+
     def without_a_site_file(self, **extra):
         for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):
             if Path(installed).exists():

@@ -1851,6 +1851,24 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
         note(a, &out, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
     }
 
+    // A build reads every secret before it starts, so one that cannot be
+    // read stops every build, whether or not it uses that secret. The
+    // values are read as a build reads them and never shown.
+    for (s.secrets.items) |sec| {
+        var f: secrets.Failure = .{};
+        if (secrets.resolve(a, &.{sec}, c.env, c.envp, nimvaultOf(s), &f)) |values| {
+            if (values[0].value.len < secrets.min_redacted_len) {
+                note(a, &out, "warn", "secret {s} from {s} is shorter than {d} bytes and is not removed from logs", .{ sec.name, sec.source, secrets.min_redacted_len });
+            } else note(a, &out, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
+        } else |e| switch (e) {
+            error.Unavailable => {
+                note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}", .{ f.message, sec.from, sec.name });
+                if (site) failed = true;
+            },
+            error.OutOfMemory => oom(),
+        }
+    }
+
     // Where installs go.
     const p = locate(c, s);
     note(a, &out, "ok  ", "installs go to {s}: a {s} install, prefix from {s}", .{ p.prefix, if (p.project) "project" else "user", if (p.project) s.project.from else s.prefix.from });

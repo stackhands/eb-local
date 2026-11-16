@@ -1,6 +1,7 @@
 //! Secrets for a build: each names the variable eb receives and where its
-//! value comes from. Values are read only for a build, after every other
-//! check, go only into eb's environment, and are never printed. A failed
+//! value comes from. Values are read for a build, after every other check,
+//! and by `config --check` and `doctor`, which say only whether each can be
+//! read. They go only into eb's environment and are never printed. A failed
 //! read reports why without the value. After the build, logs written during
 //! it are scanned and every occurrence of a value is replaced.
 const std = @import("std");
