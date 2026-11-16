@@ -4,6 +4,7 @@
 The fixture and the module, eb and findmnt doubles are those of
 test_storage; rtrash is a double that records what it was given.
 """
+import json
 import os
 from pathlib import Path
 import shlex
@@ -148,15 +149,46 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         out = run.stdout
         self.assertIn("there is none here, so a build would stop now", out)
-        self.assertIn(f"export EESSI_USER_INSTALL={shlex.quote(str(self.prefix))}", out)
-        self.assertIn("unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL", out)
-        self.assertIn('export EASYBUILD_BUILDPATH="$W/build"', out)
-        # The extension loads after the stack, and eb comes last with the arguments as given.
-        self.assertLess(out.index("module load EESSI/2026.06"), out.index("module load EESSI-extend/2026.06-easybuild"))
-        self.assertEqual(out.rstrip().splitlines()[-1], "eb --umask=022 'recipe with space.eb' --robot")
+        self.assertIn(f"\nset -- EESSI/2026.06 EESSI-extend/2026.06-easybuild EESSI_USER_INSTALL {shlex.quote(str(self.prefix))}"
+                      " user 'recipe with space.eb' --robot\nset -eo pipefail\n", out)
+        self.assertIn('\nexport EASYBUILD_BUILDPATH="$W/build"\n', out)
+        self.assertIn("\nunset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL", out)
+        self.assertEqual(out.rstrip().splitlines()[-1],
+                         'if [ "$mode" = project ]; then exec eb "$@"; else exec eb --umask=022 "$@"; fi')
         self.assertFalse(self.prefix.exists())
         self.assertEqual(list(self.job.iterdir()), [])
         self.assertFalse((self.root / "eb.json").exists())
+
+    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    def test_the_printed_script_runs_as_a_build_runs_it(self):
+        explained = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"])
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        built = self.run_wrapper(["recipe with space.eb", "--robot"], EB_LOCAL_KEEP_WORK="1")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        real = json.loads((self.root / "eb.json").read_text())
+        (self.root / "eb.json").unlink()
+        # By hand, in the workspace the build made, with bash reading the doubles.
+        env = {k: v for k, v in self.env.items() if k not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")}
+        env.update(W=str(self.job / self.workspaces()[0]), PATH=f"{self.root / 'doubles-bin'}:{self.env['PATH']}")
+        replay = subprocess.run(["bash", "--noprofile", "--norc", "-c", explained.stdout],
+                                env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text()), real)
+        self.assertEqual(real["argv"], ["--umask=022", "recipe with space.eb", "--robot"])
+
+    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    def test_a_build_starts_with_the_command_that_prints_its_script(self):
+        run = self.run_wrapper(["recipe with space.eb", "--robot"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        first = run.stdout.splitlines()[0]
+        self.assertEqual(first, "eb-local: what this runs: eb-local --explain 'recipe with space.eb' --robot")
+        explained = self.run_wrapper(shlex.split(first.split(": ", 2)[2])[1:])
+        self.assertTrue(explained.stdout.startswith("# eb-local --explain: the script a build runs"), explained.stdout)
+        self.prefix.chmod(0o2770)
+        run = self.run_wrapper(["--project", str(self.prefix), "recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stdout.splitlines()[0],
+                         f"eb-local: what this runs: eb-local --project {shlex.quote(str(self.prefix))} --explain recipe.eb")
 
     @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
     def test_explain_a_project_build_keeps_the_project_umask(self):
@@ -165,8 +197,9 @@ class Commands(StorageFixture):
         run = self.run_wrapper(["--explain", "--project", str(self.prefix), "recipe.eb"])
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("Slurm job 123", run.stdout)
-        self.assertIn(f"export EESSI_PROJECT_INSTALL={shlex.quote(str(self.prefix))}", run.stdout)
-        self.assertEqual(run.stdout.rstrip().splitlines()[-1], "eb recipe.eb")
+        self.assertIn("\numask 002\n", run.stdout)
+        self.assertIn(f"\nset -- EESSI/2026.06 EESSI-extend/2026.06-easybuild EESSI_PROJECT_INSTALL"
+                      f" {shlex.quote(str(self.prefix))} project recipe.eb\n", run.stdout)
         self.assertEqual(list(self.job.iterdir()), [])
 
     @unittest.skipUnless(binary.BIN, "the shared default prefix is a feature of the Zig build")
