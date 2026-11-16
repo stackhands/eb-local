@@ -1078,43 +1078,119 @@ fn stop(run: Run) u8 {
     }
 }
 
-/// Run a program on this terminal and wait for it. An interrupt reaches the
-/// child (it shares the process group) while this process ignores it, so
-/// that it can still report and clean up. The caller raises the signal again
-/// after that cleanup.
-fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
-    const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch oom();
-    for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch oom()).ptr;
-    const ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
-    const sigs = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT };
-    var old: [sigs.len]linux.Sigaction = undefined;
-    for (sigs, 0..) |sg, i| _ = linux.sigaction(sg, &ign, &old[i]);
-    defer for (sigs, 0..) |sg, i| {
-        _ = linux.sigaction(sg, &old[i], null);
-    };
-    const pid: isize = @bitCast(linux.fork());
-    if (pid < 0) die("cannot start {s}", .{argv[0]});
-    if (pid == 0) {
-        // The dispositions this process had, so nohup and an ignored SIGINT
-        // reach the child as they would have without eb-local.
-        for (sigs, 0..) |sg, i| _ = linux.sigaction(sg, &old[i], null);
-        const rc = linux.execve(zargv[0].?, zargv.ptr, envp);
-        cli.err("eb-local: cannot run {s} ({s})\n", .{ argv[0], sys.describeErrno(linux.errno(rc)) });
-        linux.exit_group(127);
-    }
-    var raw: i32 = 0;
-    while (true) {
-        const rc = linux.wait4(@intCast(pid), &raw, 0, null);
-        switch (linux.errno(rc)) {
-            .SUCCESS => break,
-            .INTR => continue,
-            else => return .{ .exit = 1 },
+/// The signals that stop a program run on a terminal or in a job, and that
+/// eb-local passes on to the program it waits for.
+const passed_on = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT };
+
+/// The `si_code` of a signal the kernel sent itself, as the terminal does
+/// for Ctrl-C to the whole foreground process group.
+const si_kernel: i32 = 0x80;
+
+/// The program being waited for, 0 for none, and the first signal of
+/// `passed_on` received while a `Guard` was held. Atomics only: the handler
+/// can run between any two instructions.
+var waited_pid = std.atomic.Value(linux.pid_t).init(0);
+var first_signal = std.atomic.Value(u32).init(0);
+
+fn passOn(sig: linux.SIG, info: *const linux.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    _ = first_signal.cmpxchgStrong(0, @backingInt(sig), .seq_cst, .seq_cst);
+    // From the terminal, the signal reached the program too.
+    if (info.code == si_kernel) return;
+    const pid = waited_pid.load(.seq_cst);
+    if (pid > 0) _ = linux.kill(pid, sig);
+}
+
+/// While a guard is held, a signal of `passed_on` does not stop eb-local.
+/// One another process sent, as `kill PID` does, is passed on to the program
+/// eb-local waits for; one from the terminal is not, as it reached that
+/// program too, which shares the foreground process group. The first is
+/// remembered, so that the caller can finish with what the program left
+/// behind, release the guard and raise it again with `stop`.
+const Guard = struct {
+    old: [passed_on.len]linux.Sigaction,
+
+    fn hold() Guard {
+        var g: Guard = .{ .old = undefined };
+        var during = linux.sigemptyset();
+        for (passed_on) |sig| linux.sigaddset(&during, sig);
+        const act: linux.Sigaction = .{ .handler = .{ .sigaction = passOn }, .mask = during, .flags = linux.SA.SIGINFO | linux.SA.RESTART };
+        first_signal.store(0, .seq_cst);
+        for (passed_on, 0..) |sig, i| {
+            _ = linux.sigaction(sig, null, &g.old[i]);
+            // One ignored, as nohup ignores SIGHUP, stays ignored, here and
+            // in the program.
+            if (g.old[i].handler.handler != linux.SIG.IGN) _ = linux.sigaction(sig, &act, null);
         }
+        return g;
     }
-    const status: u32 = @bitCast(raw);
-    if (linux.W.IFEXITED(status)) return .{ .exit = linux.W.EXITSTATUS(status) };
-    if (linux.W.IFSIGNALED(status)) return .{ .signal = linux.W.TERMSIG(status) };
-    return .{ .exit = 1 };
+
+    fn release(g: *const Guard) void {
+        for (passed_on, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
+    }
+
+    fn received(_: *const Guard) ?linux.SIG {
+        const v = first_signal.load(.seq_cst);
+        return if (v == 0) null else @fromBackingInt(@intCast(v));
+    }
+
+    /// Run a program on this terminal and wait for it to exit.
+    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
+        const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch oom();
+        for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch oom()).ptr;
+        // Blocked until this process knows the child, and the child has the
+        // dispositions this process started with (nohup's, an ignored
+        // SIGINT), so that the handler never runs in the child.
+        var block = linux.sigemptyset();
+        for (passed_on) |sig| linux.sigaddset(&block, sig);
+        var mask: linux.sigset_t = undefined;
+        _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &mask);
+        const pid: isize = @bitCast(linux.fork());
+        if (pid == 0) {
+            for (passed_on, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
+            _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
+            const rc = linux.execve(zargv[0].?, zargv.ptr, envp);
+            cli.err("eb-local: cannot run {s} ({s})\n", .{ argv[0], sys.describeErrno(linux.errno(rc)) });
+            linux.exit_group(127);
+        }
+        if (pid > 0) waited_pid.store(@intCast(pid), .seq_cst);
+        _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
+        if (pid < 0) die("cannot start {s}", .{argv[0]});
+        // Waited for without reaping, so that its pid cannot be reused
+        // before the handler forgets it.
+        var info: linux.siginfo_t = undefined;
+        while (true) {
+            const rc = linux.waitid(.PID, @intCast(pid), &info, linux.W.EXITED | linux.W.NOWAIT, null);
+            switch (linux.errno(rc)) {
+                .SUCCESS => break,
+                .INTR => continue,
+                else => break,
+            }
+        }
+        waited_pid.store(0, .seq_cst);
+        var raw: i32 = 0;
+        while (true) {
+            const rc = linux.wait4(@intCast(pid), &raw, 0, null);
+            switch (linux.errno(rc)) {
+                .SUCCESS => break,
+                .INTR => continue,
+                else => return .{ .exit = 1 },
+            }
+        }
+        const status: u32 = @bitCast(raw);
+        if (linux.W.IFEXITED(status)) return .{ .exit = linux.W.EXITSTATUS(status) };
+        if (linux.W.IFSIGNALED(status)) return .{ .signal = linux.W.TERMSIG(status) };
+        return .{ .exit = 1 };
+    }
+};
+
+/// Run a program on this terminal and wait for it, holding a `Guard`. A
+/// signal eb-local received is the result, whatever the program did with
+/// it, so that the caller cleans up and raises it again.
+fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
+    const guard = Guard.hold();
+    defer guard.release();
+    const ran = guard.run(a, argv, envp);
+    return if (guard.received()) |sig| .{ .signal = sig } else ran;
 }
 
 fn envpOf(a: Allocator, map: *const std.process.Environ.Map) proc.Envp {
@@ -1445,7 +1521,9 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\echo "eb-local: installing into $prefix ($mode)"
     \\echo "eb-local: target $EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+ + $EESSI_ACCELERATOR_TARGET}, build space ${saved[EASYBUILD_BUILDPATH]%/build}"
     \\# A project install keeps the umask EESSI-extend sets for one (002).
-    \\if [ "$mode" = project ]; then eb "$@"; else eb --umask=022 "$@"; fi
+    \\# eb replaces this shell, so the program eb-local waits for, and passes
+    \\# a signal on to, is EasyBuild, which writes the logs it then cleans.
+    \\if [ "$mode" = project ]; then exec eb "$@"; else exec eb --umask=022 "$@"; fi
 ;
 
 /// What a build runs, as the shell commands a person would type, with the
@@ -1623,8 +1701,11 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         s.stack_module.value, s.extend_module.value, if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix, if (p.project) "project" else "user",
     }) catch oom();
     argv.appendSlice(a, args) catch oom();
-    const run = runAttached(a, argv.items, envpOf(a, &env));
-    const rc: u8 = switch (run) {
+    // The guard stays until the logs are clean: a signal stops the build, but
+    // eb-local first waits for EasyBuild, which writes them, to exit.
+    const guard = Guard.hold();
+    const ran = guard.run(a, argv.items, envpOf(a, &env));
+    const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
     };
@@ -1656,7 +1737,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         say("eb-local: done. To use the modules in a new shell or job:", .{});
         say("  eval \"$(eb-local {s})\"", .{replay(a, "env", s, g, p.prefix, &.{})});
     }
-    return stop(run);
+    const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
+    guard.release();
+    return stop(ended);
 }
 
 // ---- list -----------------------------------------------------------------

@@ -28,6 +28,20 @@ umask
 printf '%s\n' "$@" "EASYBUILD_PREFIX=$EASYBUILD_PREFIX" "EESSI_USER_INSTALL=${EESSI_USER_INSTALL-unset}"
 '''
 
+SLOW_EB = r'''#!/bin/sh
+exec python3 -c '
+import os, signal, sys, time
+got = []
+signal.signal(signal.SIGTERM, lambda sig, frame: got.append(sig))
+open(os.environ["CONTROL_ROOT"] + "/eb.pid", "w").write(str(os.getpid()))
+deadline = time.monotonic() + 10
+while not got and time.monotonic() < deadline:
+    time.sleep(0.05)
+open(os.environ["CONTROL_ROOT"] + "/eb.signals", "w").write(str(len(got)))
+sys.exit(15 if got else 0)
+'
+'''
+
 
 @unittest.skipUnless(binary.BIN, "eb and --explain eb are features of the Zig build")
 class ExtendCli(unittest.TestCase):
@@ -49,6 +63,24 @@ class ExtendCli(unittest.TestCase):
     def run_tool(self, args, **extra):
         argv, env = binary.command(SCRIPT, args, dict(self.env, **extra))
         return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+
+    def test_a_sigterm_to_eb_local_eb_reaches_easybuild(self):
+        (self.root / "bin" / "eb").write_text(SLOW_EB)
+        argv, env = binary.command(SCRIPT, ["eb", "x.eb"], self.env)
+        launcher = subprocess.Popen(argv, env=env, cwd=self.root, start_new_session=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: launcher.poll() is None and os.killpg(launcher.pid, 9))
+        pid_file = self.root / "eb.pid"
+        deadline = time.monotonic() + 20
+        while not pid_file.exists():
+            self.assertLess(time.monotonic(), deadline, "eb did not start")
+            time.sleep(0.05)
+        sent = time.monotonic()
+        os.kill(launcher.pid, 15)
+        out, err = launcher.communicate(timeout=30)
+        self.assertLess(time.monotonic() - sent, 8, out + err)
+        self.assertEqual(launcher.returncode, -15, out + err)
+        self.assertEqual((self.root / "eb.signals").read_text(), "1")
 
     def test_explain_eb_prints_the_launcher_script_and_runs_nothing(self):
         mine = self.root / "mine"

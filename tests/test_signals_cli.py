@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""A build that is signalled stops, and its logs are cleaned after EasyBuild exits.
+
+The eb double stands in for EasyBuild: a program, as the real eb is a script
+that execs python, which records each signal it gets, and on the first takes
+a moment before it writes its last log line, with the secret in it, and
+exits as EasyBuild does (15 for SIGTERM, 1 for SIGINT). eb-local must wait
+for it, clean the log, and then die of the signal.
+"""
+import os
+from pathlib import Path
+import pty
+import signal
+import subprocess
+import time
+import unittest
+
+import binary
+from test_storage import StorageFixture
+
+SLOW_EB = r'''
+import os, signal, sys, time
+root = os.environ["CONTROL_ROOT"]
+got = []
+def note(sig, frame):
+    got.append(signal.Signals(sig).name)
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    if signal.getsignal(sig) != signal.SIG_IGN:
+        signal.signal(sig, note)
+log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-slow.log")
+with open(log, "w") as f:
+    f.write("building\n")
+open(os.path.join(root, "eb.pid"), "w").write(str(os.getpid()))
+deadline = time.monotonic() + float(os.environ.get("SLOW_EB_WAIT", "10"))
+while not got and time.monotonic() < deadline:
+    time.sleep(0.05)
+if not got:
+    sys.exit(0)
+time.sleep(0.5)
+with open(log, "a") as f:
+    f.write("stopping with " + os.environ["LICENCE_KEY"] + "\n")
+open(os.path.join(root, "eb.signals"), "w").write(" ".join(got))
+sys.exit(15 if got[0] == "SIGTERM" else 1)
+'''
+
+KEY = "licence-key-6f1c2e9a"
+
+
+@unittest.skipUnless(binary.BIN, "passing signals on is a feature of the Zig build")
+class Signals(StorageFixture):
+    def setUp(self):
+        super().setUp()
+        (self.root / "slow-eb.py").write_text(SLOW_EB)
+        programs = self.root / "slow-bin"
+        programs.mkdir()
+        (programs / "eb").write_text('#!/bin/bash\nexec python3 "$CONTROL_ROOT/slow-eb.py" "$@"\n')
+        (programs / "eb").chmod(0o755)
+        slow = self.root / "doubles-slow.sh"
+        slow.write_text((self.root / "doubles.sh").read_text() + "\nunset -f eb\n")
+        argv, env = binary.command(self.script, ["recipe.eb"], dict(
+            self.env, BASH_ENV=str(slow), LICENCE_SRC=KEY, EB_LOCAL_SECRET_LICENCE_KEY="env:LICENCE_SRC"))
+        env["PATH"] = f"{programs}:{env['PATH']}"
+        self.argv, self.build_env = argv, env
+        self.log = self.prefix / ".eb-local" / "logs" / "easybuild-slow.log"
+
+    def eb_pid(self):
+        pid_file = self.root / "eb.pid"
+        deadline = time.monotonic() + 20
+        while not pid_file.exists():
+            self.assertLess(time.monotonic(), deadline, "eb did not start")
+            time.sleep(0.05)
+        return int(pid_file.read_text())
+
+    def assert_stopped_and_clean(self, eb):
+        with self.assertRaises(ProcessLookupError):
+            os.kill(eb, 0)
+        text = self.log.read_text()
+        self.assertIn("stopping with <secret LICENCE_KEY removed by eb-local>", text)
+        self.assertNotIn(KEY, text)
+
+    def signalled(self, send, **popen):
+        build = subprocess.Popen(self.argv, env=self.build_env, cwd=self.root, start_new_session=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen)
+        self.addCleanup(lambda: build.poll() is None and os.killpg(build.pid, signal.SIGKILL))
+        eb = self.eb_pid()
+        sent = time.monotonic()
+        send(build.pid)
+        out, err = build.communicate(timeout=30)
+        self.assertLess(time.monotonic() - sent, 8, out + err)
+        return build.returncode, out, err, eb
+
+    def test_a_sigterm_to_eb_local_alone_reaches_easybuild(self):
+        rc, out, err, eb = self.signalled(lambda pid: os.kill(pid, signal.SIGTERM))
+        self.assertEqual(rc, -signal.SIGTERM, out + err)
+        self.assertEqual((self.root / "eb.signals").read_text(), "SIGTERM")
+        self.assert_stopped_and_clean(eb)
+        self.assertIn("removed secret values from 1 log file(s)", out)
+        self.assertIn("build workspace kept", err)
+
+    def test_a_sigterm_to_the_process_group_waits_for_easybuild_before_the_logs_are_cleaned(self):
+        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGTERM))
+        self.assertEqual(rc, -signal.SIGTERM, out + err)
+        self.assertTrue((self.root / "eb.signals").read_text().startswith("SIGTERM"))
+        self.assert_stopped_and_clean(eb)
+
+    def test_a_signal_ignored_as_nohup_ignores_sighup_stays_ignored(self):
+        self.build_env["SLOW_EB_WAIT"] = "1"
+        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGHUP),
+                                          preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+        self.assertEqual(rc, 0, out + err)
+        self.assertFalse((self.root / "eb.signals").exists())
+
+    def test_ctrl_c_on_the_terminal_reaches_easybuild_once(self):
+        pid, master = pty.fork()
+        if pid == 0:
+            os.chdir(self.root)
+            os.execve(self.argv[0], self.argv, self.build_env)
+        self.addCleanup(os.close, master)
+        output = b""
+        eb = self.eb_pid()
+        os.write(master, b"\x03")
+        deadline = time.monotonic() + 30
+        while True:
+            self.assertLess(time.monotonic(), deadline, output)
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status), output)
+        self.assertEqual(os.WTERMSIG(status), signal.SIGINT)
+        # The terminal sent it to the whole foreground group; eb-local passes
+        # on only what was sent to it alone.
+        self.assertEqual((self.root / "eb.signals").read_text(), "SIGINT")
+        self.assert_stopped_and_clean(eb)
+
+
+if __name__ == "__main__":
+    unittest.main()
