@@ -1,0 +1,1 @@
+`eb-local doctor` reports, one line each, what would stop a build or a module load: the site file, the prefix and its permissions, install variables and loader variables left in the shell, the allocation's node-local mount, EESSI and `MODULEPATH`, and rtrash. It exits 1 when a line says FAIL and changes nothing.

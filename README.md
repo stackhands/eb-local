@@ -183,6 +183,28 @@ Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/ee
 A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
 Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
 
+## What you have, and what is wrong
+
+Each CPU target has its own tree, so a module built on one node type is not there on another.
+`eb-local list` shows every module you installed, with a column per CPU target, and, with EESSI loaded, which of them this node's target lacks:
+
+```sh
+$ eval "$(eb-local env)"
+$ eb-local list
+/home/u/eessi: 2 module(s) for 2 CPU target(s)
+MODULE                   zen2  zen4*
+GSL/2.8-GCC-15.2.0       x     x
+pigz/2.8-GCCcore-15.2.0  x     -
+Not built for this node's target, x86_64/amd/zen4 (*): pigz/2.8-GCCcore-15.2.0.
+Build them in an allocation on this node type; each target needs its own build.
+```
+
+`eb-local list GSL` or `eb-local list GSL/2.8-GCC-15.2.0` narrows it.
+
+`eb-local doctor` checks, one line each, what would stop a build or a module load: the site file, the prefix and its permissions, install variables and `LD_LIBRARY_PATH` left in the shell, the allocation's node-local mount, whether EESSI is loaded and your modules are on `MODULEPATH`, and rtrash.
+Each line says `ok`, `info`, `warn` or `FAIL`; it exits 1 when one says `FAIL`, and changes nothing.
+Paste its output when asking for help.
+
 ## Clean up
 
 ```sh
