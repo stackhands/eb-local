@@ -931,10 +931,40 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
 
 // ---- running programs -----------------------------------------------------
 
+const Run = union(enum) {
+    exit: u8,
+    signal: linux.SIG,
+};
+
+/// An exit code as it is. A signal is raised again, with the disposition this
+/// process was started with: the default kills the process, so a shell and
+/// Slurm see the signal rather than exit 128+n and carry on, and an ignored
+/// signal (nohup) stays ignored.
+fn stop(run: Run) u8 {
+    switch (run) {
+        .exit => |c| return c,
+        .signal => |sig| {
+            var cur: linux.Sigaction = undefined;
+            _ = linux.sigaction(sig, null, &cur);
+            const ignored = cur.handler.handler == linux.SIG.IGN;
+            if (!ignored) {
+                const dfl: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.DFL }, .mask = linux.sigemptyset(), .flags = 0 };
+                _ = linux.sigaction(sig, &dfl, null);
+                var set = linux.sigemptyset();
+                linux.sigaddset(&set, sig);
+                _ = linux.sigprocmask(linux.SIG.UNBLOCK, &set, null);
+                _ = linux.kill(linux.getpid(), sig);
+            }
+            return @intCast(@min(255, 128 + @as(u32, @backingInt(sig))));
+        },
+    }
+}
+
 /// Run a program on this terminal and wait for it. An interrupt reaches the
 /// child (it shares the process group) while this process ignores it, so
-/// that it can still report and clean up.
-fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) u8 {
+/// that it can still report and clean up. The caller raises the signal again
+/// after that cleanup.
+fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
     const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch oom();
     for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch oom()).ptr;
     const ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
@@ -960,13 +990,13 @@ fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) u8 {
         switch (linux.errno(rc)) {
             .SUCCESS => break,
             .INTR => continue,
-            else => return 1,
+            else => return .{ .exit = 1 },
         }
     }
     const status: u32 = @bitCast(raw);
-    if (linux.W.IFEXITED(status)) return linux.W.EXITSTATUS(status);
-    if (linux.W.IFSIGNALED(status)) return @intCast(@min(255, 128 + @as(u32, @backingInt(linux.W.TERMSIG(status)))));
-    return 1;
+    if (linux.W.IFEXITED(status)) return .{ .exit = linux.W.EXITSTATUS(status) };
+    if (linux.W.IFSIGNALED(status)) return .{ .signal = linux.W.TERMSIG(status) };
+    return .{ .exit = 1 };
 }
 
 fn envpOf(a: Allocator, map: *const std.process.Environ.Map) proc.Envp {
@@ -1154,8 +1184,11 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
             var argv: std.ArrayList([]const u8) = .empty;
             argv.appendSlice(a, &.{ rtrash.?, "put", "--" }) catch oom();
             argv.appendSlice(a, targets) catch oom();
-            const rc = runAttached(a, argv.items, c.envp);
-            if (rc != 0) die("rtrash put exited {d}", .{rc});
+            const run = runAttached(a, argv.items, c.envp);
+            switch (run) {
+                .exit => |rc| if (rc != 0) die("rtrash put exited {d}", .{rc}),
+                .signal => return stop(run),
+            }
             say("eb-local: moved {d} file(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
         } else {
             for (targets) |t| sys.unlinkat(fsx.cwd, t, 0) catch |e| warn("cannot remove {s} ({s})", .{ t, @errorName(e) });
@@ -1325,7 +1358,11 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         s.stack_module.value, s.extend_module.value, if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix, if (p.project) "project" else "user",
     }) catch oom();
     argv.appendSlice(a, args) catch oom();
-    const rc = runAttached(a, argv.items, envpOf(a, &env));
+    const run = runAttached(a, argv.items, envpOf(a, &env));
+    const rc: u8 = switch (run) {
+        .exit => |code| code,
+        .signal => 1,
+    };
 
     if (values.len > 0) {
         var report: secrets.RedactReport = .{};
@@ -1351,7 +1388,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         say("eb-local: done. To use the modules in a new shell or job:", .{});
         say("  eval \"$(eb-local {s})\"", .{replay(a, "env", s, g, p.prefix, &.{})});
     }
-    return rc;
+    return stop(run);
 }
 
 // ---- uninstall ------------------------------------------------------------
@@ -1578,8 +1615,11 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
             var argv: std.ArrayList([]const u8) = .empty;
             argv.appendSlice(a, &.{ rtrash.?, "put", "-r", "--" }) catch oom();
             argv.appendSlice(a, list) catch oom();
-            const rc = runAttached(a, argv.items, c.envp);
-            if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc});
+            const run = runAttached(a, argv.items, c.envp);
+            switch (run) {
+                .exit => |rc| if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc}),
+                .signal => return stop(run),
+            }
         }
         say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (rtrash restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
     } else {
@@ -1788,6 +1828,48 @@ test "the replay line repeats the options that selected this environment" {
     const g: Global = .{ .config_file = "/etc/x.toml", .buildenv = "buildenv/lfoss" };
     try std.testing.expectEqualStrings("--config /etc/x.toml --profile gpu --project '/proj/my group' dev --buildenv buildenv/lfoss FFTW/1", replay(a, "dev", s, g, "/proj/my group", &.{"FFTW/1"}));
     try std.testing.expectEqualStrings("env", replay(a, "env", .{}, .{}, "/home/u/.local/eessi", &.{}));
+}
+
+test "a signal that killed the child kills this process, and an ignored one does not" {
+    const pid: isize = @bitCast(linux.fork());
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = stop(.{ .signal = .TERM });
+        linux.exit_group(42);
+    }
+    var raw: i32 = 0;
+    while (true) {
+        const wr = linux.wait4(@intCast(pid), &raw, 0, null);
+        switch (linux.errno(wr)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    const status: u32 = @bitCast(raw);
+    try std.testing.expect(linux.W.IFSIGNALED(status));
+    try std.testing.expectEqual(linux.SIG.TERM, linux.W.TERMSIG(status));
+
+    const pid2: isize = @bitCast(linux.fork());
+    if (pid2 < 0) return error.TestUnexpectedResult;
+    if (pid2 == 0) {
+        const ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+        _ = linux.sigaction(.HUP, &ign, null);
+        const code = stop(.{ .signal = .HUP });
+        linux.exit_group(code);
+    }
+    raw = 0;
+    while (true) {
+        const wr = linux.wait4(@intCast(pid2), &raw, 0, null);
+        switch (linux.errno(wr)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    const status2: u32 = @bitCast(raw);
+    try std.testing.expect(linux.W.IFEXITED(status2));
+    try std.testing.expectEqual(@as(u8, 129), linux.W.EXITSTATUS(status2));
 }
 
 test "shell quoting reads back as the same word" {

@@ -1,0 +1,1 @@
+A build stopped by a signal is cleaned up, including its logs, and eb-local then dies from that signal. A shell or Slurm sees the signal instead of exit 128+n and does not continue the job. An ignored signal, as with nohup, stays ignored.

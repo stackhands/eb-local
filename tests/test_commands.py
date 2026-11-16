@@ -6,6 +6,7 @@ test_storage; rtrash is a double that records what it was given.
 """
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 import unittest
@@ -67,6 +68,17 @@ class Commands(StorageFixture):
     def test_keep_work_keeps_a_successful_workspace(self):
         run = self.run_wrapper(EB_LOCAL_KEEP_WORK="1")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(len(self.workspaces()), 1)
+
+    @unittest.skipUnless(binary.BIN, "re-raising the child's signal is a feature of the Zig build")
+    def test_a_killed_build_is_that_signal_after_the_workspace_is_reported(self):
+        killer = self.root / "doubles-kill.sh"
+        killer.write_text((self.root / "doubles.sh").read_text() + "\neb() { kill -TERM $$; }\n")
+        argv, env = binary.command(self.script, ["recipe.eb"], dict(self.env, BASH_ENV=str(killer)))
+        run = subprocess.run(argv, env=env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(run.returncode, -signal.SIGTERM, run.stdout + run.stderr)
+        self.assertIn("build workspace kept", run.stderr)
+        self.assertEqual(run.stderr.count("build workspace kept"), 1)
         self.assertEqual(len(self.workspaces()), 1)
 
     # -- env and dev ---------------------------------------------------------
