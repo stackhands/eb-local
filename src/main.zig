@@ -483,10 +483,10 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, environmentLines(c, s, installed)) catch oom();
-    // The modules the program uses first, the build environment last: its
-    // compiler wrappers then come first on PATH and record a run path for
-    // the library directory of every loaded module, so the program runs
-    // without LD_LIBRARY_PATH.
+    // The modules the program uses first, the build environment last, so
+    // its wrappers come first on PATH. When the program links, they record
+    // a run path for each directory on LIBRARY_PATH, which the modules set
+    // in either order, so the program runs without LD_LIBRARY_PATH.
     if (mods.items.len > 0) {
         out.appendSlice(a, "module load") catch oom();
         for (mods.items) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
