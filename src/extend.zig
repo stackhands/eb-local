@@ -20,11 +20,9 @@ pub const Selection = struct {
     mode: Mode,
     /// Process umask, as octal digits: 077, 002 or 022.
     umask: []const u8,
-    /// `$HOME/EESSI` when no install variable was set. The caller frees it.
-    owned_value: ?[]const u8 = null,
 };
 
-pub const SelectError = error{ TooMany, NoHome } || Allocator.Error;
+pub const SelectError = error{TooMany};
 
 pub const too_many = "eb-local: set exactly one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL";
 
@@ -51,7 +49,11 @@ pub fn engaged(env: *const std.process.Environ.Map) bool {
     return v.len != 0 and !std.mem.eql(u8, v, "0");
 }
 
-pub fn select(a: Allocator, env: *const std.process.Environ.Map, home: ?[]const u8) SelectError!Selection {
+/// None of the four is a user install, and nothing is exported. On EESSI
+/// 2026.06 the module's help text says `$HOME/EESSI`, and the loaded module
+/// uses `$HOME/eessi` without requiring that directory to exist. Exporting
+/// the uppercase path would make the module demand a directory it does not use.
+pub fn select(env: *const std.process.Environ.Map) SelectError!Selection {
     var chosen: ?usize = null;
     for (names, 0..) |n, i| {
         if (env.get(n.name) != null) {
@@ -59,18 +61,13 @@ pub fn select(a: Allocator, env: *const std.process.Environ.Map, home: ?[]const 
             chosen = i;
         }
     }
-    if (chosen) |i| return .{ .mode = names[i].mode, .umask = names[i].umask };
-    const h = home orelse return error.NoHome;
-    if (h.len == 0) return error.NoHome;
-    const value = try std.fmt.allocPrint(a, "{s}/EESSI", .{h});
-    errdefer a.free(value);
-    return .{ .mode = .user, .umask = "077", .owned_value = value };
+    const i = chosen orelse return .{ .mode = .user, .umask = "077" };
+    return .{ .mode = names[i].mode, .umask = names[i].umask };
 }
 
-/// Put the default user prefix into `env` and drop the launcher switch, so
-/// a build that itself runs eb-local does not enter this mode again.
-pub fn apply(env: *std.process.Environ.Map, sel: Selection) Allocator.Error!void {
-    if (sel.owned_value) |v| try env.put("EESSI_USER_INSTALL", v);
+/// Drop the launcher switch, so a build that itself runs eb-local does not
+/// enter this mode again. Install variables are left as the caller set them.
+pub fn apply(env: *std.process.Environ.Map) void {
     _ = env.swapRemove("EB_LOCAL_EESSI_EXTEND");
 }
 
@@ -99,6 +96,10 @@ pub const script =
     \\# and for files eb creates outside that setting. No --umask is added,
     \\# so the module's value stands, and so do its hooks.
     \\umask "$umask_bits"
+    \\# A named user prefix must exist or the module refuses to load. With
+    \\# no install variable set, export nothing: the module uses $HOME/eessi
+    \\# and does not require that directory yet. An empty value is set, so
+    \\# it is not this default, and there is no path to create.
     \\if [[ $mode == user && -n ${EESSI_USER_INSTALL:-} ]]; then
     \\  mkdir -p -- "$EESSI_USER_INSTALL"
     \\fi
@@ -143,52 +144,47 @@ test "a present empty install variable is that mode" {
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
     try put(&env, "EESSI_SITE_INSTALL", "");
-    const site = try select(testing.allocator, &env, "/home/u");
+    const site = try select(&env);
     try testing.expectEqual(Mode.site, site.mode);
-    try testing.expect(site.owned_value == null);
     try testing.expectEqualStrings("022", site.umask);
 
     try put(&env, "EESSI_CVMFS_INSTALL", "");
-    try testing.expectError(error.TooMany, select(testing.allocator, &env, "/home/u"));
+    try testing.expectError(error.TooMany, select(&env));
     _ = env.swapRemove("EESSI_SITE_INSTALL");
-    const cvmfs = try select(testing.allocator, &env, "/home/u");
+    const cvmfs = try select(&env);
     try testing.expectEqual(Mode.cvmfs, cvmfs.mode);
     try testing.expectEqualStrings("022", cvmfs.umask);
 
     _ = env.swapRemove("EESSI_CVMFS_INSTALL");
     try put(&env, "EESSI_USER_INSTALL", "");
-    const user = try select(testing.allocator, &env, "/home/u");
+    const user = try select(&env);
     try testing.expectEqual(Mode.user, user.mode);
-    try testing.expect(user.owned_value == null);
     try testing.expectEqualStrings("077", user.umask);
 
     try put(&env, "EESSI_PROJECT_INSTALL", "/project");
-    try testing.expectError(error.TooMany, select(testing.allocator, &env, "/home/u"));
+    try testing.expectError(error.TooMany, select(&env));
 }
 
-test "no install variable defaults to a user prefix under HOME" {
+test "no install variable is a user install and exports nothing" {
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
-    const sel = try select(testing.allocator, &env, "/home/u");
-    defer if (sel.owned_value) |v| testing.allocator.free(v);
+    const sel = try select(&env);
     try testing.expectEqual(Mode.user, sel.mode);
-    try testing.expectEqualStrings("/home/u/EESSI", sel.owned_value.?);
     try testing.expectEqualStrings("077", sel.umask);
-    try testing.expectError(error.NoHome, select(testing.allocator, &env, null));
-    try testing.expectError(error.NoHome, select(testing.allocator, &env, ""));
+    apply(&env);
+    try testing.expect(env.get("EESSI_USER_INSTALL") == null);
 }
 
 test "a project prefix is group-writable and a named user prefix is private" {
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
     try put(&env, "EESSI_PROJECT_INSTALL", "/project/eessi");
-    const project = try select(testing.allocator, &env, "/home/u");
+    const project = try select(&env);
     try testing.expectEqual(Mode.project, project.mode);
     try testing.expectEqualStrings("002", project.umask);
-    try testing.expect(project.owned_value == null);
     _ = env.swapRemove("EESSI_PROJECT_INSTALL");
     try put(&env, "EESSI_USER_INSTALL", "/home/u/mine");
-    const user = try select(testing.allocator, &env, "/home/u");
+    const user = try select(&env);
     try testing.expectEqual(Mode.user, user.mode);
     try testing.expectEqualStrings("077", user.umask);
 }
@@ -287,21 +283,14 @@ const Run = struct {
 
     fn launch(self: *Run, eb_args: []const []const u8) !proc.Result {
         const a = self.arena.allocator();
-        const sel = select(a, &self.env, self.env.get("HOME")) catch |err| switch (err) {
+        const sel = select(&self.env) catch |err| switch (err) {
             error.TooMany => return .{
                 .term = .{ .exited = 3 },
                 .stdout = try a.dupe(u8, ""),
                 .stderr = try a.dupe(u8, too_many),
             },
-            error.NoHome => return .{
-                .term = .{ .exited = 2 },
-                .stdout = try a.dupe(u8, ""),
-                .stderr = try a.dupe(u8, "no HOME"),
-            },
-            else => return err,
         };
-        errdefer if (sel.owned_value) |v| a.free(v);
-        try apply(&self.env, sel);
+        apply(&self.env);
         const argv = try commandLine(a, sel, eb_args);
         const envp = try envBlock(a, &self.env);
         return proc.run(a, argv[0], argv, envp, .{
@@ -411,17 +400,20 @@ test "a named user prefix is created private" {
     try kept(out.stdout);
 }
 
-test "the default user prefix is HOME/EESSI" {
+test "with no install variable nothing is exported or created" {
     var r = try Run.init();
     defer r.deinit();
     try r.fake("2026.06", null);
     const out = try r.launch(&.{});
     try ok(out);
-    const prefix = try std.fs.path.join(r.arena.allocator(), &.{ r.root, "home/EESSI" });
-    const st = try fsx.statAt(fsx.cwd, prefix, false);
-    try testing.expect(st.isDir());
-    try testing.expectEqual(@as(u32, 0o700), st.perm());
-    try testing.expectEqualStrings(prefix, envVar(out.stdout, "EESSI_USER_INSTALL").?);
+    try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
+    try testing.expectEqualStrings("0077", firstLine(out.stdout));
+    // The module's help text says $HOME/EESSI. The loaded module uses
+    // $HOME/eessi, and does not need that directory at load time.
+    for ([_][]const u8{ "home/EESSI", "home/eessi" }) |rel| {
+        const path = try std.fs.path.join(r.arena.allocator(), &.{ r.root, rel });
+        try testing.expect(fsx.statAt(fsx.cwd, path, false) == error.NotFound);
+    }
 }
 
 test "a project prefix is not created" {

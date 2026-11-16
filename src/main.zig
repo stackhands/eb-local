@@ -30,7 +30,8 @@ const usage_text =
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
     \\                                       Exactly one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL, and a present
-    \\                                       empty value counts as set; otherwise $HOME/EESSI
+    \\                                       empty value counts as set; with none set, the
+    \\                                       module uses $HOME/eessi and nothing is exported
     \\  eb-local env                         lines that make your installed modules visible
     \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work
@@ -1844,18 +1845,15 @@ test {
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    const sel = extend.select(c.a, c.env, nonEmpty(c.env.get("HOME"))) catch |err| switch (err) {
+    const sel = extend.select(c.env) catch |err| switch (err) {
         error.TooMany => {
             cli.err("{s}\n", .{extend.too_many});
             return 3;
         },
-        error.NoHome => die("no install variable is set and HOME is unset, so there is no default user prefix", .{}),
-        error.OutOfMemory => oom(),
     };
-    defer if (sel.owned_value) |v| c.a.free(v);
     var env = c.env.clone(c.a) catch oom();
     defer env.deinit();
-    extend.apply(&env, sel) catch oom();
+    extend.apply(&env);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
     return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
 }

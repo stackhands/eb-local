@@ -129,7 +129,7 @@ The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to
 
 `eb-local eb` is the way to run EasyBuild where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced. It sources that init, loads `EESSI-extend`, and execs `eb`. The module keeps EESSI's hooks, RPATH and compat layer. Host Cargo and CMake wrappers are unset first, and the compat-layer linker is put on `PATH` even when `rustc` is not installed.
 
-Set exactly one install variable before it. A variable that is present and empty counts as set, which is how EESSI-extend reads them. With none set, the mode is a user install at `$HOME/EESSI`, and that directory is created.
+Set exactly one install variable before it. A variable that is present and empty counts as set, which is how EESSI-extend reads them. With none set, this command exports nothing and creates nothing. The loaded module then installs under `$HOME/eessi`. Its help text says `$HOME/EESSI`; on EESSI 2026.06 the module uses the lowercase directory, and does not require it to exist before the load.
 
 | variable | mode | prefix | process umask |
 |---|---|---|---|
@@ -141,7 +141,8 @@ Set exactly one install variable before it. A variable that is present and empty
 The module sets `EASYBUILD_UMASK` to the same end (and the sticky bit for a user prefix, the setgid bit for a project). This command does not pass `--umask`, so that value stands. An argument of eb's still overrides it: `--umask=022` is what a user-namespace build needs when Lmod, running as uid 0, skips a directory that others cannot search.
 
 ```sh
-export EESSI_USER_INSTALL=$HOME/EESSI
+eb-local eb -- example.eb --robot          # the module's default, $HOME/eessi
+export EESSI_USER_INSTALL=$HOME/eessi      # a named user prefix; it is created
 eb-local eb -- example.eb --robot
 ```
 
