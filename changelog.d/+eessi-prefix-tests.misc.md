@@ -1,0 +1,1 @@
+The `eb-local eb` tests check that no default prefix is made in `$HOME/eessi`, the directory EESSI-extend installs into, as well as in `$HOME/EESSI`, the one its help text names. Four of them looked only at `$HOME/EESSI`, and passed with a launcher that made `$HOME/eessi`.
