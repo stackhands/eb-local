@@ -193,7 +193,7 @@ When the site file lists them in `[build.targets]`, `eb-local submit` sends one 
 
 ```sh
 eb-local submit GSL-2.8-GCC-15.2.0.eb --robot             # every target
-eb-local submit --on genoa GSL-2.8-GCC-15.2.0.eb --robot  # only these
+eb-local submit --on gpu GSL-2.8-GCC-15.2.0.eb --robot    # only these
 eb-local submit --print GSL-2.8-GCC-15.2.0.eb               # show the jobs, submit nothing
 ```
 
@@ -204,7 +204,7 @@ The site file sets the targets, as sbatch options separated by spaces; only the 
 ```toml
 [build.targets]
 cpu = "-p cpu -n 16 -t 02:00:00"
-bigmem = "-p bigmem -n 16 -t 02:00:00"
+gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
 ```
 
 ## What you have, and what is wrong
