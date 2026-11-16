@@ -862,7 +862,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
     row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
     if (s.targets.value.len == 0) row("build.targets", "(none)", s.targets.from);
-    for (s.targets.value) |t| row(str(a, "build.targets.{s}", .{t.name}), t.sbatch, s.targets.from);
+    for (s.targets.value) |t| row(str(a, "build.targets.{s}", .{t.name}), t.sbatch, t.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);

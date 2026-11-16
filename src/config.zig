@@ -21,6 +21,8 @@ pub const Target = struct {
     name: []const u8,
     /// sbatch options, words separated by spaces.
     sbatch: []const u8,
+    /// The file and line that set this target.
+    from: []const u8 = "",
 };
 
 /// A target name: what --on names and a job name carries.
@@ -395,7 +397,7 @@ const Loader = struct {
                             const v = try l.string(src, g, "build.targets");
                             if (!validSbatchOptions(v))
                                 return l.fail("{s}:{d}: build.targets.{s}: sbatch options, separated by spaces, with no quotes, $, ; or other shell characters", .{ src.path, g.line, g.key });
-                            try list.append(l.a, .{ .name = g.key, .sbatch = v });
+                            try list.append(l.a, .{ .name = g.key, .sbatch = v, .from = try l.where(src, g.line, null) });
                         }
                         l.s.targets = .{ .value = list.items, .from = try l.where(src, f.line, null) };
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
@@ -1040,6 +1042,25 @@ test "the 1.x site file" {
     try std.testing.expectEqual(Trash.none, s.trash.value);
     try std.testing.expectEqualStrings("stack/mine", s.stack_module.value);
     try std.testing.expectError(error.Invalid, legacyToToml(a, "source_me = $(touch x)\n", &d));
+}
+
+test "each build target is where its own line is" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const site =
+        \\[build]
+        \\allocation_hint = "salloc -p cpu -n 16"
+        \\
+        \\[build.targets]
+        \\cpu = "-p cpu -n 16 -t 02:00:00"
+        \\gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
+    ;
+    const s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expectEqual(@as(usize, 2), s.targets.value.len);
+    try std.testing.expectEqualStrings("cpu", s.targets.value[0].name);
+    try std.testing.expectEqualStrings("site site.toml:5", s.targets.value[0].from);
+    try std.testing.expectEqualStrings("gpu", s.targets.value[1].name);
+    try std.testing.expectEqualStrings("site site.toml:6", s.targets.value[1].from);
 }
 
 test "build.targets" {
