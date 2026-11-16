@@ -400,8 +400,10 @@ A site's easyconfig installs the program and its site configuration.
 
 ```sh
 python3 -m unittest discover -s tests                    # the Bash script
-zig build unit && zig build -Dtest-ops=true test          # the Zig build: unit tests, then the same suite
+zig build unit && zig build test                          # the Zig build: unit tests, then the same suite
 ```
+
+`zig build test` runs the suite against a debug build with the test seams; with `-Dtest-ops=true`, as CI runs it, against the binary it builds.
 
 A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
 
