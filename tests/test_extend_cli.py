@@ -85,6 +85,18 @@ class ExtendCli(unittest.TestCase):
         self.assertEqual(run.stdout, "")
         self.assertIn("EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL", run.stderr)
 
+    def test_at_most_one_install_variable_and_none_is_the_modules_default(self):
+        help_text = self.run_tool(["--help"]).stdout
+        self.assertIn("At most one of EESSI_USER_INSTALL", help_text)
+        self.assertNotIn("Exactly one", help_text)
+        none = self.run_tool(["eb", "x.eb"])
+        self.assertEqual(none.returncode, 0, none.stderr)
+        self.assertIn("EESSI_USER_INSTALL=unset", none.stdout)
+        two = self.run_tool(["eb", "x.eb"], EESSI_USER_INSTALL="/x", EESSI_SITE_INSTALL="")
+        self.assertEqual(two.returncode, 3, two.stdout)
+        self.assertIn("set at most one of EESSI_USER_INSTALL", two.stderr)
+        self.assertIn("with none set, the module installs under $HOME/eessi", two.stderr)
+
     def test_explain_with_a_command_it_does_not_explain_is_refused(self):
         prefix = self.root / "prefix"
         logs = prefix / ".eb-local" / "logs"

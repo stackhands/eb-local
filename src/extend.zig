@@ -2,8 +2,8 @@
 //!
 //! EESSI-extend reads EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
 //! EESSI_SITE_INSTALL and EESSI_CVMFS_INSTALL when it loads, and treats a
-//! present empty value as set (`os.getenv(name) ~= nil`). This chooses
-//! exactly one of those, then a shell sources the EESSI init, loads the
+//! present empty value as set (`os.getenv(name) ~= nil`). This allows at
+//! most one of those, then a shell sources the EESSI init, loads the
 //! module and execs eb. The module sets the hooks, the RPATH and
 //! EASYBUILD_UMASK; nothing here replaces them.
 const std = @import("std");
@@ -24,7 +24,7 @@ pub const Selection = struct {
 
 pub const SelectError = error{TooMany};
 
-pub const too_many = "eb-local: set exactly one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL";
+pub const too_many = "eb-local: set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, the module installs under $HOME/eessi";
 
 const Name = struct {
     name: []const u8,

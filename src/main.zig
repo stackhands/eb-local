@@ -31,9 +31,9 @@ const usage_text =
     \\                                       the commands that build runs, as shell lines,
     \\                                       its checks as comments; creates and runs nothing
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
-    \\                                       Exactly one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
-    \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL, and a present
-    \\                                       empty value counts as set; with none set, the
+    \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
+    \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
+    \\                                       present empty value counts as set; with none set, the
     \\                                       module uses $HOME/eessi and nothing is exported
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
