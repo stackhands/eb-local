@@ -123,6 +123,17 @@ class Submit(StorageFixture):
         run = self.run_tool(["config"], SLURM_JOB_ID="")
         self.assertRegex(run.stdout, r"(?m)^build\.targets\s+\(none\)")
 
+    def test_config_gives_each_target_its_own_line(self):
+        run = self.run_tool(["config"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lines = self.site.read_text().splitlines()
+        rows = [l for l in run.stdout.splitlines() if l.startswith("build.targets.")]
+        self.assertEqual(len(rows), 2, run.stdout)
+        for row in rows:
+            name = row.split()[0][len("build.targets."):]
+            line = next(i for i, text in enumerate(lines, 1) if text.startswith(f"{name} = "))
+            self.assertTrue(row.endswith(f"[site {self.site}:{line}]"), row)
+
 
 if __name__ == "__main__":
     unittest.main()
