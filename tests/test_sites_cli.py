@@ -5,6 +5,7 @@ how nimvault is run, through the command line of the Zig build
 """
 import os
 from pathlib import Path
+import re
 import shlex
 import stat
 import subprocess
@@ -13,11 +14,28 @@ import unittest
 import binary
 from test_storage import StorageFixture
 
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "sites"
+PATHS = ["--set", "node_local_root=/local", "--set", "shared_scratch=/scratch"]
+
 VAULT_TOOL = r'''#!/bin/sh
 printf '%s\n' "$@" > "$CONTROL_ROOT/nimvault-args"
 [ "$1" = get ] || exit 64
 printf 'vault-value\n'
 '''
+
+
+def site_settings(text):
+    """Each `key = "value"` and `key = ["a", "b"]` line of a rendered site
+    file, by table.key, a list's values joined by spaces as config prints them."""
+    table, settings = "", {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            table = line.strip("[]")
+        elif line and not line.startswith("#"):
+            key, _, value = line.partition(" = ")
+            settings[f"{table}.{key}"] = " ".join(re.findall(r'"([^"]*)"', value))
+    return settings
 
 
 def exported(text):
@@ -48,20 +66,21 @@ class SitesCli(StorageFixture):
 
     # -- templates -------------------------------------------------------------
 
-    def test_list_names_each_template_and_its_placeholders(self):
+    def test_list_names_each_built_in_template_and_its_placeholders(self):
         run = self.run_tool(["site", "list"])
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertRegex(run.stdout, r"snellius\s+placeholders: partition")
+        self.assertEqual([line.split()[0] for line in run.stdout.splitlines()], ["slurm"])
         self.assertRegex(run.stdout, r"slurm\s+placeholders: node_local_root, node_local_fstype, shared_scratch, partition")
 
     def test_show_fills_defaults_and_set_values(self):
-        run = self.run_tool(["site", "show", "snellius"])
+        run = self.run_tool(["site", "show", "slurm"] + PATHS)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn('node_local_root = "/scratch-node"', run.stdout)
-        self.assertIn("salloc -p rome ", run.stdout)
+        self.assertIn('node_local_root = "/local"', run.stdout)
+        self.assertIn('node_local_fstype = "xfs"', run.stdout)
+        self.assertIn("salloc -p cpu ", run.stdout)
         self.assertNotIn("{{", run.stdout)
-        run = self.run_tool(["site", "show", "snellius", "--set", "partition=genoa"])
-        self.assertIn("salloc -p genoa ", run.stdout)
+        run = self.run_tool(["site", "show", "slurm", "--set", "partition=gpu"] + PATHS)
+        self.assertIn("salloc -p gpu ", run.stdout)
 
     def test_install_writes_a_site_file_the_program_then_reads(self):
         target = self.root / "etc" / "config.toml"
@@ -82,10 +101,10 @@ class SitesCli(StorageFixture):
             (["site", "install", "slurm", "--to", str(target)], "needs --set node_local_root=VALUE"),
             (["site", "install", "slurm", "--to", str(target), "--set", "node_local_root=relative",
               "--set", "shared_scratch=/s"], "node_local_root"),
-            (["site", "install", "snellius", "--to", str(target), "--set", 'partition=a"b'], "without quotes"),
-            (["site", "install", "snellius", "--to", str(target), "--set", "colour=blue"], "no placeholder colour"),
+            (["site", "install", "slurm", "--to", str(target), "--set", 'partition=a"b'] + PATHS, "without quotes"),
+            (["site", "install", "slurm", "--to", str(target), "--set", "colour=blue"] + PATHS, "no placeholder colour"),
             (["site", "install", "nowhere"], "no site template 'nowhere'"),
-            (["site", "frobnicate", "snellius"], "site takes list, show NAME or install NAME"),
+            (["site", "frobnicate", "slurm"], "site takes list, show NAME or install NAME"),
         ]
         for argv, needle in cases:
             with self.subTest(argv=argv):
@@ -97,20 +116,35 @@ class SitesCli(StorageFixture):
     def test_install_does_not_replace_unless_forced_and_never_through_a_link(self):
         target = self.root / "config.toml"
         target.write_text("# the site's own\n")
-        run = self.run_tool(["site", "install", "snellius", "--to", str(target)])
+        run = self.run_tool(["site", "install", "slurm", "--to", str(target)] + PATHS)
         self.assertEqual(run.returncode, 2)
         self.assertIn("--force replaces it", run.stderr)
         self.assertEqual(target.read_text(), "# the site's own\n")
-        run = self.run_tool(["site", "install", "snellius", "--to", str(target), "--force"])
+        run = self.run_tool(["site", "install", "slurm", "--to", str(target), "--force"] + PATHS)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("/scratch-node", target.read_text())
+        self.assertIn('node_local_root = "/local"', target.read_text())
         elsewhere = self.root / "elsewhere"
         elsewhere.write_text("untouched\n")
         link = self.root / "link.toml"
         link.symlink_to(elsewhere)
-        run = self.run_tool(["site", "install", "snellius", "--to", str(link), "--force"])
+        run = self.run_tool(["site", "install", "slurm", "--to", str(link), "--force"] + PATHS)
         self.assertNotEqual(run.returncode, 0)
         self.assertEqual(elsewhere.read_text(), "untouched\n")
+
+    def test_every_site_example_installs_the_settings_it_names(self):
+        examples = sorted(EXAMPLES.glob("*.toml"))
+        self.assertTrue(examples)
+        for example in examples:
+            with self.subTest(example=example.name):
+                target = self.root / example.name
+                run = self.run_tool(["site", "install", str(example), "--to", str(target)])
+                self.assertEqual(run.returncode, 0, run.stderr)
+                settings = site_settings(target.read_text())
+                self.assertIn("storage.node_local_root", settings)
+                shown = self.run_tool(["config", "--config", str(target)])
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                for key, value in settings.items():
+                    self.assertRegex(shown.stdout, rf"(?m)^{re.escape(key)}\s+{re.escape(value)}\s+\[site ")
 
     def test_a_template_file_renders_and_installs_as_a_built_in_one_does(self):
         template = self.root / "templates" / "site.toml"

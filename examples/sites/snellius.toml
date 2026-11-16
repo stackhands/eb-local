@@ -1,6 +1,9 @@
-# eb-local site file for Snellius (SURF).
-#   eb-local site install snellius [--set partition=genoa]
-# The allocation's node-local NVMe mount is /scratch-node/<user>.<job id>.
+# Site example: an eb-local site file template for Snellius (SURF). It is a
+# worked example of a site's own template, not a default, and is not built
+# into eb-local. From a checkout of eb-local:
+#   eb-local site install examples/sites/snellius.toml [--set partition=genoa]
+# The allocation's node-local NVMe mount is /scratch-node/<user>.<job id>,
+# on nodes allocated with --constraint=scratch-node.
 
 [storage]
 node_local_root = "/scratch-node"

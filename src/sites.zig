@@ -9,8 +9,8 @@ const Allocator = std.mem.Allocator;
 
 pub const Template = struct { name: []const u8, text: []const u8 };
 
+/// The built-in templates, for no particular site; a site keeps its own in a file.
 pub const all = [_]Template{
-    .{ .name = "snellius", .text = @embedFile("sites/snellius.toml") },
     .{ .name = "slurm", .text = @embedFile("sites/slurm.toml") },
 };
 
@@ -104,20 +104,20 @@ test "every template renders with its required placeholders set" {
     defer arena.deinit();
     const a = arena.allocator();
     var d: Diagnostic = .{};
-    const snel = try render(a, find("snellius").?, &.{}, &d);
-    try testing.expect(std.mem.indexOf(u8, snel, "salloc -p rome ") != null);
-    try testing.expect(std.mem.indexOf(u8, snel, "{{") == null);
-    const genoa = try render(a, find("snellius").?, &.{.{ .name = "partition", .value = "genoa" }}, &d);
-    try testing.expect(std.mem.indexOf(u8, genoa, "salloc -p genoa ") != null);
     try testing.expectError(error.Invalid, render(a, find("slurm").?, &.{}, &d));
     try testing.expect(std.mem.indexOf(u8, d.message, "--set node_local_root=VALUE") != null);
-    const slurm = try render(a, find("slurm").?, &.{
+    const paths = [_]Set{
         .{ .name = "node_local_root", .value = "/local" },
         .{ .name = "shared_scratch", .value = "/scratch" },
-    }, &d);
+    };
+    const slurm = try render(a, find("slurm").?, &paths, &d);
     try testing.expect(std.mem.indexOf(u8, slurm, "node_local_root = \"/local\"") != null);
     try testing.expect(std.mem.indexOf(u8, slurm, "node_local_fstype = \"xfs\"") != null);
-    try testing.expectError(error.Invalid, render(a, find("snellius").?, &.{.{ .name = "nope", .value = "x" }}, &d));
+    try testing.expect(std.mem.indexOf(u8, slurm, "salloc -p cpu ") != null);
+    try testing.expect(std.mem.indexOf(u8, slurm, "{{") == null);
+    const gpu = try render(a, find("slurm").?, &(paths ++ [_]Set{.{ .name = "partition", .value = "gpu" }}), &d);
+    try testing.expect(std.mem.indexOf(u8, gpu, "salloc -p gpu ") != null);
+    try testing.expectError(error.Invalid, render(a, find("slurm").?, &.{.{ .name = "nope", .value = "x" }}, &d));
 }
 
 test "a template from a file renders as a built-in one does" {
@@ -148,8 +148,8 @@ test "a value cannot leave its TOML string" {
     var d: Diagnostic = .{};
     for ([_][]const u8{ "p=a\"b", "p=a\\b", "p=a\nb", "p=", "P=x", "nop" }) |bad|
         try testing.expectError(error.Invalid, parseSet(arena.allocator(), bad, &d));
-    const s = try parseSet(arena.allocator(), "partition=genoa", &d);
-    try testing.expectEqualStrings("genoa", s.value);
+    const s = try parseSet(arena.allocator(), "partition=gpu", &d);
+    try testing.expectEqualStrings("gpu", s.value);
 }
 
 test "every rendered template loads as a site file" {

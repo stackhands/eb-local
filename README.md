@@ -247,16 +247,18 @@ EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
 
 ### Site files from a template
 
-eb-local carries site file templates: `snellius`, and `slurm` for any Slurm cluster whose jobs get a node-local disk.
+eb-local carries one site file template, `slurm`, for any Slurm cluster whose jobs get a node-local disk.
+A site can keep its own template in a file, named with a slash; `examples/sites/` holds worked examples of such files.
 
 ```sh
-eb-local site list                                  # templates and their placeholders
-eb-local site show snellius --set partition=genoa   # the file, rendered and checked
-eb-local site install slurm --set node_local_root=/local --set shared_scratch=/scratch
+eb-local site list                                  # the built-in templates and their placeholders
+eb-local site show slurm --set node_local_root=/local --set shared_scratch=/scratch   # rendered and checked
+eb-local site install ./site.toml --set partition=gpu   # a template file of the site's own
 ```
 
 `install` writes `config.toml` beside the program (or `--to FILE`), mode 644, only after the rendered file loads as a site file; it never replaces an existing file without `--force`, and never through a symbolic link.
 A `--set` value cannot hold a quote, a backslash or a control character.
+A template file is read only when it is a regular file, not a symbolic link, not writable by group or others.
 
 ### The configuration as variables
 
@@ -318,7 +320,7 @@ eb-local --version
 ```
 
 `env` and `dev` work once `~/.local/bin` is on `PATH`.
-Building with EasyBuild also needs a site file beside the program: `eb-local site install snellius`, or the `slurm` template with your cluster's paths.
+Building with EasyBuild also needs a site file beside the program: `eb-local site install slurm` with your cluster's paths, or the site's own template file.
 To build from source: `zig build --release=safe` with Zig 0.17.1.
 
 Each release binary has a build provenance attestation and, from 2.4.0, a CycloneDX SBOM (`$f.cdx.json` beside it) with its own attestation.
