@@ -267,6 +267,21 @@ class Uninstall(StorageFixture):
             self.assertEqual(self.run_tool(args, **env).returncode, 2, args)
         self.assertFalse(any(p.exists() for p in self.installs + self.modules))
 
+    def test_restore_brings_back_a_class_link_after_its_module_file(self):
+        # EasyBuild links modules/<class>/NAME/VERSION.lua to the module
+        # file; in the trash with it, the link comes back after the file.
+        env = self.trash()
+        link = self.modules[0].parent.parent.parent / "tools" / "pigz" / self.modules[0].name
+        link.parent.mkdir(parents=True)
+        link.symlink_to(self.modules[0])
+        subprocess.run([str(self.bin / "rtrash"), "put", "--", str(link)], env=env, check=True)
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"], **env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        run = self.run_tool(["restore", "pigz/2.8-GCCcore-15.2.0"], **env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(os.readlink(link), str(self.modules[0]))
+        self.assertLess(run.stdout.index(f"restored '{self.modules[0]}'"), run.stdout.index(f"restored '{link}'"))
+
     def test_restore_leaves_a_choice_between_two_copies_to_rtrash(self):
         env = self.trash()
         for _ in range(2):
