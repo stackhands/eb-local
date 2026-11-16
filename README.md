@@ -54,7 +54,7 @@ A job script finds the build for the node it lands on by loading EESSI first:
 
 ```sh
 eval "$(eb-local env)"
-"$HOME/.local/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
+"$HOME/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
 ```
 
 ### Other compilers
@@ -170,10 +170,13 @@ The lines are what you would type to use EESSI-extend by hand: clear the install
 
 | what | where |
 |---|---|
-| installs | `$HOME/.local/eessi`, the `prefix` setting, or `--project DIR` |
+| installs | `$HOME/eessi`, the `prefix` setting, or `--project DIR` |
 | build, temporary, cache and EESSI setup directories | a unique workspace in the allocation's node-local mount |
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
+
+The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree.
+Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/eessi` does not, eb-local keeps using it and says so. Set `prefix` to choose either for good.
 
 A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
 Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.

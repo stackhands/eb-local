@@ -35,7 +35,9 @@ pub const EessiVar = struct {
 
 pub const Settings = struct {
     profile: ?[]const u8 = null,
-    prefix: Setting([]const u8) = .{ .value = "~/.local/eessi" },
+    /// EESSI-extend's own default, so `eb-local eb` and EESSI-extend loaded
+    /// by hand install into the same tree.
+    prefix: Setting([]const u8) = .{ .value = "~/eessi" },
     project: Setting(?[]const u8) = .{ .value = null },
     stack_module: Setting([]const u8) = .{ .value = "EESSI/2026.06" },
     extend_module: Setting([]const u8) = .{ .value = "EESSI-extend/2026.06-easybuild" },
@@ -821,7 +823,7 @@ test "an empty variable empties a setting that may be empty and is ignored by on
     try std.testing.expectEqualStrings("environment EB_LOCAL_BUILD_ALLOCATION_HINT", s.allocation_hint.from);
     try std.testing.expectEqualStrings("", s.nimvault_program.value);
     try std.testing.expectEqualStrings("", s.nimvault_vault.value);
-    try std.testing.expectEqualStrings("~/.local/eessi", s.prefix.value);
+    try std.testing.expectEqualStrings("~/eessi", s.prefix.value);
     try std.testing.expectEqualStrings("EESSI/2026.06", s.stack_module.value);
     try std.testing.expectEqual(Trash.auto, s.trash.value);
 }

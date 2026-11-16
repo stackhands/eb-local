@@ -169,6 +169,30 @@ class Commands(StorageFixture):
         self.assertEqual(run.stdout.rstrip().splitlines()[-1], "eb recipe.eb")
         self.assertEqual(list(self.job.iterdir()), [])
 
+    @unittest.skipUnless(binary.BIN, "the shared default prefix is a feature of the Zig build")
+    def test_the_default_prefix_is_eessi_extends_and_an_older_tree_stays_in_use(self):
+        home = self.root / "home"
+        home.mkdir()
+        self.env = dict(self.env, HOME=str(home), XDG_CONFIG_HOME=str(self.root / "xdg"), SLURM_JOB_ID="")
+        self.env.pop("EB_LOCAL_PREFIX")
+
+        def chosen():
+            run = self.run_wrapper(["env"])
+            self.assertEqual(run.returncode, 0, run.stderr)
+            return [l for l in run.stdout.splitlines() if l.startswith("export EESSI_USER_INSTALL=")], run.stderr
+
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/eessi"])
+        self.assertNotIn("before eb-local 3.0", err)
+        (home / ".local" / "eessi").mkdir(parents=True)
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/.local/eessi"])
+        self.assertIn("before eb-local 3.0", err)
+        (home / "eessi").mkdir()
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/eessi"])
+        self.assertNotIn("before eb-local 3.0", err)
+
     def test_dev_refuses_a_module_name_that_is_not_one(self):
         for name in ("GSL; touch injected", "$(touch injected)", "../x", "a b", "-x", "GSL/`id`"):
             with self.subTest(name=name):

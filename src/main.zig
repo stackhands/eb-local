@@ -62,7 +62,7 @@ const usage_text =
     \\  eb-local help | --version
     \\
     \\Every command takes --profile NAME, --project DIR (a shared project directory
-    \\instead of $HOME/.local/eessi) and --config FILE. Use env and dev with eval:
+    \\instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -423,8 +423,28 @@ fn locate(c: Ctx, s: config.Settings) Place {
     if (std.mem.startsWith(u8, raw, "~/") or std.mem.eql(u8, raw, "~")) {
         const home = nonEmpty(c.env.get("HOME")) orelse die("prefix {s} needs HOME", .{raw});
         raw = std.mem.concat(c.a, u8, &.{ home, raw[1..] }) catch oom();
+        if (std.mem.eql(u8, s.prefix.from, "default")) {
+            if (legacyPrefix(c, home, raw)) |old| return .{ .prefix = old, .project = false };
+        }
     }
     return .{ .prefix = storage.canonical(c.a, raw, c.cwd) catch oom(), .project = false };
+}
+
+/// eb-local 2.x installed into ~/.local/eessi by default. Where
+/// that tree exists and the new default does not, it stays in use, so
+/// installed modules do not disappear; set `prefix` to choose for good.
+fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u8 {
+    const isDir = struct {
+        fn f(path: []const u8) bool {
+            return if (fsx.statAt(fsx.cwd, path, true)) |st| st.isDir() else |_| false;
+        }
+    }.f;
+    if (isDir(default_prefix)) return null;
+    const old = std.fs.path.join(c.a, &.{ home, ".local", "eessi" }) catch oom();
+    if (!isDir(old)) return null;
+    warn("using {s}, the default before eb-local 3.0; EESSI-extend and `eb-local eb` use {s}.", .{ old, default_prefix });
+    cli.err("  Keep it with prefix = \"~/.local/eessi\" in ~/.config/eb-local/config.toml, or move it to {s}.\n", .{default_prefix});
+    return storage.canonical(c.a, old, c.cwd) catch oom();
 }
 
 // ---- env, dev, config, profiles -------------------------------------------
