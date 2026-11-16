@@ -1,0 +1,1 @@
+`eb-local submit` is deprecated and is removed in 4.0.0; it says so when it runs, and otherwise works as before. `eb-local --explain RECIPE` prints the `sbatch` line for each node type the site lists; `[build.node_types]` stays.

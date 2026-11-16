@@ -197,7 +197,27 @@ Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link ali
 ## Build for every node type
 
 A module is built for the CPU target of the node that built it, so a site with several node types needs one build on each.
-When the site file lists them in `[build.node_types]`, `eb-local submit` sends one batch job to each, every job running this eb-local with the same recipe, options and configuration:
+The site file lists them in `[build.node_types]`, each as the sbatch options that place a job there; only the site file may:
+
+```toml
+[build.node_types]
+cpu = "-p cpu -n 16 -t 02:00:00"
+gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
+```
+
+`eb-local --explain`, and a build started outside a job, then print an `sbatch` line for each, which runs the same build as a batch job on that node type:
+
+```console
+$ eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
+# On each node type the site file lists in [build.node_types], the same build as a batch job:
+#   sbatch -p cpu -n 16 -t 02:00:00 --job-name=eb-local-cpu-GSL-2.8-GCC-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
+#   sbatch -p gpu -n 16 -t 02:00:00 --gpus=1 --job-name=eb-local-gpu-GSL-2.8-GCC-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
+```
+
+Only those lines of the explanation are shown here. Each job runs this eb-local with the same recipe, options and configuration, in the directory `--explain` ran in, and writes its output there; `eb-local list` then shows the module on each CPU target.
+Before eb-local 3.2 the table was `[build.targets]`; eb-local reads that name, and warns, until 4.0.0.
+
+`eb-local submit` sends those jobs itself. It is deprecated, and is removed in 4.0.0:
 
 ```sh
 eb-local submit GSL-2.8-GCC-15.2.0.eb --robot             # every node type
@@ -206,15 +226,7 @@ eb-local submit --print GSL-2.8-GCC-15.2.0.eb               # show the jobs, sub
 ```
 
 `--on` and `--print` come before the recipe; options after it are eb's.
-The batch scripts go to `<install-prefix>/.eb-local/jobs`, each job's output to `<install-prefix>/.eb-local/logs/submit-NODETYPE-JOBID.out`, and `eb-local list` then shows the module on each CPU target.
-The site file sets the node types, as sbatch options separated by spaces; only the site file may.
-Before eb-local 3.2 the table was `[build.targets]`; eb-local reads that name, and warns, until 4.0.0.
-
-```toml
-[build.node_types]
-cpu = "-p cpu -n 16 -t 02:00:00"
-gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
-```
+The batch scripts go to `<install-prefix>/.eb-local/jobs`, and each job's output to `<install-prefix>/.eb-local/logs/submit-NODETYPE-JOBID.out`.
 
 ## What you have, and what is wrong
 

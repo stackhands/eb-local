@@ -5,6 +5,7 @@ submit writes one batch script per node type the site file lists in
 build.node_types and hands each to sbatch, here a double that records its
 arguments.
 """
+import json
 import os
 from pathlib import Path
 import re
@@ -93,10 +94,13 @@ class Submit(StorageFixture):
         # --dry-run after the recipe is eb's, not submit's.
         self.assertIn("recipe.eb --dry-run", run.stdout)
 
-    def test_the_readme_commands_run_against_the_readme_node_types(self):
+    def readme_section(self):
         text = README.read_text()
         start = text.index("\n## Build for every node type\n")
-        section = text[start:text.index("\n## ", start + 1)]
+        return text[start:text.index("\n## ", start + 1)]
+
+    def test_the_readme_commands_run_against_the_readme_node_types(self):
+        section = self.readme_section()
         site = re.search(r"```toml\n(.*?)```", section, re.S).group(1)
         self.assertTrue(site.startswith("[build.node_types]\n"), site)
         self.write_site(site)
@@ -110,6 +114,54 @@ class Submit(StorageFixture):
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(len(self.calls()), 3, self.calls())
         self.assertTrue(self.calls()[2].startswith("-p gpu "), self.calls())
+
+    def test_the_readme_shows_the_lines_explain_prints(self):
+        section = self.readme_section()
+        self.write_site(re.search(r"```toml\n(.*?)```", section, re.S).group(1))
+        shown = re.search(r"```console\n\$ (.*?)\n(.*?)```", section, re.S)
+        run = self.run_tool(shlex.split(shown.group(1))[1:], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        printed = (run.stdout.replace(str(Path(binary.BIN).resolve()), "/usr/local/bin/eb-local")
+                   .replace(f"--chdir={self.root} ", "--chdir=/home/alice "))
+        for line in shown.group(2).splitlines():
+            self.assertIn(line + "\n", printed)
+
+    def batch_lines(self, text, indent):
+        return [shlex.split(l[len(indent):]) for l in text.splitlines() if l.startswith(indent + "sbatch ")]
+
+    def test_explain_and_the_refusal_outside_a_job_print_an_sbatch_line_per_node_type(self):
+        explained = self.run_tool(["--explain", "my recipe.eb", "--robot"], SLURM_JOB_ID="")
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        lines = self.batch_lines(explained.stdout, "#   ")
+        self.assertEqual([l[:3] for l in lines], [["sbatch", "-p", "rome"], ["sbatch", "-p", "genoa"]])
+        self.assertIn("--job-name=eb-local-rome-my_recipe.eb", lines[0])
+        self.assertIn(f"--chdir={self.root}", lines[0])
+        self.assertIn("--output=%x-%j.out", lines[0])
+        refused = self.run_tool(["my recipe.eb", "--robot"], SLURM_JOB_ID="")
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertEqual(self.batch_lines(refused.stderr, "  "), lines)
+        # Each job runs what submit's job for that node type runs.
+        run = self.run_tool(["submit", "my recipe.eb", "--robot"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        script = next((self.prefix / ".eb-local" / "jobs").glob("*-rome-*"))
+        wrap = next(w for w in lines[0] if w.startswith("--wrap="))[len("--wrap="):]
+        self.assertEqual(wrap, script.read_text().rstrip().splitlines()[-1])
+
+    def test_the_printed_job_builds_in_its_allocation(self):
+        explained = self.run_tool(["--explain", "my recipe.eb", "--robot"], SLURM_JOB_ID="")
+        line = self.batch_lines(explained.stdout, "#   ")[1]
+        wrap = next(w for w in line if w.startswith("--wrap="))[len("--wrap="):]
+        _, env = binary.command(self.script, [], dict(self.env))
+        job = subprocess.run(["sh", "-c", wrap], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(job.returncode, 0, job.stdout + job.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["argv"], ["my recipe.eb", "--robot"])
+
+    def test_submit_says_it_is_deprecated_and_still_submits(self):
+        run = self.run_tool(["submit", "recipe.eb"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("eb-local: submit is deprecated and is removed in 4.0.0; eb-local --explain RECIPE"
+                      " prints an sbatch line for each node type\n", run.stderr)
+        self.assertEqual(len(self.calls()), 2)
 
     def test_without_node_types_there_is_nothing_to_submit(self):
         self.write_site("")
