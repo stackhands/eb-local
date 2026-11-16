@@ -3,6 +3,8 @@
 
 The module and eb doubles verify wrapper routing and argument preservation.
 They do not establish the destination chosen by a native EESSI extension.
+The module double refuses, as Lmod 9.4.5 does, a load that names
+EESSI-extend while EESSI is not loaded yet.
 """
 import json
 import os
@@ -31,6 +33,7 @@ module() {
     fi
     if [ "$1" = load ]; then
         python3 "$CONTROL_ROOT/capture.py" load "$@" || return
+        export CONTROL_LOADED="${CONTROL_LOADED-} ${*:2}"
         export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4
         export EESSI_ACCELERATOR_TARGET=
         export EASYBUILD_HOOKS=/selected/eessi/eb_hooks.py
@@ -79,9 +82,19 @@ if kind == "load":
     if values != expected:
         print("unexpected load environment: " + repr(values), file=sys.stderr)
         sys.exit(96)
-    if sys.argv[2:] != ["load", "EESSI/2026.06", "EESSI-extend/2026.06-easybuild"]:
+    names = sys.argv[3:]
+    # EESSI-extend is on MODULEPATH only once EESSI is loaded, and Lmod finds
+    # every module of a load before it loads any: naming both in one call
+    # fails and loads neither.
+    if "EESSI-extend/2026.06-easybuild" in names and "EESSI/2026.06" not in os.environ.get("CONTROL_LOADED", "").split():
+        print('Lmod has detected the following error: These module(s) or extension(s) exist '
+              'but cannot be loaded as requested: "EESSI-extend/2026.06-easybuild"', file=sys.stderr)
+        sys.exit(1)
+    if names not in (["EESSI/2026.06"], ["EESSI-extend/2026.06-easybuild"]):
         sys.exit(97)
-    (root / "load.json").write_text(json.dumps({"env": values, "argv": sys.argv[2:]}))
+    record = root / "load.json"
+    calls = json.loads(record.read_text())["calls"] if record.exists() else []
+    record.write_text(json.dumps({"env": values, "calls": calls + [names]}))
 else:
     if os.environ.get("EASYBUILD_HOOKS") != "/selected/eessi/eb_hooks.py":
         sys.exit(98)
@@ -141,8 +154,12 @@ class EnvironmentControls(unittest.TestCase):
         else:
             self.assertEqual(built["argv"], ["--umask=022"] + arguments)
             self.assertEqual(built["umask"], 0o077)
-        self.assertEqual(json.loads((self.root / "load.json").read_text())["env"],
-                         {mode: str(self.prefix)})
+        self.check_loads(mode)
+
+    def check_loads(self, mode):
+        loaded = json.loads((self.root / "load.json").read_text())
+        self.assertEqual(loaded["calls"], [["EESSI/2026.06"], ["EESSI-extend/2026.06-easybuild"]])
+        self.assertEqual(loaded["env"], {mode: str(self.prefix)})
 
     def test_user_mode_clears_inherited_and_unload_restored_values(self):
         self.check_build("EESSI_USER_INSTALL")
@@ -164,8 +181,7 @@ class EnvironmentControls(unittest.TestCase):
         replay = subprocess.run(["bash", "-c", 'source "$1"', "environment", str(env_script)],
                                 env=dict(self.env, CONTROL_MODE=mode), cwd=self.root, text=True, capture_output=True)
         self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
-        self.assertEqual(json.loads((self.root / "load.json").read_text())["env"],
-                         {mode: str(self.prefix)})
+        self.check_loads(mode)
         self.assertFalse((self.root / "injected").exists())
 
     def test_user_env_is_shell_safe_and_selects_only_user_mode(self):
