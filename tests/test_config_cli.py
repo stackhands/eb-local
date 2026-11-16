@@ -94,8 +94,8 @@ class ConfigCli(StorageFixture):
             handle.write(EB)
 
     def run_tool(self, args, **extra):
-        # The site file is named with --config, which (as in 1.x) replaces the
-        # user file; the user file alone is found through HOME.
+        # The site file is named with --config; the user file is found
+        # through HOME.
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
         return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
 
@@ -190,10 +190,10 @@ class ConfigCli(StorageFixture):
         # The storage settings come from the site layer: name it explicitly.
         self.site.write_text(SITE.format(nodes=self.nodes))
         argv, env = binary.command(self.script, ["--config", str(self.site), "--profile", "gpu", "recipe.eb"], dict(self.env))
-        # --config replaces the user file, so give the secrets in the site file.
+        # SOURCE_TOKEN and OTHER_TOKEN come from the user file, LM_LICENSE_FILE
+        # from the site file.
         with open(self.site, "a") as handle:
-            handle.write(f'[secrets]\nSOURCE_TOKEN = "file:{self.token}"\nOTHER_TOKEN = "env:MY_OTHER"\n'
-                         'LM_LICENSE_FILE = "nimvault:licences/flexlm"\n')
+            handle.write('[secrets]\nLM_LICENSE_FILE = "nimvault:licences/flexlm"\n')
         run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn('eval "$(eb-local --config ', run.stdout)
