@@ -203,6 +203,12 @@ The script does what you would type to use EESSI-extend by hand: clear the insta
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
 
+A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
+Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created, and so is an install prefix on shared scratch or node-local storage.
+A refusal says what it refused and why, and what the command then did not do; its next line says what to change: a setting, with its value and where it was set as `eb-local config` shows it, or the variable, option or command to use.
+`eb-local doctor` says the same on one line.
+[Refusals](docs/reference/refusals.md) lists each one.
+
 The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree, with the same permissions.
 That is why the default is not `$HOME/.local/eessi`: EESSI-extend, loaded with no install variable set, installs under `$HOME/eessi`, so any other default would split one user's modules into two trees, of which `eb-local env` shows one.
 Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/eessi` does not, eb-local keeps using it and says so. Set `prefix` to choose either for good.
@@ -255,9 +261,6 @@ prefix = "~/.local/eessi"
 ```
 
 `eb-local doctor` then says that `EESSI_USER_INSTALL` names your prefix.
-
-A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
-Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
 
 ## Build for every node type
 

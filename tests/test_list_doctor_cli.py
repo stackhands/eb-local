@@ -178,6 +178,23 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI"
                       " detects\n", run.stdout)
 
+    def test_doctor_says_what_is_wrong_with_the_node_local_mount_and_what_to_change(self):
+        run = self.run_tool(["doctor"], CONTROL_FSTYPE="tmpfs")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"FAIL Slurm job 123: the node-local mount {self.job} is on tmpfs, not xfs; builds refuse it. "
+                      "A build's workspace must be on node-local disk, not shared or memory-backed storage; "
+                      f"storage.node_local_fstype, xfs [site {self.config}:3], names the nodes' file system", run.stdout)
+
+    def test_doctor_names_where_a_refused_prefix_and_its_storage_were_set(self):
+        shared = self.root / "shared" / "install"
+        run = self.run_tool(["doctor"], EB_LOCAL_PREFIX=str(shared))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"FAIL the install prefix {shared} [environment EB_LOCAL_PREFIX] is under {shared.parent}, shared "
+                      f"scratch in storage.shared_scratch [site {self.config}:4]; builds refuse it. Installs, sources and "
+                      "logs must outlive the job and not be on shared scratch; set a prefix on durable storage you own "
+                      "with prefix in your eb-local configuration, EB_LOCAL_PREFIX, or --project DIR for a project\n",
+                      run.stdout)
+
     def test_doctor_fails_on_a_project_directory_others_can_write(self):
         project = self.root / "durable" / "project"
         project.mkdir(parents=True)

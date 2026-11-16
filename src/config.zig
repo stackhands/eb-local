@@ -691,14 +691,18 @@ pub fn load(
 }
 
 /// The 1.x site file: `key = value` lines, parsed, never sourced. Kept so a
-/// site's existing eb-local.conf keeps working.
+/// site's existing eb-local.conf keeps working. Each setting becomes a
+/// dotted TOML key on the line it is on, so that `eb-local config` and the
+/// errors name that line.
 pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]const u8 {
     const tables = [_][]const u8{ "storage", "stack", "build", "dev", "clean" };
-    var bufs: [tables.len]std.ArrayList(u8) = @splat(.empty);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var n: usize = 0;
     while (lines.next()) |raw| {
         n += 1;
+        if (n > 1) try out.append(a, '\n');
         const no_comment = if (std.mem.indexOfScalar(u8, raw, '#')) |i| raw[0..i] else raw;
         const line = std.mem.trim(u8, no_comment, " \t\r");
         if (line.len == 0) continue;
@@ -727,30 +731,23 @@ pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]c
             diag.message = try std.fmt.allocPrint(a, "line {d}: unknown setting '{s}'", .{ n, key });
             return error.Invalid;
         };
-        const buf = &bufs[m.t];
-        try buf.appendSlice(a, m.name);
-        try buf.appendSlice(a, " = ");
+        try out.print(a, "{s}.{s} = ", .{ tables[m.t], m.name });
         if (m.list) {
-            try buf.append(a, '[');
+            try out.append(a, '[');
             var it = std.mem.tokenizeAny(u8, value, " \t");
             var first = true;
             while (it.next()) |p| {
-                if (!first) try buf.appendSlice(a, ", ");
+                if (!first) try out.appendSlice(a, ", ");
                 first = false;
-                try appendQuoted(a, buf, p);
+                try appendQuoted(a, &out, p);
             }
-            try buf.append(a, ']');
+            try out.append(a, ']');
         } else {
-            try appendQuoted(a, buf, value);
+            try appendQuoted(a, &out, value);
         }
-        try buf.append(a, '\n');
     }
-    var out: std.ArrayList(u8) = .empty;
-    for (tables, &bufs) |name, *buf| if (buf.items.len > 0) {
-        try out.appendSlice(a, try std.fmt.allocPrint(a, "[{s}]\n", .{name}));
-        try out.appendSlice(a, buf.items);
-    };
-    return out.items;
+    try out.append(a, '\n');
+    return out.toOwnedSlice(a);
 }
 
 fn appendQuoted(a: Allocator, buf: *std.ArrayList(u8), v: []const u8) Allocator.Error!void {
@@ -1053,6 +1050,22 @@ test "the 1.x site file" {
     try std.testing.expectEqual(Trash.none, s.trash.value);
     try std.testing.expectEqualStrings("stack/mine", s.stack_module.value);
     try std.testing.expectError(error.Invalid, legacyToToml(a, "source_me = $(touch x)\n", &d));
+
+    // Each setting is where its own line is, whatever its table and order.
+    try std.testing.expectEqualStrings("site eb-local.conf:2", s.node_local_root.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:6", s.allocation_hint.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:9", s.trash.from);
+    const reordered = try legacyToToml(a,
+        \\allocation_hint = salloc -n 16
+        \\
+        \\# the node-local disk
+        \\node_local_root = /local   # each job's mount is below it
+        \\node_local_mount = job-%j
+    , &d);
+    const r = try t.load(&.{.{ .path = "eb-local.conf", .text = reordered, .layer = .site }}, .{});
+    try std.testing.expectEqualStrings("site eb-local.conf:1", r.allocation_hint.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:4", r.node_local_root.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:5", r.node_local_mount.from);
 }
 
 test "each node type is where its own line is" {

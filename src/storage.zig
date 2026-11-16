@@ -8,14 +8,24 @@ const sys = common.sys;
 const fsx = common.fsx;
 const Allocator = std.mem.Allocator;
 
+/// Why a path was refused: in `message`, what was refused and why, as one
+/// clause; in `fix`, what changes that, naming the setting, variable or
+/// command, and for a setting its value and where it was set.
 pub const Refusal = struct {
     message: []const u8 = "",
+    fix: []const u8 = "",
 };
 
 pub const Error = error{Refused} || Allocator.Error;
 
-fn refuse(a: Allocator, r: *Refusal, comptime fmt: []const u8, args: anytype) Error {
-    r.message = try std.fmt.allocPrint(a, fmt, args);
+fn refuse(a: Allocator, r: *Refusal, comptime what: []const u8, what_args: anytype, comptime fix: []const u8, fix_args: anytype) Error {
+    const message = try std.fmt.allocPrint(a, what, what_args);
+    // Not errdefer: every return is an error, and r keeps the message.
+    const fixed = std.fmt.allocPrint(a, fix, fix_args) catch |e| {
+        a.free(message);
+        return e;
+    };
+    r.* = .{ .message = message, .fix = fixed };
     return error.Refused;
 }
 
@@ -197,6 +207,40 @@ pub const JobRoot = struct {
 /// the job id.
 pub const default_mount = "%u.%j";
 
+/// The site file's node-local settings, each with where it was set, as
+/// `eb-local config` shows it.
+pub const NodeLocal = struct {
+    root: []const u8,
+    root_from: []const u8 = "default",
+    mount: []const u8 = default_mount,
+    mount_from: []const u8 = "default",
+    fstype: []const u8 = "xfs",
+    fstype_from: []const u8 = "default",
+};
+
+// What changes a refusal of the job's mount, for Refusal.fix.
+const where_fix = "storage.node_local_root, {s} [{s}], and storage.node_local_mount, {s} [{s}], name it; " ++
+    "build in an allocation that has a node-local disk, or set them in the site file to where Slurm mounts your job's node-local disk";
+const job_fix = "eb-local finds the job's node-local mount by it; run eb-local inside the allocation, " ++
+    "from salloc, srun or sbatch, and leave SLURM_JOB_ID as Slurm sets it";
+const user_fix = "eb-local puts your user name, as id -un prints it, for %u in storage.node_local_mount, {s} [{s}]; " ++
+    "run eb-local as a user that has one";
+const pattern_fix = "Set it in the site file to one file name of letters, digits, '.', '_', '-', " ++
+    "%u (the user) and %j (the job id), with %j in it";
+const link_fix = "A link could lead a build onto another job's or shared storage, so none is followed; ";
+const owner_fix = "storage.node_local_mount, {s} [{s}], names your job's own mount below storage.node_local_root, {s} [{s}], " ++
+    "with %u for your user name and %j for the job id; set them in the site file to where Slurm mounts your job's node-local disk";
+const mountinfo_fix = "eb-local reads the mount table to check that the job's mount is node-local; run it where /proc is mounted";
+const fstype_fix = "A build's workspace must be on node-local disk, not shared or memory-backed storage; " ++
+    "storage.node_local_fstype, {s} [{s}], names the nodes' file system: set it in the site file if their disks use another, " ++
+    "or build in an allocation that has a node-local disk";
+const own_mount_fix = "Each job's workspace must be a mount made for the job, which goes with it; " ++ where_fix;
+const rw_fix = "A build writes its workspace there; build in an allocation whose node-local disk is writable, and tell the site";
+
+fn whereArgs(nl: NodeLocal) struct { []const u8, []const u8, []const u8, []const u8 } {
+    return .{ nl.root, nl.root_from, nl.mount, nl.mount_from };
+}
+
 /// A storage.node_local_mount: one file name of letters, digits, '.', '_',
 /// '-', %u (the user) and %j (the job id). It must hold %j, so that each
 /// allocation has a mount of its own.
@@ -237,44 +281,58 @@ fn mountName(a: Allocator, pattern: []const u8, user: []const u8, job_id: []cons
 
 /// The allocation's node-local mount: <root>/<mount>, the mount name with
 /// the user and the job id filled in, an owned, writable, canonical
-/// directory that is its own mount of `fstype`.
+/// directory that is its own mount of `nl.fstype`.
 pub fn jobRoot(
     a: Allocator,
-    node_local_root: []const u8,
-    mount: []const u8,
-    fstype: []const u8,
+    nl: NodeLocal,
     job_id: []const u8,
     user: []const u8,
     mountinfo: []const u8,
     uid: linux.uid_t,
     r: *Refusal,
 ) Error!JobRoot {
-    if (job_id.len == 0 or job_id[0] == '0') return refuse(a, r, "invalid Slurm allocation identity.", .{});
-    for (job_id) |c| if (!std.ascii.isDigit(c)) return refuse(a, r, "invalid Slurm allocation identity.", .{});
+    const job_ok = job_id.len > 0 and job_id[0] != '0' and for (job_id) |c| {
+        if (!std.ascii.isDigit(c)) break false;
+    } else true;
+    if (!job_ok) return refuse(a, r, "SLURM_JOB_ID={s} is not a Slurm job id", .{job_id}, job_fix, .{});
     if (user.len == 0 or std.mem.indexOfAny(u8, user, "/\x00") != null or std.mem.eql(u8, user, "..") or std.mem.eql(u8, user, "."))
-        return refuse(a, r, "cannot determine the allocation user.", .{});
-    if (!validMountPattern(mount)) return refuse(a, r, "storage.node_local_mount is not a mount name.", .{});
-    const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ node_local_root, try mountName(a, mount, user, job_id) });
-    const st = fsx.statAt(fsx.cwd, path, false) catch
-        return refuse(a, r, "allocation node-local root must be an owned writable directory.", .{});
-    if (!st.isDir()) return refuse(a, r, "allocation node-local root must be an owned writable directory.", .{});
+        return refuse(a, r, "the user name \"{s}\" cannot be part of a path", .{user}, user_fix, .{ nl.mount, nl.mount_from });
+    if (!validMountPattern(nl.mount))
+        return refuse(a, r, "storage.node_local_mount, {s} [{s}], is not a mount name", .{ nl.mount, nl.mount_from }, pattern_fix, .{});
+    const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ nl.root, try mountName(a, nl.mount, user, job_id) });
+    const st = fsx.statAt(fsx.cwd, path, false) catch |e| return switch (e) {
+        error.NotFound => refuse(a, r, "the node-local mount {s} does not exist", .{path}, where_fix, whereArgs(nl)),
+        else => refuse(a, r, "the node-local mount {s} cannot be read ({s})", .{ path, @errorName(e) }, where_fix, whereArgs(nl)),
+    };
+    if (st.isLink()) return refuse(a, r, "the node-local mount {s} is a symbolic link", .{path}, link_fix ++
+        "build in an allocation whose node-local mount is a directory of its own", .{});
+    if (!st.isDir()) return refuse(a, r, "the node-local mount {s} is not a directory", .{path}, where_fix, whereArgs(nl));
     var zb: [sys.path_max:0]u8 = undefined;
-    const zp = sys.z(&zb, path) catch return refuse(a, r, "allocation node-local root must be an owned writable directory.", .{});
+    const zp = sys.z(&zb, path) catch return refuse(a, r, "the node-local mount {s} is too long a path", .{path}, where_fix, whereArgs(nl));
     if (linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0)) != .SUCCESS)
-        return refuse(a, r, "allocation node-local root must be an owned writable directory.", .{});
+        return refuse(a, r, "the node-local mount {s} is not writable by you", .{path}, where_fix, whereArgs(nl));
     var buf: [sys.path_max]u8 = undefined;
-    const real = fsx.realpath(fsx.cwd, path, &buf) catch return refuse(a, r, "cannot resolve allocation node-local root.", .{});
-    if (!std.mem.eql(u8, real, path)) return refuse(a, r, "allocation node-local root must be canonical.", .{});
-    if (st.uid != uid) return refuse(a, r, "allocation node-local root belongs to another user.", .{});
-    const m = (try mountOf(a, mountinfo, path)) orelse return refuse(a, r, "cannot inspect allocation mount.", .{});
-    if (!std.mem.eql(u8, m.fstype, fstype))
-        return refuse(a, r, "allocation node-local root must use {s}, not shared or memory-backed storage.", .{fstype});
-    if (!std.mem.eql(u8, m.target, path)) return refuse(a, r, "allocation node-local root must be its own mount.", .{});
+    const real = fsx.realpath(fsx.cwd, path, &buf) catch |e|
+        return refuse(a, r, "the node-local mount {s} cannot be resolved ({s})", .{ path, @errorName(e) }, where_fix, whereArgs(nl));
+    if (!std.mem.eql(u8, real, path)) {
+        var root_buf: [sys.path_max]u8 = undefined;
+        const real_root = fsx.realpath(fsx.cwd, nl.root, &root_buf) catch nl.root;
+        return refuse(a, r, "the node-local mount {s} is reached through a symbolic link, as {s}", .{ path, real }, link_fix ++
+            "set storage.node_local_root, {s} [{s}], in the site file to the directory itself, {s}", .{ nl.root, nl.root_from, real_root });
+    }
+    if (st.uid != uid)
+        return refuse(a, r, "the node-local mount {s} belongs to uid {d}, not to you (uid {d})", .{ path, st.uid, uid }, owner_fix, .{ nl.mount, nl.mount_from, nl.root, nl.root_from });
+    const m = (try mountOf(a, mountinfo, path)) orelse
+        return refuse(a, r, "no mount in /proc/self/mountinfo holds the node-local mount {s}", .{path}, mountinfo_fix, .{});
+    if (!std.mem.eql(u8, m.fstype, nl.fstype))
+        return refuse(a, r, "the node-local mount {s} is on {s}, not {s}", .{ path, m.fstype, nl.fstype }, fstype_fix, .{ nl.fstype, nl.fstype_from });
+    if (!std.mem.eql(u8, m.target, path))
+        return refuse(a, r, "the node-local mount {s} is not a mount of its own but part of {s}", .{ path, m.target }, own_mount_fix, whereArgs(nl));
     var opts = std.mem.tokenizeScalar(u8, m.options, ',');
     while (opts.next()) |o| {
         if (std.mem.eql(u8, o, "rw")) return .{ .path = path };
     }
-    return refuse(a, r, "allocation mount is not writable.", .{});
+    return refuse(a, r, "the node-local mount {s} is not mounted read-write ({s})", .{ path, m.options }, rw_fix, .{});
 }
 
 /// A workspace eb-local made: a real directory of the caller named
@@ -328,18 +386,16 @@ pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator
         for (raw, 0..) |b, i| name[i] = alphabet[b % alphabet.len];
         const path = try std.fmt.allocPrint(a, "{s}/eb-local.{s}", .{ job_root, name });
         var zb: [sys.path_max:0]u8 = undefined;
+        const zp = try sys.z(&zb, path);
         // mkdir applies the process umask. With umask 0777 the directory
         // would be mode 000 and could not be opened to correct it, so the
         // umask is cleared for this one call. eb-local is one thread.
         const previous: linux.mode_t = @intCast(linux.syscall1(.umask, 0));
-        const rc = linux.mkdirat(linux.AT.FDCWD, (try sys.z(&zb, path)).ptr, 0o700);
-        const created = linux.errno(rc);
+        const rc = linux.mkdirat(linux.AT.FDCWD, zp.ptr, 0o700);
         _ = linux.syscall1(.umask, previous);
-        switch (created) {
-            .SUCCESS => return path,
-            .EXIST => continue,
-            else => return error.AccessDenied,
-        }
+        if (sys.result(rc)) |made| {
+            if (made != null) return path;
+        } else |e| if (e != error.Exists) return e;
     }
     return error.Exists;
 }
@@ -459,6 +515,27 @@ test "a workspace is private even when the umask clears every bit" {
     try testing.expectEqual(@as(u32, 0o700), (try fsx.statAt(fsx.cwd, path, false)).perm());
 }
 
+test "a workspace that cannot be made says why, and leaves the umask as it was" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/no-ws-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const old: linux.mode_t = @intCast(linux.syscall1(.umask, 0o027));
+    defer _ = linux.syscall1(.umask, old);
+    try testing.expectError(error.NotFound, makeWorkspace(a, try std.fmt.allocPrint(a, "{s}/gone", .{root})));
+    const file = try std.fmt.allocPrint(a, "{s}/file", .{root});
+    sys.close(try sys.openat(fsx.cwd, file, .{ .ACCMODE = .WRONLY, .CREAT = true }, 0o600));
+    try testing.expectError(error.NotDir, makeWorkspace(a, file));
+    const long = try a.alloc(u8, sys.path_max);
+    @memset(long, 'x');
+    try testing.expectError(error.NameTooLong, makeWorkspace(a, long));
+    try testing.expectEqual(@as(usize, 0o027), linux.syscall1(.umask, 0o027));
+}
+
 test "removeTree stays on one device" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -491,15 +568,73 @@ test "the job mount is refused when another user owns it" {
     defer fsx.deleteTree(a, fsx.cwd, nodes) catch {};
     const info = try std.fmt.allocPrint(a, "1 0 0:1 / / rw - ext4 /dev/x rw\n2 1 0:2 / {s} rw,relatime - xfs /dev/y rw\n", .{job});
     var r: Refusal = .{};
-    const ok = try jobRoot(a, nodes, default_mount, "xfs", "42", "u", info, linux.getuid(), &r);
+    const ok = try jobRoot(a, .{ .root = nodes }, "42", "u", info, linux.getuid(), &r);
     try testing.expectEqualStrings(job, ok.path);
-    try testing.expectError(error.Refused, jobRoot(a, nodes, default_mount, "xfs", "42", "u", info, linux.getuid() + 1, &r));
-    try testing.expect(std.mem.indexOf(u8, r.message, "another user") != null);
-    try testing.expectError(error.Refused, jobRoot(a, nodes, default_mount, "gpfs", "42", "u", info, linux.getuid(), &r));
-    try testing.expectError(error.Refused, jobRoot(a, nodes, default_mount, "xfs", "042", "u", info, linux.getuid(), &r));
-    try testing.expectError(error.Refused, jobRoot(a, nodes, "job-%j", "xfs", "42", "u", info, linux.getuid(), &r));
-    try testing.expectError(error.Refused, jobRoot(a, nodes, "%u", "xfs", "42", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, .{ .root = nodes }, "42", "u", info, linux.getuid() + 1, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s} belongs to uid {d}, not to you (uid {d})", .{ job, linux.getuid(), linux.getuid() + 1 }), r.message);
+    try testing.expectError(error.Refused, jobRoot(a, .{ .root = nodes, .fstype = "gpfs" }, "42", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, .{ .root = nodes }, "042", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, .{ .root = nodes, .mount = "job-%j" }, "42", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, .{ .root = nodes, .mount = "%u" }, "42", "u", info, linux.getuid(), &r));
     try testing.expect(std.mem.indexOf(u8, r.message, "node_local_mount") != null);
+}
+
+test "a refused job mount says what, why, and the setting that changes it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const nodes = try std.fmt.allocPrint(a, "{s}/.zig-cache/refusal-test-{d}", .{ cwd, linux.getpid() });
+    const job = try std.fmt.allocPrint(a, "{s}/u.42", .{nodes});
+    try common.atomic.makedirs(job);
+    defer fsx.deleteTree(a, fsx.cwd, nodes) catch {};
+    const nl: NodeLocal = .{ .root = nodes, .root_from = "site /etc/eb-local/config.toml:3", .fstype_from = "site /etc/eb-local/config.toml:5" };
+    const uid = linux.getuid();
+    const table = struct {
+        fn of(allocator: Allocator, target: []const u8, options: []const u8, fstype: []const u8) ![]const u8 {
+            return std.fmt.allocPrint(allocator, "1 0 0:1 / / rw - ext4 /dev/x rw\n2 1 0:2 / {s} {s} - {s} /dev/y rw\n", .{ target, options, fstype });
+        }
+    }.of;
+    var r: Refusal = .{};
+    const where = try std.fmt.allocPrint(a, "storage.node_local_root, {s} [site /etc/eb-local/config.toml:3], and storage.node_local_mount, %u.%j [default], name it; " ++
+        "build in an allocation that has a node-local disk, or set them in the site file to where Slurm mounts your job's node-local disk", .{nodes});
+
+    try testing.expectError(error.Refused, jobRoot(a, nl, "43", "u", try table(a, job, "rw", "xfs"), uid, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s}/u.43 does not exist", .{nodes}), r.message);
+    try testing.expectEqualStrings(where, r.fix);
+
+    try testing.expectError(error.Refused, jobRoot(a, nl, "42", "u", try table(a, job, "rw", "gpfs"), uid, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s} is on gpfs, not xfs", .{job}), r.message);
+    try testing.expect(std.mem.indexOf(u8, r.fix, "storage.node_local_fstype, xfs [site /etc/eb-local/config.toml:5], names the nodes' file system") != null);
+
+    try testing.expectError(error.Refused, jobRoot(a, nl, "42", "u", try table(a, nodes, "rw", "xfs"), uid, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s} is not a mount of its own but part of {s}", .{ job, nodes }), r.message);
+    try testing.expect(std.mem.endsWith(u8, r.fix, where));
+
+    try testing.expectError(error.Refused, jobRoot(a, nl, "42", "u", try table(a, job, "ro,relatime", "xfs"), uid, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s} is not mounted read-write (ro,relatime)", .{job}), r.message);
+
+    try testing.expectError(error.Refused, jobRoot(a, nl, "4x2", "u", "", uid, &r));
+    try testing.expectEqualStrings("SLURM_JOB_ID=4x2 is not a Slurm job id", r.message);
+    try testing.expect(std.mem.indexOf(u8, r.fix, "run eb-local inside the allocation") != null);
+
+    // A link in the root is named with the directory it leads to; the job's
+    // own mount as a link is refused without one.
+    const link = try std.fmt.allocPrint(a, "{s}-link", .{nodes});
+    var zt: [sys.path_max:0]u8 = undefined;
+    var zl: [sys.path_max:0]u8 = undefined;
+    var zlink_buf: [sys.path_max:0]u8 = undefined;
+    const zlink = try sys.z(&zlink_buf, link);
+    _ = linux.symlinkat((try sys.z(&zt, nodes)).ptr, linux.AT.FDCWD, zlink.ptr);
+    defer _ = linux.unlinkat(linux.AT.FDCWD, zlink.ptr, 0);
+    try testing.expectError(error.Refused, jobRoot(a, .{ .root = link }, "42", "u", try table(a, job, "rw", "xfs"), uid, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s}/u.42 is reached through a symbolic link, as {s}", .{ link, job }), r.message);
+    try testing.expect(std.mem.endsWith(u8, r.fix, try std.fmt.allocPrint(a, "set storage.node_local_root, {s} [default], in the site file to the directory itself, {s}", .{ link, nodes })));
+    const alias = try std.fmt.allocPrint(a, "{s}/u.44", .{nodes});
+    _ = linux.symlinkat((try sys.z(&zt, job)).ptr, linux.AT.FDCWD, (try sys.z(&zl, alias)).ptr);
+    try testing.expectError(error.Refused, jobRoot(a, nl, "44", "u", try table(a, alias, "rw", "xfs"), uid, &r));
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "the node-local mount {s} is a symbolic link", .{alias}), r.message);
 }
 
 test "the allocation's mount name" {

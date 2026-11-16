@@ -22,6 +22,7 @@
 :hidden:
 :maxdepth: 1
 
+reference/refusals
 explanation/install-variables
 ```
 
