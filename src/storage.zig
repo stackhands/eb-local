@@ -243,6 +243,35 @@ pub fn ownWorkspace(job_root: []const u8, path: []const u8, uid: linux.uid_t) bo
     return st.isDir() and st.uid == uid;
 }
 
+/// Remove `path` and everything under it that is on `dev`. A mount point,
+/// whose device differs, is left in place, as `rm --one-file-system` does.
+/// Symbolic links are removed, not followed.
+pub fn removeTreeDevice(a: Allocator, path: []const u8, dev: u64) (fsx.Error || Allocator.Error)!void {
+    try removeOnDevice(a, fsx.cwd, path, dev);
+}
+
+pub fn removeTree(a: Allocator, path: []const u8) (fsx.Error || Allocator.Error)!void {
+    const st = try fsx.statAt(fsx.cwd, path, false);
+    try removeTreeDevice(a, path, st.dev);
+}
+
+fn removeOnDevice(a: Allocator, dir: sys.fd_t, name: []const u8, dev: u64) (fsx.Error || Allocator.Error)!void {
+    const st = try fsx.statAt(dir, name, false);
+    if (st.dev != dev) return;
+    if (!st.isDir()) {
+        try sys.unlinkat(dir, name, 0);
+        return;
+    }
+    const fd = try fsx.openDir(dir, name, false);
+    {
+        defer sys.close(fd);
+        var it = try fsx.DirIter.init(a, fd);
+        defer it.deinit(a);
+        while (try it.next()) |e| try removeOnDevice(a, fd, e.name, dev);
+    }
+    try sys.unlinkat(dir, name, linux.AT.REMOVEDIR);
+}
+
 /// A new eb-local.XXXXXXXX directory, mode 0700, in `job_root`.
 pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator.Error)![]const u8 {
     const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -383,6 +412,26 @@ test "a workspace is private even when the umask clears every bit" {
     defer _ = linux.syscall1(.umask, old);
     const path = try makeWorkspace(a, root);
     try testing.expectEqual(@as(u32, 0o700), (try fsx.statAt(fsx.cwd, path, false)).perm());
+}
+
+test "removeTree stays on one device" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/one-fs-{d}", .{ cwd, linux.getpid() });
+    const nested = try std.fmt.allocPrint(a, "{s}/sub", .{root});
+    const file = try std.fmt.allocPrint(a, "{s}/sub/f", .{root});
+    try common.atomic.makedirs(nested);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const fd = try sys.openat(fsx.cwd, file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+    sys.close(fd);
+    const dev = (try fsx.statAt(fsx.cwd, root, false)).dev;
+    try removeTreeDevice(a, root, dev +% 1);
+    try testing.expect((try fsx.statAt(fsx.cwd, file, false)).isReg());
+    try removeTree(a, root);
+    try testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, root, false));
 }
 
 test "the job mount is refused when another user owns it" {
