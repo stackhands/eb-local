@@ -53,8 +53,9 @@ const usage_text =
     \\  eb-local restore NAME/VERSION... [--dry-run]
     \\                                       bring them back from the trash, read-only again
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
-    \\                                       the site file templates built in; install writes
-    \\                                       config.toml beside this program, mode 644
+    \\                                       a site file from a template built in, or from a
+    \\                                       template file (a NAME with a slash); install
+    \\                                       writes config.toml beside this program, mode 644
     \\  eb-local help | --version
     \\
     \\Every command takes --profile NAME, --project DIR (a shared project directory
@@ -918,6 +919,18 @@ const SiteOpts = struct {
     force: bool = false,
 };
 
+/// The template `eb-local site` renders: one built in, or a site's own
+/// template file, named with a slash so that it is never taken for a
+/// built-in name. The file is read as a configuration file is.
+fn siteTemplate(c: Ctx, name: []const u8) sites.Template {
+    if (std.mem.indexOfScalar(u8, name, '/') == null)
+        return sites.find(name) orelse die("no site template '{s}' (eb-local site list shows them; a template file is named with a slash, as ./{s})", .{ name, name });
+    const opened = openConfig(name);
+    defer sys.close(opened.fd);
+    const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ name, @errorName(e) });
+    return .{ .name = name, .text = text };
+}
+
 fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const a = c.a;
     const w = o.words.items;
@@ -932,9 +945,9 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     }
     const show = std.mem.eql(u8, action, "show");
     if (!show and !std.mem.eql(u8, action, "install")) die("site takes list, show NAME or install NAME; got '{s}'", .{action});
-    if (w.len != 2) die("site {s} takes one template name (eb-local site list shows them)", .{action});
+    if (w.len != 2) die("site {s} takes one template, a name (eb-local site list shows them) or a file", .{action});
     if (show and (o.to != null or o.force)) die("site show prints the file; --to and --force are for install", .{});
-    const t = sites.find(w[1]) orelse die("no site template '{s}' (eb-local site list shows them)", .{w[1]});
+    const t = siteTemplate(c, w[1]);
     var d: sites.Diagnostic = .{};
     const text = sites.render(a, t, o.sets.items, &d) catch |e| switch (e) {
         error.Invalid => die("{s}", .{d.message}),

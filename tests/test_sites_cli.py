@@ -112,6 +112,45 @@ class SitesCli(StorageFixture):
         self.assertNotEqual(run.returncode, 0)
         self.assertEqual(elsewhere.read_text(), "untouched\n")
 
+    def test_a_template_file_renders_and_installs_as_a_built_in_one_does(self):
+        template = self.root / "templates" / "site.toml"
+        template.parent.mkdir()
+        template.write_text('[storage]\nnode_local_root = "{{node_local_root:/local}}"\n'
+                            'shared_scratch = ["/scratch"]\n'
+                            '[build]\nallocation_hint = "salloc -p {{partition}} -n 16"\n')
+        template.chmod(0o644)
+        run = self.run_tool(["site", "show", str(template)])
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn(f"template {template} needs --set partition=VALUE", run.stderr)
+        target = self.root / "etc" / "config.toml"
+        target.parent.mkdir()
+        run = self.run_tool(["site", "install", "templates/site.toml", "--to", str(target),
+                             "--set", "partition=gpu"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("from template templates/site.toml", run.stdout + run.stderr)
+        self.assertNotIn("{{", target.read_text())
+        run = self.run_tool(["config", "--config", str(target)])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertRegex(run.stdout, r"storage\.node_local_root\s+/local\s+\[site ")
+        self.assertRegex(run.stdout, r"build\.allocation_hint\s+salloc -p gpu -n 16\s+\[site ")
+
+    def test_template_file_refusals(self):
+        template = self.root / "site.toml"
+        template.write_text('[storage]\nnode_local_root = "/local"\n')
+        template.chmod(0o664)
+        target = self.root / "config.toml"
+        cases = [
+            (["site", "show", "./missing.toml"], "cannot open ./missing.toml"),
+            (["site", "install", "./site.toml", "--to", str(target)], "writable by group or others"),
+            (["site", "show", "site.toml"], "a template file is named with a slash, as ./site.toml"),
+        ]
+        for argv, needle in cases:
+            with self.subTest(argv=argv):
+                run = self.run_tool(argv)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertIn(needle, run.stderr)
+                self.assertFalse(target.exists())
+
     # -- configuration in the environment -------------------------------------
 
     def test_config_env_round_trips(self):

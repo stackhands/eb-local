@@ -1,5 +1,6 @@
-//! Site file templates, built into the program: `eb-local site` lists,
-//! renders and installs them. A template is TOML with {{name}} placeholders,
+//! Site file templates, built into the program or kept by a site in a file:
+//! `eb-local site` lists the built-in ones, and renders and installs either
+//! kind. A template is TOML with {{name}} placeholders,
 //! which --set name=value must fill, and {{name:default}} ones, which take
 //! the default unless set. Values go inside TOML strings, so a value with a
 //! quote, a backslash or a control character is refused.
@@ -117,6 +118,28 @@ test "every template renders with its required placeholders set" {
     try testing.expect(std.mem.indexOf(u8, slurm, "node_local_root = \"/local\"") != null);
     try testing.expect(std.mem.indexOf(u8, slurm, "node_local_fstype = \"xfs\"") != null);
     try testing.expectError(error.Invalid, render(a, find("snellius").?, &.{.{ .name = "nope", .value = "x" }}, &d));
+}
+
+test "a template from a file renders as a built-in one does" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: Diagnostic = .{};
+    const own: Template = .{
+        .name = "./site.toml",
+        .text =
+        \\[storage]
+        \\node_local_root = "{{node_local_root:/local}}"
+        \\shared_scratch = ["/scratch"]
+        \\[build]
+        \\allocation_hint = "salloc -p {{partition}}"
+        ,
+    };
+    try testing.expectError(error.Invalid, render(a, own, &.{}, &d));
+    try testing.expectEqualStrings("template ./site.toml needs --set partition=VALUE", d.message);
+    const text = try render(a, own, &.{.{ .name = "partition", .value = "gpu" }}, &d);
+    try testing.expect(std.mem.indexOf(u8, text, "node_local_root = \"/local\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "allocation_hint = \"salloc -p gpu\"") != null);
 }
 
 test "a value cannot leave its TOML string" {
