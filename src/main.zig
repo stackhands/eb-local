@@ -802,8 +802,17 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
 /// The part of a build that needs Lmod runs in bash. The stack, extension,
 /// install variable, prefix and mode come as arguments and the easyconfig
 /// arguments after them, so nothing a user typed is part of the script.
-const build_script =
-    \\set -eo pipefail
+const test_prelude =
+    \\if [ -n "${EB_LOCAL_TEST_PRELUDE:-}" ]; then
+    \\    # The test artifact's stand-in for BASH_ENV. A release build has no
+    \\    # such seam: bash would run BASH_ENV before this script.
+    \\    source "$EB_LOCAL_TEST_PRELUDE"
+    \\    unset EB_LOCAL_TEST_PRELUDE
+    \\fi
+    \\
+;
+
+const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
     \\stack=$1 extend=$2 install_var=$3 prefix=$4 mode=$5
     \\shift 5
     \\keep=(WORKING_DIR TMPDIR TMP TEMP EASYBUILD_BUILDPATH EASYBUILD_TMPDIR XDG_CACHE_HOME CARGO_HOME EASYBUILD_SOURCEPATH EASYBUILD_TMP_LOGDIR)
@@ -908,6 +917,18 @@ fn cmdBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
+    // bash runs BASH_ENV before the script, and SHELLOPTS=xtrace prints the
+    // commands into the job log. Neither may reach the build.
+    for ([_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" }) |name| _ = env.swapRemove(name);
+    // Host loader settings select libraries ahead of the toolchain's RPATH.
+    var dropped_loader = false;
+    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |name| {
+        if (env.swapRemove(name)) dropped_loader = true;
+    }
+    if (dropped_loader) {
+        warn("LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT was set; a build does not pass them to eb,", .{});
+        cli.err("  because they mix host libraries into the toolchain.\n", .{});
+    }
     if (s.site_toolchains.value.len > 0)
         env.put("EB_LOCAL_SITE_TOOLCHAINS", config.toolchainsJson(a, s.site_toolchains.value) catch oom()) catch oom();
     const tmp = std.fs.path.join(a, &.{ work, "tmp" }) catch oom();

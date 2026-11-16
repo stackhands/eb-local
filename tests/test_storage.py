@@ -56,7 +56,9 @@ names=os.environ["CONTROL_PATH_NAMES"].split()
 result={"paths":{name:os.environ.get(name) for name in names},"argv":sys.argv[2:],
         "user":os.environ.get("EESSI_USER_INSTALL"),
         "project":os.environ.get("EESSI_PROJECT_INSTALL"),
-        "hooks":os.environ.get("EASYBUILD_HOOKS")}
+        "hooks":os.environ.get("EASYBUILD_HOOKS"),
+        "ld_library_path":os.environ.get("LD_LIBRARY_PATH"),
+        "ld_preload":os.environ.get("LD_PRELOAD")}
 (root/(sys.argv[1]+".json")).write_text(json.dumps(result))
 if sys.argv[1]=="eb":sys.exit(int(os.environ.get("CONTROL_EB_STATUS","0")))
 '''
@@ -155,6 +157,24 @@ class StorageControls(StorageFixture):
         self.nodes.rename(real)
         self.nodes.symlink_to(real, target_is_directory=True)
         self.refused(TMPDIR=str(self.job))
+
+    @unittest.skipUnless(binary.BIN, "dropping BASH_ENV and loader paths is a feature of the Zig build")
+    def test_build_drops_bash_env_and_loader_paths(self):
+        marker = self.root / "bash-env-ran"
+        evil = self.root / "evil-bash-env.sh"
+        evil.write_text(f"touch {marker}\n")
+        argv, env = binary.command(self.script, ["recipe.eb"], dict(
+            self.env, LD_LIBRARY_PATH="/host/lib", LD_PRELOAD="/host/hack.so", SHELLOPTS="xtrace"))
+        # Put back after the doubles have been handed to the test prelude.
+        env["BASH_ENV"] = str(evil)
+        run = subprocess.run(argv, env=env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse(marker.exists(), run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        self.assertIsNone(built["ld_library_path"])
+        self.assertIsNone(built["ld_preload"])
+        self.assertNotIn("+ export", run.stderr)
+        self.assertIn("LD_LIBRARY_PATH", run.stderr)
 
     def test_build_paths_survive_unload_and_module_initialization(self):
         args = ["recipe with spaces.eb", "--hooks=/selected/custom.py", "--robot"]

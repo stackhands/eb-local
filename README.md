@@ -74,6 +74,7 @@ eb-local --project /path/to/project/eessi GSL-2.8-GCC-15.2.0.eb --robot
 eb-local refuses a project directory that others can write to, since anyone could then add module files the group loads, and warns when the setgid bit is missing, since each member's installs would then keep that member's own group.
 
 A successful build removes its workspace; a failed one keeps it for inspection until the allocation ends.
+The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
 
 ## Where things go
 

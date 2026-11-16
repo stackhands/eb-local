@@ -22,6 +22,11 @@ def command(script, arguments, env):
     if not BIN:
         return ["bash", str(script)] + list(arguments), env
     env = dict(env)
+    # The release binary drops BASH_ENV (it is code bash runs before the
+    # script). The test artifact sources this instead, and only then.
+    prelude = env.pop("BASH_ENV", None)
+    if prelude:
+        env["EB_LOCAL_TEST_PRELUDE"] = prelude
     job = env.get("CONTROL_JOB_ROOT")
     if job:
         target = env.get("CONTROL_MOUNT_TARGET") or job
