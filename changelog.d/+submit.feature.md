@@ -1,1 +1,0 @@
-`eb-local submit [--on NAME,...] [--print] RECIPE [eb options]` sends one batch job per node type the site file lists in `[build.targets]` (a name and its sbatch options, site file only), each running this eb-local with the same recipe and configuration, so a module is built for every CPU target. `eb-local config` shows the targets.

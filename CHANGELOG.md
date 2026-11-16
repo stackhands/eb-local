@@ -2,6 +2,15 @@
 
 <!-- towncrier release notes start -->
 
+## 3.1.0 (2026-11-16)
+
+### Features
+
+- `eb-local doctor` reports, one line each, what would stop a build or a module load: the site file, the prefix and its permissions, install variables and loader variables left in the shell, the allocation's node-local mount, EESSI and `MODULEPATH`, and rtrash. It exits 1 when a line says FAIL and changes nothing.
+- `eb-local list [NAME[/VERSION]...]` shows the modules installed in the prefix with a column per CPU target, and, with EESSI loaded, the ones this node's target lacks.
+- `eb-local submit [--on NAME,...] [--print] RECIPE [eb options]` sends one batch job per node type the site file lists in `[build.targets]` (a name and its sbatch options, site file only), each running this eb-local with the same recipe and configuration, so a module is built for every CPU target. `eb-local config` shows the targets.
+
+
 ## 3.0.0 (2026-11-16)
 
 ### Features
