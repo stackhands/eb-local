@@ -3,6 +3,7 @@ import json
 import os
 import pwd
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -227,6 +228,19 @@ class StorageControls(StorageFixture):
         self.assertEqual(run.returncode, 0)
         self.assertFalse(self.prefix.exists())
         self.assertEqual(list(self.job.iterdir()), [])
+
+    @unittest.skipIf(binary.BIN, "the help of the 1.x Bash script")
+    def test_help_says_the_bash_script_is_frozen_and_removed_in_4_0_0(self):
+        run = self.run_wrapper(["help"], SLURM_JOB_ID="", TMPDIR="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("It is frozen: it gains no commands,\nand it is removed in eb-local 4.0.0.", run.stdout)
+        self.assertTrue(run.stdout.endswith("reads the same eb-local.conf.\n"), run.stdout)
+        self.assertIn("EESSI-extend supplies EESSI's hooks, RPATH and compat layer.\n", run.stdout)
+
+    def test_the_frozen_bash_script_has_the_commands_it_had(self):
+        commands = re.search(r'^case "\$\{1:-\}" in\n(.*?)^esac', SCRIPT.read_text(), re.M | re.S).group(1)
+        self.assertEqual(re.findall(r"^ +(\S+)\)", commands, re.M), ["env|dev|clean", "help|-h|--help", "--env"],
+                         "the 1.x Bash script is frozen: it gains no commands")
 
     def test_environment_mode_is_pure_without_allocation(self):
         run = self.run_wrapper(["--env"], SLURM_JOB_ID="", TMPDIR="")

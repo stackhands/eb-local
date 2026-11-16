@@ -1,0 +1,1 @@
+The Bash script `eb-local`, 1.x, is frozen: it gains no commands, and it is removed in 4.0.0, as is the test suite's default run against it. Its help says so. The eb-local program has its commands and reads the same `eb-local.conf`.

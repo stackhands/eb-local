@@ -417,7 +417,8 @@ gh attestation verify "$f" --repo stackhands/eb-local
 gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://cyclonedx.org/bom
 ```
 
-The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
+The Bash script (`eb-local`, 1.x) is frozen: it gains no commands, and it is removed in 4.0.0, when the suite's default run against it ends too.
+It needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
 It reads one site file, `eb-local.conf`: the file `EB_LOCAL_CONFIG` names, else the one beside the script, else `/etc/eb-local.conf`, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
 Its `key = value` lines set `node_local_root`, `node_local_mount`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
 A site's easyconfig installs the program and its site configuration.
@@ -425,7 +426,7 @@ A site's easyconfig installs the program and its site configuration.
 ## Test
 
 ```sh
-python3 -m unittest discover -s tests                    # the Bash script
+python3 -m unittest discover -s tests                    # the Bash script, until 4.0.0
 zig build unit && zig build test                          # the Zig build: unit tests, then the same suite
 ```
 
