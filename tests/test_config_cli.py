@@ -107,6 +107,41 @@ class ConfigCli(StorageFixture):
         self.assertIn("SOURCE_TOKEN", run.stdout)
         self.assertNotIn("file-secret-value", run.stdout + run.stderr)
 
+    def test_config_shows_every_setting_when_the_project_directory_cannot_be_used(self):
+        # config is where a profile's user finds out that its project
+        # directory is missing or unsafe, so it shows everything and warns;
+        # --check counts it as a failure, and the other commands still stop.
+        project = self.root / "projects" / "eessi"
+        with open(self.user, "a") as handle:
+            handle.write(f'\n[profile.group]\nproject = "{project}"\n')
+        project.parent.mkdir()
+        cases = {
+            "does not exist": lambda: None,
+            "is not a directory": lambda: project.write_text(""),
+            "is writable by others": lambda: (project.mkdir(), project.chmod(0o2777)),
+        }
+        for needle, make in cases.items():
+            if project.is_dir():
+                project.rmdir()
+            elif project.exists():
+                project.unlink()
+            make()
+            with self.subTest(needle):
+                run = self.run_tool(["config", "--profile", "group"])
+                self.assertEqual(run.returncode, 0, run.stderr)
+                row = next(line for line in run.stdout.splitlines() if line.startswith("project "))
+                self.assertIn(str(project), row)
+                self.assertIn("storage.shared_scratch", run.stdout)
+                self.assertIn("OTHER_TOKEN", run.stdout)
+                self.assertIn(f"project directory {project} {needle}", run.stderr)
+                check = self.run_tool(["config", "--check", "--profile", "group"])
+                self.assertEqual(check.returncode, 1, check.stdout + check.stderr)
+                self.assertEqual(check.stdout.count("   ok"), 2, check.stdout)
+                self.assertIn(needle, check.stderr)
+                run = self.run_tool(["env", "--profile", "group"])
+                self.assertEqual(run.returncode, 2, run.stdout)
+                self.assertEqual(run.stdout, "")
+
     def test_config_check_reads_secrets_without_showing_them(self):
         run = self.run_tool(["config", "--check", "--profile", "licensed"])
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
