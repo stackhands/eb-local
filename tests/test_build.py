@@ -2,7 +2,8 @@
 """zig build -Dtest-ops=true test, the step that runs this suite.
 
 It runs in a scratch copy of the project whose tests directory holds one
-test, so the suite does not run itself.
+test, so the suite does not run itself. The tests share the copy, and so
+its build cache.
 """
 import os
 from pathlib import Path
@@ -28,16 +29,20 @@ class One(unittest.TestCase):
 
 @unittest.skipUnless(binary.BIN and shutil.which("zig"), "runs under zig build -Dtest-ops=true test")
 class SuiteStep(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-build-")
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="eb-local-build-")
+        cls.root = Path(cls.tmp.name)
         for name in ("build.zig", "build.zig.zon", "LICENSE", "README.md"):
-            shutil.copy(ROOT / name, self.root / name)
-        shutil.copytree(ROOT / "src", self.root / "src")
+            shutil.copy(ROOT / name, cls.root / name)
+        shutil.copytree(ROOT / "src", cls.root / "src")
         if (ROOT / "zig-pkg").is_dir():
-            shutil.copytree(ROOT / "zig-pkg", self.root / "zig-pkg", symlinks=True)
-        (self.root / "tests").mkdir()
+            shutil.copytree(ROOT / "zig-pkg", cls.root / "zig-pkg", symlinks=True)
+        (cls.root / "tests").mkdir()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
 
     def build(self, test):
         (self.root / "tests" / "test_one.py").write_text(test)
