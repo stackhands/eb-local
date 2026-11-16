@@ -168,6 +168,23 @@ fn evalHint(words: []const u8) void {
     }
 }
 
+/// The command that reproduces this environment: the config file, profile,
+/// project and (for dev) buildenv that selected it, shell-quoted, options
+/// before the command. A hint that drops them tells the reader to eval a
+/// different environment.
+fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, canonical_prefix: []const u8, extra: []const []const u8) []const u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    if (g.config_file) |p| parts.appendSlice(a, &.{ "--config", q(a, p) }) catch oom();
+    if (s.profile) |p| parts.appendSlice(a, &.{ "--profile", q(a, p) }) catch oom();
+    if (s.project.value != null) parts.appendSlice(a, &.{ "--project", q(a, canonical_prefix) }) catch oom();
+    parts.append(a, command) catch oom();
+    if (std.mem.eql(u8, command, "dev")) {
+        if (g.buildenv) |p| parts.appendSlice(a, &.{ "--buildenv", q(a, p) }) catch oom();
+        for (extra) |m| parts.append(a, q(a, m)) catch oom();
+    }
+    return std.mem.join(a, " ", parts.items) catch oom();
+}
+
 // ---- configuration files --------------------------------------------------
 
 fn selfExe(buf: *[sys.path_max]u8) ?[]const u8 {
@@ -342,20 +359,22 @@ fn place(c: Ctx, s: config.Settings) Place {
 
 // ---- env, dev, config, profiles -------------------------------------------
 
-fn cmdEnv(c: Ctx, s: config.Settings) u8 {
-    evalHint("env");
-    cli.put(1, environmentLines(c, s, place(c, s)));
+fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
+    const p = place(c, s);
+    evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
+    cli.put(1, environmentLines(c, s, p));
     return 0;
 }
 
-fn cmdDev(c: Ctx, s: config.Settings, extra: []const []const u8) u8 {
+fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const a = c.a;
     var mods: std.ArrayList([]const u8) = .empty;
     mods.appendSlice(a, s.dev_modules.value) catch oom();
     mods.appendSlice(a, extra) catch oom();
-    evalHint(str(a, "dev{s}{s}", .{ if (extra.len > 0) " " else "", std.mem.join(a, " ", extra) catch oom() }));
+    const installed = place(c, s);
+    evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, place(c, s))) catch oom();
+    out.appendSlice(a, environmentLines(c, s, installed)) catch oom();
     // The modules the program uses first, the build environment last: its
     // compiler wrappers then come first on PATH and record a run path for
     // the library directory of every loaded module, so the program runs
@@ -837,7 +856,7 @@ const build_script =
     \\eb --umask=022 "$@"
 ;
 
-fn cmdBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
+fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     if (args.len == 0) {
         cli.err("{s}", .{usage_text});
@@ -958,7 +977,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     if (rc == 0) {
         say("", .{});
         say("eb-local: done. To use the modules in a new shell or job:", .{});
-        if (p.project) say("  eval \"$(eb-local env --project {s})\"", .{q(a, p.prefix)}) else say("  eval \"$(eb-local env)\"", .{});
+        say("  eval \"$(eb-local {s})\"", .{replay(a, "env", s, g, p.prefix, &.{})});
     }
     return rc;
 }
@@ -1329,11 +1348,11 @@ pub fn main(init: std.process.Init) u8 {
     if (command == .site) return cmdSite(c, site);
     const s = loadSettings(c, g);
     return switch (command) {
-        .env => cmdEnv(c, s),
-        .dev => cmdDev(c, s, rest.items),
+        .env => cmdEnv(c, s, g),
+        .dev => cmdDev(c, s, g, rest.items),
         .config => if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check),
         .clean => cmdClean(c, s, clean),
-        .build => cmdBuild(c, s, rest.items),
+        .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .profiles, .site => unreachable,
     };
@@ -1345,6 +1364,18 @@ test {
     _ = secrets;
     _ = sites;
     _ = storage;
+}
+
+test "the replay line repeats the options that selected this environment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s: config.Settings = .{};
+    s.profile = "gpu";
+    s.project = .{ .value = "/proj/my group" };
+    const g: Global = .{ .config_file = "/etc/x.toml", .buildenv = "buildenv/lfoss" };
+    try std.testing.expectEqualStrings("--config /etc/x.toml --profile gpu --project '/proj/my group' dev --buildenv buildenv/lfoss FFTW/1", replay(a, "dev", s, g, "/proj/my group", &.{"FFTW/1"}));
+    try std.testing.expectEqualStrings("env", replay(a, "env", .{}, .{}, "/home/u/.local/eessi", &.{}));
 }
 
 test "shell quoting reads back as the same word" {

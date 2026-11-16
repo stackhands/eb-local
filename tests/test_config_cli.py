@@ -156,6 +156,8 @@ class ConfigCli(StorageFixture):
                          'LM_LICENSE_FILE = "nimvault:licences/flexlm"\n')
         run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('eval "$(eb-local --config ', run.stdout)
+        self.assertIn("--profile gpu env)", run.stdout)
         seen = json.loads((self.root / "eb.json").read_text())["secrets"]
         self.assertEqual(seen, {"SOURCE_TOKEN": "file-secret-value", "OTHER_TOKEN": "env-secret-value",
                                 "LM_LICENSE_FILE": "27000@licence.example"})
