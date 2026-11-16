@@ -8,6 +8,8 @@ installation's copy of the log and in their encoded forms, and the log
 directory is private while they may be in it.
 """
 import base64
+import bz2
+import gzip
 import json
 import os
 from pathlib import Path
@@ -31,6 +33,28 @@ open(os.path.join(logs, "easybuild-x.log"), "w").write(f"raw {v}\nauth {base64.b
 inst = os.path.join(root, "versions/2026.06/software/linux/x86_64/amd/zen4/software/demo/1/easybuild")
 os.makedirs(inst, exist_ok=True)
 open(os.path.join(inst, "easybuild-demo-1.log"), "w").write(f"copied {v}\n")
+PY
+}
+export -f eb
+'''
+
+# EasyBuild moves its log into the installation and runs its zip-logs
+# command on it (gzip; bzip2 under EESSI-extend; none when it is unset),
+# then takes write permission from easybuild/.
+EB_ZIPPED = r'''
+eb() {
+    python3 - "$@" <<'PY'
+import base64, bz2, gzip, os
+v = os.environ["SOURCE_TOKEN"]
+root = os.environ["EESSI_USER_INSTALL"]
+inst = os.path.join(root, "versions/2026.06/software/linux/x86_64/amd/zen4/software/demo/1/easybuild")
+os.makedirs(inst)
+text = f"token {v}\nauth {base64.b64encode(v.encode()).decode()}\n".encode()
+for name, data in (("bzip2.log.bz2", bz2.compress(text)), ("gzip.log.gz", gzip.compress(text)), ("plain.log", text)):
+    path = os.path.join(inst, "easybuild-demo-1-" + name)
+    open(path, "wb").write(data)
+    os.chmod(path, 0o444)
+os.chmod(inst, 0o1555)
 PY
 }
 export -f eb
@@ -105,6 +129,50 @@ class Hardening(StorageFixture):
             self.assertNotIn(b64, text, path)
         copied = next(self.prefix.rglob("easybuild-demo-1.log")).read_text()
         self.assertIn("<secret SOURCE_TOKEN removed by eb-local>", copied)
+
+    def zipped_build(self, **extra):
+        token = self.root / "token"
+        token.write_text("tok-3141-secret\n")
+        token.chmod(0o600)
+        site = self.root / "site.toml"
+        site.write_text(f'[storage]\nnode_local_root = "{self.nodes}"\n'
+                        f'[secrets]\nSOURCE_TOKEN = "file:{token}"\n')
+        site.chmod(0o600)
+        with open(self.root / "doubles.sh", "a") as handle:
+            handle.write(EB_ZIPPED)
+        run = self.run_tool(["--config", str(site), "recipe.eb"], **extra)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        return run, next(self.prefix.rglob("easybuild-demo-1-plain.log")).parent
+
+    def test_secrets_leave_the_compressed_copies_in_a_read_only_installation(self):
+        # A build warns on stderr that it drops these; a CI runner's Python
+        # sets LD_LIBRARY_PATH.
+        for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
+            self.env.pop(name, None)
+        run, inst = self.zipped_build()
+        b64 = base64.b64encode(b"tok-3141-secret").decode()
+        for name, read in (("bzip2.log.bz2", bz2.decompress), ("gzip.log.gz", gzip.decompress), ("plain.log", bytes)):
+            path = inst / ("easybuild-demo-1-" + name)
+            text = read(path.read_bytes()).decode()
+            self.assertNotIn("tok-3141-secret", text, name)
+            self.assertNotIn(b64, text, name)
+            self.assertIn("<secret SOURCE_TOKEN removed by eb-local>", text, name)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444, name)
+        self.assertEqual(stat.S_IMODE(inst.stat().st_mode), 0o1555)
+        self.assertIn("removed secret values from 3 log file(s)", run.stdout)
+        self.assertEqual(run.stderr, "")
+
+    def test_a_log_that_cannot_be_decompressed_is_reported(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "bzip2").write_text("#!/bin/sh\necho 'bzip2: no' >&2\nexit 2\n")
+        (tools / "bzip2").chmod(0o755)
+        run, inst = self.zipped_build(PATH=f"{tools}:{self.env['PATH']}")
+        path = inst / "easybuild-demo-1-bzip2.log.bz2"
+        self.assertIn(f"cannot check {path} for secret values", run.stderr)
+        self.assertIn("inspect it before sharing", run.stderr)
+        self.assertIn("tok-3141-secret", bz2.decompress(path.read_bytes()).decode())
+        self.assertIn("removed secret values from 2 log file(s)", run.stdout)
 
 
 if __name__ == "__main__":
