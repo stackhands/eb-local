@@ -155,6 +155,17 @@ eb-local eb -- example.eb --robot
 
 `--profile`, `--project` and `--config` are not this command's options. The project, site and cvmfs modes are the variables above. A caller that can pass only a program name, and then eb's own arguments, sets `EB_LOCAL_EESSI_EXTEND=1`. Every argument is then eb's, which is how an eb-stack EESSI target runs this command. The 1.x Bash script has no `eb` command.
 
+### What a build runs
+
+`eb-local --explain` prints the commands a build would run, as shell lines, with the checks it makes first as comments, and creates and runs nothing:
+
+```sh
+eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
+```
+
+The lines are what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, and run `eb`.
+`$W` stands for the workspace a build makes in the allocation's node-local mount.
+
 ## Where things go
 
 | what | where |
