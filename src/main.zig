@@ -52,7 +52,9 @@ const usage_text =
     \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
     \\                                       one batch job per node type the site file lists
     \\                                       in build.node_types, each building the recipe for
-    \\                                       its CPU target; --print shows the jobs instead
+    \\                                       its CPU target; --print shows the jobs instead.
+    \\                                       Deprecated, and removed in 4.0.0: --explain
+    \\                                       prints an sbatch line for each node type
     \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
     \\                                       what this node's target lacks
     \\  eb-local doctor                      what in this shell, node or configuration would
@@ -1578,7 +1580,7 @@ fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []cons
 /// first as comments. Nothing is created and nothing runs, so it also works
 /// outside an allocation. $W stands for the workspace a build makes in the
 /// allocation's node-local mount.
-fn explainBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
+fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     const p = place(c, s);
     const d = durableDirs(c, p.prefix);
@@ -1595,6 +1597,11 @@ fn explainBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
         out.print(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     }
     out.appendSlice(a, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n") catch oom();
+    const jobs = batchLines(c, s, g, p, args);
+    if (jobs.len > 0) {
+        out.appendSlice(a, "# The same build as a batch job, on each node type the site file lists:\n") catch oom();
+        for (jobs) |line| out.print(a, "#   {s}\n", .{line}) catch oom();
+    }
     out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
     for (s.secrets.items) |sec| out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
@@ -1629,12 +1636,15 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         cli.err("{s}", .{usage_text});
         return 2;
     }
-    if (g.explain) return explainBuild(c, s, args);
+    if (g.explain) return explainBuild(c, s, g, args);
     if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job.", .{});
         cli.err("  Software is built for the CPU of the node that runs eb-local, so build\n", .{});
         cli.err("  inside an allocation on the node type that will run it{s}\n", .{if (s.allocation_hint.value.len > 0) ", for example:" else ""});
         if (s.allocation_hint.value.len > 0) cli.err("  {s}\n", .{s.allocation_hint.value});
+        const jobs = batchLines(c, s, g, place(c, s), args);
+        if (jobs.len > 0) cli.err("  or as a batch job, on each node type the site file lists:\n", .{});
+        for (jobs) |line| cli.err("  {s}\n", .{line});
         return 2;
     }
     const job_root = checkedJobRoot(c, s);
@@ -2126,6 +2136,35 @@ fn jobNamePart(a: Allocator, s: []const u8) []const u8 {
     return out;
 }
 
+/// The command a batch job runs to build: this program, the options that
+/// chose this configuration, and the recipe with its eb options as given.
+fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []const u8) []const u8 {
+    const a = c.a;
+    var self_buf: [sys.path_max]u8 = undefined;
+    const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
+    var line: std.ArrayList([]const u8) = .empty;
+    line.appendSlice(a, &.{ "exec", q(a, self) }) catch oom();
+    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", q(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
+    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", q(a, pr) }) catch oom();
+    if (p.project) line.appendSlice(a, &.{ "--project", q(a, p.prefix) }) catch oom();
+    for (args) |x| line.append(a, q(a, x)) catch oom();
+    return std.mem.join(a, " ", line.items) catch oom();
+}
+
+/// An sbatch line for each node type the site file lists, which runs the
+/// build as a batch job there. The job's output goes to the directory
+/// sbatch runs in, as JOBNAME-JOBID.out.
+fn batchLines(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []const u8) []const []const u8 {
+    const a = c.a;
+    const types = nodeTypes(s);
+    if (types.len == 0) return &.{};
+    const wrap = q(a, jobCommand(c, s, g, p, args));
+    const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (types) |t| lines.append(a, str(a, "sbatch {s} --job-name=eb-local-{s}-{s} --output=%x-%j.out --wrap={s}", .{ t.sbatch, t.name, recipe, wrap })) catch oom();
+    return lines.items;
+}
+
 /// The node types the site file lists, with a warning where it lists them
 /// under their old name.
 fn nodeTypes(s: config.Settings) []const config.NodeType {
@@ -2139,6 +2178,7 @@ fn nodeTypes(s: config.Settings) []const config.NodeType {
 /// a module is built for every CPU target the site has.
 fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o: SubmitOpts) u8 {
     const a = c.a;
+    warn("submit is deprecated and is removed in 4.0.0; eb-local --explain RECIPE prints an sbatch line for each node type", .{});
     if (args.len == 0) die("submit needs an easyconfig: eb-local submit [--on NAME,...] [--print] RECIPE [eb options]", .{});
     const all = nodeTypes(s);
     if (all.len == 0) die("no build.node_types in the site file, so there is nothing to submit to; build inside an allocation with eb-local RECIPE", .{});
@@ -2161,18 +2201,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const p = place(c, s);
     const sbatch = (proc.which(a, "sbatch", c.env.get("PATH") orelse "") catch null) orelse
         if (o.print) "sbatch" else die("sbatch is not on PATH", .{});
-    var self_buf: [sys.path_max]u8 = undefined;
-    const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
-
-    // The command each job runs: this program, the options that chose this
-    // configuration, and the recipe with its eb options as given.
-    var line: std.ArrayList([]const u8) = .empty;
-    line.appendSlice(a, &.{ "exec", q(a, self) }) catch oom();
-    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", q(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
-    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", q(a, pr) }) catch oom();
-    if (p.project) line.appendSlice(a, &.{ "--project", q(a, p.prefix) }) catch oom();
-    for (args) |x| line.append(a, q(a, x)) catch oom();
-    const command = std.mem.join(a, " ", line.items) catch oom();
+    const command = jobCommand(c, s, g, p, args);
 
     const root = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
     const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
