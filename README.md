@@ -162,7 +162,7 @@ A `--set` value cannot hold a quote, a backslash or a control character.
 
 ### The configuration as variables
 
-`eb-local config --env` prints the settings in force as `export EB_LOCAL_...` lines, secrets as `EB_LOCAL_SECRET_<NAME>=<source>`, so a job script, a container or CI carries the same configuration without the files:
+`eb-local config --env` prints the settings in force as `export EB_LOCAL_...` lines, secrets as `EB_LOCAL_SECRET_<NAME>=<source>`, so a job script, a container or CI carries the same configuration without the files. `EB_LOCAL_PREFIX` and `EB_LOCAL_PROJECT` are the absolute path `env` uses, with `~/` expanded and symbolic links resolved:
 
 ```sh
 eb-local --profile gpu config --env > eb-local.env   # sources only, never values
