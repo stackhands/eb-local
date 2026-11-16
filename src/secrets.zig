@@ -138,21 +138,96 @@ pub fn placeholder(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "<secret {s} removed by eb-local>", .{name});
 }
 
-/// The forms a value takes in a log: as it is, base64 (an HTTP basic
-/// authorization header) and percent-encoded (a URL).
-fn variants(a: Allocator, value: []const u8) Allocator.Error![3][]const u8 {
-    const enc = std.base64.standard.Encoder;
-    const b64 = try a.alloc(u8, enc.calcSize(value.len));
-    _ = enc.encode(b64, value);
-    var url: std.ArrayList(u8) = .empty;
+const Form = struct {
+    /// Raw bytes, or null when this is the percent-encoded form, which is
+    /// matched against `value` so either hex case counts.
+    bytes: ?[]const u8,
+    value: []const u8,
+    name: []const u8,
+};
+
+fn unreserved(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~", c) != null;
+}
+
+/// How many bytes of `text` are the percent-encoding of `value`. Hex digits
+/// match in either case: an encoder may write `%2f` or `%2F`.
+fn matchPercent(text: []const u8, value: []const u8) ?usize {
+    var o: usize = 0;
     for (value) |c| {
-        if (std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "-._~", c) != null) {
-            try url.append(a, c);
-        } else {
-            try url.appendSlice(a, try std.fmt.allocPrint(a, "%{X:0>2}", .{c}));
+        if (unreserved(c)) {
+            if (o >= text.len or text[o] != c) return null;
+            o += 1;
+            continue;
         }
+        if (o + 3 > text.len or text[o] != '%') return null;
+        if (!hexEq(text[o + 1], c >> 4) or !hexEq(text[o + 2], c & 0xf)) return null;
+        o += 3;
     }
-    return .{ value, b64, url.items };
+    return o;
+}
+
+fn hexEq(got: u8, nib: u8) bool {
+    const want: u8 = if (nib < 10) '0' + nib else 'A' + (nib - 10);
+    if (got == want) return true;
+    if (want >= 'A' and want <= 'F' and got == want - 'A' + 'a') return true;
+    return false;
+}
+
+fn formsOf(a: Allocator, v: Resolved) Allocator.Error![3]Form {
+    const enc = std.base64.standard.Encoder;
+    const b64 = try a.alloc(u8, enc.calcSize(v.value.len));
+    _ = enc.encode(b64, v.value);
+    return .{
+        .{ .bytes = v.value, .value = v.value, .name = v.name },
+        .{ .bytes = b64, .value = v.value, .name = v.name },
+        .{ .bytes = null, .value = v.value, .name = v.name },
+    };
+}
+
+fn formLen(text: []const u8, f: Form) ?usize {
+    if (f.bytes) |b| {
+        if (!std.mem.startsWith(u8, text, b)) return null;
+        return b.len;
+    }
+    return matchPercent(text, f.value);
+}
+
+fn containsForm(hay: []const u8, f: Form) bool {
+    if (f.bytes) |b| return std.mem.indexOf(u8, hay, b) != null;
+    // A percent-encoded value inside the placeholder.
+    var i: usize = 0;
+    while (i < hay.len) : (i += 1) if (matchPercent(hay[i..], f.value) != null) return true;
+    return false;
+}
+
+/// The usual marker, or another one when that marker would itself contain a
+/// value. A marker is never searched again, so it must not reintroduce one.
+fn markerFor(a: Allocator, name: []const u8, forms: []const Form) Allocator.Error![]const u8 {
+    const standard = try placeholder(a, name);
+    if (!containsAny(standard, forms)) return standard;
+    var n: u32 = 0;
+    while (n < 10000) : (n += 1) {
+        const alt = try std.fmt.allocPrint(a, "<redacted:{d}>", .{n});
+        if (!containsAny(alt, forms)) return alt;
+    }
+    var present = std.mem.zeroes([256]bool);
+    for (forms) |f| {
+        if (f.bytes) |b| for (b) |c| {
+            present[c] = true;
+        };
+        for (f.value) |c| present[c] = true;
+    }
+    var b: u8 = 1;
+    while (b < 255 and present[b]) b += 1;
+    const mark = try a.alloc(u8, 4);
+    @memset(mark, b);
+    return mark;
+}
+
+fn containsAny(hay: []const u8, forms: []const Form) bool {
+    for (forms) |f| if (containsForm(hay, f)) return true;
+    return false;
 }
 
 /// Shorter values would match ordinary text everywhere; they are not
@@ -160,18 +235,64 @@ fn variants(a: Allocator, value: []const u8) Allocator.Error![3][]const u8 {
 pub const min_redacted_len = 4;
 
 /// Replace every value, in each of its forms, in `bytes`; null when none occurs.
+/// The longest form wins where several start at the same byte, so a shorter
+/// secret that is a prefix of a longer one does not leave the rest behind.
+/// Percent-encoding matches either hex case.
 pub fn redactText(a: Allocator, bytes: []const u8, values: []const Resolved) Allocator.Error!?[]u8 {
-    var current: []const u8 = bytes;
-    var changed = false;
+    var forms: std.ArrayList(Form) = .empty;
     for (values) |v| {
         if (v.value.len < min_redacted_len) continue;
-        for (try variants(a, v.value)) |form| {
-            if (form.len < min_redacted_len or std.mem.indexOf(u8, current, form) == null) continue;
-            current = try std.mem.replaceOwned(u8, a, current, form, try placeholder(a, v.name));
-            changed = true;
+        for (try formsOf(a, v)) |f| {
+            // A fixed form shorter than the minimum is skipped. The
+            // percent-encoded length depends on the text, so it is decided
+            // at each match.
+            if (f.bytes) |b| if (b.len < min_redacted_len) continue;
+            try forms.append(a, f);
         }
     }
-    return if (changed) @constCast(current) else null;
+    if (forms.items.len == 0) return null;
+    var markers = std.StringHashMap([]const u8).init(a);
+    for (forms.items) |f| {
+        if (markers.get(f.name) == null) try markers.put(f.name, try markerFor(a, f.name, forms.items));
+    }
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    var changed = false;
+    while (i < bytes.len) {
+        var best_at: usize = bytes.len;
+        var best_len: usize = 0;
+        var best_name: []const u8 = "";
+        for (forms.items) |f| {
+            const from = if (f.bytes) |b| std.mem.indexOf(u8, bytes[i..], b) else findPercent(bytes[i..], f.value);
+            const at = from orelse continue;
+            const n = formLen(bytes[i + at ..], f).?;
+            if (n < min_redacted_len) continue;
+            if (at < best_at or (at == best_at and n > best_len)) {
+                best_at = at;
+                best_len = n;
+                best_name = f.name;
+            }
+        }
+        if (best_len == 0) {
+            try out.appendSlice(a, bytes[i..]);
+            break;
+        }
+        try out.appendSlice(a, bytes[i .. i + best_at]);
+        try out.appendSlice(a, markers.get(best_name).?);
+        i += best_at + best_len;
+        changed = true;
+    }
+    if (!changed) {
+        out.deinit(a);
+        return null;
+    }
+    return out.items;
+}
+
+fn findPercent(text: []const u8, value: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) if (matchPercent(text[i..], value) != null) return i;
+    return null;
 }
 
 /// Largest log rewritten; a larger one is reported, not rewritten.
@@ -223,7 +344,7 @@ fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: 
         const child = try std.fs.path.join(a, &.{ path, e.name });
         if (st.isDir()) {
             if (depth >= max_depth) {
-                if (filter == .all) try report.too_deep.append(a, child);
+                try report.too_deep.append(a, child);
                 continue;
             }
             const sub = fsx.openDir(dir, e.name, false) catch continue;
@@ -389,10 +510,61 @@ test "a value is removed as it is, in base64 and percent-encoded" {
     defer arena.deinit();
     const a = arena.allocator();
     const values = [_]Resolved{.{ .name = "T", .value = "p@ss word/1" }};
-    const text = "raw p@ss word/1 b64 cEBzcyB3b3JkLzE= url p%40ss%20word%2F1 end";
+    const text = "raw p@ss word/1 b64 cEBzcyB3b3JkLzE= url p%40ss%20word%2F1 low p%40ss%20word%2f1 end";
     const clean = (try redactText(a, text, &values)).?;
     try testing.expect(std.mem.indexOf(u8, clean, "p@ss") == null);
     try testing.expect(std.mem.indexOf(u8, clean, "cEBzcyB3b3JkLzE=") == null);
     try testing.expect(std.mem.indexOf(u8, clean, "p%40ss") == null);
-    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, clean, "<secret T removed by eb-local>"));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, clean, "<secret T removed by eb-local>"));
+}
+
+test "a shorter secret does not leave the tail of a longer one" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]Resolved{
+        .{ .name = "SHORT", .value = "s3cret" },
+        .{ .name = "LONG", .value = "s3cret-value" },
+    };
+    const clean = (try redactText(a, "token s3cret-value end", &values)).?;
+    try testing.expect(std.mem.indexOf(u8, clean, "s3cret") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "-value") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "<secret LONG removed by eb-local>") != null);
+}
+
+test "the replacement does not contain the value it stands in for" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]Resolved{.{ .name = "T", .value = "secret" }};
+    const clean = (try redactText(a, "the secret is secret", &values)).?;
+    try testing.expect(std.mem.indexOf(u8, clean, "secret") == null);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, clean, "<redacted:"));
+}
+
+test "an installation log nested past the search depth is reported" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const a = s.arena.allocator();
+    var dir = try a.dupe(u8, s.root);
+    var depth: usize = 0;
+    while (depth < max_depth + 2) : (depth += 1) {
+        dir = try std.fs.path.join(a, &.{ dir, "d" });
+        try common.atomic.makedirs(dir);
+    }
+    const eb = try std.fs.path.join(a, &.{ dir, "easybuild" });
+    try common.atomic.makedirs(eb);
+    const log = try std.fs.path.join(a, &.{ eb, "easybuild.log" });
+    const fd = try sys.openat(fsx.cwd, log, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+    defer sys.close(fd);
+    try sys.writeAll(fd, "copied s3cret-value\n");
+    const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
+    var report: RedactReport = .{};
+    try redactTree(a, s.root, 0, &values, .easybuild_dirs, &report);
+    try testing.expect(report.too_deep.items.len > 0);
+    try testing.expectEqual(@as(usize, 0), report.files);
+    const opened = try fsx.openRegular(fsx.cwd, log, false);
+    defer sys.close(opened.fd);
+    const text = try fsx.readAll(a, opened.fd, 4096);
+    try testing.expect(std.mem.indexOf(u8, text, "s3cret-value") != null);
 }
