@@ -1097,12 +1097,12 @@ test "build.targets is read as build.node_types until 4.0.0, and not with it" {
 }
 
 test "build.node_types" {
-    try std.testing.expect(validSbatchOptions("-p rome -n 16 -t 02:00:00 --constraint=scratch-node"));
-    try std.testing.expect(!validSbatchOptions("-p rome; rm -rf ~"));
+    try std.testing.expect(validSbatchOptions("-p cpu -n 16 -t 02:00:00 --constraint=local-disk"));
+    try std.testing.expect(!validSbatchOptions("-p cpu; rm -rf ~"));
     try std.testing.expect(!validSbatchOptions("-p '$(id)'"));
-    try std.testing.expect(!validSbatchOptions("rome"));
+    try std.testing.expect(!validSbatchOptions("cpu"));
     try std.testing.expect(!validSbatchOptions(" "));
-    try std.testing.expect(validNodeTypeName("genoa_h100"));
+    try std.testing.expect(validNodeTypeName("gpu_cc90"));
     try std.testing.expect(!validNodeTypeName("a b"));
     try std.testing.expect(!validNodeTypeName(""));
 }

@@ -9,8 +9,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: shellcheck eb-local
       - run: python3 -m unittest discover -s tests -v
-      # A site's own names and paths belong in examples/sites/; release
-      # notes may name what a release removed.
-      - name: no site names outside examples/sites
+      # A site's own names and paths belong in the site's own repository;
+      # release notes may name what a release removed. Each name keeps one
+      # letter in brackets, so the pattern does not match its own text.
+      - name: no site names
         run: |
-          ! git grep -nIiE 'snellius|surf\.nl|/gpfs/|/projects/0|rg\.terra|scratch-shared' -- . ':!examples/sites/' ':!CHANGELOG.md' ':!changelog.d/' ':!.github/workflows/shellcheck.yml'
+          ! git grep -nIiE 'snelli[u]s|sne[l]-|sur[f]\.nl|sur[f]sara|/gp[f]s/|/project[s]/0|r[g]\.terra|scratch-shar[e]d|scratch-nod[e]|eblocalinstal[l]|chatgp[t]\.com|claud[e]\.ai|perplexit[y]\.ai' -- . ':!CHANGELOG.md' ':!changelog.d/'

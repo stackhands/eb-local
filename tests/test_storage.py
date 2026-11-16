@@ -90,7 +90,7 @@ class StorageFixture(unittest.TestCase):
         self.prefix = self.root / "durable" / "owned prefix"
         self.script = self.root / "eb-local"
         original = SCRIPT.read_text()
-        self.assertNotIn("/scratch-node", original)
+        self.assertNotRegex(original, "/scratch-nod[e]")
         self.script.write_text(original)
         # The site configuration names the mount namespace; probes remain real.
         self.config = self.root / "site.conf"
