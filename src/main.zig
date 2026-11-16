@@ -91,7 +91,8 @@ const usage_text =
     \\then options. Builds use the allocation's own
     \\node-local mount; a successful build removes its workspace unless
     \\EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
-    \\written during a build are cleaned of them.
+    \\written during a build are cleaned of them. A build gets every secret,
+    \\unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
     \\
     \\--config FILE, or EB_LOCAL_CONFIG=FILE without it, is read in place of the
     \\site file when root or this program's owner owns it, otherwise in place of
@@ -897,6 +898,9 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const types = nodeTypes(s);
     if (types.len == 0) row("build.node_types", "(none)", s.node_types.from);
     for (types) |t| row(str(a, "build.node_types.{s}", .{t.name}), t.sbatch, t.from);
+    if (s.build_secrets.value) |names| {
+        row("build.secrets", if (names.len == 0) "(none)" else std.mem.join(a, " ", names) catch oom(), s.build_secrets.from);
+    } else row("build.secrets", "(every secret)", s.build_secrets.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -976,6 +980,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     line(a, &out, "EB_LOCAL_NIMVAULT_PROGRAM", s.nimvault_program.value);
     line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
+    if (s.build_secrets.value) |names| line(a, &out, "EB_LOCAL_BUILD_SECRETS", std.mem.join(a, " ", names) catch oom());
     // [eessi] settings are environment for EESSI already; they travel as
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
@@ -1769,7 +1774,11 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
         for (jobs) |line| out.print(a, "#   {s}\n", .{line}) catch oom();
     }
     out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
-    for (s.secrets.items) |sec| out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
+    for (s.secrets.items) |sec| {
+        if (config.buildGets(s, sec.name)) {
+            out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
+        } else out.print(a, "# {s} stays out of eb's environment and is not read: build.secrets [{s}] does not name it.\n", .{ sec.name, s.build_secrets.from }) catch oom();
+    }
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
@@ -1852,7 +1861,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
     var failure: secrets.Failure = .{};
-    const values = secrets.resolve(a, s.secrets.items, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
+    const wanted = config.buildSecrets(a, s) catch oom();
+    const values = secrets.resolve(a, wanted, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
         error.Unavailable => die("{s}", .{failure.message}),
         error.OutOfMemory => oom(),
     };
@@ -2143,18 +2153,26 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
         note(a, &out, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
     }
 
-    // A build reads every secret before it starts, so one that cannot be
-    // read stops every build, whether or not it uses that secret. The
-    // values are read as a build reads them and never shown.
+    // A build reads each secret it gets before it starts, so one of those
+    // that cannot be read stops it, whether or not eb uses it. The values
+    // are read as a build reads them and never shown.
     for (s.secrets.items) |sec| {
+        const gets = config.buildGets(s, sec.name);
         var f: secrets.Failure = .{};
         if (secrets.resolve(a, &.{sec}, c.env, c.envp, nimvaultOf(s), &f)) |values| {
             if (values[0].value.len < secrets.min_redacted_len) {
                 note(a, &out, "warn", "secret {s} from {s} is shorter than {d} bytes and is not removed from logs", .{ sec.name, sec.source, secrets.min_redacted_len });
-            } else note(a, &out, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
+            } else if (gets) {
+                note(a, &out, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
+            } else note(a, &out, "info", "secret {s} can be read from {s}; builds do not get it, as build.secrets [{s}] does not name it", .{ sec.name, sec.source, s.build_secrets.from });
         } else |e| switch (e) {
-            error.Unavailable => {
-                note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}", .{ f.message, sec.from, sec.name });
+            error.Unavailable => if (!gets) {
+                note(a, &out, "warn", "{s} [{s}]; builds do not read it, as build.secrets [{s}] does not name it, but one that names it stops there", .{ f.message, sec.from, s.build_secrets.from });
+            } else {
+                if (s.build_secrets.value == null) {
+                    note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}. " ++
+                        "Name in build.secrets the secrets builds need, or in EB_LOCAL_BUILD_SECRETS those one build needs", .{ f.message, sec.from, sec.name });
+                } else note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, as build.secrets [{s}] names {s}", .{ f.message, sec.from, s.build_secrets.from, sec.name });
                 if (site) failed = true;
             },
             error.OutOfMemory => oom(),

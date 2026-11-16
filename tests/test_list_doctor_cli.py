@@ -225,7 +225,8 @@ class ListAndDoctor(StorageFixture):
         run = self.run_tool(["doctor"], **secret)
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("FAIL secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set", run.stdout)
-        self.assertIn("every build stops there, whether or not it uses MY_LICENCE_KEY", run.stdout)
+        self.assertIn("every build stops there, whether or not it uses MY_LICENCE_KEY. Name in build.secrets the "
+                      "secrets builds need, or in EB_LOCAL_BUILD_SECRETS those one build needs\n", run.stdout)
         self.assertTrue(run.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
         build = self.run_wrapper(["recipe.eb"], **secret)
         self.assertEqual(build.returncode, 2, build.stdout + build.stderr)
@@ -244,6 +245,27 @@ class ListAndDoctor(StorageFixture):
 
         run = self.without_a_site_file(**secret)
         self.assertIn("warn secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set", run.stdout)
+
+    def test_doctor_fails_only_on_a_secret_builds_get(self):
+        secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC", EB_LOCAL_SECRET_MIRROR_TOKEN="env:MY_MIRROR")
+        run = self.run_tool(["doctor"], EB_LOCAL_BUILD_SECRETS="MIRROR_TOKEN", MY_MIRROR="mirror-token-value", **secret)
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn("warn secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set [environment EB_LOCAL_SECRET_MY_LICENCE_KEY]; "
+                      "builds do not read it, as build.secrets [environment EB_LOCAL_BUILD_SECRETS] does not name it, "
+                      "but one that names it stops there\n", run.stdout)
+        self.assertIn("ok   secret MIRROR_TOKEN can be read from env:MY_MIRROR\n", run.stdout)
+        self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+        build = self.run_wrapper(["recipe.eb"], EB_LOCAL_BUILD_SECRETS="MIRROR_TOKEN", MY_MIRROR="mirror-token-value", **secret)
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+
+        run = self.run_tool(["doctor"], EB_LOCAL_BUILD_SECRETS="MY_LICENCE_KEY", MY_MIRROR="mirror-token-value", **secret)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("FAIL secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set [environment EB_LOCAL_SECRET_MY_LICENCE_KEY]; "
+                      "every build stops there, as build.secrets [environment EB_LOCAL_BUILD_SECRETS] names MY_LICENCE_KEY\n",
+                      run.stdout)
+        self.assertIn("info secret MIRROR_TOKEN can be read from env:MY_MIRROR; builds do not get it, as build.secrets "
+                      "[environment EB_LOCAL_BUILD_SECRETS] does not name it\n", run.stdout)
+        self.assertNotIn("mirror-token-value", run.stdout + run.stderr)
 
     def without_a_site_file(self, **extra):
         for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):

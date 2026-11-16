@@ -369,7 +369,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile; without either, `default_profile` does, from your file if it sets one, else from the site file.
-The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` and `build.node_types` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.secrets`, `build.site_toolchains` and `build.node_types` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_BUILD_SECRETS`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file is the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, and a 1.x `eb-local.conf` beside the program or in `/etc`.
@@ -425,7 +425,8 @@ eb-local --profile gpu config --env > eb-local.env   # sources only, never value
 ```
 
 Empty settings are printed too, and `EB_LOCAL_PROFILE` is printed empty, which selects no profile, not even `default_profile`: the lines already hold every setting of the profile in force, and they work where that profile is not defined.
-An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` empties its setting; any other empty `EB_LOCAL_*` variable is ignored.
+An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_BUILD_SECRETS`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` empties its setting; any other empty `EB_LOCAL_*` variable is ignored.
+`EB_LOCAL_BUILD_SECRETS` is printed only when `build.secrets` is set, since without it a build gets every secret.
 `EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. `[eessi]` settings come out as the `EESSI_*` variables themselves, which reach EESSI as they are. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
 
 A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root or the program's owner (a site file) or by you (your file); otherwise eb-local stops.
@@ -443,9 +444,26 @@ SOURCE_TOKEN = "file:~/.secrets/source-token"   # your file, mode 600
 MIRROR_PASSWORD = "env:MY_MIRROR_PASSWORD"
 ```
 
+A build gets every secret unless `build.secrets` names the ones it gets, and then only those: set it to `[]` in your file and name the secrets in the profile of the builds that need them, or for one build with `EB_LOCAL_BUILD_SECRETS`, names separated by spaces:
+
+```toml
+# ~/.config/eb-local/config.toml
+[build]
+secrets = []                              # no build gets a secret it does not name
+
+[profile.licensed]
+build.secrets = ["LM_LICENSE_FILE"]       # eb-local --profile licensed MATLAB-2026a.eb
+```
+
+```sh
+EB_LOCAL_BUILD_SECRETS=SOURCE_TOKEN eb-local Private-1.0-GCC-15.2.0.eb
+```
+
+A secret a build does not get is not read, so it cannot stop that build. A name no secret has is an error that says where it was set. `eb-local config` shows `build.secrets`, and `eb-local --explain RECIPE` which secrets reach `eb`. [Give a secret only to the builds that need it](docs/howto/scope-secrets.md) has the steps.
+
 - Values are read only for a build, after every other check, and go only into the environment of `eb` and what it runs.
 - `eb-local config --check` reads each secret and reports `ok` or why not, never the value.
-- After the build, the logs written during it (in `.eb-local/logs` and each installation's `easybuild/`) have each value, its base64 form and its percent-encoded form (either hex case) replaced. The usual replacement is `<secret NAME removed by eb-local>`; a value that those words contain is replaced with `<redacted:N>` instead, so the marker does not put the value back. Where one value is a prefix of another, the longer one is removed whole. The log directory is private meanwhile. EasyBuild compresses the copy in an installation (with `bzip2` under EESSI-extend): a log ending in `.bz2`, `.gz`, `.xz` or `.zst` is decompressed and compressed again with `bzip2`, `gzip`, `xz` or `zstd` from `PATH`. A value shorter than 4 bytes, or a log that is too large or too deep to check or that cannot be decompressed, is reported instead, including an installation log nested too deep to reach. A secret reaches every program the build runs. A build stopped with a signal is cleaned up, including those logs, and eb-local then dies from that same signal, so a cancelled job does not continue; a build killed with SIGKILL leaves its logs unchecked. eb-local passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to EasyBuild, except one from the terminal, such as Ctrl-C, which reaches EasyBuild directly, and cleans the logs only once EasyBuild has exited, so the lines it writes as it stops are cleaned too. An ignored signal, as SIGHUP is under `nohup`, stays ignored. `eb-local eb` passes signals on in the same way.
+- After the build, the logs written during it (in `.eb-local/logs` and each installation's `easybuild/`) have each value, its base64 form and its percent-encoded form (either hex case) replaced. The usual replacement is `<secret NAME removed by eb-local>`; a value that those words contain is replaced with `<redacted:N>` instead, so the marker does not put the value back. Where one value is a prefix of another, the longer one is removed whole. The log directory is private meanwhile. EasyBuild compresses the copy in an installation (with `bzip2` under EESSI-extend): a log ending in `.bz2`, `.gz`, `.xz` or `.zst` is decompressed and compressed again with `bzip2`, `gzip`, `xz` or `zstd` from `PATH`. A value shorter than 4 bytes, or a log that is too large or too deep to check or that cannot be decompressed, is reported instead, including an installation log nested too deep to reach. A secret a build gets reaches every program the build runs. A build stopped with a signal is cleaned up, including those logs, and eb-local then dies from that same signal, so a cancelled job does not continue; a build killed with SIGKILL leaves its logs unchecked. eb-local passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to EasyBuild, except one from the terminal, such as Ctrl-C, which reaches EasyBuild directly, and cleans the logs only once EasyBuild has exited, so the lines it writes as it stops are cleaned too. An ignored signal, as SIGHUP is under `nohup`, stays ignored. `eb-local eb` passes signals on in the same way.
 - A secret cannot set `PATH`, `LD_*`, `EESSI_*`, `EASYBUILD_*` or another variable the build depends on.
 - [nimvault](https://github.com/HaoZeke/nimvault) runs with a 30-second deadline; on failure eb-local shows its error output, never what it printed as the value.
 - nimvault finds its vault from `NIMVAULT_VAULT_REPO` or the current git repository, so a build started inside another repository reads that one. Name the vault, and the program if it is not on `PATH`:

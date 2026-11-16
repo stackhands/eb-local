@@ -22,6 +22,7 @@
 :hidden:
 :maxdepth: 1
 
+howto/scope-secrets
 reference/refusals
 explanation/install-variables
 ```
