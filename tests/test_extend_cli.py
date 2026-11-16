@@ -16,9 +16,16 @@ import binary
 
 SCRIPT = Path(__file__).resolve().parents[1] / "eb-local"
 INIT = r'''
+export EESSI_SOFTWARE_PATH="$EESSI_CVMFS_REPO/versions/2026.06/software/linux/x86_64/amd/zen4"
+export EESSI_SITE_SOFTWARE_PATH="$EESSI_CVMFS_REPO/host_injections/2026.06/software/linux/x86_64/amd/zen4"
 module() {
     if [ "$1" = load ]; then
         export EASYBUILD_PREFIX="${WORKING_DIR:-/tmp/$USER}/easybuild"
+        if [ -n "${EESSI_CVMFS_INSTALL+set}" ]; then installpath=$EESSI_SOFTWARE_PATH
+        elif [ -n "${EESSI_SITE_INSTALL+set}" ]; then installpath=$EESSI_SITE_SOFTWARE_PATH
+        else installpath="${EESSI_USER_INSTALL:-${EESSI_PROJECT_INSTALL:-$HOME/eessi}}/versions/2026.06/software/linux/x86_64/amd/zen4"
+        fi
+        export EASYBUILD_INSTALLPATH="${CONTROL_INSTALLPATH:-$installpath}"
     fi
 }
 '''
@@ -128,6 +135,39 @@ class ExtendCli(unittest.TestCase):
         self.assertEqual(two.returncode, 3, two.stdout)
         self.assertIn("set at most one of EESSI_USER_INSTALL", two.stderr)
         self.assertIn("with none set, the module installs under $HOME/eessi", two.stderr)
+
+    def test_a_leftover_user_install_beside_a_project_install_is_named(self):
+        run = self.run_tool(["eb", "x.eb"], EESSI_USER_INSTALL="/home/alice/eessi", EESSI_PROJECT_INSTALL="/projects/a")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        self.assertFalse((self.root / "eb-ran").exists())
+        self.assertIn("eb-local: EESSI_USER_INSTALL=/home/alice/eessi and EESSI_PROJECT_INSTALL=/projects/a are both set; "
+                      "EESSI-extend would make a private user install (umask 077) under /home/alice/eessi, "
+                      "not a project install under /projects/a.\n"
+                      "  Unset the one an earlier session left", run.stderr)
+
+    def test_eb_stops_when_the_install_path_is_outside_the_selected_tree(self):
+        mine = self.root / "mine"
+        run = self.run_tool(["eb", "x.eb"], EESSI_USER_INSTALL=str(mine), CONTROL_INSTALLPATH="/elsewhere/hooktree")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertFalse((self.root / "eb-ran").exists())
+        self.assertIn(f"eb-local: EESSI-extend set the install path to /elsewhere/hooktree, outside {mine}, "
+                      "where a user install goes; nothing was built.\n"
+                      "  The install variable did not choose it: a site Lmod hook,", run.stderr)
+
+    def test_eb_stops_on_a_leftover_install_path_for_modules(self):
+        run = self.run_tool(["eb", "x.eb"], EASYBUILD_INSTALLPATH_MODULES="/home/alice/old-modules")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertFalse((self.root / "eb-ran").exists())
+        self.assertIn("eb-local: EASYBUILD_INSTALLPATH_MODULES=/home/alice/old-modules is set in this shell and would put "
+                      f"part of this install outside {self.root / 'home' / 'eessi'}; nothing was built.\n  Unset it:",
+                      run.stderr)
+
+    def test_site_and_cvmfs_installs_go_into_the_trees_eessi_sets(self):
+        for name in ("EESSI_SITE_INSTALL", "EESSI_CVMFS_INSTALL"):
+            with self.subTest(name=name):
+                run = self.run_tool(["eb", "x.eb"], **{name: "1"})
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(run.stdout.splitlines()[0], "0022")
 
     def test_explain_with_a_command_it_does_not_explain_is_refused(self):
         prefix = self.root / "prefix"

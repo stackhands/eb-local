@@ -42,6 +42,13 @@ module() {
         export EASYBUILD_HOOKS=/selected/hooks.py
         export TMPDIR=/scratch/module WORKING_DIR=/scratch/module
         export EASYBUILD_BUILDPATH=/scratch/module
+        # The install path EESSI-extend sets, or CONTROL_INSTALLPATH; and
+        # CONTROL_LOAD_SETS, NAME=VALUE, as a site load hook would set it.
+        case "$2" in
+            EESSI-extend/*)
+                export EASYBUILD_INSTALLPATH="${CONTROL_INSTALLPATH:-${EESSI_USER_INSTALL:-${EESSI_PROJECT_INSTALL:-$HOME/eessi}}/versions/2026.06/software/linux/x86_64/amd/zen4}"
+                [ -z "${CONTROL_LOAD_SETS:-}" ] || export "$CONTROL_LOAD_SETS";;
+        esac
         return 0
     fi
     return 99
@@ -363,6 +370,163 @@ class StorageControls(StorageFixture):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertFalse(destination.exists())
         self.assertEqual(list(self.job.iterdir()), [])
+
+
+@unittest.skipUnless(binary.BIN, "the wording of these refusals is the Zig build's")
+class RefusalWording(StorageFixture):
+    """A refusal says what it refused and why, and what was not done; its next
+    line says what to change: a setting, with its value and where it was set,
+    a variable, or a command."""
+
+    def refusal(self, args=None, **extra):
+        run = self.run_wrapper(args, **extra)
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertEqual(run.stdout, "")
+        return run.stderr.splitlines()
+
+    def site(self, line):
+        return f"[site {self.config}:{line}]"
+
+    def test_a_mount_another_user_owns(self):
+        first, fix = self.refusal(CONTROL_OWNER=str(os.getuid() + 1))
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} belongs to uid {os.getuid()}, "
+                                f"not to you (uid {os.getuid() + 1}); nothing was built.")
+        self.assertEqual(fix, f"  storage.node_local_mount, %u.%j [default], names your job's own mount below "
+                              f"storage.node_local_root, {self.nodes} {self.site(2)}, with %u for your user name and %j "
+                              "for the job id; set them in the site file to where Slurm mounts your job's node-local disk.")
+
+    def test_a_mount_on_another_file_system(self):
+        first, fix = self.refusal(CONTROL_FSTYPE="tmpfs")
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is on tmpfs, not xfs; nothing was built.")
+        self.assertIn("not shared or memory-backed storage", fix)
+        self.assertIn(f"storage.node_local_fstype, xfs {self.site(3)}, names the nodes' file system", fix)
+
+    def test_a_mount_that_is_part_of_another_or_read_only(self):
+        first, fix = self.refusal(CONTROL_MOUNT_TARGET=str(self.nodes))
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is not a mount of its own but part of "
+                                f"{self.nodes}; nothing was built.")
+        self.assertTrue(fix.endswith(f"storage.node_local_root, {self.nodes} {self.site(2)}, and storage.node_local_mount, "
+                                     "%u.%j [default], name it; build in an allocation that has a node-local disk, or set them "
+                                     "in the site file to where Slurm mounts your job's node-local disk."), fix)
+        first, fix = self.refusal(CONTROL_MOUNT_OPTIONS="ro,relatime")
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is not mounted read-write (ro,relatime); "
+                                "nothing was built.")
+
+    def test_a_mount_the_site_file_names_that_does_not_exist(self):
+        write_config(self.config, self.nodes, "node_local_mount = job-%j\n")
+        first, fix = self.refusal()
+        self.assertEqual(first, f"eb-local: the node-local mount {self.nodes}/job-123 does not exist; nothing was built.")
+        self.assertIn(f"storage.node_local_mount, job-%j {self.site(6)}, name it", fix)
+
+    def test_a_mount_reached_through_a_link_names_the_directory_itself(self):
+        real = self.root / "real-node-mounts"
+        self.nodes.rename(real)
+        self.nodes.symlink_to(real, target_is_directory=True)
+        first, fix = self.refusal()
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is reached through a symbolic link, "
+                                f"as {real / self.job.name}; nothing was built.")
+        self.assertTrue(fix.endswith(f"set storage.node_local_root, {self.nodes} {self.site(2)}, in the site file "
+                                     f"to the directory itself, {real}."), fix)
+
+    def test_no_job_a_job_id_that_is_not_one_and_no_node_local_root(self):
+        self.assertEqual(self.refusal(SLURM_JOB_ID="")[0],
+                         "eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.")
+        first, fix = self.refusal(SLURM_JOB_ID="not-a-job")
+        self.assertEqual(first, "eb-local: SLURM_JOB_ID=not-a-job is not a Slurm job id; nothing was built.")
+        self.assertIn("run eb-local inside the allocation, from salloc, srun or sbatch", fix)
+        self.config.write_text("node_local_fstype = xfs\n")
+        first, fix = self.refusal()
+        self.assertEqual(first, "eb-local: no site file sets storage.node_local_root, the directory that holds each "
+                                "job's node-local mount; nothing was built.")
+        self.assertIn("--config FILE or EB_LOCAL_CONFIG=FILE", fix)
+
+    def test_a_prefix_on_shared_scratch_or_in_job_storage_names_where_each_was_set(self):
+        for prefix, tree, what in (
+                (self.root / "shared" / "install", self.root / "shared",
+                 f"shared scratch in storage.shared_scratch {self.site(4)}"),
+                (self.job / "install", self.nodes, f"node-local storage below storage.node_local_root {self.site(2)}")):
+            with self.subTest(prefix=prefix):
+                first, fix = self.refusal(EB_LOCAL_PREFIX=str(prefix))
+                self.assertEqual(first, f"eb-local: the install prefix {prefix} [environment EB_LOCAL_PREFIX] is under "
+                                        f"{tree}, {what}; nothing was built.")
+                self.assertEqual(fix, "  Installs, sources and logs must outlive the job and not be on shared scratch; "
+                                      "set a prefix on durable storage you own with prefix in your eb-local configuration, "
+                                      "EB_LOCAL_PREFIX, or --project DIR for a project.")
+                self.assertFalse(prefix.exists())
+
+    def test_a_link_that_leads_sources_or_versions_away(self):
+        (self.prefix / ".eb-local").mkdir(parents=True)
+        sources = self.prefix / ".eb-local" / "sources"
+        sources.symlink_to(self.job, target_is_directory=True)
+        first, fix = self.refusal()
+        self.assertEqual(first, f"eb-local: {sources} leads to {self.job}, not to a directory inside the install "
+                                f"prefix {self.prefix}; nothing was built.")
+        self.assertIn(f"Sources and logs stay in the durable prefix, beside the installs: replace the symbolic link "
+                      f"in {sources} with a directory, or set a prefix", fix)
+        self.assertEqual(self.refusal(["--explain", "recipe.eb"])[0], first.replace("nothing was built", "a build would stop here"))
+        self.assertEqual(self.refusal(["clean"])[0], first.replace("nothing was built", "nothing was removed"))
+        sources.unlink()
+        shared = self.root / "shared" / "versions"
+        (self.prefix / "versions").symlink_to(shared, target_is_directory=True)
+        first, fix = self.refusal()
+        self.assertEqual(first, f"eb-local: {self.prefix}/versions leads to {shared}, under {shared.parent}, shared "
+                                f"scratch in storage.shared_scratch {self.site(4)}; nothing was built.")
+        self.assertIn(f"replace the symbolic link in {self.prefix}/versions with a directory", fix)
+        self.assertEqual(list(self.job.iterdir()), [])
+
+    def test_clean_workspaces_says_nothing_was_removed(self):
+        first, fix = self.refusal(["clean", "--workspaces"], SLURM_JOB_ID="")
+        self.assertEqual(first, "eb-local: clean --workspaces works only inside the Slurm job that made the workspaces, "
+                                "and SLURM_JOB_ID is unset or empty; nothing was removed.")
+        self.assertIn("srun --jobid=JOBID --overlap", fix)
+        first, fix = self.refusal(["clean", "--workspaces"], CONTROL_FSTYPE="tmpfs")
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is on tmpfs, not xfs; nothing was removed.")
+
+
+@unittest.skipUnless(binary.BIN, "checking where EESSI-extend installs is a feature of the Zig build")
+class InstallPathChecks(StorageFixture):
+    """The install path EESSI-extend chose, and install variables left in the shell or set as it loads."""
+
+    def test_an_install_path_moved_out_of_the_prefix_stops_the_build(self):
+        for moved in ("/elsewhere/hooktree", f"{self.prefix}/versions/../../elsewhere",
+                      f"{self.prefix}-old/versions/2026.06", f"{self.prefix}/versions"):
+            with self.subTest(moved=moved):
+                run = self.run_wrapper(CONTROL_INSTALLPATH=moved)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertFalse((self.root / "eb.json").exists())
+                self.assertNotIn("installing into", run.stdout)
+                self.assertIn(f"eb-local: loading EESSI-extend/2026.06-easybuild set the install path to {moved}, "
+                              f"outside {self.prefix}/versions, the tree eb-local checked; nothing was built.", run.stderr)
+
+    def test_a_load_that_sets_an_install_path_for_modules_stops_the_build(self):
+        run = self.run_wrapper(CONTROL_LOAD_SETS="EASYBUILD_INSTALLPATH_MODULES=/elsewhere/modules")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+        self.assertIn("eb-local: loading EESSI-extend/2026.06-easybuild set EASYBUILD_INSTALLPATH_MODULES=/elsewhere/modules, "
+                      f"which would put part of the install outside {self.prefix}/versions", run.stderr)
+
+    def test_an_install_variable_set_as_the_module_loads_is_reported_and_does_not_move_the_build(self):
+        run = self.run_wrapper(CONTROL_LOAD_SETS="EESSI_PROJECT_INSTALL=/projects/a")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["user"], str(self.prefix))
+        self.assertIn("eb-local: loading EESSI-extend/2026.06-easybuild set EESSI_PROJECT_INSTALL=/projects/a; "
+                      f"this build still installs into {self.prefix}, but a shell that loads EESSI-extend by hand "
+                      "keeps the change, and its next load installs elsewhere.", run.stderr)
+
+    def test_a_leftover_install_variable_is_cleared_and_reported(self):
+        run = self.run_wrapper(EESSI_USER_INSTALL="/home/alice/eessi-old",
+                               EASYBUILD_INSTALLPATH_MODULES="/home/alice/modules")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["user"], str(self.prefix))
+        self.assertIn("eb-local: EESSI_USER_INSTALL=/home/alice/eessi-old is set in this shell; this build clears it, "
+                      "but EESSI-extend or eb run by hand would use it", run.stderr)
+        self.assertIn("eb-local: EASYBUILD_INSTALLPATH_MODULES=/home/alice/modules is set in this shell", run.stderr)
+
+    def test_what_eb_local_env_sets_for_this_prefix_is_not_a_leftover(self):
+        run = self.run_wrapper(EESSI_USER_INSTALL=str(self.prefix), EASYBUILD_PREFIX="/tmp/alice/easybuild",
+                               EASYBUILD_INSTALLPATH=f"{self.prefix}/versions/2026.06/software/linux/x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("is set in this shell", run.stderr)
 
 
 if __name__ == "__main__":

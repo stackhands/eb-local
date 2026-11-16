@@ -178,6 +178,23 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI"
                       " detects\n", run.stdout)
 
+    def test_doctor_says_what_is_wrong_with_the_node_local_mount_and_what_to_change(self):
+        run = self.run_tool(["doctor"], CONTROL_FSTYPE="tmpfs")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"FAIL Slurm job 123: the node-local mount {self.job} is on tmpfs, not xfs; builds refuse it. "
+                      "A build's workspace must be on node-local disk, not shared or memory-backed storage; "
+                      f"storage.node_local_fstype, xfs [site {self.config}:3], names the nodes' file system", run.stdout)
+
+    def test_doctor_names_where_a_refused_prefix_and_its_storage_were_set(self):
+        shared = self.root / "shared" / "install"
+        run = self.run_tool(["doctor"], EB_LOCAL_PREFIX=str(shared))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"FAIL the install prefix {shared} [environment EB_LOCAL_PREFIX] is under {shared.parent}, shared "
+                      f"scratch in storage.shared_scratch [site {self.config}:4]; builds refuse it. Installs, sources and "
+                      "logs must outlive the job and not be on shared scratch; set a prefix on durable storage you own "
+                      "with prefix in your eb-local configuration, EB_LOCAL_PREFIX, or --project DIR for a project\n",
+                      run.stdout)
+
     def test_doctor_fails_on_a_project_directory_others_can_write(self):
         project = self.root / "durable" / "project"
         project.mkdir(parents=True)
@@ -208,7 +225,8 @@ class ListAndDoctor(StorageFixture):
         run = self.run_tool(["doctor"], **secret)
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("FAIL secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set", run.stdout)
-        self.assertIn("every build stops there, whether or not it uses MY_LICENCE_KEY", run.stdout)
+        self.assertIn("every build stops there, whether or not it uses MY_LICENCE_KEY. Name in build.secrets the "
+                      "secrets builds need, or in EB_LOCAL_BUILD_SECRETS those one build needs\n", run.stdout)
         self.assertTrue(run.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
         build = self.run_wrapper(["recipe.eb"], **secret)
         self.assertEqual(build.returncode, 2, build.stdout + build.stderr)
@@ -227,6 +245,27 @@ class ListAndDoctor(StorageFixture):
 
         run = self.without_a_site_file(**secret)
         self.assertIn("warn secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set", run.stdout)
+
+    def test_doctor_fails_only_on_a_secret_builds_get(self):
+        secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC", EB_LOCAL_SECRET_MIRROR_TOKEN="env:MY_MIRROR")
+        run = self.run_tool(["doctor"], EB_LOCAL_BUILD_SECRETS="MIRROR_TOKEN", MY_MIRROR="mirror-token-value", **secret)
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn("warn secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set [environment EB_LOCAL_SECRET_MY_LICENCE_KEY]; "
+                      "builds do not read it, as build.secrets [environment EB_LOCAL_BUILD_SECRETS] does not name it, "
+                      "but one that names it stops there\n", run.stdout)
+        self.assertIn("ok   secret MIRROR_TOKEN can be read from env:MY_MIRROR\n", run.stdout)
+        self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+        build = self.run_wrapper(["recipe.eb"], EB_LOCAL_BUILD_SECRETS="MIRROR_TOKEN", MY_MIRROR="mirror-token-value", **secret)
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+
+        run = self.run_tool(["doctor"], EB_LOCAL_BUILD_SECRETS="MY_LICENCE_KEY", MY_MIRROR="mirror-token-value", **secret)
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("FAIL secret MY_LICENCE_KEY: MY_LICENCE_SRC is not set [environment EB_LOCAL_SECRET_MY_LICENCE_KEY]; "
+                      "every build stops there, as build.secrets [environment EB_LOCAL_BUILD_SECRETS] names MY_LICENCE_KEY\n",
+                      run.stdout)
+        self.assertIn("info secret MIRROR_TOKEN can be read from env:MY_MIRROR; builds do not get it, as build.secrets "
+                      "[environment EB_LOCAL_BUILD_SECRETS] does not name it\n", run.stdout)
+        self.assertNotIn("mirror-token-value", run.stdout + run.stderr)
 
     def without_a_site_file(self, **extra):
         for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):

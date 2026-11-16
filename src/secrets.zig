@@ -1,9 +1,10 @@
 //! Secrets for a build: each names the variable eb receives and where its
-//! value comes from. Values are read for a build, after every other check,
-//! and by `config --check` and `doctor`, which say only whether each can be
-//! read. They go only into eb's environment and are never printed. A failed
-//! read reports why without the value. After the build, logs written during
-//! it are scanned and every occurrence of a value is replaced.
+//! value comes from. A build reads the ones it gets (config.buildSecrets),
+//! after every other check; `config --check` and `doctor` read each one and
+//! say only whether it can be read. Values go only into eb's environment
+//! and are never printed. A failed read reports why without the value.
+//! After the build, logs written during it are scanned and every occurrence
+//! of a value is replaced.
 const std = @import("std");
 const linux = std.os.linux;
 const common = @import("zig_common");

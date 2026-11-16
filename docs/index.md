@@ -15,12 +15,15 @@
 ```{include} ../README.md
 :start-after: <!-- docs:start -->
 :end-before: <!-- stackhands:begin -->
+:relative-docs: docs/
 ```
 
 ```{toctree}
 :hidden:
 :maxdepth: 1
 
-
+howto/scope-secrets
+reference/refusals
+explanation/install-variables
 ```
 

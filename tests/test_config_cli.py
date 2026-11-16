@@ -260,6 +260,68 @@ class ConfigCli(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
         self.assertFalse((self.root / "eb.json").exists())
 
+    def test_a_build_gets_only_the_secrets_build_secrets_names(self):
+        with open(self.user, "a") as handle:
+            handle.write('\n[build]\nsecrets = ["SOURCE_TOKEN"]\n')
+        # OTHER_TOKEN's source is not set, and a build that does not get it
+        # does not read it.
+        env = dict(self.env)
+        del env["MY_OTHER"]
+        argv, env = binary.command(self.script, ["--config", str(self.site), "recipe.eb"], env)
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())["secrets"]
+        self.assertEqual(seen, {"SOURCE_TOKEN": "file-secret-value", "OTHER_TOKEN": None, "LM_LICENSE_FILE": None})
+        text = (self.prefix / ".eb-local" / "logs" / "easybuild-test.log").read_text()
+        self.assertNotIn("file-secret-value", text)
+        self.assertIn("<secret SOURCE_TOKEN removed by eb-local>", text)
+
+        run = self.run_tool(["--config", str(self.site), "--profile", "licensed", "recipe.eb"],
+                            EB_LOCAL_BUILD_SECRETS="OTHER_TOKEN LM_LICENSE_FILE")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())["secrets"]
+        self.assertEqual(seen, {"SOURCE_TOKEN": None, "OTHER_TOKEN": "env-secret-value",
+                                "LM_LICENSE_FILE": "27000@licence.example"})
+
+        run = self.run_tool(["--config", str(self.site), "recipe.eb"], EB_LOCAL_BUILD_SECRETS="")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())["secrets"]
+        self.assertEqual(seen, {"SOURCE_TOKEN": None, "OTHER_TOKEN": None, "LM_LICENSE_FILE": None})
+        self.assertNotIn("removed secret values", run.stdout)
+
+        run = self.run_tool(["--config", str(self.site), "recipe.eb"], EB_LOCAL_BUILD_SECRETS="LM_LICENSE_FILE")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("build.secrets [environment EB_LOCAL_BUILD_SECRETS] names LM_LICENSE_FILE, but no secret "
+                      "LM_LICENSE_FILE is defined: add it to [secrets], or set EB_LOCAL_SECRET_LM_LICENSE_FILE=SOURCE",
+                      run.stderr)
+
+    def test_config_and_explain_say_which_secrets_a_build_gets(self):
+        run = self.run_tool(["config"])
+        self.assertRegex(run.stdout, r"build\.secrets\s+\(every secret\)\s+\[default\]")
+        run = self.run_tool(["config", "--env"])
+        self.assertNotIn("EB_LOCAL_BUILD_SECRETS", run.stdout)
+
+        with open(self.user, "a") as handle:
+            handle.write('\n[build]\nsecrets = ["SOURCE_TOKEN"]\n\n[profile.none]\nbuild.secrets = []\n')
+        lines = self.user.read_text().splitlines()
+        top = lines.index('secrets = ["SOURCE_TOKEN"]') + 1
+        run = self.run_tool(["config"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertRegex(run.stdout, rf"build\.secrets\s+SOURCE_TOKEN\s+\[user .*config\.toml:{top}\]")
+        run = self.run_tool(["config", "--profile", "none"])
+        self.assertRegex(run.stdout, rf"build\.secrets\s+\(none\)\s+\[user profile none, .*config\.toml:{len(lines)}\]")
+        run = self.run_tool(["config", "--env", "--profile", "none"])
+        self.assertIn("export EB_LOCAL_BUILD_SECRETS=''\n", run.stdout)
+        run = self.run_tool(["config", "--env"])
+        self.assertIn("export EB_LOCAL_BUILD_SECRETS=SOURCE_TOKEN\n", run.stdout)
+
+        run = self.run_tool(["--config", str(self.site), "--explain", "recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"# SOURCE_TOKEN reaches eb's environment from file:{self.token}; logs are cleaned of it afterwards.\n",
+                      run.stdout)
+        self.assertIn(f"# OTHER_TOKEN stays out of eb's environment and is not read: build.secrets [user {self.user}:{top}] "
+                      "does not name it.\n", run.stdout)
+
     def test_site_toolchains_reach_the_eessi_hooks(self):
         text = self.site.read_text()
         self.assertIn('allocation_hint = "salloc -p cpu -n 16"\n', text)

@@ -34,7 +34,9 @@ const usage_text =
     \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
     \\                                       present empty value counts as set; with none set, the
-    \\                                       module uses $HOME/eessi and nothing is exported
+    \\                                       module uses $HOME/eessi and nothing is exported.
+    \\                                       eb runs only if the module's install path is in the
+    \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
     \\  eb-local env                         lines that make your installed modules visible
@@ -89,7 +91,8 @@ const usage_text =
     \\then options. Builds use the allocation's own
     \\node-local mount; a successful build removes its workspace unless
     \\EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
-    \\written during a build are cleaned of them.
+    \\written during a build are cleaned of them. A build gets every secret,
+    \\unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
     \\
     \\--config FILE, or EB_LOCAL_CONFIG=FILE without it, is read in place of the
     \\site file when root or this program's owner owns it, otherwise in place of
@@ -158,10 +161,24 @@ const install_vars = [_][]const u8{
     "EASYBUILD_INSTALLPATH_SOFTWARE",    "EASYBUILD_INSTALLPATH_MODULES", "EASYBUILD_PREFIX",
 };
 
+/// What, left in a shell, sends a later load of EESSI-extend, or eb after
+/// it, somewhere else: EESSI-extend sets the other install variables itself.
+const leftover_vars = [_][]const u8{
+    "EESSI_USER_INSTALL",             "EESSI_PROJECT_INSTALL",         "EESSI_SITE_INSTALL", "EESSI_CVMFS_INSTALL",
+    "EASYBUILD_INSTALLPATH_SOFTWARE", "EASYBUILD_INSTALLPATH_MODULES",
+};
+
 const Place = struct {
     prefix: []const u8,
     project: bool,
 };
+
+/// Whether NAME=VALUE is what `eb-local env` sets for P: its install
+/// variable, naming its prefix.
+fn ownInstallVar(c: Ctx, p: Place, name: []const u8, value: []const u8) bool {
+    const mine = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
+    return std.mem.eql(u8, name, mine) and std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix);
+}
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
     const a = c.a;
@@ -881,6 +898,9 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const types = nodeTypes(s);
     if (types.len == 0) row("build.node_types", "(none)", s.node_types.from);
     for (types) |t| row(str(a, "build.node_types.{s}", .{t.name}), t.sbatch, t.from);
+    if (s.build_secrets.value) |names| {
+        row("build.secrets", if (names.len == 0) "(none)" else std.mem.join(a, " ", names) catch oom(), s.build_secrets.from);
+    } else row("build.secrets", "(every secret)", s.build_secrets.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -960,6 +980,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     line(a, &out, "EB_LOCAL_NIMVAULT_PROGRAM", s.nimvault_program.value);
     line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
+    if (s.build_secrets.value) |names| line(a, &out, "EB_LOCAL_BUILD_SECRETS", std.mem.join(a, " ", names) catch oom());
     // [eessi] settings are environment for EESSI already; they travel as
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
@@ -1267,12 +1288,16 @@ test "the value eessi-arch-guard --shell gives a variable" {
     try std.testing.expect(shellExport(a, text, "EESSI_SOFTWARE") == null);
 }
 
-fn userName(c: Ctx) []const u8 {
+/// Your user name, for %u in storage.node_local_mount. `undone` is what the
+/// command does not do when there is none.
+fn userName(c: Ctx, s: config.Settings, undone: []const u8) []const u8 {
     // A static binary has no NSS; id(1) asks the system's.
     const id = (proc.which(c.a, "id", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/usr/bin/id";
-    const r = proc.run(c.a, id, &.{ id, "-un" }, c.envp, .{ .stdout_limit = 4096, .timeout_ms = 10_000 }) catch
-        die("cannot determine the allocation user.", .{});
-    if (r.term.code() != 0) die("cannot determine the allocation user.", .{});
+    const failed = "cannot tell your user name: {s} -un {s}; {s}.\n" ++
+        "  eb-local puts it for %u in storage.node_local_mount, {s} [{s}]; run eb-local where id -un prints your user name.";
+    const r = proc.run(c.a, id, &.{ id, "-un" }, c.envp, .{ .stdout_limit = 4096, .timeout_ms = 10_000 }) catch |e|
+        die(failed, .{ id, str(c.a, "could not run ({s})", .{@errorName(e)}), undone, s.node_local_mount.value, s.node_local_mount.from });
+    if (r.term.code() != 0) die(failed, .{ id, str(c.a, "failed with status {d}", .{r.term.code()}), undone, s.node_local_mount.value, s.node_local_mount.from });
     return std.mem.trim(u8, r.stdout, " \n");
 }
 
@@ -1295,15 +1320,64 @@ fn callerUid(c: Ctx) linux.uid_t {
     return linux.getuid();
 }
 
-fn checkedJobRoot(c: Ctx, s: config.Settings) []const u8 {
-    if (s.node_local_root.value.len == 0) die("no node-local root is configured; set storage.node_local_root in the site configuration (see the README).", .{});
+fn nodeLocal(s: config.Settings) storage.NodeLocal {
+    return .{
+        .root = s.node_local_root.value,
+        .root_from = s.node_local_root.from,
+        .mount = s.node_local_mount.value,
+        .mount_from = s.node_local_mount.from,
+        .fstype = s.node_local_fstype.value,
+        .fstype_from = s.node_local_fstype.from,
+    };
+}
+
+/// The allocation's node-local mount. A refusal says what was refused and
+/// why, then what to change; `undone` is what the command then did not do.
+fn checkedJobRoot(c: Ctx, s: config.Settings, undone: []const u8) []const u8 {
+    if (s.node_local_root.value.len == 0)
+        die("no site file sets storage.node_local_root, the directory that holds each job's node-local mount; {s}.\n" ++
+            "  Set it in the site file, which eb-local site install slurm --set node_local_root=DIR writes, or name a site file " ++
+            "that root or this program's owner owns with --config FILE or EB_LOCAL_CONFIG=FILE. eb-local eb needs no site file.", .{undone});
     var r: storage.Refusal = .{};
     const job_id = c.env.get("SLURM_JOB_ID") orelse "";
-    const jr = storage.jobRoot(c.a, s.node_local_root.value, s.node_local_mount.value, s.node_local_fstype.value, job_id, userName(c), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
-        error.Refused => die("{s}", .{r.message}),
+    const jr = storage.jobRoot(c.a, nodeLocal(s), job_id, userName(c, s, undone), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
+        error.Refused => die("{s}; {s}.\n  {s}.", .{ r.message, undone, r.fix }),
         error.OutOfMemory => oom(),
     };
     return jr.path;
+}
+
+/// Where the prefix in force was set, as `eb-local config` shows it.
+fn prefixFrom(s: config.Settings, p: Place) []const u8 {
+    return if (p.project) s.project.from else s.prefix.from;
+}
+
+/// What to change when a prefix is refused.
+const prefix_fix = "set a prefix on durable storage you own with prefix in your eb-local configuration, EB_LOCAL_PREFIX, or --project DIR for a project";
+
+/// Why a prefix is refused when it, or a tree below it, is on refused storage.
+const outlive = "Installs, sources and logs must outlive the job and not be on shared scratch";
+
+/// A tree a build writes nothing to, with the setting that names it.
+const RefusedTree = struct { path: []const u8, what: []const u8 };
+
+/// Shared scratch and the node-local root, as configured and, when
+/// `resolved`, as the kernel resolves them, so that an alias (a symbolic
+/// link to shared scratch) is refused as the tree itself is.
+fn refusedTrees(c: Ctx, s: config.Settings, resolved: bool) []const RefusedTree {
+    const a = c.a;
+    const scratch = str(a, "shared scratch in storage.shared_scratch [{s}]", .{s.shared_scratch.from});
+    const local = str(a, "node-local storage below storage.node_local_root [{s}]", .{s.node_local_root.from});
+    var configured: std.ArrayList(RefusedTree) = .empty;
+    for (s.shared_scratch.value) |r| configured.append(a, .{ .path = r, .what = scratch }) catch oom();
+    if (s.node_local_root.value.len > 0) configured.append(a, .{ .path = s.node_local_root.value, .what = local }) catch oom();
+    if (!resolved) return configured.items;
+    var out: std.ArrayList(RefusedTree) = .empty;
+    for (configured.items) |t| {
+        out.append(a, t) catch oom();
+        out.append(a, .{ .path = storage.canonical(a, t.path, c.cwd) catch oom(), .what = t.what }) catch oom();
+    }
+    return out.items;
 }
 
 const Durable = struct {
@@ -1312,7 +1386,8 @@ const Durable = struct {
 };
 
 /// Sources and logs live beside the installation, and must stay there.
-fn durableDirs(c: Ctx, prefix: []const u8) Durable {
+/// `undone` is what the command does not do when one leads elsewhere.
+fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     const root = std.fs.path.join(c.a, &.{ prefix, ".eb-local" }) catch oom();
     const d: Durable = .{
         .sources = std.fs.path.join(c.a, &.{ root, "sources" }) catch oom(),
@@ -1321,9 +1396,17 @@ fn durableDirs(c: Ctx, prefix: []const u8) Durable {
     for ([_][]const u8{ d.sources, d.logs }) |p| {
         const resolved = storage.canonical(c.a, p, c.cwd) catch oom();
         if (!storage.under(resolved, prefix) or std.mem.eql(u8, resolved, prefix))
-            die("source and log directories must remain inside the durable prefix.", .{});
+            die("{s} leads to {s}, not to a directory inside the install prefix {s}; {s}.\n" ++
+                "  Sources and logs stay in the durable prefix, beside the installs: replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ p, resolved, prefix, undone, p });
     }
     return d;
+}
+
+/// The stop when the checked node-local mount takes no workspace.
+fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
+    if (e == error.OutOfMemory) oom();
+    die("cannot make a build workspace in the node-local mount {s} ({s}); nothing was built.\n" ++
+        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, @errorName(e), q(a, job_root) });
 }
 
 // ---- clean ----------------------------------------------------------------
@@ -1436,11 +1519,14 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
     const a = c.a;
     var job_root: ?[]const u8 = null;
     if (o.workspaces) {
-        if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) die("--workspaces works inside the allocation that made them.", .{});
-        job_root = checkedJobRoot(c, s);
+        if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null)
+            die("clean --workspaces works only inside the Slurm job that made the workspaces, and SLURM_JOB_ID is unset or empty; nothing was removed.\n" ++
+                "  A build workspace is in its job's node-local mount, which goes when the job ends; run eb-local clean --workspaces inside that job, " ++
+                "in its batch script or with srun --jobid=JOBID --overlap.", .{});
+        job_root = checkedJobRoot(c, s, "nothing was removed");
     }
     const p = place(c, s);
-    const d = durableDirs(c, p.prefix);
+    const d = durableDirs(c, p.prefix, "nothing was removed");
     var trash = s.trash.value;
     const rtrash = proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null;
     switch (trash) {
@@ -1575,6 +1661,31 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\fi
     \\module load "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $extend" >&2; exit 1; }
     \\restore
+    \\# EESSI-extend chose the install path as it loaded. eb-local checked the
+    \\# prefix's versions tree, lists it and cleans its logs of secrets, so an
+    \\# install path anything else chose stops the build. An install variable
+    \\# a load hook sets acts only on the next load.
+    \\readme='See "Where EESSI-extend installs" in the README.'
+    \\for v in EESSI_USER_INSTALL EESSI_PROJECT_INSTALL EESSI_SITE_INSTALL EESSI_CVMFS_INSTALL; do
+    \\    if [ "$v" = "$install_var" ]; then want=set:$prefix; else want=; fi
+    \\    [ "${!v+set:${!v}}" = "$want" ] && continue
+    \\    if [ -n "${!v+set}" ]; then what="set $v=${!v}"; else what="unset $v"; fi
+    \\    echo "eb-local: loading $extend $what; this build still installs into $prefix, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere." >&2
+    \\    echo "  A site Lmod hook that sets an install variable acts only on the next load. $readme" >&2
+    \\done
+    \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
+    \\    if [ -n "${!v+set}" ]; then
+    \\        echo "eb-local: loading $extend set $v=${!v}, which would put part of the install outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
+    \\        echo "  A site Lmod hook or a changed EESSI-extend set it. $readme" >&2
+    \\        exit 2
+    \\    fi
+    \\done
+    \\installpath=${EASYBUILD_INSTALLPATH-}
+    \\if [[ $installpath != "$prefix"/versions/?* || /$installpath/ == */../* ]]; then
+    \\    echo "eb-local: loading $extend set the install path to ${installpath:-nothing}, outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
+    \\    echo "  $install_var did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. $readme" >&2
+    \\    exit 2
+    \\fi
     \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.
     \\if [ -n "${EB_LOCAL_SITE_TOOLCHAINS:-}" ]; then
     \\    [ -n "${EESSI_VERSION:-}" ] || { echo "eb-local: $stack set no EESSI_VERSION; cannot apply build.site_toolchains" >&2; exit 1; }
@@ -1643,7 +1754,7 @@ fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []cons
 fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     const p = place(c, s);
-    const d = durableDirs(c, p.prefix);
+    const d = durableDirs(c, p.prefix, "a build would stop here");
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain: the script a build runs, with its environment and arguments. Nothing was created or run.\n") catch oom();
     out.print(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
@@ -1663,7 +1774,11 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
         for (jobs) |line| out.print(a, "#   {s}\n", .{line}) catch oom();
     }
     out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
-    for (s.secrets.items) |sec| out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
+    for (s.secrets.items) |sec| {
+        if (config.buildGets(s, sec.name)) {
+            out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
+        } else out.print(a, "# {s} stays out of eb's environment and is not read: build.secrets [{s}] does not name it.\n", .{ sec.name, s.build_secrets.from }) catch oom();
+    }
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
@@ -1698,7 +1813,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     if (g.explain) return explainBuild(c, s, g, args);
     if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
-        warn("not inside a Slurm job.", .{});
+        warn("not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.", .{});
         cli.err("  Software is built for the CPU of the node that runs eb-local, so build\n", .{});
         cli.err("  inside an allocation on the node type that will run it{s}\n", .{if (s.allocation_hint.value.len > 0) ", for example:" else ""});
         if (s.allocation_hint.value.len > 0) cli.err("  {s}\n", .{s.allocation_hint.value});
@@ -1707,24 +1822,16 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         for (jobs) |line| cli.err("  {s}\n", .{line});
         return 2;
     }
-    const job_root = checkedJobRoot(c, s);
+    const job_root = checkedJobRoot(c, s, "nothing was built");
     var p = place(c, s);
     // The process umask EESSI-extend gives the install, as `eb-local eb`
     // sets it: 002 for a project, so that every member can write the
     // directories builds share, and 077 for a user. What eb-local makes
     // there takes it too.
     _ = linux.syscall1(.umask, buildUmask(p));
-    // The refused trees as the kernel resolves them, so an alias (a symbolic
-    // link to shared scratch) is refused as the tree itself is.
-    var refused: std.ArrayList([]const u8) = .empty;
-    for (s.shared_scratch.value) |r| {
-        refused.append(a, r) catch oom();
-        refused.append(a, storage.canonical(a, r, c.cwd) catch oom()) catch oom();
-    }
-    refused.append(a, s.node_local_root.value) catch oom();
-    refused.append(a, storage.canonical(a, s.node_local_root.value, c.cwd) catch oom()) catch oom();
-    for (refused.items) |r| if (storage.under(p.prefix, r))
-        die("installation, source and log paths must use durable owned storage.", .{});
+    const refused = refusedTrees(c, s, true);
+    for (refused) |t| if (storage.under(p.prefix, t.path))
+        die("the install prefix {s} [{s}] is under {s}, {s}; nothing was built.\n  " ++ outlive ++ "; " ++ prefix_fix ++ ".", .{ p.prefix, prefixFrom(s, p), t.path, t.what });
     common.atomic.makedirs(p.prefix) catch die("installation prefix is not writable.", .{});
     {
         var zb: [sys.path_max:0]u8 = undefined;
@@ -1734,13 +1841,14 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         var buf: [sys.path_max]u8 = undefined;
         p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch die("cannot resolve installation prefix.", .{})) catch oom();
     }
-    const d = durableDirs(c, p.prefix);
+    const d = durableDirs(c, p.prefix, "nothing was built");
     // The trees a build writes below the prefix must not lead onto refused
     // storage either, through a symbolic link made later.
     for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
-        const resolved = storage.canonical(a, std.fs.path.join(a, &.{ p.prefix, sub }) catch oom(), c.cwd) catch oom();
-        for (refused.items) |r| if (storage.under(resolved, r))
-            die("{s}/{s} leads onto shared or node-local storage; installation, source and log paths must use durable owned storage.", .{ p.prefix, sub });
+        const path = std.fs.path.join(a, &.{ p.prefix, sub }) catch oom();
+        const resolved = storage.canonical(a, path, c.cwd) catch oom();
+        for (refused) |t| if (storage.under(resolved, t.path))
+            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
     }
 
     {
@@ -1753,16 +1861,17 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
     var failure: secrets.Failure = .{};
-    const values = secrets.resolve(a, s.secrets.items, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
+    const wanted = config.buildSecrets(a, s) catch oom();
+    const values = secrets.resolve(a, wanted, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
         error.Unavailable => die("{s}", .{failure.message}),
         error.OutOfMemory => oom(),
     };
     for (values) |v| if (v.value.len < secrets.min_redacted_len)
         warn("secret {s} is shorter than {d} bytes and is not removed from logs", .{ v.name, secrets.min_redacted_len });
 
-    const work = storage.makeWorkspace(a, job_root) catch die("cannot create allocation workspace.", .{});
+    const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
-        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch die("cannot create allocation workspace.", .{});
+        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
     common.atomic.makedirs(d.sources) catch die("cannot create {s}", .{d.sources});
     common.atomic.makedirs(d.logs) catch die("cannot create {s}", .{d.logs});
     if (values.len > 0) {
@@ -1774,6 +1883,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const started: i64 = nowSecs();
 
+    for (leftover_vars) |v| if (c.env.get(v)) |val| {
+        if (!ownInstallVar(c, p, v, val))
+            warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
+    };
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -2040,18 +2153,26 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
         note(a, &out, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
     }
 
-    // A build reads every secret before it starts, so one that cannot be
-    // read stops every build, whether or not it uses that secret. The
-    // values are read as a build reads them and never shown.
+    // A build reads each secret it gets before it starts, so one of those
+    // that cannot be read stops it, whether or not eb uses it. The values
+    // are read as a build reads them and never shown.
     for (s.secrets.items) |sec| {
+        const gets = config.buildGets(s, sec.name);
         var f: secrets.Failure = .{};
         if (secrets.resolve(a, &.{sec}, c.env, c.envp, nimvaultOf(s), &f)) |values| {
             if (values[0].value.len < secrets.min_redacted_len) {
                 note(a, &out, "warn", "secret {s} from {s} is shorter than {d} bytes and is not removed from logs", .{ sec.name, sec.source, secrets.min_redacted_len });
-            } else note(a, &out, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
+            } else if (gets) {
+                note(a, &out, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
+            } else note(a, &out, "info", "secret {s} can be read from {s}; builds do not get it, as build.secrets [{s}] does not name it", .{ sec.name, sec.source, s.build_secrets.from });
         } else |e| switch (e) {
-            error.Unavailable => {
-                note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}", .{ f.message, sec.from, sec.name });
+            error.Unavailable => if (!gets) {
+                note(a, &out, "warn", "{s} [{s}]; builds do not read it, as build.secrets [{s}] does not name it, but one that names it stops there", .{ f.message, sec.from, s.build_secrets.from });
+            } else {
+                if (s.build_secrets.value == null) {
+                    note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}. " ++
+                        "Name in build.secrets the secrets builds need, or in EB_LOCAL_BUILD_SECRETS those one build needs", .{ f.message, sec.from, sec.name });
+                } else note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, as build.secrets [{s}] names {s}", .{ f.message, sec.from, s.build_secrets.from, sec.name });
                 if (site) failed = true;
             },
             error.OutOfMemory => oom(),
@@ -2061,11 +2182,8 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     // Where installs go.
     const p = locate(c, s);
     note(a, &out, "ok  ", "installs go to {s}: a {s} install, prefix from {s}", .{ p.prefix, if (p.project) "project" else "user", if (p.project) s.project.from else s.prefix.from });
-    var refused: std.ArrayList([]const u8) = .empty;
-    for (s.shared_scratch.value) |r| refused.append(a, r) catch oom();
-    if (s.node_local_root.value.len > 0) refused.append(a, s.node_local_root.value) catch oom();
-    for (refused.items) |r| if (r.len > 0 and storage.under(p.prefix, r)) {
-        note(a, &out, "FAIL", "{s} is under {s}, shared or node-local scratch; builds refuse it. Set prefix to durable storage you own", .{ p.prefix, r });
+    for (refusedTrees(c, s, false)) |t| if (t.path.len > 0 and storage.under(p.prefix, t.path)) {
+        note(a, &out, "FAIL", "the install prefix {s} [{s}] is under {s}, {s}; builds refuse it. " ++ outlive ++ "; " ++ prefix_fix, .{ p.prefix, prefixFrom(s, p), t.path, t.what });
         failed = true;
     };
     if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| {
@@ -2098,9 +2216,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     // What this shell carries.
     var leftovers: usize = 0;
     for (install_vars) |v| if (c.env.get(v)) |val| {
-        const own = ((std.mem.eql(u8, v, "EESSI_USER_INSTALL") and !p.project) or (std.mem.eql(u8, v, "EESSI_PROJECT_INSTALL") and p.project)) and
-            std.mem.eql(u8, storage.canonical(a, val, c.cwd) catch oom(), p.prefix);
-        if (own) {
+        if (ownInstallVar(c, p, v, val)) {
             note(a, &out, "ok  ", "{s} names your prefix, as eb-local env sets it", .{v});
             continue;
         }
@@ -2134,11 +2250,11 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         if (s.node_local_root.value.len > 0) {
             var r: storage.Refusal = .{};
-            if (storage.jobRoot(a, s.node_local_root.value, s.node_local_mount.value, s.node_local_fstype.value, job, userName(c), mountinfoText(c), callerUid(c), &r)) |jr| {
+            if (storage.jobRoot(a, nodeLocal(s), job, userName(c, s, "doctor checks no further"), mountinfoText(c), callerUid(c), &r)) |jr| {
                 note(a, &out, "ok  ", "Slurm job {s}: build space {s}", .{ job, jr.path });
             } else |e| switch (e) {
                 error.Refused => {
-                    note(a, &out, "FAIL", "Slurm job {s}: {s}", .{ job, r.message });
+                    note(a, &out, "FAIL", "Slurm job {s}: {s}; builds refuse it. {s}", .{ job, r.message, r.fix });
                     failed = true;
                 },
                 error.OutOfMemory => oom(),
@@ -2900,7 +3016,7 @@ fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
     const sel = extend.select(c.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}\n", .{extend.too_many});
+            cli.err("{s}", .{extend.tooMany(c.a, c.env) catch oom()});
             return 3;
         },
     };
@@ -2919,7 +3035,7 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
     const sel = extend.select(c.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}\n", .{extend.too_many});
+            cli.err("{s}", .{extend.tooMany(a, c.env) catch oom()});
             return 3;
         },
     };

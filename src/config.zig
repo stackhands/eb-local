@@ -105,6 +105,9 @@ pub const Settings = struct {
     /// one from NIMVAULT_VAULT_REPO or the current directory.
     nimvault_vault: Setting([]const u8) = .{ .value = "" },
     secrets: std.ArrayList(Secret) = .empty,
+    /// The secrets a build gets, by name. Null, when nothing sets
+    /// build.secrets, is every secret.
+    build_secrets: Setting(?[]const []const u8) = .{ .value = null },
     eessi: std.ArrayList(EessiVar) = .empty,
 };
 
@@ -230,6 +233,22 @@ pub fn validSecretSource(source: []const u8) bool {
         }
     }
     return false;
+}
+
+/// Whether a build gets the secret `name`: build.secrets names it, or
+/// nothing sets build.secrets.
+pub fn buildGets(s: Settings, name: []const u8) bool {
+    const names = s.build_secrets.value orelse return true;
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+/// The secrets a build gets, in the order the configuration defines them.
+pub fn buildSecrets(a: Allocator, s: Settings) Allocator.Error![]Secret {
+    var out: std.ArrayList(Secret) = .empty;
+    errdefer out.deinit(a);
+    for (s.secrets.items) |sec| if (buildGets(s, sec.name)) try out.append(a, sec);
+    return out.toOwnedSlice(a);
 }
 
 fn validEnvName(name: []const u8) bool {
@@ -411,6 +430,11 @@ const Loader = struct {
                         }
                         l.s.node_types = .{ .value = list.items, .from = try l.where(src, f.line, null) };
                         l.s.node_types_old_key = if (old) l.s.node_types.from else null;
+                    } else if (std.mem.eql(u8, f.key, "secrets")) {
+                        const v = try l.stringList(src, f, "build.secrets");
+                        for (v) |name| if (!validSecretName(name))
+                            return l.fail("{s}:{d}: build.secrets: {s} is not a variable name a secret may set", .{ src.path, f.line, name });
+                        l.s.build_secrets = .{ .value = v, .from = try l.where(src, f.line, profile) };
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
@@ -680,6 +704,23 @@ pub fn load(
             try s.secrets.append(a, .{ .name = name, .source = v, .from = try std.fmt.allocPrint(a, "environment {s}", .{k}) });
         }
     }
+    // EB_LOCAL_BUILD_SECRETS="NAME ..." names the secrets a build gets;
+    // empty, it names none.
+    if (env.get("EB_LOCAL_BUILD_SECRETS")) |v| {
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.tokenizeAny(u8, v, " \t");
+        while (it.next()) |name| {
+            if (!validSecretName(name)) return l.fail("EB_LOCAL_BUILD_SECRETS: {s} is not a variable name a secret may set", .{name});
+            try names.append(a, name);
+        }
+        s.build_secrets = .{ .value = names.items, .from = "environment EB_LOCAL_BUILD_SECRETS" };
+    }
+    if (s.build_secrets.value) |names| for (names) |name| {
+        for (s.secrets.items) |sec| {
+            if (std.mem.eql(u8, sec.name, name)) break;
+        } else return l.fail("build.secrets [{s}] names {s}, but no secret {s} is defined: add it to [secrets], or set " ++
+            secret_env_prefix ++ "{s}=SOURCE", .{ s.build_secrets.from, name, name, name });
+    };
 
     if (cli.prefix) |v| s.prefix = .{ .value = v, .from = "option" };
     if (cli.project) |v| s.project = .{ .value = v, .from = "option --project" };
@@ -691,14 +732,18 @@ pub fn load(
 }
 
 /// The 1.x site file: `key = value` lines, parsed, never sourced. Kept so a
-/// site's existing eb-local.conf keeps working.
+/// site's existing eb-local.conf keeps working. Each setting becomes a
+/// dotted TOML key on the line it is on, so that `eb-local config` and the
+/// errors name that line.
 pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]const u8 {
     const tables = [_][]const u8{ "storage", "stack", "build", "dev", "clean" };
-    var bufs: [tables.len]std.ArrayList(u8) = @splat(.empty);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
     var lines = std.mem.splitScalar(u8, text, '\n');
     var n: usize = 0;
     while (lines.next()) |raw| {
         n += 1;
+        if (n > 1) try out.append(a, '\n');
         const no_comment = if (std.mem.indexOfScalar(u8, raw, '#')) |i| raw[0..i] else raw;
         const line = std.mem.trim(u8, no_comment, " \t\r");
         if (line.len == 0) continue;
@@ -727,30 +772,23 @@ pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]c
             diag.message = try std.fmt.allocPrint(a, "line {d}: unknown setting '{s}'", .{ n, key });
             return error.Invalid;
         };
-        const buf = &bufs[m.t];
-        try buf.appendSlice(a, m.name);
-        try buf.appendSlice(a, " = ");
+        try out.print(a, "{s}.{s} = ", .{ tables[m.t], m.name });
         if (m.list) {
-            try buf.append(a, '[');
+            try out.append(a, '[');
             var it = std.mem.tokenizeAny(u8, value, " \t");
             var first = true;
             while (it.next()) |p| {
-                if (!first) try buf.appendSlice(a, ", ");
+                if (!first) try out.appendSlice(a, ", ");
                 first = false;
-                try appendQuoted(a, buf, p);
+                try appendQuoted(a, &out, p);
             }
-            try buf.append(a, ']');
+            try out.append(a, ']');
         } else {
-            try appendQuoted(a, buf, value);
+            try appendQuoted(a, &out, value);
         }
-        try buf.append(a, '\n');
     }
-    var out: std.ArrayList(u8) = .empty;
-    for (tables, &bufs) |name, *buf| if (buf.items.len > 0) {
-        try out.appendSlice(a, try std.fmt.allocPrint(a, "[{s}]\n", .{name}));
-        try out.appendSlice(a, buf.items);
-    };
-    return out.items;
+    try out.append(a, '\n');
+    return out.toOwnedSlice(a);
 }
 
 fn appendQuoted(a: Allocator, buf: *std.ArrayList(u8), v: []const u8) Allocator.Error!void {
@@ -910,8 +948,63 @@ test "refusals" {
     try r.one(&t, "default_profile = \"nope\"\n", .user, "no profile 'nope'");
     try r.one(&t, "[storage]\nnode_local_root = \"relative\"\n", .site, "absolute");
     try r.one(&t, "x = 1\nx = 2\n", .user, "c.toml:2");
+    try r.one(&t, "[build]\nsecrets = \"TOKEN\"\n", .user, "build.secrets must be an array of strings");
+    try r.one(&t, "[build]\nsecrets = [\"PATH\"]\n", .user, "c.toml:2: build.secrets: PATH is not a variable name a secret may set");
+    try r.one(&t, "[build]\nsecrets = [\"TOKEN\"]\n", .user, "build.secrets [user c.toml:2] names TOKEN, but no secret TOKEN is defined");
     t.env.put("EB_LOCAL_STACK_MODULE", "a b") catch unreachable;
     try r.one(&t, "", .user, "EB_LOCAL_STACK_MODULE");
+}
+
+test "build.secrets names the secrets a build gets" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const a = t.arena.allocator();
+    const text =
+        \\[build]
+        \\secrets = []
+        \\[secrets]
+        \\SOURCE_TOKEN = "env:MY_TOKEN"
+        \\MIRROR_PASSWORD = "env:MY_MIRROR"
+        \\[profile.licensed]
+        \\build.secrets = ["LM_LICENSE_FILE", "SOURCE_TOKEN"]
+        \\[profile.licensed.secrets]
+        \\LM_LICENSE_FILE = "nimvault:licences/flexlm"
+    ;
+    const sources = [_]Source{.{ .path = "u.toml", .text = text, .layer = .user }};
+
+    // With nothing setting it, a build gets every secret.
+    var s = try t.load(&.{.{ .path = "u.toml", .text = user_text, .layer = .user }}, .{ .profile = "group" });
+    try std.testing.expect(s.build_secrets.value == null);
+    try std.testing.expectEqualStrings("default", s.build_secrets.from);
+    try std.testing.expectEqual(@as(usize, 2), (try buildSecrets(a, s)).len);
+
+    s = try t.load(&sources, .{});
+    try std.testing.expectEqualStrings("user u.toml:2", s.build_secrets.from);
+    try std.testing.expectEqual(@as(usize, 0), (try buildSecrets(a, s)).len);
+    try std.testing.expect(!buildGets(s, "SOURCE_TOKEN"));
+
+    s = try t.load(&sources, .{ .profile = "licensed" });
+    try std.testing.expectEqualStrings("user profile licensed, u.toml:7", s.build_secrets.from);
+    const got = try buildSecrets(a, s);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("SOURCE_TOKEN", got[0].name);
+    try std.testing.expectEqualStrings("LM_LICENSE_FILE", got[1].name);
+    try std.testing.expect(!buildGets(s, "MIRROR_PASSWORD"));
+
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", " MIRROR_PASSWORD\tSOURCE_TOKEN ");
+    s = try t.load(&sources, .{ .profile = "licensed" });
+    try std.testing.expectEqualStrings("environment EB_LOCAL_BUILD_SECRETS", s.build_secrets.from);
+    try std.testing.expect(buildGets(s, "MIRROR_PASSWORD") and buildGets(s, "SOURCE_TOKEN") and !buildGets(s, "LM_LICENSE_FILE"));
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "");
+    s = try t.load(&sources, .{ .profile = "licensed" });
+    try std.testing.expectEqual(@as(usize, 0), (try buildSecrets(a, s)).len);
+
+    // Only the profile defines LM_LICENSE_FILE.
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "LM_LICENSE_FILE");
+    try t.refuse(&sources, "build.secrets [environment EB_LOCAL_BUILD_SECRETS] names LM_LICENSE_FILE, but no secret LM_LICENSE_FILE " ++
+        "is defined: add it to [secrets], or set EB_LOCAL_SECRET_LM_LICENSE_FILE=SOURCE");
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "SOURCE_TOKEN LD_PRELOAD");
+    try t.refuse(&sources, "EB_LOCAL_BUILD_SECRETS: LD_PRELOAD is not a variable name a secret may set");
 }
 
 test "storage.node_local_mount" {
@@ -1053,6 +1146,22 @@ test "the 1.x site file" {
     try std.testing.expectEqual(Trash.none, s.trash.value);
     try std.testing.expectEqualStrings("stack/mine", s.stack_module.value);
     try std.testing.expectError(error.Invalid, legacyToToml(a, "source_me = $(touch x)\n", &d));
+
+    // Each setting is where its own line is, whatever its table and order.
+    try std.testing.expectEqualStrings("site eb-local.conf:2", s.node_local_root.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:6", s.allocation_hint.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:9", s.trash.from);
+    const reordered = try legacyToToml(a,
+        \\allocation_hint = salloc -n 16
+        \\
+        \\# the node-local disk
+        \\node_local_root = /local   # each job's mount is below it
+        \\node_local_mount = job-%j
+    , &d);
+    const r = try t.load(&.{.{ .path = "eb-local.conf", .text = reordered, .layer = .site }}, .{});
+    try std.testing.expectEqualStrings("site eb-local.conf:1", r.allocation_hint.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:4", r.node_local_root.from);
+    try std.testing.expectEqualStrings("site eb-local.conf:5", r.node_local_mount.from);
 }
 
 test "each node type is where its own line is" {

@@ -145,7 +145,7 @@ The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to
 `eb-local eb` is the way to run EasyBuild where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced. It sources that init, loads `EESSI-extend`, and execs `eb`. The module keeps EESSI's hooks, RPATH and compat layer. Host Cargo and CMake wrappers are unset first, and the compat-layer linker is put on `PATH` even when `rustc` is not installed.
 EasyBuild builds under `$WORKING_DIR/easybuild`, as the module sets it. This command leaves `WORKING_DIR` as you set it; unset, the module uses `/tmp/$USER`, so two users on one node do not share a build directory.
 
-Set at most one install variable before it. A variable that is present and empty counts as set, which is how EESSI-extend reads them. With none set, this command exports nothing and creates nothing. The loaded module then installs under `$HOME/eessi`. Its help text says `$HOME/EESSI`; on EESSI 2026.06 the module uses the lowercase directory, and does not require it to exist before the load.
+Set at most one install variable before it. A variable that is present and empty counts as set, which is how EESSI-extend reads them. With none set, this command exports nothing and creates nothing. The loaded module then installs under `$HOME/eessi`. Its help text says `$HOME/EESSI`; on EESSI 2026.06 the module uses the lowercase directory, and does not require it to exist before the load. With more than one set, this command stops with exit 3 and names each one, its value, and what EESSI-extend would do with them.
 
 | variable | mode | prefix | process umask |
 |---|---|---|---|
@@ -166,6 +166,21 @@ eb-local eb -- example.eb --robot
 
 `--profile`, `--project` and `--config` are not this command's options. The project, site and cvmfs modes are the variables above. A caller that can pass only a program name, and then eb's own arguments, sets `EB_LOCAL_EESSI_EXTEND=1`. Every argument is then eb's, which is how an eb-stack EESSI target runs this command. The 1.x Bash script has no `eb` command.
 
+### Where EESSI-extend installs
+
+EESSI-extend chooses the install tree as it loads: `DIR/versions/2026.06/software/linux/<target>` for `EESSI_USER_INSTALL=DIR` or `EESSI_PROJECT_INSTALL=DIR`, the same below `$HOME/eessi` with none set, the site tree `$EESSI_SITE_SOFTWARE_PATH` for `EESSI_SITE_INSTALL`, and EESSI's own `$EESSI_SOFTWARE_PATH` for `EESSI_CVMFS_INSTALL`.
+With a user and a project variable both set, it loads and makes a private user install, umask 077 and the sticky bit, in the user tree, and puts both module trees on `MODULEPATH`, the user's first; with the site or the cvmfs variable and another, it refuses to load.
+So a variable left from an earlier session, by a `.bashrc` that exports `EESSI_USER_INSTALL` or by `eval "$(eb-local env)"` for another prefix, turns a project install typed by hand into one the rest of the project cannot read.
+
+A build clears every install variable and sets its own, and names each one it cleared from your shell.
+`eb-local eb` refuses two or more, and `eb-local doctor` lists every one your shell has; unset the one you did not mean to keep.
+
+Once EESSI-extend has loaded, a build and `eb-local eb` stop with exit 2, before `eb` runs, unless `EASYBUILD_INSTALLPATH` is in the tree the install variable selects, and whenever `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` is set.
+A build's tree is `<prefix>/versions`, which eb-local checked, lists and cleans of secrets.
+Three things move the install path: a site Lmod hook that sets one (see the next section), a changed EESSI-extend, and an `EESSI_CVMFS_REPO` with a character such as `-`. EESSI-extend makes a user or project path by replacing `EESSI_CVMFS_REPO` in `$EESSI_SOFTWARE_PATH` with Lua's `string.gsub`, which reads it as a pattern, so a copy of the repository under `/opt/eessi-mirror` leaves the path unchanged and the install would go into the repository's own tree.
+Both also say when loading EESSI-extend sets or unsets an install variable, as a site hook does: the variable stays in a shell, and that shell's next load installs elsewhere.
+[Where EESSI-extend installs](docs/explanation/install-variables.md) has what each mode and mix of variables did under Lmod.
+
 ### What a build runs
 
 `eb-local --explain` prints the script a build runs, and creates and runs nothing.
@@ -176,7 +191,7 @@ A build names this command in its first line, as in `eb-local: what this runs: e
 eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
 ```
 
-The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, and run `eb`.
+The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, check that the install path EESSI-extend set is in `<prefix>/versions`, and run `eb`.
 `$W` stands for the workspace a build makes in the allocation's node-local mount. With `W` set to a directory, `bash` runs the printed text as a build runs its script; the checks before it and the cleaning of logs after it are eb-local's own.
 
 ## Where things go
@@ -187,6 +202,12 @@ The script does what you would type to use EESSI-extend by hand: clear the insta
 | build, temporary, cache and EESSI setup directories | a unique workspace in the allocation's node-local mount |
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
+
+A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
+Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created, and so is an install prefix on shared scratch or node-local storage.
+A refusal says what it refused and why, and what the command then did not do; its next line says what to change: a setting, with its value and where it was set as `eb-local config` shows it, or the variable, option or command to use.
+`eb-local doctor` says the same on one line.
+[Refusals](docs/reference/refusals.md) lists each one.
 
 The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree, with the same permissions.
 That is why the default is not `$HOME/.local/eessi`: EESSI-extend, loaded with no install variable set, installs under `$HOME/eessi`, so any other default would split one user's modules into two trees, of which `eb-local env` shows one.
@@ -221,15 +242,16 @@ They apply when EESSI-extend is loaded by hand and under `eb-local eb`.
 An eb-local build puts its own workspace and `.eb-local/sources` back after EESSI-extend loads, so the build uses those, and the two do not conflict.
 Lmod undoes only what a module file sets, so the hook's values stay set after `module unload EESSI-extend`.
 
-An install path from a hook bypasses eb-local's checks.
+An install path from a hook stops eb-local.
 `EASYBUILD_INSTALLPATH`, `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` set in a hook replaces the install path EESSI-extend chose, while the `MODULEPATH` the module set still names its own tree.
-In an eb-local build, EasyBuild then installs, and writes its logs, outside the prefix eb-local checked: `eb-local env` and `list` do not show what it installed, and eb-local does not remove secret values from those logs.
+EasyBuild would then install, and write its logs, outside the prefix eb-local checked, where `eb-local env` and `list` do not show what it installed and eb-local does not remove secret values from those logs, so a build and `eb-local eb` stop once EESSI-extend has loaded, before `eb` runs.
 A hook sets no install path.
 
 A default install prefix cannot come from a load hook.
 EESSI-extend reads `EESSI_USER_INSTALL` and the other install variables as its module file runs, and Lmod runs the load hook after that.
 A hook that sets `EESSI_USER_INSTALL=$HOME/.local/eessi` when no install variable is set is too late for that load, which installs under `$HOME/eessi`.
 The value stays after `module unload`, so the next load in the same shell installs under `$HOME/.local/eessi`, and which tree a user gets depends on what their shell did before.
+A build and `eb-local eb` say so when loading EESSI-extend sets an install variable.
 A hook for the `EESSI` module itself does not run: that module sets `LMOD_PACKAGE_PATH`, through which Lmod finds EESSI's `SitePackage.lua` and so the site's, and neither is in effect for the command that loads it.
 
 So another default goes into the environment before EESSI-extend loads, for example `EESSI_USER_INSTALL` set by a login script in `/etc/profile.d`, and into eb-local's site file as `prefix`, before the file's first table, so that eb-local builds there too:
@@ -239,9 +261,6 @@ prefix = "~/.local/eessi"
 ```
 
 `eb-local doctor` then says that `EESSI_USER_INSTALL` names your prefix.
-
-A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
-Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
 
 ## Build for every node type
 
@@ -350,7 +369,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile; without either, `default_profile` does, from your file if it sets one, else from the site file.
-The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` and `build.node_types` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.secrets`, `build.site_toolchains` and `build.node_types` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_BUILD_SECRETS`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file is the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, and a 1.x `eb-local.conf` beside the program or in `/etc`.
@@ -406,7 +425,8 @@ eb-local --profile gpu config --env > eb-local.env   # sources only, never value
 ```
 
 Empty settings are printed too, and `EB_LOCAL_PROFILE` is printed empty, which selects no profile, not even `default_profile`: the lines already hold every setting of the profile in force, and they work where that profile is not defined.
-An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` empties its setting; any other empty `EB_LOCAL_*` variable is ignored.
+An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_BUILD_SECRETS`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` empties its setting; any other empty `EB_LOCAL_*` variable is ignored.
+`EB_LOCAL_BUILD_SECRETS` is printed only when `build.secrets` is set, since without it a build gets every secret.
 `EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. `[eessi]` settings come out as the `EESSI_*` variables themselves, which reach EESSI as they are. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
 
 A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root or the program's owner (a site file) or by you (your file); otherwise eb-local stops.
@@ -424,9 +444,26 @@ SOURCE_TOKEN = "file:~/.secrets/source-token"   # your file, mode 600
 MIRROR_PASSWORD = "env:MY_MIRROR_PASSWORD"
 ```
 
+A build gets every secret unless `build.secrets` names the ones it gets, and then only those: set it to `[]` in your file and name the secrets in the profile of the builds that need them, or for one build with `EB_LOCAL_BUILD_SECRETS`, names separated by spaces:
+
+```toml
+# ~/.config/eb-local/config.toml
+[build]
+secrets = []                              # no build gets a secret it does not name
+
+[profile.licensed]
+build.secrets = ["LM_LICENSE_FILE"]       # eb-local --profile licensed MATLAB-2026a.eb
+```
+
+```sh
+EB_LOCAL_BUILD_SECRETS=SOURCE_TOKEN eb-local Private-1.0-GCC-15.2.0.eb
+```
+
+A secret a build does not get is not read, so it cannot stop that build. A name no secret has is an error that says where it was set. `eb-local config` shows `build.secrets`, and `eb-local --explain RECIPE` which secrets reach `eb`. [Give a secret only to the builds that need it](docs/howto/scope-secrets.md) has the steps.
+
 - Values are read only for a build, after every other check, and go only into the environment of `eb` and what it runs.
 - `eb-local config --check` reads each secret and reports `ok` or why not, never the value.
-- After the build, the logs written during it (in `.eb-local/logs` and each installation's `easybuild/`) have each value, its base64 form and its percent-encoded form (either hex case) replaced. The usual replacement is `<secret NAME removed by eb-local>`; a value that those words contain is replaced with `<redacted:N>` instead, so the marker does not put the value back. Where one value is a prefix of another, the longer one is removed whole. The log directory is private meanwhile. EasyBuild compresses the copy in an installation (with `bzip2` under EESSI-extend): a log ending in `.bz2`, `.gz`, `.xz` or `.zst` is decompressed and compressed again with `bzip2`, `gzip`, `xz` or `zstd` from `PATH`. A value shorter than 4 bytes, or a log that is too large or too deep to check or that cannot be decompressed, is reported instead, including an installation log nested too deep to reach. A secret reaches every program the build runs. A build stopped with a signal is cleaned up, including those logs, and eb-local then dies from that same signal, so a cancelled job does not continue; a build killed with SIGKILL leaves its logs unchecked. eb-local passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to EasyBuild, except one from the terminal, such as Ctrl-C, which reaches EasyBuild directly, and cleans the logs only once EasyBuild has exited, so the lines it writes as it stops are cleaned too. An ignored signal, as SIGHUP is under `nohup`, stays ignored. `eb-local eb` passes signals on in the same way.
+- After the build, the logs written during it (in `.eb-local/logs` and each installation's `easybuild/`) have each value, its base64 form and its percent-encoded form (either hex case) replaced. The usual replacement is `<secret NAME removed by eb-local>`; a value that those words contain is replaced with `<redacted:N>` instead, so the marker does not put the value back. Where one value is a prefix of another, the longer one is removed whole. The log directory is private meanwhile. EasyBuild compresses the copy in an installation (with `bzip2` under EESSI-extend): a log ending in `.bz2`, `.gz`, `.xz` or `.zst` is decompressed and compressed again with `bzip2`, `gzip`, `xz` or `zstd` from `PATH`. A value shorter than 4 bytes, or a log that is too large or too deep to check or that cannot be decompressed, is reported instead, including an installation log nested too deep to reach. A secret a build gets reaches every program the build runs. A build stopped with a signal is cleaned up, including those logs, and eb-local then dies from that same signal, so a cancelled job does not continue; a build killed with SIGKILL leaves its logs unchecked. eb-local passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to EasyBuild, except one from the terminal, such as Ctrl-C, which reaches EasyBuild directly, and cleans the logs only once EasyBuild has exited, so the lines it writes as it stops are cleaned too. An ignored signal, as SIGHUP is under `nohup`, stays ignored. `eb-local eb` passes signals on in the same way.
 - A secret cannot set `PATH`, `LD_*`, `EESSI_*`, `EASYBUILD_*` or another variable the build depends on.
 - [nimvault](https://github.com/HaoZeke/nimvault) runs with a 30-second deadline; on failure eb-local shows its error output, never what it printed as the value.
 - nimvault finds its vault from `NIMVAULT_VAULT_REPO` or the current git repository, so a build started inside another repository reads that one. Name the vault, and the program if it is not on `PATH`:
@@ -483,6 +520,8 @@ zig build unit && zig build test                          # the Zig build: unit 
 `zig build test` runs the suite against a debug build with the test seams; with `-Dtest-ops=true`, as CI runs it, against the binary it builds.
 
 A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
+
+The documentation is this README and the pages under `docs/`. A page with an Org source in `docs/orgmode/` is written from it, so edit the Org file and run `emacs --batch -Q -l docs/export.el`; `tests/test_docs.py` checks that the two agree where Emacs is installed. `python -m sphinx -W -b html docs docs/_build/html` builds the site, as CI does.
 
 `tests/site/` holds the site acceptance scripts: the development tasks above, and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
 

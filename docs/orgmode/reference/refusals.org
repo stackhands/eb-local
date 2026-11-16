@@ -1,0 +1,99 @@
+#+title: Refusals
+
+A build checks where it would work and where it would install, and stops before it makes anything there when either is wrong.
+=eb-local clean= checks the trees it would remove from before it removes anything, and =eb-local doctor= reports what a build would refuse.
+This page lists each refusal: what it refused, why, and what to change.
+The README's [[file:../index.md::#where-things-go][Where things go]] says where each thing goes, and [[file:../explanation/install-variables.org][Where EESSI-extend installs]] has the refusals of =eb-local eb= and of an install path EESSI-extend moves.
+
+* The form
+
+A refusal is two lines or more on standard error, and the command exits with status 2:
+
+#+begin_example
+eb-local: WHAT WAS REFUSED, AND WHY; WHAT THE COMMAND DID NOT DO.
+  WHAT TO CHANGE.
+#+end_example
+
+The first line ends with what the command then did not do: =nothing was built= for a build, =a build would stop here= for =eb-local --explain=, =nothing was removed= for =eb-local clean=, and =doctor checks no further= when =eb-local doctor= cannot tell your user name.
+The next line names a setting with its value and, in square brackets, where it was set, as =eb-local config= shows it; or it names the variable, option or command to use.
+Where the reason is not plain from the first line, that line starts with it.
+
+| In brackets                                       | The setting comes from      |
+|---------------------------------------------------+-----------------------------|
+| =default=                                         | eb-local's built-in default |
+| =site /etc/eb-local/config.toml:2=                | line 2 of the site file     |
+| =user /home/alice/.config/eb-local/config.toml:2= | line 2 of your file         |
+| =environment EB_LOCAL_PREFIX=                     | the variable                |
+| =option --project=                                | the option                  |
+
+=eb-local doctor= puts a refusal on one line, after =FAIL=, with =builds refuse it= in place of =nothing was built=, and what to change after that:
+
+#+begin_example
+FAIL Slurm job 4242: the node-local mount /local/alice.4242 is on tmpfs, not xfs; builds refuse it. A build's workspace must be on node-local disk, not shared or memory-backed storage; storage.node_local_fstype, xfs [site /etc/eb-local/config.toml:4], names the nodes' file system: set it in the site file if their disks use another, or build in an allocation that has a node-local disk
+#+end_example
+
+A site file that sets a storage setting wrongly, such as a =storage.node_local_mount= without =%j=, stops eb-local as it reads the file, with the file and line.
+
+* Outside a Slurm job
+
+A build needs an allocation on the node type that will run the software:
+
+#+begin_example
+eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.
+  Software is built for the CPU of the node that runs eb-local, so build
+  inside an allocation on the node type that will run it, for example:
+  salloc -p cpu -n 16 -t 02:00:00
+#+end_example
+
+The example is =build.allocation_hint=.
+When the site file lists =[build.node_types]=, the same build as a batch job for each type follows.
+
+=eb-local clean --workspaces= removes only the workspaces of the job it runs in:
+
+#+begin_example
+eb-local: clean --workspaces works only inside the Slurm job that made the workspaces, and SLURM_JOB_ID is unset or empty; nothing was removed.
+  A build workspace is in its job's node-local mount, which goes when the job ends; run eb-local clean --workspaces inside that job, in its batch script or with srun --jobid=JOBID --overlap.
+#+end_example
+
+* The node-local mount
+
+A build makes its workspace in the allocation's node-local mount, =<storage.node_local_root>/<storage.node_local_mount>=, with your user name for =%u= and the job id for =%j=.
+=eb-local clean --workspaces= removes workspaces only there.
+Only the site file sets the =storage= settings.
+With the README's site file, =storage.node_local_root= is =/local= and =storage.node_local_mount= is =%u.%j=, so job 4242 of the user =alice= has =/local/alice.4242=.
+The checks run in this order, and the first that fails is the refusal:
+
+- =no site file sets storage.node_local_root= :: Set it in the site file, which =eb-local site install slurm --set node_local_root=DIR= writes, or name a site file that root or this program's owner owns with =--config FILE= or =EB_LOCAL_CONFIG=FILE=. =eb-local eb= needs no site file.
+- =cannot tell your user name: /usr/bin/id -un failed with status N= :: eb-local puts it for =%u= in =storage.node_local_mount=: run eb-local where =id -un= prints your user name.
+- =SLURM_JOB_ID=ID is not a Slurm job id= :: eb-local finds the job's mount by it: run eb-local inside the allocation, from =salloc=, =srun= or =sbatch=, and leave =SLURM_JOB_ID= as Slurm sets it.
+- =the user name "NAME" cannot be part of a path= :: It would be =%u= in =storage.node_local_mount=: run eb-local as a user whose name can.
+- =the node-local mount MOUNT does not exist=, =cannot be read=, =is not a directory=, =is too long a path=, =is not writable by you=, =cannot be resolved= :: =storage.node_local_root= and =storage.node_local_mount= name it: build in an allocation that has a node-local disk, or set them in the site file to where Slurm mounts your job's node-local disk.
+- =the node-local mount MOUNT is a symbolic link= :: A link could lead a build onto another job's or shared storage, so none is followed: build in an allocation whose node-local mount is a directory of its own.
+- =the node-local mount MOUNT is reached through a symbolic link, as PATH= :: The same; set =storage.node_local_root= in the site file to the directory itself, which the next line names.
+- =the node-local mount MOUNT belongs to uid N, not to you (uid M)= :: =storage.node_local_mount= names your job's own mount below =storage.node_local_root=: set them in the site file to where Slurm mounts your job's node-local disk.
+- =no mount in /proc/self/mountinfo holds the node-local mount MOUNT= :: eb-local reads the mount table to check that the mount is node-local: run it where =/proc= is mounted.
+- =the node-local mount MOUNT is on TYPE, not FSTYPE= :: A workspace must be on node-local disk, not shared or memory-backed storage: set =storage.node_local_fstype= in the site file if the nodes' disks use another file system, or build in an allocation that has a node-local disk.
+- =the node-local mount MOUNT is not a mount of its own but part of TARGET= :: Each job's workspace must be a mount made for the job, which goes with it; then as for a mount that does not exist.
+- =the node-local mount MOUNT is not mounted read-write (OPTIONS)= :: A build writes its workspace there: build in an allocation whose node-local disk is writable, and tell the site.
+
+Once the checks of the install prefix below pass, and the secrets the build needs are found, the build makes its workspace in the mount.
+When it cannot:
+
+#+begin_example
+eb-local: cannot make a build workspace in the node-local mount /local/alice.4242 (NoSpace); nothing was built.
+  The mount passed eb-local's checks, so it may be full or have changed since; df /local/alice.4242 shows its free space.
+#+end_example
+
+* The install prefix
+
+Installs, sources and logs must outlive the job, so a build refuses a prefix on shared scratch, any of =storage.shared_scratch=, or below =storage.node_local_root=:
+
+#+begin_example
+eb-local: the install prefix /scratch/alice/eessi [environment EB_LOCAL_PREFIX] is under /scratch, shared scratch in storage.shared_scratch [site /etc/eb-local/config.toml:5]; nothing was built.
+  Installs, sources and logs must outlive the job and not be on shared scratch; set a prefix on durable storage you own with prefix in your eb-local configuration, EB_LOCAL_PREFIX, or --project DIR for a project.
+#+end_example
+
+It refuses the trees a build writes below the prefix when they lead there or out of the prefix, through a symbolic link:
+
+- =PREFIX/versions leads to PATH, under TREE=, and the same for =PREFIX/.eb-local= :: Replace the symbolic link with a directory, or set another prefix as above.
+- =PREFIX/.eb-local/sources leads to PATH, not to a directory inside the install prefix PREFIX=, and the same for =logs= :: Sources and logs stay in the durable prefix, beside the installs: replace the symbolic link with a directory, or set another prefix as above. =eb-local clean= refuses it too.

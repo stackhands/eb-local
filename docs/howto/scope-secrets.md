@@ -1,0 +1,65 @@
+<!-- Generated from docs/orgmode/howto/scope-secrets.org by docs/export.el; edit that file. -->
+
+# Give a secret only to the builds that need it
+
+Every build gets every secret the configuration defines, unless `build.secrets` names the ones it gets.
+A build reads only the secrets it gets, so one it does not get cannot stop it, and its value never reaches `eb` or anything `eb` runs.
+These steps keep a licence and a source token away from the builds that do not use them.
+The secrets are defined in `[secrets]`, or as `EB_LOCAL_SECRET_<NAME>` variables, as [Secrets](../index.md#secrets) describes.
+
+## Give no secret by default
+
+Set `build.secrets` to an empty list in your file, beside the secrets:
+
+```toml
+# ~/.config/eb-local/config.toml
+[build]
+secrets = []
+
+[secrets]
+LM_LICENSE_FILE = "nimvault:licences/flexlm"
+SOURCE_TOKEN = "file:~/.secrets/source-token"
+```
+
+`eb-local config` now shows `build.secrets` as `(none)`, and where it was set.
+A site file can set it in the same way for everyone; your file then overrides it.
+
+## Name the secrets of a kind of build in a profile
+
+```toml
+[profile.licensed]
+build.secrets = ["LM_LICENSE_FILE"]
+```
+
+```sh
+eb-local --profile licensed MATLAB-2026a.eb
+```
+
+The profile's list replaces the one above it; it does not add to it.
+
+## Name the secrets of one build
+
+`EB_LOCAL_BUILD_SECRETS` names them, separated by spaces, in place of `build.secrets`; set but empty, it names none:
+
+```sh
+EB_LOCAL_BUILD_SECRETS=SOURCE_TOKEN eb-local Private-1.0-GCC-15.2.0.eb
+```
+
+The `sbatch` lines that `eb-local --explain` prints for each node type run the build with the environment of the shell that runs them, so export the variable in that shell instead.
+
+## Check what a build gets
+
+```sh
+eb-local config                       # build.secrets, and where it was set
+eb-local --explain MATLAB-2026a.eb    # which secrets reach eb, and which stay out
+eb-local doctor                       # which secrets can be read, and which would stop a build
+```
+
+A name that no secret in force has stops eb-local, which says where the name was set:
+
+```text
+eb-local: build.secrets [user /home/alice/.config/eb-local/config.toml:2] names TOKEN, but no secret TOKEN is defined: add it to [secrets], or set EB_LOCAL_SECRET_TOKEN=SOURCE
+```
+
+With a site file, `eb-local doctor` says FAIL for a secret that cannot be read only when builds get it; one they do not get is a warning.
+Without `build.secrets` anywhere, `doctor` suggests naming the secrets builds need when one of them cannot be read, since every build would stop there.
