@@ -192,6 +192,8 @@ If another module you installed loads the one you name, `uninstall` lists it and
 
 Settings come from, lowest first: built-in defaults, the site file, a site profile, your file, your profile, `EB_LOCAL_*` variables, options.
 `eb-local config` prints every setting and where it came from; `eb-local profiles` lists the profiles.
+`--config FILE`, or `EB_LOCAL_CONFIG=FILE` without it, is read in place of the site file when root or the program's owner owns it, otherwise in place of your file when you own it.
+The other file is still read, so a named site file keeps your profiles and secrets, and a file of yours cannot set the storage settings.
 
 ```toml
 # ~/.config/eb-local/config.toml

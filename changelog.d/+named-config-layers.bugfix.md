@@ -1,0 +1,1 @@
+A file named with `--config` or `EB_LOCAL_CONFIG` that root or the program's owner owns replaces only the site file; your file was not read either, so its profiles, default profile and secrets were lost. `eb-local help` and the README now say what a named file replaces.

@@ -70,6 +70,11 @@ const usage_text =
     \\node-local mount; a successful build removes its workspace. Secrets reach
     \\eb's environment only, and logs written during a build are cleaned of them.
     \\
+    \\--config FILE, or EB_LOCAL_CONFIG=FILE without it, is read in place of the
+    \\site file when root or this program's owner owns it, otherwise in place of
+    \\your ~/.config/eb-local/config.toml when you own it; the other file is
+    \\still read, and only a site file may set the storage settings.
+    \\
 ;
 
 fn die(comptime fmt: []const u8, args: anytype) noreturn {
@@ -348,7 +353,7 @@ fn configSources(c: Ctx, g: Global) []const config.Source {
     // The user file: a named one the caller owns replaces the usual one.
     if (explicit_trust == .user) {
         sources.append(c.a, sourceFrom(c, explicit.?, .user)) catch oom();
-    } else if (explicit_trust == null) {
+    } else {
         const user_file: ?[]const u8 = if (nonEmpty(c.env.get("XDG_CONFIG_HOME"))) |x|
             std.fs.path.join(c.a, &.{ x, "eb-local", "config.toml" }) catch oom()
         else if (nonEmpty(c.env.get("HOME"))) |h|
