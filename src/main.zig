@@ -16,6 +16,7 @@ pub const sites = @import("sites.zig");
 pub const storage = @import("storage.zig");
 pub const rpath = @import("rpath.zig");
 pub const elfcheck = @import("elfcheck.zig");
+pub const extend = @import("extend.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -26,6 +27,10 @@ const usage_text =
     \\directory you own. The 2026 replacement for eblocalinstall.
     \\
     \\  eb-local <easyconfig> [eb options]   build and install with EasyBuild
+    \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
+    \\                                       Exactly one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
+    \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL, and a present
+    \\                                       empty value counts as set; otherwise $HOME/EESSI
     \\  eb-local env                         lines that make your installed modules visible
     \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work
@@ -1642,7 +1647,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, env, dev, clean, config, profiles, uninstall, site, @"rpath-wrappers", check };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, site, @"rpath-wrappers", check };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -1658,6 +1663,13 @@ pub fn main(init: std.process.Init) u8 {
     const c: Ctx = .{ .a = a, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
+    }
+    // A single program name, then eb's own arguments: an eb-stack target.
+    if (extend.engaged(c.env)) {
+        const raw = argv_all[1..];
+        const forwarded = a.alloc([]const u8, raw.len) catch oom();
+        for (raw, 0..) |arg, n| forwarded[n] = arg;
+        return cmdExtend(c, forwarded);
     }
 
     var args: []const [:0]const u8 = argv_all[1..];
@@ -1720,7 +1732,7 @@ pub fn main(init: std.process.Init) u8 {
             // Global options may come first: eb-local --profile gpu dev.
             command = subcommand(x).?;
         } else switch (command) {
-            .build => rest.append(a, x) catch oom(),
+            .build, .eb => rest.append(a, x) catch oom(),
             .@"rpath-wrappers" => {
                 if (std.mem.eql(u8, x, "--for")) {
                     family = value(args, &i, "--for");
@@ -1801,6 +1813,12 @@ pub fn main(init: std.process.Init) u8 {
     if (command == .site) return cmdSite(c, site);
     if (command == .@"rpath-wrappers") return cmdRpathWrappers(c, family);
     if (command == .check) return cmdCheck(c, rest.items);
+    // The install mode is the four EESSI variables, not the site file.
+    if (command == .eb) {
+        if (g.profile != null or g.project != null or g.config_file != null)
+            die("eb reads the install mode from the environment, not from --profile, --project or --config", .{});
+        return cmdExtend(c, rest.items);
+    }
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s, g),
@@ -1809,7 +1827,7 @@ pub fn main(init: std.process.Init) u8 {
         .clean => cmdClean(c, s, clean),
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
-        .profiles, .site, .@"rpath-wrappers", .check => unreachable,
+        .eb, .profiles, .site, .@"rpath-wrappers", .check => unreachable,
     };
 }
 
@@ -1821,6 +1839,31 @@ test {
     _ = storage;
     _ = rpath;
     _ = elfcheck;
+    _ = extend;
+}
+
+fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
+    const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
+    const sel = extend.select(c.a, c.env, nonEmpty(c.env.get("HOME"))) catch |err| switch (err) {
+        error.TooMany => {
+            cli.err("{s}\n", .{extend.too_many});
+            return 3;
+        },
+        error.NoHome => die("no install variable is set and HOME is unset, so there is no default user prefix", .{}),
+        error.OutOfMemory => oom(),
+    };
+    defer if (sel.owned_value) |v| c.a.free(v);
+    var env = c.env.clone(c.a) catch oom();
+    defer env.deinit();
+    extend.apply(&env, sel) catch oom();
+    const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
+    return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
+}
+
+test "eb is the EESSI-extend command" {
+    try std.testing.expectEqual(Command.eb, subcommand("eb").?);
+    try std.testing.expect(subcommand("build") == null);
+    try std.testing.expect(subcommand("env") != null);
 }
 
 test "the replay line repeats the options that selected this environment" {

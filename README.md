@@ -125,6 +125,28 @@ eb-local refuses a project directory that others can write to, since anyone coul
 A successful build removes its workspace; a failed one keeps it for inspection until the allocation ends.
 The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
 
+## EESSI-extend, without a site file
+
+`eb-local eb` is the way to run EasyBuild where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced. It sources that init, loads `EESSI-extend`, and execs `eb`. The module keeps EESSI's hooks, RPATH and compat layer. Host Cargo and CMake wrappers are unset first, and the compat-layer linker is put on `PATH` even when `rustc` is not installed.
+
+Set exactly one install variable before it. A variable that is present and empty counts as set, which is how EESSI-extend reads them. With none set, the mode is a user install at `$HOME/EESSI`, and that directory is created.
+
+| variable | mode | prefix | process umask |
+|---|---|---|---|
+| `EESSI_USER_INSTALL` | user | created when the value is non-empty | 077 |
+| `EESSI_PROJECT_INSTALL` | project | not created; the owner sets the group and the setgid bit | 002 |
+| `EESSI_SITE_INSTALL` | site | the init's site software path | 022 |
+| `EESSI_CVMFS_INSTALL` | cvmfs | the EESSI software path | 022 |
+
+The module sets `EASYBUILD_UMASK` to the same end (and the sticky bit for a user prefix, the setgid bit for a project). This command does not pass `--umask`, so that value stands. An argument of eb's still overrides it: `--umask=022` is what a user-namespace build needs when Lmod, running as uid 0, skips a directory that others cannot search.
+
+```sh
+export EESSI_USER_INSTALL=$HOME/EESSI
+eb-local eb -- example.eb --robot
+```
+
+`--profile`, `--project` and `--config` are not this command's options. The project, site and cvmfs modes are the variables above. A caller that can pass only a program name, and then eb's own arguments, sets `EB_LOCAL_EESSI_EXTEND=1`. Every argument is then eb's, which is how an eb-stack EESSI target runs this command. The 1.x Bash script has no `eb` command.
+
 ## Where things go
 
 | what | where |
@@ -205,7 +227,7 @@ Other settings for the EESSI module and its EasyBuild hooks go in `[eessi]`, in 
 EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
 ```
 
-`[eessi]` takes `EESSI_*` names other than the install and target variables eb-local sets itself (`EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL`, `EESSI_CVMFS_INSTALL`, `EESSI_SITE_SOFTWARE_PREFIX`, `EESSI_SOFTWARE_SUBDIR_OVERRIDE`, `EESSI_ACCELERATOR_TARGET_OVERRIDE`, `EESSI_OVERRIDE_GPU_CHECK`) and the `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_*` ones `site_toolchains` sets.
+`[eessi]` takes `EESSI_*` names other than the install and target variables eb-local sets itself (`EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL`, `EESSI_CVMFS_INSTALL`, `EESSI_SITE_SOFTWARE_PREFIX`, `EESSI_SOFTWARE_SUBDIR_OVERRIDE`, `EESSI_ACCELERATOR_TARGET_OVERRIDE`, `EESSI_OVERRIDE_GPU_CHECK`) and the `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_*` ones `site_toolchains` sets. `eb-local eb` reads the four install variables from the environment instead.
 `eb-local config` shows each value; a credential belongs in `[secrets]`, not here.
 
 ### Site files from a template
