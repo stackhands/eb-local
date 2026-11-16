@@ -180,6 +180,7 @@ fn put(a: Allocator, path: []const u8, bytes: []const u8, mode: u32) Error!void 
         if (old) |o| if (std.mem.eql(u8, o, bytes) and f.stat.perm() == mode and f.stat.uid == linux.getuid()) return;
     } else |_| {}
     var why: common.atomic.Why = .{};
+    defer why.deinit(a);
     common.atomic.atomicWrite(a, path, bytes, .{ .mode = mode }, &why) catch return error.Unsafe;
 }
 
@@ -202,6 +203,22 @@ test "the directory names its contents" {
     try std.testing.expect(std.mem.startsWith(u8, try directory(a, &env, &.{"clang"}), "/xdg/eb-local/rpath-"));
     try env.put("XDG_CACHE_HOME", "relative");
     try std.testing.expectError(error.NoCacheDir, directory(a, &env, &.{"clang"}));
+}
+
+test "a wrapper that cannot be written frees the reason" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/rpath-put-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const link = try std.fs.path.join(a, &.{ root, "clang" });
+    var tb: [sys.path_max:0]u8 = undefined;
+    var lb: [sys.path_max:0]u8 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlink((try sys.z(&tb, root)).ptr, (try sys.z(&lb, link)).ptr)));
+    try std.testing.expectError(error.Unsafe, put(std.testing.allocator, link, script, 0o700));
 }
 
 test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's comes first" {

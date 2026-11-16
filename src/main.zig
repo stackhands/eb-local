@@ -1023,6 +1023,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     }
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
+    defer why.deinit(a);
     common.atomic.atomicWrite(a, target, text, .{ .mode = 0o644 }, &why) catch |e|
         die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else @errorName(e) });
     say("wrote {s} from template {s}; eb-local config shows what it sets", .{ target, t.name });
@@ -2236,6 +2237,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
             continue;
         }
         var why: common.atomic.Why = .{};
+        defer why.deinit(a);
         common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch die("cannot write {s}", .{path});
         say("eb-local: {s}:", .{t.name});
         switch (runAttached(a, argv.items, c.envp)) {
