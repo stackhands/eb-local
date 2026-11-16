@@ -135,7 +135,7 @@ eb-local --project /path/to/project/eessi GSL-2.8-GCC-15.2.0.eb --robot
 eb-local refuses a project directory that others can write to, since anyone could then add module files the group loads, and warns when the setgid bit is missing, since each member's installs would then keep that member's own group.
 `eb-local config` still prints every setting when the project directory is missing or refused, and warns; `config --check` then exits 1.
 
-A project build runs with the umask EESSI-extend sets for a project install, 002, so that each member can write the directories the others' builds made: `software/`, `modules/`, EasyBuild's locks and `.eb-local/`. EasyBuild still leaves each installation read-only. A user install is made with umask 022.
+A project build runs with the umask EESSI-extend sets for a project install, 002, so that each member can write the directories the others' builds made: `software/`, `modules/`, EasyBuild's locks and `.eb-local/`. EasyBuild still leaves each installation read-only. A user build runs with the umask EESSI-extend sets for a user install, 077, and EasyBuild adds the sticky bit the module asks for, so an install is yours alone, as one `eb-local eb` makes. Installs made before eb-local 3.2 keep their modes. To share installs, use `--project`; where others must read a user install, as Lmod running as uid 0 in a user-namespace build must, pass `--umask=022` among eb's options.
 
 A successful build removes its workspace, unless `EB_LOCAL_KEEP_WORK=1` is set; a failed one keeps it for inspection until the allocation ends.
 The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
@@ -188,7 +188,7 @@ The script does what you would type to use EESSI-extend by hand: clear the insta
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
 
-The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree.
+The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree, with the same permissions.
 Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/eessi` does not, eb-local keeps using it and says so. Set `prefix` to choose either for good.
 
 A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.

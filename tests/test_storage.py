@@ -197,7 +197,8 @@ class StorageControls(StorageFixture):
                 self.assertFalse(path.is_relative_to(self.job))
                 self.assertTrue(path.is_dir())
         self.assertEqual(loaded["paths"], built["paths"])
-        self.assertEqual(built["argv"], ["--umask=022"] + args)
+        # The Bash 1.x script keeps passing --umask=022 for a user install.
+        self.assertEqual(built["argv"], args if binary.BIN else ["--umask=022"] + args)
         self.assertEqual(built["user"], str(self.prefix))
         self.assertEqual(built["hooks"], "/selected/hooks.py")
 

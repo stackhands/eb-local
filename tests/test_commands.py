@@ -153,8 +153,8 @@ class Commands(StorageFixture):
                       " user 'recipe with space.eb' --robot\nset -eo pipefail\n", out)
         self.assertIn('\nexport EASYBUILD_BUILDPATH="$W/build"\n', out)
         self.assertIn("\nunset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL", out)
-        self.assertEqual(out.rstrip().splitlines()[-1],
-                         'if [ "$mode" = project ]; then exec eb "$@"; else exec eb --umask=022 "$@"; fi')
+        self.assertIn("\numask 077\n", out)
+        self.assertEqual(out.rstrip().splitlines()[-1], 'exec eb "$@"')
         self.assertFalse(self.prefix.exists())
         self.assertEqual(list(self.job.iterdir()), [])
         self.assertFalse((self.root / "eb.json").exists())
@@ -171,10 +171,10 @@ class Commands(StorageFixture):
         env = {k: v for k, v in self.env.items() if k not in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")}
         env.update(W=str(self.job / self.workspaces()[0]), PATH=f"{self.root / 'doubles-bin'}:{self.env['PATH']}")
         replay = subprocess.run(["bash", "--noprofile", "--norc", "-c", explained.stdout],
-                                env=env, cwd=self.root, capture_output=True, text=True)
+                                env=env, cwd=self.root, capture_output=True, text=True, umask=0o022)
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(json.loads((self.root / "eb.json").read_text()), real)
-        self.assertEqual(real["argv"], ["--umask=022", "recipe with space.eb", "--robot"])
+        self.assertEqual(real["argv"], ["recipe with space.eb", "--robot"])
 
     @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
     def test_a_build_starts_with_the_command_that_prints_its_script(self):
