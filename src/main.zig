@@ -2126,9 +2126,6 @@ fn jobNamePart(a: Allocator, s: []const u8) []const u8 {
     return out;
 }
 
-/// One batch job per configured node type, each running this eb-local with
-/// the same recipe, options and configuration inside its own allocation, so
-/// a module is built for every CPU target the site has.
 /// The node types the site file lists, with a warning where it lists them
 /// under their old name.
 fn nodeTypes(s: config.Settings) []const config.NodeType {
@@ -2137,6 +2134,9 @@ fn nodeTypes(s: config.Settings) []const config.NodeType {
     return s.node_types.value;
 }
 
+/// One batch job per configured node type, each running this eb-local with
+/// the same recipe, options and configuration inside its own allocation, so
+/// a module is built for every CPU target the site has.
 fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o: SubmitOpts) u8 {
     const a = c.a;
     if (args.len == 0) die("submit needs an easyconfig: eb-local submit [--on NAME,...] [--print] RECIPE [eb options]", .{});
