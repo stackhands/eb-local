@@ -125,6 +125,51 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
 
+    def without_a_site_file(self, **extra):
+        for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):
+            if Path(installed).exists():
+                self.skipTest(f"{installed} is this host's site file")
+        repo = self.root / "repo"
+        return self.run_tool(["doctor"], EB_LOCAL_CONFIG="", XDG_CONFIG_HOME=str(self.root / "xdg"),
+                             SLURM_JOB_ID="", EESSI_CVMFS_REPO=str(repo), **extra)
+
+    def test_doctor_without_a_site_file_judges_eb_local_eb(self):
+        init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        run = self.without_a_site_file()
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("info no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; "
+                      "`eb-local eb` does not.", run.stdout)
+        self.assertIn(f"FAIL {init} is missing, so `eb-local eb` stops", run.stdout)
+        self.assertEqual(run.stdout.count("FAIL"), 2, run.stdout)
+
+        init.parent.mkdir(parents=True)
+        init.write_text("")
+        run = self.without_a_site_file()
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertNotIn("FAIL", run.stdout)
+        self.assertIn(f"ok   `eb-local eb` sources {init}", run.stdout)
+        self.assertIn("ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi", run.stdout)
+        self.assertTrue(run.stdout.rstrip().endswith(
+            "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file."), run.stdout)
+
+        run = self.without_a_site_file(EESSI_PROJECT_INSTALL="/project/climate")
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn("ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL=/project/climate", run.stdout)
+
+        run = self.without_a_site_file(EESSI_USER_INSTALL="/home/alice/eessi", EESSI_SITE_INSTALL="")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn("FAIL more than one of EESSI_USER_INSTALL", run.stdout)
+        self.assertIn("so `eb-local eb` refuses to run", run.stdout)
+
+    def test_doctor_with_a_site_file_judges_builds_and_warns_for_eb_local_eb(self):
+        run = self.run_tool(["doctor"], EESSI_CVMFS_REPO=str(self.root / "repo"),
+                            EESSI_USER_INSTALL=str(self.prefix), EESSI_SITE_INSTALL="")
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertNotIn("FAIL", run.stdout)
+        self.assertIn("is missing, so `eb-local eb` stops", run.stdout)
+        self.assertIn("warn more than one of EESSI_USER_INSTALL", run.stdout)
+        self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+
 
 if __name__ == "__main__":
     unittest.main()

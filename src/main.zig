@@ -1831,8 +1831,10 @@ fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: [
 }
 
 /// Everything about this shell, this node and the configuration that would
-/// make a build or a module load go wrong, one line each: ok, info, warn or
-/// FAIL. Changes nothing; exits 1 when a line says FAIL.
+/// make a build, `eb-local eb` or a module load go wrong, one line each: ok,
+/// info, warn or FAIL. Changes nothing; exits 1 when a line says FAIL. A
+/// build needs a site file and `eb-local eb` does not, so without one what
+/// stops `eb-local eb` is a FAIL, and with one what stops a build is.
 fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
@@ -1842,11 +1844,11 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     // Configuration.
     const sources = configSources(c, g);
     for (sources) |src| note(a, &out, "ok  ", "{s} file {s}", .{ @tagName(src.layer), src.path });
-    if (s.node_local_root.value.len == 0) {
-        note(a, &out, "FAIL", "no site file sets storage.node_local_root, so builds cannot run; `eb-local site install` writes one beside the program", .{});
-        failed = true;
-    } else {
+    const site = s.node_local_root.value.len > 0;
+    if (site) {
         note(a, &out, "ok  ", "builds use the allocation's own {s} mount {s}/{s}", .{ s.node_local_fstype.value, s.node_local_root.value, s.node_local_mount.value });
+    } else {
+        note(a, &out, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
     }
 
     // Where installs go.
@@ -1899,6 +1901,25 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
         note(a, &out, "warn", "{s}={s} is set in this shell; eb-local builds clear it, but EESSI-extend or eb run by hand would use it", .{ v, val });
     };
     if (leftovers == 0) note(a, &out, "ok  ", "no other EESSI or EasyBuild install variable is set in this shell", .{});
+
+    // What eb-local eb needs: the EESSI init, and at most one install variable.
+    const eb_stop = if (site) "warn" else "FAIL";
+    const init = extend.initPath(a, c.env) catch oom();
+    if (fsx.statAt(fsx.cwd, init, true)) |_| {
+        note(a, &out, "ok  ", "`eb-local eb` sources {s}", .{init});
+    } else |_| {
+        note(a, &out, eb_stop, "{s} is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere", .{init});
+        if (!site) failed = true;
+    }
+    if (extend.select(c.env)) |sel| {
+        const name = extend.variable(sel.mode);
+        if (c.env.get(name)) |v| {
+            note(a, &out, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+        } else note(a, &out, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
+    } else |_| {
+        note(a, &out, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
+        if (!site) failed = true;
+    }
     for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
         note(a, &out, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
 
@@ -1940,7 +1961,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
         note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
     } else note(a, &out, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});
 
-    out.appendSlice(a, if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n") catch oom();
+    out.appendSlice(a, if (site)
+        (if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n")
+    else if (failed)
+        "\nSomething above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.\n"
+    else
+        "\nNothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.\n") catch oom();
     cli.put(1, out.items);
     return if (failed) 1 else 0;
 }

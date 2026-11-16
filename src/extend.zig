@@ -77,6 +77,17 @@ pub fn apply(env: *std.process.Environ.Map) void {
     _ = env.swapRemove("EB_LOCAL_EESSI_EXTEND");
 }
 
+/// The EESSI init the script sources, with the script's defaults for an
+/// unset or empty `EESSI_CVMFS_REPO` and `EESSI_VERSION`.
+pub fn initPath(a: Allocator, env: *const std.process.Environ.Map) Allocator.Error![]const u8 {
+    const repo = env.get("EESSI_CVMFS_REPO") orelse "";
+    const ver = env.get("EESSI_VERSION") orelse "";
+    return std.fmt.allocPrint(a, "{s}/versions/{s}/init/lmod/bash", .{
+        if (repo.len > 0) repo else "/cvmfs/software.eessi.io",
+        if (ver.len > 0) ver else "2026.06",
+    });
+}
+
 /// `$1` is the umask, `$2` is the mode, and the rest are eb's arguments.
 /// EESSI's init is not safe under `nounset`. The compat-layer `ld` goes on
 /// `PATH` even when `rustc` is absent: a failing command substitution under
@@ -511,7 +522,21 @@ test "a missing version is reported" {
     try r.env.put("EESSI_VERSION", "2025.06");
     const out = try r.launch(&.{});
     try testing.expectEqual(@as(u32, 2), out.term.code());
-    try testing.expect(std.mem.indexOf(u8, out.stderr, "versions/2025.06/init") != null);
+    const init = try initPath(r.arena.allocator(), &r.env);
+    try testing.expect(std.mem.endsWith(u8, init, "/versions/2025.06/init/lmod/bash"));
+    const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: missing {s}\n", .{init});
+    try testing.expectEqualStrings(said, out.stderr);
+}
+
+test "the init path has the script's defaults" {
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("EESSI_VERSION", "");
+    const init = try initPath(testing.allocator, &env);
+    defer testing.allocator.free(init);
+    try testing.expectEqualStrings("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash", init);
+    try testing.expect(std.mem.indexOf(u8, script, "repo=${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}\n") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "ver=${EESSI_VERSION:-2026.06}\n") != null);
 }
 
 test "the build directory is the caller's WORKING_DIR or one of the user's own" {
