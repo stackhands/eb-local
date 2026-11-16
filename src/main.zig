@@ -834,19 +834,24 @@ fn nimvaultOf(s: config.Settings) secrets.Nimvault {
     return .{ .program = s.nimvault_program.value, .vault = s.nimvault_vault.value };
 }
 
-/// The settings in force as EB_LOCAL_* lines, so the same configuration can
-/// travel in the environment of a job, a container or CI. Storage and
-/// build.site_toolchains have no variable: only the site file sets them.
+/// The settings in force as EB_LOCAL_* lines, empty ones included, so the
+/// same configuration can travel in the environment of a job, a container or
+/// CI. Storage and build.site_toolchains have no variable: only the site file
+/// sets them. A profile sets nothing else, so the lines hold all of the
+/// profile in force and select none: in a job that still has the files, the
+/// default profile would otherwise apply beneath them, and where the profile
+/// is not defined, naming it would stop eb-local.
 fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     const line = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), name: []const u8, v: []const u8) void {
-            if (v.len == 0) return;
             o.appendSlice(al, str(al, "export {s}={s}\n", .{ name, q(al, v) })) catch oom();
         }
     }.f;
     out.appendSlice(a, "# eb-local configuration; storage and build.site_toolchains come only from the site file\n") catch oom();
+    out.appendSlice(a, "# every setting of the profile in force is below, so no profile is selected beneath them\n") catch oom();
+    line(a, &out, "EB_LOCAL_PROFILE", "");
     // The same absolute path `eb-local env` would use. A relative prefix, a
     // ~/ prefix and a symbolic link must not be re-resolved from another
     // directory, or followed onto a different tree, when the lines are sourced.
@@ -867,13 +872,9 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
     // [eessi] settings are environment for EESSI already; they travel as
-    // themselves.
-    // An empty [eessi] value is a profile clearing a site setting. line()
-    // skips empty strings, which is how an unset EB_LOCAL_* default is left
-    // out; the clear has to be exported or the site value stays in the job.
-    for (s.eessi.items) |e| {
-        out.appendSlice(a, str(a, "export {s}={s}\n", .{ e.name, q(a, e.value) })) catch oom();
-    }
+    // themselves. An empty one is a profile clearing a site setting; the
+    // clear has to be exported or the site value stays in the job.
+    for (s.eessi.items) |e| line(a, &out, e.name, e.value);
     cli.put(1, out.items);
     return 0;
 }
