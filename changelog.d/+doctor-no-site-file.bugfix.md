@@ -1,0 +1,1 @@
+`eb-local doctor` without a site file checks what `eb-local eb` needs, the EESSI init and at most one install variable, and no longer exits 1 because builds in a job need a site file. The exit status changes only in that case: with a site file, what stops only `eb-local eb` is a warning.
