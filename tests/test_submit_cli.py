@@ -7,12 +7,15 @@ arguments.
 """
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import unittest
 
 import binary
 from test_storage import StorageFixture
+
+README = Path(__file__).resolve().parents[1] / "README.md"
 
 SBATCH = r'''#!/bin/sh
 printf '%s\n' "$*" >> "$CONTROL_ROOT/sbatch-calls"
@@ -89,6 +92,24 @@ class Submit(StorageFixture):
         self.assertIn("#SBATCH --job-name=eb-local-genoa-recipe.eb", run.stdout)
         # --dry-run after the recipe is eb's, not submit's.
         self.assertIn("recipe.eb --dry-run", run.stdout)
+
+    def test_the_readme_commands_run_against_the_readme_targets(self):
+        text = README.read_text()
+        start = text.index("\n## Build for every node type\n")
+        section = text[start:text.index("\n## ", start + 1)]
+        site = re.search(r"```toml\n(.*?)```", section, re.S).group(1)
+        self.assertTrue(site.startswith("[build.targets]\n"), site)
+        self.write_site(site)
+        commands = re.search(r"```sh\n(.*?)```", section, re.S).group(1).splitlines()
+        self.assertEqual(len(commands), 3, commands)
+        for line in commands:
+            argv = shlex.split(line, comments=True)
+            self.assertEqual(argv[:2], ["eb-local", "submit"])
+            with self.subTest(command=line):
+                run = self.run_tool(argv[1:], SLURM_JOB_ID="")
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(len(self.calls()), 3, self.calls())
+        self.assertTrue(self.calls()[2].startswith("-p gpu "), self.calls())
 
     def test_without_targets_there_is_nothing_to_submit(self):
         self.write_site("")
