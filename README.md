@@ -25,7 +25,7 @@ The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can m
 Load the modules you link against on the `dev` line, not after it: the build environment, loaded last, puts its compiler wrappers ahead of every module's programs on `PATH`, so that no module's `gcc` or `ld` runs in their place, and `dev` checks only the modules it is given.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
-These were checked on Snellius with EESSI 2026.06, each program then run with no modules at all:
+`tests/site/dev-tasks.sh` checks these on a cluster with EESSI 2026.06, each program then run with no modules at all:
 
 | task | the line before building |
 |---|---|
@@ -208,7 +208,7 @@ default_profile = "mine"
 dev.modules = ["FFTW/3.3.10-GCC-15.2.0"]
 
 [profile.group]
-project = "/projects/0/myproj/eessi"
+project = "/path/to/project/eessi"
 
 [profile.gpu]
 dev.modules = ["CUDA/13.3.0"]
@@ -223,13 +223,13 @@ It also holds the storage settings, which only it may set:
 
 ```toml
 [storage]
-node_local_root = "/scratch-node"        # where allocation mounts are
+node_local_root = "/local"               # where allocation mounts are
 node_local_mount = "%u.%j"               # each allocation's mount below it: %u the user, %j the job id
 node_local_fstype = "xfs"
-shared_scratch = ["/scratch-shared", "/gpfs/scratch1"]
+shared_scratch = ["/scratch", "/work"]
 
 [build]
-allocation_hint = "salloc -p rome -n 16 -t 02:00:00 --constraint=scratch-node"
+allocation_hint = "salloc -p cpu -n 16 -t 02:00:00"
 site_toolchains = ["intel/2026.1"]       # toolchains EESSI's hooks accept besides foss and lfoss
 ```
 

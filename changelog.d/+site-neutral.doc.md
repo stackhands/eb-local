@@ -1,0 +1,1 @@
+The README, the help and `eb-local.conf.example` describe no particular site: their examples use a neutral one (node-local mounts under `/local`, shared scratch `/scratch` and `/work`, partition `cpu`, a project under `/path/to/project`), and the help no longer names the tool eb-local replaced at one site.

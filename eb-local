@@ -1,6 +1,6 @@
 #!/bin/bash
 # eb-local: install and build software on top of EESSI 2026.06, into a
-# directory you own. The 2026 replacement for eblocalinstall.
+# directory you own.
 #
 #   eb-local <easyconfig> [eb options]   build and install with EasyBuild
 #   eb-local env                         lines that make your installed modules visible

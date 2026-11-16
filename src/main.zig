@@ -24,7 +24,7 @@ pub const version = "2.4.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
-    \\directory you own. The 2026 replacement for eblocalinstall.
+    \\directory you own.
     \\
     \\  eb-local <easyconfig> [eb options]   build and install with EasyBuild
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
