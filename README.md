@@ -164,7 +164,7 @@ eb-local eb -- example.eb --robot
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
 
-A build needs a Slurm allocation whose node-local directory is its own mount, of the configured file system type, owned by you.
+A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
 Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
 
 ## Clean up
@@ -223,7 +223,8 @@ It also holds the storage settings, which only it may set:
 
 ```toml
 [storage]
-node_local_root = "/scratch-node"        # allocation mounts are <root>/<user>.<job id>
+node_local_root = "/scratch-node"        # where allocation mounts are
+node_local_mount = "%u.%j"               # each allocation's mount below it: %u the user, %j the job id
 node_local_fstype = "xfs"
 shared_scratch = ["/scratch-shared", "/gpfs/scratch1"]
 
@@ -333,7 +334,7 @@ gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://c
 
 The Bash script (`eb-local`, 1.x) needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
 It reads one site file, `eb-local.conf`: the file `EB_LOCAL_CONFIG` names, else the one beside the script, else `/etc/eb-local.conf`, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
-Its `key = value` lines set `node_local_root`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
+Its `key = value` lines set `node_local_root`, `node_local_mount`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
 A site's easyconfig installs the program and its site configuration.
 
 ## Test

@@ -193,11 +193,55 @@ pub const JobRoot = struct {
     path: []const u8,
 };
 
-/// The allocation's node-local mount: <root>/<user>.<job id>, an owned,
-/// writable, canonical directory that is its own mount of `fstype`.
+/// storage.node_local_mount unless the site sets it: the user, a dot and
+/// the job id.
+pub const default_mount = "%u.%j";
+
+/// A storage.node_local_mount: one file name of letters, digits, '.', '_',
+/// '-', %u (the user) and %j (the job id). It must hold %j, so that each
+/// allocation has a mount of its own.
+pub fn validMountPattern(p: []const u8) bool {
+    if (p.len == 0 or p.len > 255 or std.mem.indexOf(u8, p, "%j") == null) return false;
+    var i: usize = 0;
+    while (i < p.len) : (i += 1) {
+        const c = p[i];
+        if (c == '%') {
+            if (i + 1 == p.len or (p[i + 1] != 'u' and p[i + 1] != 'j')) return false;
+            i += 1;
+        } else if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-')) return false;
+    }
+    return true;
+}
+
+fn mountName(a: Allocator, pattern: []const u8, user: []const u8, job_id: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '%' and i + 1 < pattern.len) {
+            const with: ?[]const u8 = switch (pattern[i + 1]) {
+                'u' => user,
+                'j' => job_id,
+                else => null,
+            };
+            if (with) |w| {
+                try out.appendSlice(a, w);
+                i += 1;
+                continue;
+            }
+        }
+        try out.append(a, pattern[i]);
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// The allocation's node-local mount: <root>/<mount>, the mount name with
+/// the user and the job id filled in, an owned, writable, canonical
+/// directory that is its own mount of `fstype`.
 pub fn jobRoot(
     a: Allocator,
     node_local_root: []const u8,
+    mount: []const u8,
     fstype: []const u8,
     job_id: []const u8,
     user: []const u8,
@@ -209,7 +253,8 @@ pub fn jobRoot(
     for (job_id) |c| if (!std.ascii.isDigit(c)) return refuse(a, r, "invalid Slurm allocation identity.", .{});
     if (user.len == 0 or std.mem.indexOfAny(u8, user, "/\x00") != null or std.mem.eql(u8, user, "..") or std.mem.eql(u8, user, "."))
         return refuse(a, r, "cannot determine the allocation user.", .{});
-    const path = try std.fmt.allocPrint(a, "{s}/{s}.{s}", .{ node_local_root, user, job_id });
+    if (!validMountPattern(mount)) return refuse(a, r, "storage.node_local_mount is not a mount name.", .{});
+    const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ node_local_root, try mountName(a, mount, user, job_id) });
     const st = fsx.statAt(fsx.cwd, path, false) catch
         return refuse(a, r, "allocation node-local root must be an owned writable directory.", .{});
     if (!st.isDir()) return refuse(a, r, "allocation node-local root must be an owned writable directory.", .{});
@@ -446,10 +491,28 @@ test "the job mount is refused when another user owns it" {
     defer fsx.deleteTree(a, fsx.cwd, nodes) catch {};
     const info = try std.fmt.allocPrint(a, "1 0 0:1 / / rw - ext4 /dev/x rw\n2 1 0:2 / {s} rw,relatime - xfs /dev/y rw\n", .{job});
     var r: Refusal = .{};
-    const ok = try jobRoot(a, nodes, "xfs", "42", "u", info, linux.getuid(), &r);
+    const ok = try jobRoot(a, nodes, default_mount, "xfs", "42", "u", info, linux.getuid(), &r);
     try testing.expectEqualStrings(job, ok.path);
-    try testing.expectError(error.Refused, jobRoot(a, nodes, "xfs", "42", "u", info, linux.getuid() + 1, &r));
+    try testing.expectError(error.Refused, jobRoot(a, nodes, default_mount, "xfs", "42", "u", info, linux.getuid() + 1, &r));
     try testing.expect(std.mem.indexOf(u8, r.message, "another user") != null);
-    try testing.expectError(error.Refused, jobRoot(a, nodes, "gpfs", "42", "u", info, linux.getuid(), &r));
-    try testing.expectError(error.Refused, jobRoot(a, nodes, "xfs", "042", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, nodes, default_mount, "gpfs", "42", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, nodes, default_mount, "xfs", "042", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, nodes, "job-%j", "xfs", "42", "u", info, linux.getuid(), &r));
+    try testing.expectError(error.Refused, jobRoot(a, nodes, "%u", "xfs", "42", "u", info, linux.getuid(), &r));
+    try testing.expect(std.mem.indexOf(u8, r.message, "node_local_mount") != null);
+}
+
+test "the allocation's mount name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("u.42", try mountName(a, default_mount, "u", "42"));
+    try testing.expectEqualStrings("job-42", try mountName(a, "job-%j", "u", "42"));
+    try testing.expectEqualStrings("u_42_u", try mountName(a, "%u_%j_%u", "u", "42"));
+    // A user name is filled in, never read as a pattern.
+    try testing.expectEqualStrings("a%jb.42", try mountName(a, default_mount, "a%jb", "42"));
+    for ([_][]const u8{ default_mount, "%j", "job-%j", "slurm.%j.%u" }) |ok|
+        try testing.expect(validMountPattern(ok));
+    for ([_][]const u8{ "", "%u", "u.42", "%u/%j", "../%j", "%x%j", "%j%", "%%j", "%j %u", "%j/" }) |bad|
+        try testing.expect(!validMountPattern(bad));
 }

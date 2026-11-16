@@ -311,6 +311,32 @@ class StorageControls(StorageFixture):
         write_config(self.config, self.nodes, "node_local_fstype = ext4\n")
         self.refused()
 
+    def test_configured_mount_name_names_the_allocation_mount(self):
+        mount = self.nodes / "job-123"
+        self.job.rename(mount)
+        self.job = mount
+        self.env.update(CONTROL_JOB_ROOT=str(mount), TMPDIR=str(mount))
+        write_config(self.config, self.nodes, "node_local_mount = job-%j\n")
+        run = self.run_wrapper()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        paths = json.loads((self.root / "eb.json").read_text())["paths"]
+        self.assertTrue(Path(paths["TMPDIR"]).is_relative_to(mount))
+        self.assertTrue(Path(paths["WORKING_DIR"]).is_relative_to(mount))
+
+    def test_the_default_mount_is_not_used_when_the_site_names_another(self):
+        write_config(self.config, self.nodes, "node_local_mount = job-%j\n")
+        self.refused()
+
+    def test_mount_name_that_is_not_one_file_name_with_the_job_id_is_refused(self):
+        for pattern in ("%u", "u.123", "../%j", "x/%j", "%x%j", "%j;id"):
+            with self.subTest(pattern=pattern):
+                write_config(self.config, self.nodes, f"node_local_mount = {pattern}\n")
+                run = self.run_wrapper()
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertIn("node_local_mount must be one file name", run.stderr)
+                self.assertFalse(self.prefix.exists())
+                self.assertEqual(list(self.job.iterdir()), [])
+
     def test_allocation_hint_comes_from_the_configuration(self):
         run = self.run_wrapper(SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 2)

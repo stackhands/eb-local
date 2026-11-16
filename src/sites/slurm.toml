@@ -1,11 +1,14 @@
 # eb-local site file for a Slurm cluster whose jobs get a node-local disk.
 #   eb-local site install slurm --set node_local_root=/local \
-#       --set shared_scratch=/scratch [--set node_local_fstype=ext4] [--set partition=cpu]
-# Each allocation's mount must be <node_local_root>/<user>.<job id>, owned
-# by the user; shared_scratch is the parallel file system builds must avoid.
+#       --set shared_scratch=/scratch [--set node_local_mount=%j] \
+#       [--set node_local_fstype=ext4] [--set partition=cpu]
+# Each allocation's mount must be <node_local_root>/<node_local_mount>, with
+# %u the user and %j the job id, owned by the user; shared_scratch is the
+# parallel file system builds must avoid.
 
 [storage]
 node_local_root = "{{node_local_root}}"
+node_local_mount = "{{node_local_mount:%u.%j}}"
 node_local_fstype = "{{node_local_fstype:xfs}}"
 shared_scratch = ["{{shared_scratch}}"]
 

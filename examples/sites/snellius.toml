@@ -7,6 +7,7 @@
 
 [storage]
 node_local_root = "/scratch-node"
+node_local_mount = "%u.%j"
 node_local_fstype = "xfs"
 shared_scratch = ["/scratch-shared", "/scratch-local", "/gpfs/scratch1"]
 

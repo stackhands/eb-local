@@ -70,17 +70,24 @@ class SitesCli(StorageFixture):
         run = self.run_tool(["site", "list"])
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual([line.split()[0] for line in run.stdout.splitlines()], ["slurm"])
-        self.assertRegex(run.stdout, r"slurm\s+placeholders: node_local_root, node_local_fstype, shared_scratch, partition")
+        self.assertRegex(run.stdout, r"slurm\s+placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition")
 
     def test_show_fills_defaults_and_set_values(self):
         run = self.run_tool(["site", "show", "slurm"] + PATHS)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn('node_local_root = "/local"', run.stdout)
+        self.assertIn('node_local_mount = "%u.%j"', run.stdout)
         self.assertIn('node_local_fstype = "xfs"', run.stdout)
         self.assertIn("salloc -p cpu ", run.stdout)
         self.assertNotIn("{{", run.stdout)
-        run = self.run_tool(["site", "show", "slurm", "--set", "partition=gpu"] + PATHS)
+        run = self.run_tool(["site", "show", "slurm", "--set", "partition=gpu",
+                             "--set", "node_local_mount=job-%j"] + PATHS)
+        self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("salloc -p gpu ", run.stdout)
+        self.assertIn('node_local_mount = "job-%j"', run.stdout)
+        run = self.run_tool(["site", "show", "slurm", "--set", "node_local_mount=%u"] + PATHS)
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("storage.node_local_mount must be one file name", run.stderr)
 
     def test_install_writes_a_site_file_the_program_then_reads(self):
         target = self.root / "etc" / "config.toml"

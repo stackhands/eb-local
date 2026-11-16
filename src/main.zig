@@ -831,6 +831,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
     row("nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
     row("storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
+    row("storage.node_local_mount", s.node_local_mount.value, s.node_local_mount.from);
     row("storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
     const scratch = std.mem.join(a, " ", s.shared_scratch.value) catch oom();
     row("storage.shared_scratch", if (scratch.len == 0) "(none)" else scratch, s.shared_scratch.from);
@@ -1107,7 +1108,7 @@ fn checkedJobRoot(c: Ctx, s: config.Settings) []const u8 {
     if (s.node_local_root.value.len == 0) die("no node-local root is configured; set storage.node_local_root in the site configuration (see the README).", .{});
     var r: storage.Refusal = .{};
     const job_id = c.env.get("SLURM_JOB_ID") orelse "";
-    const jr = storage.jobRoot(c.a, s.node_local_root.value, s.node_local_fstype.value, job_id, userName(c), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
+    const jr = storage.jobRoot(c.a, s.node_local_root.value, s.node_local_mount.value, s.node_local_fstype.value, job_id, userName(c), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
         error.Refused => die("{s}", .{r.message}),
         error.OutOfMemory => oom(),
     };
