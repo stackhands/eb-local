@@ -59,7 +59,7 @@ root = os.environ["CONTROL_ROOT"]
 names = ["SOURCE_TOKEN", "OTHER_TOKEN", "LM_LICENSE_FILE"]
 seen = {n: os.environ.get(n) for n in names}
 site = {n: v for n, v in os.environ.items() if "TOP_LEVEL_TOOLCHAINS" in n or n == "EB_LOCAL_SITE_TOOLCHAINS"}
-open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site}))
+open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site, "eessi": os.environ.get("EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220")}))
 log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-test.log")
 open(log, "w").write("".join(f"{n}={v}\n" for n, v in seen.items()))
 PY
@@ -220,6 +220,45 @@ class ConfigCli(StorageFixture):
         site = json.loads((self.root / "eb.json").read_text())["site"]
         self.assertEqual(site, {"EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06": "[x]"})
 
+    def test_eessi_settings_reach_the_build_and_the_printed_lines(self):
+        text = self.site.read_text()
+        self.site.write_text(text.replace('allocation_hint = "salloc -p rome -n 16"\n',
+                                          'allocation_hint = "salloc -p rome -n 16"\n'
+                                          'site_toolchains = ["intel/2026.1"]\n')
+                             + "[eessi]\nEESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = '1 2'\n")
+        run = self.run_tool(["--config", str(self.site), "recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["eessi"], "1 2")
+        run = self.run_tool(["env", "--config", str(self.site)], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        line = "export EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220='1 2'\n"
+        self.assertIn(line, run.stdout)
+        self.assertLess(run.stdout.index(line), run.stdout.index("module load EESSI/2026.06"))
+        # site_toolchains after the stack loads, under the version it set.
+        replay = subprocess.run(["bash", "-c", 'module() { export EESSI_VERSION=2026.06; }\n' + run.stdout
+                                 + 'printf %s "$EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06"'],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(replay.stdout, '[{"name": "intel", "version": "2026.1"}]', replay.stderr)
+        run = self.run_tool(["config", "--config", str(self.site)])
+        self.assertRegex(run.stdout, r"eessi\.EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220\s+'1 2'\s+\[site .*site\.toml:\d+\]")
+        run = self.run_tool(["config", "--env", "--config", str(self.site)])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("export EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220='1 2'\n", run.stdout)
+
+    def test_an_empty_eessi_override_is_exported(self):
+        self.site.write_text(
+            SITE.format(nodes=self.nodes)
+            + "\n[eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"1\"\n"
+            + "[profile.cleared.eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"\"\n"
+        )
+        run = self.run_tool(["config", "--env", "--config", str(self.site), "--profile", "cleared"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("export EESSI_OVERRIDE_TOOLCHAIN_CHECK=''\n", run.stdout)
+        self.assertNotIn("export EESSI_OVERRIDE_TOOLCHAIN_CHECK='1'\n", run.stdout)
+        run = self.run_tool(["env", "--config", str(self.site), "--profile", "cleared"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("export EESSI_OVERRIDE_TOOLCHAIN_CHECK=''\n", run.stdout)
+
     def test_refusals(self):
         cases = {
             'TOKEN = "hunter2"\n': "never written",
@@ -229,6 +268,7 @@ class ConfigCli(StorageFixture):
             '[profile.p]\nstack.module = "EESSI;id"\n': "not a module name",
             '[build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",
             '[profile.p.build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",
+            '[eessi]\nEESSI_USER_INSTALL = "/x"\n': "install and target",
         }
         for text, needle in cases.items():
             with self.subTest(text=text):

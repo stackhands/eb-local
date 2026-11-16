@@ -155,7 +155,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile.
-The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+The keys are `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file (`/etc/eb-local/config.toml`, or `config.toml` beside the program) also holds the storage settings, which only it may set:
@@ -172,6 +172,17 @@ site_toolchains = ["intel/2026.1"]       # toolchains EESSI's hooks accept besid
 ```
 
 `site_toolchains` reaches EasyBuild as `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_<EESSI version>`, so users build recipes on those toolchains without setting the variable; `eb-local config` shows it.
+`env` and `dev` print it too, after the stack loads, for `eb` run by hand.
+
+Other settings for the EESSI module and its EasyBuild hooks go in `[eessi]`, in the site file, your file or a profile; `env`, `dev` and builds export them before the stack loads:
+
+```toml
+[eessi]
+EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
+```
+
+`[eessi]` takes `EESSI_*` names other than the install and target variables eb-local sets itself (`EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL`, `EESSI_CVMFS_INSTALL`, `EESSI_SITE_SOFTWARE_PREFIX`, `EESSI_SOFTWARE_SUBDIR_OVERRIDE`, `EESSI_ACCELERATOR_TARGET_OVERRIDE`, `EESSI_OVERRIDE_GPU_CHECK`) and the `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_*` ones `site_toolchains` sets.
+`eb-local config` shows each value; a credential belongs in `[secrets]`, not here.
 
 ### Site files from a template
 
@@ -195,7 +206,7 @@ eb-local --profile gpu config --env > eb-local.env   # sources only, never value
 . ./eb-local.env && eb-local config                  # each setting now says [environment ...]
 ```
 
-`EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
+`EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. `[eessi]` settings come out as the `EESSI_*` variables themselves, which reach EESSI as they are. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
 
 A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the program's owner or you (a site file) or by you (your file); otherwise eb-local stops.
 A 1.x `eb-local.conf` is read as before.
