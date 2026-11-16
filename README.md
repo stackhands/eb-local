@@ -334,7 +334,7 @@ EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
 ### Site files from a template
 
 eb-local carries one site file template, `slurm`, for any Slurm cluster whose jobs get a node-local disk.
-A site can keep its own template in a file, named with a slash; `examples/sites/` holds worked examples of such files.
+A site can keep its own template in a file, named with a slash, in a repository of its own; `examples/sites/example.toml` is a worked example of such a file, for a site that does not exist.
 
 ```sh
 eb-local site list                                  # the built-in templates and their placeholders
