@@ -362,6 +362,15 @@ fn machine(buf: *[64]u8) []const u8 {
     return buf[0..name.len];
 }
 
+/// The module installs into `$HOME/eessi` by default, though its help text
+/// says `$HOME/EESSI`; neither is made.
+fn noDefaultPrefix(r: *Run) !void {
+    for ([_][]const u8{ "home/eessi", "home/EESSI" }) |rel| {
+        const path = try std.fs.path.join(r.arena.allocator(), &.{ r.root, rel });
+        try testing.expect(fsx.statAt(fsx.cwd, path, false) == error.NotFound);
+    }
+}
+
 fn kept(text: []const u8) !void {
     try testing.expectEqualStrings("/eessi/init/easybuild/eb_hooks.py", envVar(text, "EASYBUILD_HOOKS").?);
     try testing.expectEqualStrings("1", envVar(text, "EASYBUILD_RPATH").?);
@@ -417,12 +426,7 @@ test "with no install variable nothing is exported or created" {
     try ok(out);
     try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
     try testing.expectEqualStrings("0077", firstLine(out.stdout));
-    // The module's help text says $HOME/EESSI. The loaded module uses
-    // $HOME/eessi, and does not need that directory at load time.
-    for ([_][]const u8{ "home/EESSI", "home/eessi" }) |rel| {
-        const path = try std.fs.path.join(r.arena.allocator(), &.{ r.root, rel });
-        try testing.expect(fsx.statAt(fsx.cwd, path, false) == error.NotFound);
-    }
+    try noDefaultPrefix(&r);
 }
 
 test "a project prefix is not created" {
@@ -447,8 +451,7 @@ test "an empty site install is not a user prefix" {
     try r.env.put("EESSI_SITE_INSTALL", "");
     const out = try r.launch(&.{});
     try ok(out);
-    const home = try std.fs.path.join(r.arena.allocator(), &.{ r.root, "home/EESSI" });
-    try testing.expect(fsx.statAt(fsx.cwd, home, false) == error.NotFound);
+    try noDefaultPrefix(&r);
     try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
     try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_SITE_INSTALL").?);
     try testing.expectEqualStrings("0022", firstLine(out.stdout));
@@ -462,8 +465,7 @@ test "an empty cvmfs install is not a user prefix" {
     try r.env.put("EESSI_CVMFS_INSTALL", "");
     const out = try r.launch(&.{});
     try ok(out);
-    const home = try std.fs.path.join(r.arena.allocator(), &.{ r.root, "home/EESSI" });
-    try testing.expect(fsx.statAt(fsx.cwd, home, false) == error.NotFound);
+    try noDefaultPrefix(&r);
     try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
     try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_CVMFS_INSTALL").?);
     try testing.expectEqualStrings("0022", firstLine(out.stdout));
@@ -476,8 +478,7 @@ test "an empty user install does not create the default prefix" {
     try r.env.put("EESSI_USER_INSTALL", "");
     const out = try r.launch(&.{});
     try ok(out);
-    const home = try std.fs.path.join(r.arena.allocator(), &.{ r.root, "home/EESSI" });
-    try testing.expect(fsx.statAt(fsx.cwd, home, false) == error.NotFound);
+    try noDefaultPrefix(&r);
     try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_USER_INSTALL").?);
     try testing.expectEqualStrings("0077", firstLine(out.stdout));
 }
@@ -490,8 +491,7 @@ test "an empty site install with a user prefix is refused" {
     try r.env.put("EESSI_USER_INSTALL", "/x");
     const out = try r.launch(&.{});
     try testing.expectEqual(@as(u32, 3), out.term.code());
-    const home = try std.fs.path.join(r.arena.allocator(), &.{ r.root, "home/EESSI" });
-    try testing.expect(fsx.statAt(fsx.cwd, home, false) == error.NotFound);
+    try noDefaultPrefix(&r);
 }
 
 test "two prefixes are refused" {
