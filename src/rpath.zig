@@ -19,6 +19,12 @@ pub const names = [_][]const u8{
     "ld.lld",
 };
 
+/// The compilers that find their linker themselves, so a wrapped `ld` on
+/// PATH never sees their links, and the linker of theirs that EasyBuild's
+/// GCC build environment does not wrap. A program they link has run paths
+/// only when they are wrapped themselves.
+pub const self_linking = [_][]const u8{ "clang", "clang++", "flang", "flang-new", "ld.lld" };
+
 /// A directory holding this file is skipped when a wrapper looks for the
 /// command it stands in for, so wrappers never call each other.
 pub const marker = ".eb-local-rpath";
@@ -130,6 +136,28 @@ pub fn present(a: Allocator, path: []const u8) Allocator.Error![]const []const u
     return out.items;
 }
 
+/// The names among `among` that no wrapper covers on `path`: the first of
+/// each name is neither one of eb-local's wrappers nor one of EasyBuild's,
+/// which it writes as `rpath_wrappers/NAME_wrapper/NAME`.
+pub fn unwrapped(a: Allocator, path: []const u8, among: []const []const u8) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(a);
+    for (among) |n| {
+        const hit = (try proc.which(a, n, path)) orelse continue;
+        defer a.free(hit);
+        const dir = std.fs.path.dirname(hit) orelse continue;
+        const m = try std.fs.path.join(a, &.{ dir, marker });
+        defer a.free(m);
+        if (fsx.statAt(fsx.cwd, m, false)) |_| continue else |_| {}
+        const parent = std.fs.path.dirname(dir) orelse "";
+        const own = try std.fmt.allocPrint(a, "{s}_wrapper", .{n});
+        defer a.free(own);
+        if (std.mem.eql(u8, std.fs.path.basename(dir), own) and std.mem.eql(u8, std.fs.path.basename(parent), "rpath_wrappers")) continue;
+        try out.append(a, n);
+    }
+    return out.toOwnedSlice(a);
+}
+
 /// Write the wrappers for `found` into `dir`, a directory the caller owns
 /// and no one else can write; existing wrappers with the same bytes stay.
 pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!void {
@@ -174,4 +202,45 @@ test "the directory names its contents" {
     try std.testing.expect(std.mem.startsWith(u8, try directory(a, &env, &.{"clang"}), "/xdg/eb-local/rpath-"));
     try env.put("XDG_CACHE_HOME", "relative");
     try std.testing.expectError(error.NoCacheDir, directory(a, &env, &.{"clang"}));
+}
+
+test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's comes first" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/rpath-test-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const files = [_][]const u8{
+        "llvm/bin/clang",                        "llvm/bin/ld.lld",
+        "eb/rpath_wrappers/clang_wrapper/clang", "eb/rpath_wrappers/other_wrapper/ld.lld",
+        "ours/clang",                            "ours/" ++ marker,
+    };
+    for (files) |rel| {
+        const path = try std.fs.path.join(a, &.{ root, rel });
+        try common.atomic.makedirs(std.fs.path.dirname(path).?);
+        const fd = try sys.openat(fsx.cwd, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o755);
+        defer sys.close(fd);
+        try sys.writeAll(fd, "#!/bin/sh\n");
+    }
+
+    const cases = [_]struct { path: []const []const u8, want: []const []const u8 }{
+        .{ .path = &.{"llvm/bin"}, .want = &.{ "clang", "ld.lld" } },
+        .{ .path = &.{ "eb/rpath_wrappers/clang_wrapper", "llvm/bin" }, .want = &.{"ld.lld"} },
+        .{ .path = &.{ "ours", "llvm/bin" }, .want = &.{"ld.lld"} },
+        .{ .path = &.{ "eb/rpath_wrappers/other_wrapper", "llvm/bin" }, .want = &.{ "clang", "ld.lld" } },
+        .{ .path = &.{}, .want = &.{} },
+    };
+    for (cases) |case| {
+        var path: std.ArrayList(u8) = .empty;
+        for (case.path, 0..) |d, i| {
+            if (i > 0) try path.append(a, ':');
+            try path.print(a, "{s}/{s}", .{ root, d });
+        }
+        const got = try unwrapped(std.testing.allocator, path.items, &self_linking);
+        defer std.testing.allocator.free(got);
+        try std.testing.expectEqual(case.want.len, got.len);
+        for (case.want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+    }
 }

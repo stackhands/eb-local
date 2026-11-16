@@ -128,17 +128,61 @@ class DevBuildenv(StorageFixture):
             + second.stdout
             + 'printf %s "${EB_LOCAL_RPATH_WRAPPERS-unset}" > "$CONTROL_ROOT/wrap2"\n'
             + 'printf %s "$PATH" > "$CONTROL_ROOT/path2"\n'
-            + 'command -v clang > "$CONTROL_ROOT/clang"\n'
+            + 'command -v ld > "$CONTROL_ROOT/ld"\n'
         )
         replay = subprocess.run([BASH, str(script)], env=self.env, cwd=self.root, text=True, capture_output=True)
         self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
         wrap = Path((self.root / "wrap1").read_text())
         self.assertTrue(wrap.is_dir(), wrap)
         self.assertTrue((self.root / "path1").read_text().startswith(str(wrap) + ":"))
-        self.assertEqual((self.root / "wrap2").read_text(), "unset")
         path2 = (self.root / "path2").read_text()
         self.assertNotIn(str(wrap), path2)
-        self.assertEqual((self.root / "clang").read_text().strip(), str(self.bin / "clang"))
+        self.assertEqual((self.root / "ld").read_text().strip(), str(self.bin / "ld"))
+        # The GCC build environment does not wrap clang, so it alone gets a wrapper.
+        wrap2 = Path((self.root / "wrap2").read_text())
+        self.assertEqual(sorted(p.name for p in wrap2.iterdir()), [".eb-local-rpath", "clang"])
+
+    def test_the_llvm_modules_clang_gets_a_wrapper_beside_the_gcc_buildenv(self):
+        # The LLVM module sets EBROOTLLVM, not EBROOTLLVMMINCOMPILERS, so dev
+        # loads the GCC build environment, which wraps gcc and ld, not clang.
+        after = ('printf "%s" "$EB_LOCAL_RPATH_WRAPPERS" > "$CONTROL_ROOT/wrappers"\n'
+                 'clang a.o -o prog -lgsl\n'
+                 'ld a.o -o prog\n')
+        calls, replay = self.dev("GSL/2.8-GCC-15.2.0", "LLVM/21.1.8-GCCcore-15.2.0", after=after,
+                                 LIBRARY_PATH="/eessi/gsl/lib")
+        self.assertEqual(calls[-2:], ["load GSL/2.8-GCC-15.2.0 LLVM/21.1.8-GCCcore-15.2.0",
+                                      "load buildenv/default-foss-2026.1"])
+        self.assertIn("eb-local: the build environment does not wrap clang;\n"
+                      "  RPATH wrappers for it come first", replay.stderr)
+        wrappers = Path((self.root / "wrappers").read_text())
+        self.assertEqual(sorted(p.name for p in wrappers.iterdir()), [".eb-local-rpath", "clang"])
+        self.assertEqual((self.root / "cc-calls").read_text().splitlines(), [
+            "a.o -o prog -lgsl -Wl,-rpath,/eessi/gsl/lib -Wl,--disable-new-dtags",
+            "a.o -o prog",
+        ])
+
+    def test_a_compiler_the_build_environment_wraps_is_left_to_it(self):
+        ours = self.root / "buildenv" / "bin" / "rpath_wrappers" / "clang_wrapper"
+        ours.mkdir(parents=True)
+        (ours / "clang").write_text(FAKE_CC)
+        (ours / "clang").chmod(0o755)
+        after = 'printf "%s" "${EB_LOCAL_RPATH_WRAPPERS-unset}" > "$CONTROL_ROOT/wrappers"\n'
+        _, replay = self.dev("llvm-compilers/21.1.8", after=after, PATH=f"{ours}:{self.bin}",
+                             CONTROL_AVAILABLE="buildenv/default-lfoss-2026.1")
+        self.assertEqual((self.root / "wrappers").read_text(), "unset")
+        self.assertEqual(replay.stderr, "")
+
+    def test_without_clang_a_gcc_dev_adds_no_wrappers(self):
+        gcc_only = self.root / "gcc-only"
+        gcc_only.mkdir()
+        for name in ("gcc", "ld"):
+            (gcc_only / name).write_text(FAKE_CC)
+            (gcc_only / name).chmod(0o755)
+        after = 'printf "%s" "${EB_LOCAL_RPATH_WRAPPERS-unset}" > "$CONTROL_ROOT/wrappers"\n'
+        calls, replay = self.dev("GSL/2.8-GCC-15.2.0", after=after, PATH=str(gcc_only))
+        self.assertEqual(calls[-1], "load buildenv/default-foss-2026.1")
+        self.assertEqual((self.root / "wrappers").read_text(), "unset")
+        self.assertEqual(replay.stderr, "")
 
     def test_a_chosen_buildenv_is_loaded_whatever_the_compilers(self):
         calls, _ = self.dev("llvm-compilers/21.1.8", "--buildenv", "buildenv/site-llvm")

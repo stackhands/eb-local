@@ -40,10 +40,13 @@ const usage_text =
     \\  eb-local env                         lines that make your installed modules visible
     \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work
-    \\  eb-local rpath-wrappers [--for FAMILY]
+    \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
-    \\                                       environment exists for the loaded compilers
+    \\                                       environment exists for the loaded compilers.
+    \\                                       --unwrapped: only clang, clang++, flang,
+    \\                                       flang-new and ld.lld, where no wrapper comes
+    \\                                       first; dev adds them after a build environment
     \\  eb-local check FILE...               whether a program or library built here runs here:
     \\                                       its architecture, loader, run paths and libraries
     \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
@@ -593,11 +596,16 @@ const drop_rpath_wrappers =
 /// modules brought in, which only the shell knows after it loads them: the
 /// family's buildenv when Lmod has it, else the GCC one for CUDA (nvcc
 /// links through gcc), else eb-local's RPATH wrappers, so nothing links
-/// without run paths.
+/// without run paths. Whichever loads, a clang that no wrapper covers then
+/// gets one: the LLVM module sets EBROOTLLVM, not llvm-compilers' variable,
+/// so its clang comes with the GCC build environment, which does not wrap it.
 fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     const a = c.a;
     const gcc = q(a, s.dev_buildenv.value);
-    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n", .{gcc});
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const exe = q(a, selfExe(&exe_buf) orelse tool);
+    const unwrapped = str(a, "eval \"$({s} rpath-wrappers --unwrapped)\"\n", .{exe});
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}", .{ gcc, unwrapped });
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
@@ -611,8 +619,6 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     for (config.families, s.buildenv_for) |f, b|
         add(a, &out, str(a, "    {s}) eb_local_buildenv={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value) }));
     add(a, &out, "    *) eb_local_buildenv= ;;\nesac\n");
-    var exe_buf: [sys.path_max]u8 = undefined;
-    const exe = q(a, selfExe(&exe_buf) orelse tool);
     add(a, &out, str(a,
         \\if [ "$eb_local_family" = gcc ]; then
         \\    module load {s}
@@ -626,13 +632,19 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
         \\unset eb_local_family eb_local_buildenv
         \\
     , .{ gcc, gcc, exe }));
+    add(a, &out, unwrapped);
     return out.items;
 }
 
-fn cmdRpathWrappers(c: Ctx, family: []const u8) u8 {
+/// With `only_unwrapped`, the wrappers are for the compilers that find
+/// their linker themselves, where no wrapper of eb-local's or of a build
+/// environment's comes first on PATH, and none at all is fine.
+fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
     const a = c.a;
-    const found = rpath.present(a, c.env.get("PATH") orelse "") catch oom();
+    const path = c.env.get("PATH") orelse "";
+    const found = (if (only_unwrapped) rpath.unwrapped(a, path, &rpath.self_linking) else rpath.present(a, path)) catch oom();
     if (found.len == 0) {
+        if (only_unwrapped) return 0;
         warn("no compiler or linker on PATH to wrap", .{});
         return 1;
     }
@@ -642,7 +654,10 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8) u8 {
     };
     rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, @errorName(e) });
     const names = std.mem.join(a, " ", found) catch oom();
-    if (family.len > 0) {
+    if (only_unwrapped) {
+        warn("the build environment does not wrap {s};", .{names});
+        cli.err("  RPATH wrappers for it come first ({s}), so what it links has run paths.\n", .{dir});
+    } else if (family.len > 0) {
         warn("no build environment module for the {s} compilers is available;", .{family});
         cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
     }
@@ -2507,6 +2522,7 @@ pub fn main(init: std.process.Init) u8 {
     var as_env = false;
     var site: SiteOpts = .{};
     var family: []const u8 = "";
+    var only_unwrapped = false;
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -2543,7 +2559,9 @@ pub fn main(init: std.process.Init) u8 {
                 if (std.mem.eql(u8, x, "--for")) {
                     family = value(args, &i, "--for");
                     for (family) |ch| if (!std.ascii.isAlphanumeric(ch)) die("--for takes a compiler family name", .{});
-                } else die("rpath-wrappers takes only --for FAMILY; got '{s}'", .{x});
+                } else if (std.mem.eql(u8, x, "--unwrapped")) {
+                    only_unwrapped = true;
+                } else die("rpath-wrappers takes only --for FAMILY or --unwrapped; got '{s}'", .{x});
             },
             .check => rest.append(a, x) catch oom(),
             .env, .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
@@ -2635,7 +2653,10 @@ pub fn main(init: std.process.Init) u8 {
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
     if (command == .site) return cmdSite(c, site);
-    if (command == .@"rpath-wrappers") return cmdRpathWrappers(c, family);
+    if (command == .@"rpath-wrappers") {
+        if (only_unwrapped and family.len > 0) die("rpath-wrappers takes --for FAMILY or --unwrapped, not both", .{});
+        return cmdRpathWrappers(c, family, only_unwrapped);
+    }
     if (command == .check) return cmdCheck(c, rest.items);
     // The install mode is the four EESSI variables, not the site file.
     if (command == .eb) {
