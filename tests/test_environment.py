@@ -86,7 +86,8 @@ else:
     if os.environ.get("EASYBUILD_HOOKS") != "/selected/eessi/eb_hooks.py":
         sys.exit(98)
     (root / "eb.json").write_text(json.dumps({"argv": sys.argv[2:],
-                                            "hooks": os.environ["EASYBUILD_HOOKS"]}))
+                                            "hooks": os.environ["EASYBUILD_HOOKS"],
+                                            "umask": os.umask(0)}))
     sys.exit(int(os.environ.get("CONTROL_EB_STATUS", "0")))
 '''
 
@@ -115,9 +116,9 @@ class EnvironmentControls(unittest.TestCase):
                         EB_LOCAL_CONFIG=str(self.config))
         self.env.update({name: "inherited" for name in CLEAR})
 
-    def run_wrapper(self, arguments, **extra):
+    def run_wrapper(self, arguments, umask=-1, **extra):
         argv, env = binary.command(self.script, arguments, dict(self.env, **extra))
-        return subprocess.run(argv, env=env, cwd=self.root, text=True, capture_output=True)
+        return subprocess.run(argv, env=env, cwd=self.root, text=True, capture_output=True, umask=umask)
 
     def check_build(self, mode, status=0):
         arguments = ["recipe with spaces.eb", "--robot", "--hooks=/private site/hooks.py",
@@ -126,10 +127,20 @@ class EnvironmentControls(unittest.TestCase):
             prefix_args = ["--project", str(self.prefix)]
         else:
             prefix_args = []
-        run = self.run_wrapper(prefix_args + arguments, CONTROL_MODE=mode, CONTROL_EB_STATUS=str(status))
+        run = self.run_wrapper(prefix_args + arguments, umask=0o077, CONTROL_MODE=mode, CONTROL_EB_STATUS=str(status))
         self.assertEqual(run.returncode, status, run.stdout + run.stderr)
-        self.assertEqual(json.loads((self.root / "eb.json").read_text())["argv"],
-                         ["--umask=022"] + arguments)
+        built = json.loads((self.root / "eb.json").read_text())
+        if mode == "EESSI_PROJECT_INSTALL":
+            # EESSI-extend's umask for a project install (002) holds, for eb
+            # and for the directories eb-local makes there, so that every
+            # member can write them.
+            self.assertEqual(built["argv"], arguments)
+            self.assertEqual(built["umask"], 0o002)
+            for sub in ("sources", "logs"):
+                self.assertEqual((self.prefix / ".eb-local" / sub).stat().st_mode & 0o070, 0o070, sub)
+        else:
+            self.assertEqual(built["argv"], ["--umask=022"] + arguments)
+            self.assertEqual(built["umask"], 0o077)
         self.assertEqual(json.loads((self.root / "load.json").read_text())["env"],
                          {mode: str(self.prefix)})
 
