@@ -42,6 +42,13 @@ module() {
         export EASYBUILD_HOOKS=/selected/hooks.py
         export TMPDIR=/scratch/module WORKING_DIR=/scratch/module
         export EASYBUILD_BUILDPATH=/scratch/module
+        # The install path EESSI-extend sets, or CONTROL_INSTALLPATH; and
+        # CONTROL_LOAD_SETS, NAME=VALUE, as a site load hook would set it.
+        case "$2" in
+            EESSI-extend/*)
+                export EASYBUILD_INSTALLPATH="${CONTROL_INSTALLPATH:-${EESSI_USER_INSTALL:-${EESSI_PROJECT_INSTALL:-$HOME/eessi}}/versions/2026.06/software/linux/x86_64/amd/zen4}"
+                [ -z "${CONTROL_LOAD_SETS:-}" ] || export "$CONTROL_LOAD_SETS";;
+        esac
         return 0
     fi
     return 99
@@ -363,6 +370,52 @@ class StorageControls(StorageFixture):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertFalse(destination.exists())
         self.assertEqual(list(self.job.iterdir()), [])
+
+
+@unittest.skipUnless(binary.BIN, "checking where EESSI-extend installs is a feature of the Zig build")
+class InstallPathChecks(StorageFixture):
+    """The install path EESSI-extend chose, and install variables left in the shell or set as it loads."""
+
+    def test_an_install_path_moved_out_of_the_prefix_stops_the_build(self):
+        for moved in ("/elsewhere/hooktree", f"{self.prefix}/versions/../../elsewhere",
+                      f"{self.prefix}-old/versions/2026.06", f"{self.prefix}/versions"):
+            with self.subTest(moved=moved):
+                run = self.run_wrapper(CONTROL_INSTALLPATH=moved)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertFalse((self.root / "eb.json").exists())
+                self.assertNotIn("installing into", run.stdout)
+                self.assertIn(f"eb-local: loading EESSI-extend/2026.06-easybuild set the install path to {moved}, "
+                              f"outside {self.prefix}/versions, the tree eb-local checked; nothing was built.", run.stderr)
+
+    def test_a_load_that_sets_an_install_path_for_modules_stops_the_build(self):
+        run = self.run_wrapper(CONTROL_LOAD_SETS="EASYBUILD_INSTALLPATH_MODULES=/elsewhere/modules")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+        self.assertIn("eb-local: loading EESSI-extend/2026.06-easybuild set EASYBUILD_INSTALLPATH_MODULES=/elsewhere/modules, "
+                      f"which would put part of the install outside {self.prefix}/versions", run.stderr)
+
+    def test_an_install_variable_set_as_the_module_loads_is_reported_and_does_not_move_the_build(self):
+        run = self.run_wrapper(CONTROL_LOAD_SETS="EESSI_PROJECT_INSTALL=/projects/a")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["user"], str(self.prefix))
+        self.assertIn("eb-local: loading EESSI-extend/2026.06-easybuild set EESSI_PROJECT_INSTALL=/projects/a; "
+                      f"this build still installs into {self.prefix}, but a shell that loads EESSI-extend by hand "
+                      "keeps the change, and its next load installs elsewhere.", run.stderr)
+
+    def test_a_leftover_install_variable_is_cleared_and_reported(self):
+        run = self.run_wrapper(EESSI_USER_INSTALL="/home/alice/eessi-old",
+                               EASYBUILD_INSTALLPATH_MODULES="/home/alice/modules")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads((self.root / "eb.json").read_text())["user"], str(self.prefix))
+        self.assertIn("eb-local: EESSI_USER_INSTALL=/home/alice/eessi-old is set in this shell; this build clears it, "
+                      "but EESSI-extend or eb run by hand would use it", run.stderr)
+        self.assertIn("eb-local: EASYBUILD_INSTALLPATH_MODULES=/home/alice/modules is set in this shell", run.stderr)
+
+    def test_what_eb_local_env_sets_for_this_prefix_is_not_a_leftover(self):
+        run = self.run_wrapper(EESSI_USER_INSTALL=str(self.prefix), EASYBUILD_PREFIX="/tmp/alice/easybuild",
+                               EASYBUILD_INSTALLPATH=f"{self.prefix}/versions/2026.06/software/linux/x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("is set in this shell", run.stderr)
 
 
 if __name__ == "__main__":

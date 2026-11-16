@@ -34,7 +34,9 @@ const usage_text =
     \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
     \\                                       present empty value counts as set; with none set, the
-    \\                                       module uses $HOME/eessi and nothing is exported
+    \\                                       module uses $HOME/eessi and nothing is exported.
+    \\                                       eb runs only if the module's install path is in the
+    \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
     \\  eb-local env                         lines that make your installed modules visible
@@ -158,10 +160,24 @@ const install_vars = [_][]const u8{
     "EASYBUILD_INSTALLPATH_SOFTWARE",    "EASYBUILD_INSTALLPATH_MODULES", "EASYBUILD_PREFIX",
 };
 
+/// What, left in a shell, sends a later load of EESSI-extend, or eb after
+/// it, somewhere else: EESSI-extend sets the other install variables itself.
+const leftover_vars = [_][]const u8{
+    "EESSI_USER_INSTALL",             "EESSI_PROJECT_INSTALL",         "EESSI_SITE_INSTALL", "EESSI_CVMFS_INSTALL",
+    "EASYBUILD_INSTALLPATH_SOFTWARE", "EASYBUILD_INSTALLPATH_MODULES",
+};
+
 const Place = struct {
     prefix: []const u8,
     project: bool,
 };
+
+/// Whether NAME=VALUE is what `eb-local env` sets for P: its install
+/// variable, naming its prefix.
+fn ownInstallVar(c: Ctx, p: Place, name: []const u8, value: []const u8) bool {
+    const mine = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
+    return std.mem.eql(u8, name, mine) and std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix);
+}
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
     const a = c.a;
@@ -1575,6 +1591,31 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\fi
     \\module load "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $extend" >&2; exit 1; }
     \\restore
+    \\# EESSI-extend chose the install path as it loaded. eb-local checked the
+    \\# prefix's versions tree, lists it and cleans its logs of secrets, so an
+    \\# install path anything else chose stops the build. An install variable
+    \\# a load hook sets acts only on the next load.
+    \\readme='See "Where EESSI-extend installs" in the README.'
+    \\for v in EESSI_USER_INSTALL EESSI_PROJECT_INSTALL EESSI_SITE_INSTALL EESSI_CVMFS_INSTALL; do
+    \\    if [ "$v" = "$install_var" ]; then want=set:$prefix; else want=; fi
+    \\    [ "${!v+set:${!v}}" = "$want" ] && continue
+    \\    if [ -n "${!v+set}" ]; then what="set $v=${!v}"; else what="unset $v"; fi
+    \\    echo "eb-local: loading $extend $what; this build still installs into $prefix, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere." >&2
+    \\    echo "  A site Lmod hook that sets an install variable acts only on the next load. $readme" >&2
+    \\done
+    \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
+    \\    if [ -n "${!v+set}" ]; then
+    \\        echo "eb-local: loading $extend set $v=${!v}, which would put part of the install outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
+    \\        echo "  A site Lmod hook or a changed EESSI-extend set it. $readme" >&2
+    \\        exit 2
+    \\    fi
+    \\done
+    \\installpath=${EASYBUILD_INSTALLPATH-}
+    \\if [[ $installpath != "$prefix"/versions/?* || /$installpath/ == */../* ]]; then
+    \\    echo "eb-local: loading $extend set the install path to ${installpath:-nothing}, outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
+    \\    echo "  $install_var did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. $readme" >&2
+    \\    exit 2
+    \\fi
     \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.
     \\if [ -n "${EB_LOCAL_SITE_TOOLCHAINS:-}" ]; then
     \\    [ -n "${EESSI_VERSION:-}" ] || { echo "eb-local: $stack set no EESSI_VERSION; cannot apply build.site_toolchains" >&2; exit 1; }
@@ -1774,6 +1815,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const started: i64 = nowSecs();
 
+    for (leftover_vars) |v| if (c.env.get(v)) |val| {
+        if (!ownInstallVar(c, p, v, val))
+            warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
+    };
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -2098,9 +2143,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     // What this shell carries.
     var leftovers: usize = 0;
     for (install_vars) |v| if (c.env.get(v)) |val| {
-        const own = ((std.mem.eql(u8, v, "EESSI_USER_INSTALL") and !p.project) or (std.mem.eql(u8, v, "EESSI_PROJECT_INSTALL") and p.project)) and
-            std.mem.eql(u8, storage.canonical(a, val, c.cwd) catch oom(), p.prefix);
-        if (own) {
+        if (ownInstallVar(c, p, v, val)) {
             note(a, &out, "ok  ", "{s} names your prefix, as eb-local env sets it", .{v});
             continue;
         }
@@ -2900,7 +2943,7 @@ fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
     const sel = extend.select(c.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}\n", .{extend.too_many});
+            cli.err("{s}", .{extend.tooMany(c.a, c.env) catch oom()});
             return 3;
         },
     };
@@ -2919,7 +2962,7 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
     const sel = extend.select(c.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}\n", .{extend.too_many});
+            cli.err("{s}", .{extend.tooMany(a, c.env) catch oom()});
             return 3;
         },
     };

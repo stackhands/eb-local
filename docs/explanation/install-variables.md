@@ -1,0 +1,95 @@
+<!-- Generated from docs/orgmode/explanation/install-variables.org by docs/export.el; edit that file. -->
+
+# Where EESSI-extend installs
+
+EESSI-extend chooses the tree EasyBuild installs into when the module loads, from four install variables.
+eb-local loads it in two ways: a build sets one variable itself, and `eb-local eb` uses the ones the shell has.
+This page says where each variable, and each mix of them, sends an install, why a variable left from an earlier session is a trap, and what eb-local checks.
+
+The results below come from the EESSI-extend module that EESSI's software-layer-scripts generate (commit `169e720f`), loaded under Lmod 8.6.19 on a stand-in EESSI 2026.06 tree for the CPU target `x86_64/amd/zen4`, with `HOME=/home/alice`.
+
+## One install variable
+
+| Set before the load | EESSI-extend installs into | umask, and bit |
+|---|---|---|
+| `EESSI_USER_INSTALL=DIR` | `DIR/versions/2026.06/software/linux/x86_64/amd/zen4` | 077, sticky |
+| `EESSI_PROJECT_INSTALL=DIR` | `DIR/versions/2026.06/software/linux/x86_64/amd/zen4` | 002, setgid |
+| `EESSI_SITE_INSTALL` | `$EESSI_SITE_SOFTWARE_PATH`, the site tree in `host_injections` | 022 |
+| `EESSI_CVMFS_INSTALL` | `$EESSI_SOFTWARE_PATH`, EESSI's own tree | 022 |
+| none | `/home/alice/eessi/versions/2026.06/software/linux/x86_64/amd/zen4` | 077, sticky |
+
+The module tests each variable with `os.getenv(name) ~= nil`, so a variable that is present and empty counts as set.
+A named user or project directory must exist, or the module refuses to load; `$HOME/eessi` need not.
+The module puts the tree's `modules/all` first on `MODULEPATH`.
+
+## Two at once
+
+| Set before the load | What EESSI-extend does |
+|---|---|
+| `EESSI_USER_INSTALL` and `EESSI_PROJECT_INSTALL` | loads, installs into the user tree with umask 077 and the sticky bit, and puts both module trees on `MODULEPATH`, the user's first |
+| `EESSI_SITE_INSTALL` and a user or project variable | refuses to load |
+| `EESSI_CVMFS_INSTALL` and any other | refuses to load |
+
+The first row is the trap.
+A `.bashrc` that exports `EESSI_USER_INSTALL`, or `eval "$(eb-local env)"` run earlier for a user prefix, leaves the variable in the shell.
+A project install typed by hand there, `export EESSI_PROJECT_INSTALL=/path/to/project/eessi` and then `module load EESSI-extend`, becomes a private user install that the rest of the project cannot read.
+Lmod says nothing about it but a second line, `Configuring for use of EESSI_USER_INSTALL under /home/alice/eessi`, after the project one.
+
+## What eb-local does with the variables
+
+A build clears every install variable, sets `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL` to its prefix, and loads EESSI-extend afresh, so what the shell carries does not reach it.
+It names each one it cleared:
+
+```text
+eb-local: EESSI_USER_INSTALL=/home/alice/eessi is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it
+```
+
+`eb-local eb` uses the variables the shell has, so it refuses two or more, with exit 3, and says what EESSI-extend would do with them:
+
+```text
+eb-local: EESSI_USER_INSTALL=/home/alice/eessi and EESSI_PROJECT_INSTALL=/path/to/project/eessi are both set; EESSI-extend would make a private user install (umask 077) under /home/alice/eessi, not a project install under /path/to/project/eessi.
+  Unset the one an earlier session left (a shell startup file, or eval "$(eb-local env)" for another prefix):
+  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, the module installs under $HOME/eessi
+```
+
+`eb-local doctor` lists every install variable the shell has, and says which one names your prefix.
+
+## The install path, once the module has loaded
+
+EESSI-extend sets `EASYBUILD_INSTALLPATH` to the tree in the first table.
+Once it has loaded, a build and `eb-local eb` stop with exit 2, before `eb` runs, unless that path is in the tree the install variable selects.
+For a build that tree is `<prefix>/versions`, which eb-local checked before the build, lists afterwards and cleans of secret values; for `eb-local eb` it is the tree in the first table.
+They also stop when `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` is set, since EasyBuild would then put the software or the modules somewhere else while `MODULEPATH` names EESSI-extend's tree.
+
+Three things move the install path:
+
+-   a site Lmod hook that sets one, which the README's [A site Lmod hook](../index.md#a-site-lmod-hook) warns against;
+-   a changed EESSI-extend;
+-   an `EESSI_CVMFS_REPO` with a character such as `-`.
+
+The last is EESSI-extend's own.
+It makes a user or project path with `string.gsub(EESSI_SOFTWARE_PATH, EESSI_CVMFS_REPO, DIR)`, and Lua reads the second argument as a pattern, where `-`, `+`, `*`, `?`, `%`, `(`, `)`, `[` and `^` are not themselves.
+With a copy of the repository under `/opt/eessi-mirror` the pattern does not match, the path is left as it was, and the install would go into the repository's own tree.
+The default, `/cvmfs/software.eessi.io`, has only `.`, which matches itself among the rest.
+A build there used to say `installing into /home/alice/eessi (user)` while EasyBuild was given the repository's tree; it now stops:
+
+```text
+eb-local: loading EESSI-extend/2026.06-easybuild set the install path to /opt/eessi-mirror/versions/2026.06/software/linux/x86_64/amd/zen4, outside /home/alice/eessi/versions, the tree eb-local checked; nothing was built.
+  EESSI_USER_INSTALL did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. See "Where EESSI-extend installs" in the README.
+```
+
+## A variable set as the module loads
+
+A site Lmod hook that sets an install variable when EESSI-extend loads runs after the module has read the variables, so the load it runs in installs where it would have anyway.
+The value stays in the shell after `module unload`, and the next load installs there.
+With a hook that sets `EESSI_USER_INSTALL=/home/alice/.local/eessi` when no install variable is set, the first load in a shell installed under `/home/alice/eessi`, and a second one, after `module unload EESSI-extend`, under `/home/alice/.local/eessi`; `MODULEPATH` then held both trees.
+
+eb-local cannot tell a variable a hook left in an earlier load from one set on purpose.
+It does see a load that sets or unsets one, and says so:
+
+```text
+eb-local: loading EESSI-extend set EESSI_USER_INSTALL=/home/alice/.local/eessi; this install still goes under /home/alice/eessi, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere.
+  A site Lmod hook that sets an install variable acts only on the next load. See "Where EESSI-extend installs" in the README.
+```
+
+A site that wants another default prefix sets it before EESSI-extend loads, in a login script, and as `prefix` in eb-local's site file, as the README's [A site Lmod hook](../index.md#a-site-lmod-hook) shows.

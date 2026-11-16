@@ -2,7 +2,9 @@
 """Behavioral checks for the environment eb-local selects.
 
 The module and eb doubles verify wrapper routing and argument preservation.
-They do not establish the destination chosen by a native EESSI extension.
+They do not establish the destination chosen by a native EESSI extension;
+the EESSI-extend double sets the install path the module would, below the
+tree the install variable names.
 The module double refuses, as Lmod 9.4.5 does, a load that names
 EESSI-extend while EESSI is not loaded yet; the EESSI load sets the CPU
 target. The eessi-arch-guard double selects another target, as the guard
@@ -40,6 +42,9 @@ module() {
         if [ "$2" = EESSI/2026.06 ]; then
             export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4
             export EESSI_ACCELERATOR_TARGET=
+        fi
+        if [ "$2" = EESSI-extend/2026.06-easybuild ]; then
+            export EASYBUILD_INSTALLPATH="${EESSI_USER_INSTALL:-${EESSI_PROJECT_INSTALL:-$HOME/eessi}}/versions/2026.06/software/linux/$EESSI_SOFTWARE_SUBDIR"
         fi
         export EASYBUILD_HOOKS=/selected/eessi/eb_hooks.py
         return 0
