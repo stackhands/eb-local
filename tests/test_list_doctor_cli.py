@@ -15,6 +15,20 @@ from test_storage import StorageFixture
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 
+# eessi-arch-guard --strict --shell: a reload, a guard that keeps the
+# target, or one that cannot select a target.
+GUARD = r'''#!/bin/sh
+printf '%s\n' "$*" > "$CONTROL_ROOT/guard-args"
+printf '%s\n' "$EESSI_ARCH_GUARD_WORKDIR" > "$CONTROL_ROOT/guard-workdir"
+stat -c %a "$EESSI_ARCH_GUARD_WORKDIR" > "$CONTROL_ROOT/guard-workdir-mode"
+case "${GUARD_DOUBLE:-reload}" in
+    reload) echo "export EESSI_ARCH_GUARD_RELOADED='x86_64/amd/zen4->x86_64/amd/zen2'"
+            echo "export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen2" ;;
+    keep) ;;
+    fail) echo "eessi-arch-guard: no software directory for x86_64/amd/zen4" >&2; exit 78 ;;
+esac
+'''
+
 
 @unittest.skipUnless(binary.BIN, "list and doctor are features of the Zig build")
 class ListAndDoctor(StorageFixture):
@@ -120,6 +134,49 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"ok   installs go to {home}/.local/eessi: a user install, prefix from site {site}:1\n", run.stdout)
         self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
         self.assertNotIn("warn EESSI_USER_INSTALL", run.stdout)
+
+    def guard_path(self):
+        bin = self.root / "guard-bin"
+        bin.mkdir()
+        (bin / "eessi-arch-guard").write_text(GUARD)
+        (bin / "eessi-arch-guard").chmod(0o755)
+        return f"{bin}:/usr/bin:/bin"
+
+    def test_doctor_shows_the_target_eessi_arch_guard_selects_in_a_job(self):
+        loaded = dict(EESSI_ARCH_GUARD="", PATH=self.guard_path(), EESSI_VERSION="2026.06",
+                      EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        run = self.run_tool(["doctor"], **loaded)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("ok   eessi-arch-guard selects x86_64/amd/zen2 here, not x86_64/amd/zen4, which EESSI is"
+                      " loaded for; builds, env and dev use x86_64/amd/zen2\n", run.stdout)
+        # Asked as a build asks it, with a private directory of its own.
+        self.assertEqual((self.root / "guard-args").read_text(), "--strict --shell\n")
+        self.assertEqual((self.root / "guard-workdir-mode").read_text(), "700\n")
+        workdir = Path((self.root / "guard-workdir").read_text().strip())
+        self.assertEqual(workdir.parent, self.job)
+        self.assertFalse(workdir.exists())
+        self.assertEqual(list(self.job.iterdir()), [])
+        run = self.run_tool(["doctor"], GUARD_DOUBLE="keep", **loaded)
+        self.assertIn("ok   eessi-arch-guard selects x86_64/amd/zen4, the target EESSI is loaded for\n", run.stdout)
+        run = self.run_tool(["doctor"], GUARD_DOUBLE="fail", **loaded)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("warn eessi-arch-guard cannot select a target here (exit 78: eessi-arch-guard: no software"
+                      " directory for x86_64/amd/zen4); builds stop when it cannot, and EESSI_ARCH_GUARD=0 turns it off\n",
+                      run.stdout)
+
+    def test_doctor_asks_eessi_arch_guard_only_in_a_job_with_eessi_loaded(self):
+        on_path = dict(EESSI_ARCH_GUARD="", PATH=self.guard_path(), EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        for outside in (dict(SLURM_JOB_ID=""), dict(EESSI_SOFTWARE_SUBDIR="")):
+            run = self.run_tool(["doctor"], **dict(on_path, **outside))
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("info eessi-arch-guard is on PATH; builds, env and dev load EESSI for the target it selects,"
+                          " which doctor shows inside a job with EESSI loaded\n", run.stdout)
+        run = self.run_tool(["doctor"], **dict(on_path, EESSI_ARCH_GUARD="0"))
+        self.assertIn("info eessi-arch-guard is on PATH, and EESSI_ARCH_GUARD=0 turns it off\n", run.stdout)
+        self.assertFalse((self.root / "guard-args").exists())
+        run = self.run_tool(["doctor"], EESSI_ARCH_GUARD="", PATH="/usr/bin:/bin")
+        self.assertIn("info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI"
+                      " detects\n", run.stdout)
 
     def test_doctor_fails_on_a_project_directory_others_can_write(self):
         project = self.root / "durable" / "project"
