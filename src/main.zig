@@ -51,7 +51,7 @@ const usage_text =
     \\                                       its architecture, loader, run paths and libraries
     \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
     \\                                       one batch job per node type the site file lists
-    \\                                       in build.targets, each building the recipe for
+    \\                                       in build.node_types, each building the recipe for
     \\                                       its CPU target; --print shows the jobs instead
     \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
     \\                                       what this node's target lacks
@@ -876,8 +876,9 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
     const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
     row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
-    if (s.targets.value.len == 0) row("build.targets", "(none)", s.targets.from);
-    for (s.targets.value) |t| row(str(a, "build.targets.{s}", .{t.name}), t.sbatch, t.from);
+    const types = nodeTypes(s);
+    if (types.len == 0) row("build.node_types", "(none)", s.node_types.from);
+    for (types) |t| row(str(a, "build.node_types.{s}", .{t.name}), t.sbatch, t.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -2125,15 +2126,23 @@ fn jobNamePart(a: Allocator, s: []const u8) []const u8 {
     return out;
 }
 
+/// The node types the site file lists, with a warning where it lists them
+/// under their old name.
+fn nodeTypes(s: config.Settings) []const config.NodeType {
+    if (s.node_types_old_key) |where|
+        warn("{s}: [build.targets] is now [build.node_types]; eb-local reads the old name until 4.0.0", .{where});
+    return s.node_types.value;
+}
+
 /// One batch job per configured node type, each running this eb-local with
 /// the same recipe, options and configuration inside its own allocation, so
 /// a module is built for every CPU target the site has.
 fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o: SubmitOpts) u8 {
     const a = c.a;
     if (args.len == 0) die("submit needs an easyconfig: eb-local submit [--on NAME,...] [--print] RECIPE [eb options]", .{});
-    const all = s.targets.value;
-    if (all.len == 0) die("no build.targets in the site file, so there is nothing to submit to; build inside an allocation with eb-local RECIPE", .{});
-    var chosen: std.ArrayList(config.Target) = .empty;
+    const all = nodeTypes(s);
+    if (all.len == 0) die("no build.node_types in the site file, so there is nothing to submit to; build inside an allocation with eb-local RECIPE", .{});
+    var chosen: std.ArrayList(config.NodeType) = .empty;
     if (o.on.len == 0) {
         chosen.appendSlice(a, all) catch oom();
     } else {
@@ -2144,7 +2153,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
             } else {
                 var known: std.ArrayList([]const u8) = .empty;
                 for (all) |k| known.append(a, k.name) catch oom();
-                die("--on {s}: no such target; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
+                die("--on {s}: no such node type; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
             };
             chosen.append(a, t) catch oom();
         }

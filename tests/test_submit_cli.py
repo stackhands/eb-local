@@ -2,7 +2,7 @@
 """eb-local submit, through the command line of the Zig build.
 
 submit writes one batch script per node type the site file lists in
-build.targets and hands each to sbatch, here a double that records its
+build.node_types and hands each to sbatch, here a double that records its
 arguments.
 """
 import os
@@ -29,7 +29,7 @@ class Submit(StorageFixture):
         super().setUp()
         self.site = self.root / "site.toml"
         self.write_site(
-            "[build.targets]\n"
+            "[build.node_types]\n"
             'rome = "-p rome -n 16 -t 02:00:00 --constraint=scratch-node"\n'
             'genoa = "-p genoa -n 16 -t 02:00:00"\n')
         self.env["EB_LOCAL_CONFIG"] = str(self.site)
@@ -55,7 +55,7 @@ class Submit(StorageFixture):
         f = self.root / "sbatch-calls"
         return f.read_text().splitlines() if f.exists() else []
 
-    def test_one_job_per_target_runs_this_program_with_the_recipe(self):
+    def test_one_job_per_node_type_runs_this_program_with_the_recipe(self):
         run = self.run_tool(["submit", "my recipe.eb", "--robot"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         calls = self.calls()
@@ -74,7 +74,7 @@ class Submit(StorageFixture):
         self.assertEqual(shlex.split(last)[-2:], ["my recipe.eb", "--robot"])
         self.assertEqual(os.stat(scripts[1]).st_mode & 0o777, 0o700)
 
-    def test_on_chooses_targets_and_names_the_known_ones(self):
+    def test_on_chooses_node_types_and_names_the_known_ones(self):
         run = self.run_tool(["submit", "--on", "genoa", "recipe.eb"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(self.calls()), 1)
@@ -93,12 +93,12 @@ class Submit(StorageFixture):
         # --dry-run after the recipe is eb's, not submit's.
         self.assertIn("recipe.eb --dry-run", run.stdout)
 
-    def test_the_readme_commands_run_against_the_readme_targets(self):
+    def test_the_readme_commands_run_against_the_readme_node_types(self):
         text = README.read_text()
         start = text.index("\n## Build for every node type\n")
         section = text[start:text.index("\n## ", start + 1)]
         site = re.search(r"```toml\n(.*?)```", section, re.S).group(1)
-        self.assertTrue(site.startswith("[build.targets]\n"), site)
+        self.assertTrue(site.startswith("[build.node_types]\n"), site)
         self.write_site(site)
         commands = re.search(r"```sh\n(.*?)```", section, re.S).group(1).splitlines()
         self.assertEqual(len(commands), 3, commands)
@@ -111,49 +111,66 @@ class Submit(StorageFixture):
         self.assertEqual(len(self.calls()), 3, self.calls())
         self.assertTrue(self.calls()[2].startswith("-p gpu "), self.calls())
 
-    def test_without_targets_there_is_nothing_to_submit(self):
+    def test_without_node_types_there_is_nothing_to_submit(self):
         self.write_site("")
         run = self.run_tool(["submit", "recipe.eb"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 2)
-        self.assertIn("no build.targets", run.stderr)
+        self.assertIn("no build.node_types", run.stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_targets_are_checked_and_belong_to_the_site_file(self):
+    def test_node_types_are_checked_and_belong_to_the_site_file(self):
         for bad in ('rome = "-p rome; touch injected"\n', 'rome = "-p $(id)"\n', 'rome = "rome"\n'):
             with self.subTest(bad=bad):
-                self.write_site("[build.targets]\n" + bad)
+                self.write_site("[build.node_types]\n" + bad)
                 run = self.run_tool(["config"], SLURM_JOB_ID="")
                 self.assertEqual(run.returncode, 2, run.stdout)
-                self.assertIn("build.targets", run.stderr)
+                self.assertIn("build.node_types.rome", run.stderr)
         self.assertFalse((self.root / "injected").exists())
         self.write_site("")
         user = self.root / "xdg" / "eb-local" / "config.toml"
         user.parent.mkdir(parents=True)
-        user.write_text('[build.targets]\nrome = "-p rome"\n')
+        user.write_text('[build.node_types]\nrome = "-p rome"\n')
         run = self.run_tool(["config"], SLURM_JOB_ID="", XDG_CONFIG_HOME=str(self.root / "xdg"))
         self.assertEqual(run.returncode, 2)
-        self.assertIn("build.targets is a site setting", run.stderr)
+        self.assertIn("build.node_types is a site setting", run.stderr)
 
-    def test_config_shows_the_targets(self):
+    def test_config_shows_the_node_types(self):
         run = self.run_tool(["config"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
-        rows = {l.split()[0]: l for l in run.stdout.splitlines() if l.startswith("build.targets")}
-        self.assertIn("-p rome -n 16 -t 02:00:00 --constraint=scratch-node", rows["build.targets.rome"])
-        self.assertIn("-p genoa -n 16 -t 02:00:00", rows["build.targets.genoa"])
+        rows = {l.split()[0]: l for l in run.stdout.splitlines() if l.startswith("build.node_types")}
+        self.assertIn("-p rome -n 16 -t 02:00:00 --constraint=scratch-node", rows["build.node_types.rome"])
+        self.assertIn("-p genoa -n 16 -t 02:00:00", rows["build.node_types.genoa"])
         self.write_site("")
         run = self.run_tool(["config"], SLURM_JOB_ID="")
-        self.assertRegex(run.stdout, r"(?m)^build\.targets\s+\(none\)")
+        self.assertRegex(run.stdout, r"(?m)^build\.node_types\s+\(none\)")
 
-    def test_config_gives_each_target_its_own_line(self):
+    def test_config_gives_each_node_type_its_own_line(self):
         run = self.run_tool(["config"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         lines = self.site.read_text().splitlines()
-        rows = [l for l in run.stdout.splitlines() if l.startswith("build.targets.")]
+        rows = [l for l in run.stdout.splitlines() if l.startswith("build.node_types.")]
         self.assertEqual(len(rows), 2, run.stdout)
         for row in rows:
-            name = row.split()[0][len("build.targets."):]
+            name = row.split()[0][len("build.node_types."):]
             line = next(i for i, text in enumerate(lines, 1) if text.startswith(f"{name} = "))
             self.assertTrue(row.endswith(f"[site {self.site}:{line}]"), row)
+
+    def test_the_old_name_build_targets_is_read_with_a_warning(self):
+        self.write_site('[build.targets]\ncpu = "-p cpu -n 16"\n')
+        warning = (f"eb-local: site {self.site}:5: [build.targets] is now [build.node_types];"
+                   " eb-local reads the old name until 4.0.0")
+        run = self.run_tool(["config"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertRegex(run.stdout, r"(?m)^build\.node_types\.cpu\s+-p cpu -n 16\s")
+        self.assertIn(warning, run.stderr)
+        run = self.run_tool(["submit", "recipe.eb"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stderr.count(warning), 1, run.stderr)
+        self.assertTrue(self.calls()[0].startswith("-p cpu -n 16 "), self.calls())
+        self.write_site('[build.node_types]\ncpu = "-p cpu"\n[build.targets]\ngpu = "-p gpu"\n')
+        run = self.run_tool(["config"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("build.targets is the old name of build.node_types, which line 5 sets; keep one", run.stderr)
 
 
 if __name__ == "__main__":
