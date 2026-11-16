@@ -22,7 +22,9 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 
 `eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
 The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
-Load the modules you link against on the `dev` line, not after it: the build environment, loaded last, puts its compiler wrappers ahead of every module's programs on `PATH`, so that no module's `gcc` or `ld` runs in their place, and `dev` checks only the modules it is given.
+The build environment has to be loaded; when, relative to the libraries, does not change the run paths.
+On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RUNPATH, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
+`dev` still loads it last, so that a module bringing another compiler cannot put its `gcc` or `ld` ahead of the wrappers on `PATH`, and it checks only the modules on the `dev` line.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
 `tests/site/dev-tasks.sh` checks these on a cluster with EESSI 2026.06, each program then run with no modules at all:
