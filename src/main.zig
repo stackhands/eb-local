@@ -1115,15 +1115,17 @@ const Collect = struct {
     }
 };
 
-fn removeEmptyDirs(c: Ctx, path: []const u8, depth: usize) void {
+fn removeEmptyDirs(c: Ctx, path: []const u8, dev: u64, depth: usize) void {
     if (depth > 16) return;
+    const here = fsx.statAt(fsx.cwd, path, false) catch return;
+    if (here.dev != dev or !here.isDir()) return;
     const fd = fsx.openDir(fsx.cwd, path, false) catch return;
     defer sys.close(fd);
     var it = fsx.DirIter.init(c.a, fd) catch return;
     while (it.next() catch null) |e| {
         const st = fsx.statAt(fd, e.name, false) catch continue;
-        if (!st.isDir()) continue;
-        removeEmptyDirs(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), depth + 1);
+        if (st.dev != dev or !st.isDir()) continue;
+        removeEmptyDirs(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), dev, depth + 1);
         sys.unlinkat(fd, e.name, linux.AT.REMOVEDIR) catch {};
     }
 }
@@ -1177,7 +1179,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
     }
     // Build workspaces are node-local scratch the scheduler removes anyway;
     // they are deleted, not trashed.
-    for (spaces.items) |w| fsx.deleteTree(a, fsx.cwd, w) catch |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
+    for (spaces.items) |w| storage.removeTree(a, w) catch |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
     if (spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{spaces.items.len});
     if (targets.len > 0) {
         if (trash == .rtrash) {
@@ -1194,7 +1196,10 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
             for (targets) |t| sys.unlinkat(fsx.cwd, t, 0) catch |e| warn("cannot remove {s} ({s})", .{ t, @errorName(e) });
             say("eb-local: deleted {d} file(s)", .{targets.len});
         }
-        for ([_][]const u8{ d.logs, d.sources }) |dir| removeEmptyDirs(c, dir, 0);
+        for ([_][]const u8{ d.logs, d.sources }) |dir| {
+            const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
+            removeEmptyDirs(c, dir, st.dev, 0);
+        }
     }
     return 0;
 }
@@ -1377,7 +1382,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
     if (rc == 0 and !keep) {
-        if (storage.ownWorkspace(job_root, work, callerUid(c))) fsx.deleteTree(a, fsx.cwd, work) catch |e|
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e|
             warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
     } else {
         warn("build workspace kept at {s}; it goes when the allocation ends,", .{work});
