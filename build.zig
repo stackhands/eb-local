@@ -38,9 +38,12 @@ pub fn build(b: *std.Build) void {
     // test artifact: zig build -Dtest-ops=true test. Its stdio is inherited:
     // unittest reports on stderr even when the suite passes, which a
     // capturing step shows as a failed command, and a capturing step is
-    // cached on the binary alone, so an edited test would not run.
+    // cached on the binary alone, so an edited test would not run. It runs
+    // in the build root: -s tests is relative, and zig build may be started
+    // in a subdirectory.
     const suite = b.addSystemCommand(&.{ "bash", "-c", "EB_LOCAL_BIN=\"$(realpath \"$0\")\" exec python3 -m unittest discover -s tests" });
     suite.addArtifactArg(exe);
+    suite.setCwd(b.path("."));
     suite.stdio = .inherit;
 
     const test_step = b.step("test", "Run the unit tests and the command-line suite against the binary");
