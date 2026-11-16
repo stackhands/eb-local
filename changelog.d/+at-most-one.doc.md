@@ -1,0 +1,1 @@
+The help, the README, the 3.0.0 release note and the refusal of `eb-local eb` say that at most one of `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL` and `EESSI_CVMFS_INSTALL` may be set, where they said exactly one: with none set, the command runs and the module installs under `$HOME/eessi`.
