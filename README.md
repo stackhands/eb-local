@@ -172,6 +172,7 @@ eb-local clean --workspaces --no-logs   # inside an allocation: its leftover wor
 ```
 
 With [rtrash](https://github.com/HaoZeke/rtrash) on `PATH`, files go to the trash (`rtrash list`, `rtrash restore`); without it, nothing is deleted unless you pass `--delete`.
+A directory among the logs, such as the `reprod_*` copies of a failed build's easyconfig, easyblocks and hooks, goes whole once nothing in it is newer than the cutoff: the copies keep their originals' older times.
 `clean` never follows a symbolic link out of the installation directory.
 
 To remove something you installed, for every CPU target you built it for:

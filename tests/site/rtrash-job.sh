@@ -38,14 +38,19 @@ inst=$(ls -d "$T"/eessi/versions/2026.06/software/linux/*/*/*/software/pigz/2.8-
 mod=$(ls "$T"/eessi/versions/2026.06/software/linux/*/*/*/modules/all/pigz/2.8-GCCcore-15.2.0.lua)
 check test ! -w "$inst"
 
-echo "== clean of an old log goes to the trash"
-log=$EB_LOCAL_PREFIX/.eb-local/logs/probe/old.log
-mkdir -p "$(dirname "$log")"; echo old > "$log"; touch -d '40 days ago' "$log"
+echo "== clean of an old log, and of a directory with nothing newer, goes to the trash"
+log=$EB_LOCAL_PREFIX/.eb-local/logs/old.log
+dir=$EB_LOCAL_PREFIX/.eb-local/logs/reprod_20250101000000_1
+mkdir -p "$dir"; echo old > "$log"; echo old > "$dir/old.eb"
+touch -d '40 days ago' "$log" "$dir/old.eb" "$dir"
 check "$EL" clean
 check test ! -e "$log"
+check test ! -e "$dir"
 check grep -qF "$log" <(rtrash list)
 check rtrash restore "$log"
+check rtrash restore "$dir"
 check test -e "$log"
+check test -e "$dir/old.eb"
 
 echo "== uninstall goes to the trash, restore brings it back"
 check "$EL" uninstall pigz/2.8-GCCcore-15.2.0
