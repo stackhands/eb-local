@@ -44,6 +44,10 @@ const usage_text =
     \\                                       environment exists for the loaded compilers
     \\  eb-local check FILE...               whether a program or library built here runs here:
     \\                                       its architecture, loader, run paths and libraries
+    \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
+    \\                                       one batch job per node type the site file lists
+    \\                                       in build.targets, each building the recipe for
+    \\                                       its CPU target; --print shows the jobs instead
     \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
     \\                                       what this node's target lacks
     \\  eb-local doctor                      what in this shell, node or configuration would
@@ -855,6 +859,9 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
     const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
     row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
+    var tnames: std.ArrayList([]const u8) = .empty;
+    for (s.targets.value) |t| tnames.append(a, str(a, "{s} ({s})", .{ t.name, t.sbatch })) catch oom();
+    row("build.targets", if (tnames.items.len == 0) "(none)" else std.mem.join(a, ", ", tnames.items) catch oom(), s.targets.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -1937,6 +1944,111 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     return if (failed) 1 else 0;
 }
 
+// ---- submit ---------------------------------------------------------------
+
+const SubmitOpts = struct {
+    /// Comma-separated target names; empty means every configured target.
+    on: []const u8 = "",
+    /// Print the scripts and sbatch commands; create and submit nothing.
+    print: bool = false,
+};
+
+/// A job name part: letters, digits, '.', '-' and '_' kept, the rest '_'.
+fn jobNamePart(a: Allocator, s: []const u8) []const u8 {
+    const out = a.dupe(u8, s[0..@min(s.len, 64)]) catch oom();
+    for (out) |*ch| if (!(std.ascii.isAlphanumeric(ch.*) or ch.* == '.' or ch.* == '-' or ch.* == '_')) {
+        ch.* = '_';
+    };
+    return out;
+}
+
+/// One batch job per configured node type, each running this eb-local with
+/// the same recipe, options and configuration inside its own allocation, so
+/// a module is built for every CPU target the site has.
+fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o: SubmitOpts) u8 {
+    const a = c.a;
+    if (args.len == 0) die("submit needs an easyconfig: eb-local submit [--on NAME,...] [--print] RECIPE [eb options]", .{});
+    const all = s.targets.value;
+    if (all.len == 0) die("no build.targets in the site file, so there is nothing to submit to; build inside an allocation with eb-local RECIPE", .{});
+    var chosen: std.ArrayList(config.Target) = .empty;
+    if (o.on.len == 0) {
+        chosen.appendSlice(a, all) catch oom();
+    } else {
+        var names = std.mem.splitScalar(u8, o.on, ',');
+        while (names.next()) |n| {
+            const t = for (all) |cand| {
+                if (std.mem.eql(u8, cand.name, n)) break cand;
+            } else {
+                var known: std.ArrayList([]const u8) = .empty;
+                for (all) |k| known.append(a, k.name) catch oom();
+                die("--on {s}: no such target; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
+            };
+            chosen.append(a, t) catch oom();
+        }
+    }
+    const p = place(c, s);
+    const sbatch = (proc.which(a, "sbatch", c.env.get("PATH") orelse "") catch null) orelse
+        if (o.print) "sbatch" else die("sbatch is not on PATH", .{});
+    var self_buf: [sys.path_max]u8 = undefined;
+    const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
+
+    // The command each job runs: this program, the options that chose this
+    // configuration, and the recipe with its eb options as given.
+    var line: std.ArrayList([]const u8) = .empty;
+    line.appendSlice(a, &.{ "exec", q(a, self) }) catch oom();
+    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", q(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
+    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", q(a, pr) }) catch oom();
+    if (p.project) line.appendSlice(a, &.{ "--project", q(a, p.prefix) }) catch oom();
+    for (args) |x| line.append(a, q(a, x)) catch oom();
+    const command = std.mem.join(a, " ", line.items) catch oom();
+
+    const root = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+    const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
+    const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
+    if (!o.print) {
+        common.atomic.makedirs(jobs) catch die("cannot create {s}", .{jobs});
+        common.atomic.makedirs(logs) catch die("cannot create {s}", .{logs});
+    }
+    const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
+    const stamp = nowSecs();
+    var failed = false;
+    for (chosen.items) |t| {
+        const script = str(a,
+            \\#!/bin/bash
+            \\#SBATCH --job-name=eb-local-{s}-{s}
+            \\#SBATCH --output={s}/submit-{s}-%j.out
+            \\#SBATCH --chdir={s}
+            \\{s}
+            \\
+        , .{ t.name, recipe, logs, t.name, c.cwd, command });
+        const path = std.fs.path.join(a, &.{ jobs, str(a, "{d}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
+        var argv: std.ArrayList([]const u8) = .empty;
+        argv.append(a, sbatch) catch oom();
+        var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
+        while (words.next()) |w| argv.append(a, w) catch oom();
+        argv.append(a, path) catch oom();
+        if (o.print) {
+            say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
+            cli.put(1, script);
+            continue;
+        }
+        var why: common.atomic.Why = .{};
+        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch die("cannot write {s}", .{path});
+        say("eb-local: {s}:", .{t.name});
+        switch (runAttached(a, argv.items, c.envp)) {
+            .exit => |code| if (code != 0) {
+                warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
+                failed = true;
+            },
+            .signal => failed = true,
+        }
+    }
+    if (o.print) return 0;
+    say("", .{});
+    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
+    return if (failed) 1 else 0;
+}
+
 // ---- uninstall ------------------------------------------------------------
 
 const UninstallOpts = struct {
@@ -2293,7 +2405,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -2345,6 +2457,7 @@ pub fn main(init: std.process.Init) u8 {
     var rest: std.ArrayList([]const u8) = .empty;
     var clean: CleanOpts = .{};
     var uninstall: UninstallOpts = .{};
+    var submit: SubmitOpts = .{};
     var check = false;
     var as_env = false;
     var site: SiteOpts = .{};
@@ -2389,6 +2502,15 @@ pub fn main(init: std.process.Init) u8 {
             },
             .check => rest.append(a, x) catch oom(),
             .env, .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .submit => {
+                if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
+                    submit.on = value(args, &i, "--on");
+                } else if (rest.items.len == 0 and std.mem.startsWith(u8, x, "--on=")) {
+                    submit.on = x["--on=".len..];
+                } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
+                    submit.print = true;
+                } else rest.append(a, x) catch oom();
+            },
             .list => {
                 if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
                 if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
@@ -2483,6 +2605,7 @@ pub fn main(init: std.process.Init) u8 {
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
         .list => cmdList(c, s, rest.items),
         .doctor => cmdDoctor(c, s, g),
+        .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check => unreachable,
     };
 }
