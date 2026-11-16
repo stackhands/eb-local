@@ -22,9 +22,12 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 
 `eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
 The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
-The build environment has to be loaded; when, relative to the libraries, does not change the run paths.
-On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RUNPATH, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
-`dev` still loads it last, so that a module bringing another compiler cannot put its `gcc` or `ld` ahead of the wrappers on `PATH`, and it checks only the modules on the `dev` line.
+The build environment has to be loaded; when, relative to the libraries, does not matter, because the modules set `LIBRARY_PATH` and the wrappers read it when you link.
+On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RPATH entries, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
+Its `gcc` and `ld` wrappers each record the run paths, so one real `gcc` or one real `ld` ahead of them on `PATH` does no harm.
+A program loses its run paths only when both are bypassed, or when its compiler has no wrapper, such as `clang` from the `LLVM` module.
+The link still succeeds and the program fails when it starts; `eb-local check PROGRAM` shows this first.
+`dev` chooses the build environment from the compilers loaded when it runs, so name every module you link against on the `dev` line, not after it.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
 `tests/site/dev-tasks.sh` checks these on a cluster with EESSI 2026.06, each program then run with no modules at all:
