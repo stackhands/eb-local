@@ -475,7 +475,11 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
         }
     }.f;
     out.appendSlice(a, "# eb-local configuration; storage and build.site_toolchains come only from the site file\n") catch oom();
-    if (s.project.value) |p| line(a, &out, "EB_LOCAL_PROJECT", p) else line(a, &out, "EB_LOCAL_PREFIX", s.prefix.value);
+    // The same absolute path `eb-local env` would use. A relative prefix, a
+    // ~/ prefix and a symbolic link must not be re-resolved from another
+    // directory, or followed onto a different tree, when the lines are sourced.
+    const p = place(c, s);
+    if (p.project) line(a, &out, "EB_LOCAL_PROJECT", p.prefix) else line(a, &out, "EB_LOCAL_PREFIX", p.prefix);
     line(a, &out, "EB_LOCAL_STACK_MODULE", s.stack_module.value);
     line(a, &out, "EB_LOCAL_STACK_EXTEND", s.extend_module.value);
     line(a, &out, "EB_LOCAL_DEV_BUILDENV", s.dev_buildenv.value);

@@ -6,6 +6,7 @@ of these, so the tests run only against the binary.
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import unittest
@@ -116,6 +117,24 @@ class ConfigCli(StorageFixture):
         run = self.run_tool(["config", "--check"])
         self.assertEqual(run.returncode, 1)
         self.assertIn("chmod 600", run.stdout)
+
+    def test_config_env_prints_the_canonical_prefix(self):
+        run = self.run_tool(["config", "--env"], EB_LOCAL_PREFIX="rel-prefix")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        absolute = str(self.root / "rel-prefix")
+        self.assertIn(f"export EB_LOCAL_PREFIX={shlex.quote(absolute)}", run.stdout)
+        self.assertNotIn("EB_LOCAL_PREFIX=rel-prefix", run.stdout)
+        link = self.root / "prefix-link"
+        self.prefix.mkdir(parents=True)
+        link.symlink_to(self.prefix)
+        run = self.run_tool(["config", "--env"], EB_LOCAL_PREFIX=str(link))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"export EB_LOCAL_PREFIX={shlex.quote(str(self.prefix))}", run.stdout)
+        self.assertNotIn("prefix-link", run.stdout)
+        run = self.run_tool(["config", "--env"], EB_LOCAL_PREFIX="~/from-home")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn(f"export EB_LOCAL_PREFIX={shlex.quote(str(self.home / 'from-home'))}", run.stdout)
+        self.assertNotIn("~", run.stdout)
 
     def test_the_environment_and_options_win(self):
         run = self.run_tool(["dev"], EB_LOCAL_DEV_MODULES="GSL/2.8-GCC-15.2.0", SLURM_JOB_ID="")
