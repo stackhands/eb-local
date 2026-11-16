@@ -2,8 +2,9 @@
 """What an adversarial review of eb-local 2.1 found, as tests of the Zig build.
 
 Each test is one finding: a user's own configuration file cannot set the
-storage settings; uninstall touches only installations and never follows a
-symbolic link; clean says what it removed; secrets are removed from the
+storage settings, nor can a site file the user owns; uninstall touches only
+installations and never follows a symbolic link; clean says what it
+removed; secrets are removed from the
 installation's copy of the log and in their encoded forms, and the log
 directory is private while they may be in it.
 """
@@ -13,6 +14,7 @@ import gzip
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import unittest
@@ -77,6 +79,27 @@ class Hardening(StorageFixture):
         self.assertEqual(run.returncode, 2, run.stdout)
         self.assertIn("site setting", run.stderr)
         self.assertFalse(self.prefix.exists())
+
+    def test_a_site_file_belongs_to_root_or_the_programs_owner(self):
+        # A site file the caller owns is refused unless the caller owns the
+        # program too: only the site file sets the storage settings.
+        program = self.root / "opt" / "eb-local"
+        program.parent.mkdir()
+        shutil.copy2(binary.BIN, program)
+        site = program.parent / "config.toml"
+        site.write_text(f'[storage]\nnode_local_root = "{self.nodes}"\n')
+        site.chmod(0o644)
+        env = dict(self.env, SLURM_JOB_ID="", EB_LOCAL_CONFIG="", HOME=str(self.root / "home"))
+        env.pop("XDG_CONFIG_HOME", None)
+        run = subprocess.run([str(program), "config"], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertRegex(run.stdout, r"storage\.node_local_root\s+" + str(self.nodes))
+        env["EB_LOCAL_TEST_SELF_OWNER"] = str(os.getuid() + 1)
+        run = subprocess.run([str(program), "config"], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertEqual(run.stdout, "")
+        self.assertIn(f"{site} is owned by uid {os.getuid()} and is not used", run.stderr)
+        self.assertIn(f"a site file belongs to root or to this program's owner (uid {os.getuid() + 1})", run.stderr)
 
     def test_uninstall_matches_only_installations(self):
         target = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"

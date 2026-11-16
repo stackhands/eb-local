@@ -1,0 +1,1 @@
+A site file must be owned by root or by the program's owner, as the code already required; the README and the code's comment said one you own was used too. A refused configuration file now says who may own it.

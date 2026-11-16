@@ -246,18 +246,24 @@ fn selfOwner() linux.uid_t {
 const Trust = enum { site, user };
 
 /// Read a configuration file that may steer builds: a regular file, not a
-/// symbolic link, not writable by group or others, owned by root, this
-/// program's owner or the caller (a site file) or by the caller (a user
-/// file). A file that fails is an error, never skipped.
+/// symbolic link, not writable by group or others, owned by root or this
+/// program's owner (a site file) or by the caller (a user file). A site
+/// file the caller owns is refused unless the caller owns the program too:
+/// only the site file sets the storage settings and build.site_toolchains.
+/// A file that fails is an error, never skipped.
 fn readTrusted(c: Ctx, path: []const u8, kind: Trust) []const u8 {
     const opened = openConfig(path);
     defer sys.close(opened.fd);
     const uid = opened.stat.uid;
-    const ok = switch (kind) {
-        .site => uid == 0 or uid == selfOwner(),
-        .user => uid == linux.getuid(),
-    };
-    if (!ok) die("{s} is owned by uid {d} and is not used", .{ path, uid });
+    switch (kind) {
+        .site => {
+            const owner = selfOwner();
+            if (uid != 0 and uid != owner)
+                die("{s} is owned by uid {d} and is not used: a site file belongs to root or to this program's owner (uid {d})", .{ path, uid, owner });
+        },
+        .user => if (uid != linux.getuid())
+            die("{s} is owned by uid {d} and is not used: your configuration file belongs to you (uid {d})", .{ path, uid, linux.getuid() }),
+    }
     return fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, @errorName(e) });
 }
 
