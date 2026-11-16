@@ -1,0 +1,1 @@
+`zig build -Dtest-ops=true test` started in a subdirectory such as `src/` runs the command-line suite: the suite step runs in the build root, where `-s tests` finds it, instead of where `zig build` was started, where unittest stopped with `Start directory is not importable: 'tests'`.
