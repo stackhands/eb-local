@@ -41,6 +41,12 @@ const names = [_]Name{
     .{ .name = "EESSI_CVMFS_INSTALL", .mode = .cvmfs, .umask = "022" },
 };
 
+/// The install variable that selects MODE.
+pub fn variable(mode: Mode) []const u8 {
+    for (names) |n| if (n.mode == mode) return n.name;
+    unreachable;
+}
+
 /// `EB_LOCAL_EESSI_EXTEND` is how a caller that can pass only one program
 /// (an eb-stack target's EasyBuild command) selects this launcher. Every
 /// argument is then eb's. Empty and `0` leave the ordinary commands alone.

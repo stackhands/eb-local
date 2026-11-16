@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""eb-local eb and eb-local --explain eb, through the command line of the Zig build.
+
+A fake EESSI repository holds an init whose module function sets what
+EESSI-extend sets when it loads; the eb double prints the process umask,
+its arguments and the variables it got, and leaves a mark that it ran.
+"""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+import unittest
+
+import binary
+
+SCRIPT = Path(__file__).resolve().parents[1] / "eb-local"
+INIT = r'''
+module() {
+    if [ "$1" = load ]; then
+        export EASYBUILD_PREFIX="${WORKING_DIR:-/tmp/$USER}/easybuild"
+    fi
+}
+'''
+EB = r'''#!/bin/sh
+touch "$CONTROL_ROOT/eb-ran"
+umask
+printf '%s\n' "$@" "EASYBUILD_PREFIX=$EASYBUILD_PREFIX" "EESSI_USER_INSTALL=${EESSI_USER_INSTALL-unset}"
+'''
+
+
+@unittest.skipUnless(binary.BIN, "eb and --explain eb are features of the Zig build")
+class ExtendCli(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-extend-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        init.parent.mkdir(parents=True)
+        init.write_text(INIT)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "eb").write_text(EB)
+        (bin_dir / "eb").chmod(0o755)
+        (self.root / "home").mkdir()
+        self.env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.root / "home"), "USER": "alice",
+                    "EESSI_CVMFS_REPO": str(self.root / "repo"), "CONTROL_ROOT": str(self.root)}
+
+    def run_tool(self, args, **extra):
+        argv, env = binary.command(SCRIPT, args, dict(self.env, **extra))
+        return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+
+    def test_explain_eb_prints_the_launcher_script_and_runs_nothing(self):
+        mine = self.root / "mine"
+        run = self.run_tool(["--explain", "eb", "--", "my recipe.eb", "--robot"], EESSI_USER_INSTALL=str(mine))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"# EESSI_USER_INSTALL={mine} selects a user install; the process umask is 077.", run.stdout)
+        self.assertIn("\nset -- 077 user 'my recipe.eb' --robot\n", run.stdout)
+        self.assertIn("\nmodule load EESSI-extend\n", run.stdout)
+        self.assertEqual(run.stdout.rstrip().splitlines()[-1], 'exec eb "$@"')
+        self.assertFalse(mine.exists())
+        self.assertFalse((self.root / "eb-ran").exists())
+        run = self.run_tool(["--explain", "eb", "x.eb"])
+        self.assertIn("No install variable is set: a user install into the module's default, $HOME/eessi", run.stdout)
+
+    def test_the_printed_script_runs_as_eb_local_eb_does(self):
+        mine = self.root / "mine"
+        explained = self.run_tool(["--explain", "eb", "--", "my recipe.eb", "--robot"], EESSI_USER_INSTALL=str(mine))
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        real = self.run_tool(["eb", "--", "my recipe.eb", "--robot"], EESSI_USER_INSTALL=str(mine))
+        self.assertEqual(real.returncode, 0, real.stderr)
+        self.assertTrue((self.root / "eb-ran").exists())
+        replay = subprocess.run(["bash", "--noprofile", "--norc", "-c", explained.stdout],
+                                env=dict(self.env, EESSI_USER_INSTALL=str(mine)), cwd=self.root,
+                                capture_output=True, text=True)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(replay.stdout, real.stdout)
+        self.assertEqual(real.stdout.splitlines(), ["0077", "my recipe.eb", "--robot",
+                                                    "EASYBUILD_PREFIX=/tmp/alice/easybuild",
+                                                    f"EESSI_USER_INSTALL={mine}"])
+
+    def test_explain_eb_refuses_two_install_variables_as_eb_does(self):
+        run = self.run_tool(["--explain", "eb", "x.eb"], EESSI_USER_INSTALL="/x", EESSI_PROJECT_INSTALL="/y")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        self.assertEqual(run.stdout, "")
+        self.assertIn("EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL", run.stderr)
+
+    def test_explain_with_a_command_it_does_not_explain_is_refused(self):
+        prefix = self.root / "prefix"
+        logs = prefix / ".eb-local" / "logs"
+        logs.mkdir(parents=True)
+        old = logs / "easybuild-old.log"
+        old.write_text("log\n")
+        os.utime(old, (time.time() - 90 * 86400,) * 2)
+        for args in (["clean", "--delete"], ["submit", "x.eb"], ["uninstall", "GSL/2.8"], ["doctor"], ["env"]):
+            with self.subTest(args=args):
+                run = self.run_tool(["--explain"] + args, EB_LOCAL_PREFIX=str(prefix))
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn(f"--explain goes with a recipe or with eb, not with {args[0]}", run.stderr)
+        self.assertTrue(old.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
