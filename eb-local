@@ -278,8 +278,9 @@ check_job_root() {
         "$node_local_root"/*) ;;
         *) fail_storage "node-local root must name the allocation mount below $node_local_root." ;;
     esac
-    [ -d "$job_root" ] && [ ! -L "$job_root" ] && [ -w "$job_root" ] && [ -x "$job_root" ] ||
+    if [ ! -d "$job_root" ] || [ -L "$job_root" ] || [ ! -w "$job_root" ] || [ ! -x "$job_root" ]; then
         fail_storage 'allocation node-local root must be an owned writable directory.'
+    fi
     canonical_root=$(readlink -e -- "$job_root") || fail_storage 'cannot resolve allocation node-local root.'
     [ "$canonical_root" = "$job_root" ] || fail_storage 'allocation node-local root must be canonical.'
     [ "$(stat -c %u -- "$job_root")" = "$(id -u)" ] || fail_storage 'allocation node-local root belongs to another user.'
@@ -392,7 +393,9 @@ for refused in "$node_local_root" $shared_scratch; do
     esac
 done
 mkdir -p -- "$prefix"
-[ -w "$prefix" ] && [ -x "$prefix" ] || fail_storage 'installation prefix is not writable.'
+if [ ! -w "$prefix" ] || [ ! -x "$prefix" ]; then
+    fail_storage 'installation prefix is not writable.'
+fi
 prefix=$(cd "$prefix" && pwd -P)
 durable_dirs
 work=$(mktemp -d "$job_root/eb-local.XXXXXXXX") || fail_storage 'cannot create allocation workspace.'
@@ -402,8 +405,12 @@ mkdir -p -- "$work/build" "$work/tmp" "$work/cache" "$work/cargo" "$work/source-
 # A build that succeeds leaves no workspace behind; one that fails keeps it
 # for inspection until the allocation ends. EB_LOCAL_KEEP_WORK=1 always keeps it.
 rc=1
-# shellcheck disable=SC2329  # run by the EXIT trap
+finished=0
+# Called on the way out, and from the EXIT trap so set -e still cleans up.
+# The flag keeps the message and the removal to one run when both fire.
 finish() {
+    [ "$finished" -eq 0 ] || return 0
+    finished=1
     if [ "$rc" -eq 0 ] && [ "${EB_LOCAL_KEEP_WORK:-}" != 1 ]; then
         remove_workspace "$work"
     elif [ -d "$work" ]; then
@@ -460,4 +467,5 @@ if [ "$rc" -eq 0 ]; then
         echo "  eval \"\$(eb-local env)\""
     fi
 fi
+finish
 exit "$rc"
