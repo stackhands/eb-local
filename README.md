@@ -125,7 +125,7 @@ eb-local refuses a project directory that others can write to, since anyone coul
 
 A project build runs with the umask EESSI-extend sets for a project install, 002, so that each member can write the directories the others' builds made: `software/`, `modules/`, EasyBuild's locks and `.eb-local/`. EasyBuild still leaves each installation read-only. A user install is made with umask 022.
 
-A successful build removes its workspace; a failed one keeps it for inspection until the allocation ends.
+A successful build removes its workspace, unless `EB_LOCAL_KEEP_WORK=1` is set; a failed one keeps it for inspection until the allocation ends.
 The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
 
 ## EESSI-extend, without a site file
