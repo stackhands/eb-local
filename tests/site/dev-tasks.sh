@@ -1,6 +1,7 @@
 #!/bin/bash
-# Site acceptance: the development tasks of the 2025 user documentation, done
-# with eb-local on the 2026 stack (EESSI 2026.06 module names).
+# Site acceptance: the development tasks in the README (C with FFTW and
+# OpenMP, MPI, CMake against GSL, a Python venv, R packages), done with
+# eb-local on EESSI 2026.06.
 #
 #   EB_LOCAL_TEST_ROOT=DIR [EB_LOCAL_BIN=eb-local] bash tests/site/dev-tasks.sh
 #

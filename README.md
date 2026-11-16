@@ -346,7 +346,7 @@ zig build unit && zig build -Dtest-ops=true test          # the Zig build: unit 
 
 A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
 
-`tests/site/` holds the acceptance scripts run on Snellius: the development tasks above, and a build inside an allocation.
+`tests/site/` holds the site acceptance scripts: the development tasks above, and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
 
 ## License
 

@@ -3,7 +3,9 @@
 # into eb-local. From a checkout of eb-local:
 #   eb-local site install examples/sites/snellius.toml [--set partition=genoa]
 # The allocation's node-local NVMe mount is /scratch-node/<user>.<job id>,
-# on nodes allocated with --constraint=scratch-node.
+# on nodes allocated with --constraint=scratch-node. The acceptance jobs in
+# tests/site/ run there with
+#   sbatch -p rome --constraint=scratch-node ... tests/site/build-job.sh
 
 [storage]
 node_local_root = "/scratch-node"

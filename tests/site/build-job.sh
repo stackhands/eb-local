@@ -1,19 +1,19 @@
 #!/bin/bash
-# Site acceptance in an allocation (Snellius values; adapt the #SBATCH lines):
+# Site acceptance in an allocation on a node with a node-local disk; give the
+# partition, and the feature that selects such a node, if the site needs them:
 #
-#   EB_LOCAL_TEST_ROOT=DIR sbatch --output=DIR/job-%j.out --export=ALL tests/site/build-job.sh
+#   EB_LOCAL_TEST_ROOT=DIR sbatch [-p PARTITION] [--constraint=FEATURE] \
+#       --output=DIR/job-%j.out --export=ALL tests/site/build-job.sh
 #
 # A build that leaves no workspace, its result used through env and with no
 # modules at all, a failed build that keeps its workspace until clean removes
 # it, clean of old logs without rtrash, and dev-tasks.sh on a compute node.
-# DIR holds eb-local.conf; remove DIR afterwards (in a batch job on Snellius).
+# DIR holds eb-local.conf; remove DIR afterwards (in a batch job).
 #SBATCH --job-name=eb-local-test
-#SBATCH --partition=rome
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:30:00
-#SBATCH --constraint=scratch-node
 # No -u: the Lmod init reads unset variables.
 set -eo pipefail
 module purge
@@ -21,7 +21,12 @@ T=${EB_LOCAL_TEST_ROOT:?set EB_LOCAL_TEST_ROOT}
 HERE=$(dirname "$(readlink -f "${SLURM_SUBMIT_DIR:-.}/tests/site/build-job.sh" 2>/dev/null || readlink -f "$0")")
 EL=${EB_LOCAL_BIN:-$HERE/../../eb-local}
 export EB_LOCAL_CONFIG=$T/eb-local.conf EB_LOCAL_PREFIX=$T/eessi
-JOB=/scratch-node/$USER.$SLURM_JOB_ID
+# The allocation's mount, as the site file names it.
+setting() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p" "$EB_LOCAL_CONFIG" | tail -n 1; }
+mount=$(setting node_local_mount)
+mount=${mount:-%u.%j}
+mount=${mount//%u/$(id -un)}
+JOB=$(setting node_local_root)/${mount//%j/$SLURM_JOB_ID}
 pass=0; fail=0
 check() { if "$@"; then echo "PASS $*"; pass=$((pass+1)); else echo "FAIL $*"; fail=$((fail+1)); fi; }
 workspaces() { ls -d "$JOB"/eb-local.* 2>/dev/null | wc -l; }
