@@ -230,6 +230,19 @@ class StorageControls(StorageFixture):
         self.assertFalse((self.root / "load.json").exists())
         self.assertEqual(list(self.job.iterdir()), [])
 
+    def test_dangling_symlink_into_shared_scratch_is_refused_before_a_workspace(self):
+        # The target does not exist yet. Resolving only links whose target
+        # exists would accept the path, then make the directory through the
+        # link once someone creates the target.
+        self.prefix.mkdir(parents=True)
+        (self.prefix / ".eb-local").symlink_to("/scratch-shared/not-created-yet")
+        run = self.run_wrapper()
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("durable prefix", run.stderr)
+        self.assertFalse((self.root / "load.json").exists())
+        self.assertEqual(list(self.job.iterdir()), [])
+        self.assertFalse(Path("/scratch-shared/not-created-yet").exists())
+
     def test_missing_configuration_refuses_before_any_write(self):
         self.config.unlink()
         self.refused()

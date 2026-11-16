@@ -70,32 +70,118 @@ pub fn mountOf(a: Allocator, mountinfo: []const u8, path: []const u8) Allocator.
     return best;
 }
 
-/// `path` made absolute and normal as `readlink -m` does: each component
-/// that exists is resolved through symbolic links before the next is
-/// applied, so `link/..` is the parent of the link's target; the components
-/// after the first that does not exist are joined on with . and .. applied.
+const Seen = struct { dev: u64, ino: u64 };
+
+fn pathOf(a: Allocator, parts: []const []const u8) Allocator.Error![]const u8 {
+    if (parts.len == 0) return "/";
+    var out: std.ArrayList(u8) = .empty;
+    for (parts) |p| {
+        try out.append(a, '/');
+        try out.appendSlice(a, p);
+    }
+    return out.items;
+}
+
+fn readLink(a: Allocator, path: []const u8) Allocator.Error!?[]const u8 {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const zp = sys.z(&zb, path) catch return null;
+    var buf: [sys.path_max]u8 = undefined;
+    const n = linux.readlinkat(linux.AT.FDCWD, zp.ptr, &buf, buf.len);
+    if (linux.errno(n) != .SUCCESS or n == 0 or n >= buf.len) return null;
+    return try a.dupe(u8, buf[0..n]);
+}
+
+fn existsDir(path: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, path, false) catch return false;
+    return st.isDir();
+}
+
+/// `path` made absolute and normal as `readlink -m` does. A symbolic link is
+/// resolved even when its target does not exist yet, so `link/..` is the
+/// parent of the link's target and a dangling link onto shared scratch is
+/// visible to the prefix check. A link cycle is kept as a literal component,
+/// which is what `readlink -m` prints, instead of being walked forever.
 pub fn canonical(a: Allocator, path: []const u8, cwd: []const u8) Allocator.Error![]const u8 {
     const abs = if (path.len > 0 and path[0] == '/') path else try std.fs.path.join(a, &.{ cwd, path });
-    var current: []const u8 = "/";
-    var exists_so_far = true;
+    var pending: std.ArrayList([]const u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, abs, '/');
-    while (it.next()) |part| {
-        if (std.mem.eql(u8, part, ".")) continue;
-        if (std.mem.eql(u8, part, "..")) {
-            current = std.fs.path.dirname(current) orelse "/";
+    while (it.next()) |part| try pending.append(a, part);
+    var out: std.ArrayList([]const u8) = .empty;
+    var seen: std.ArrayList(Seen) = .empty;
+    var missing = false;
+    var idx: usize = 0;
+    while (idx < pending.items.len) {
+        const part = pending.items[idx];
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) {
+            idx += 1;
             continue;
         }
-        const next = if (std.mem.eql(u8, current, "/")) try std.mem.concat(a, u8, &.{ "/", part }) else try std.mem.concat(a, u8, &.{ current, "/", part });
-        if (exists_so_far) {
-            var buf: [sys.path_max]u8 = undefined;
-            if (fsx.realpath(fsx.cwd, next, &buf)) |real| {
-                current = try a.dupe(u8, real);
-                continue;
-            } else |_| exists_so_far = false;
+        if (std.mem.eql(u8, part, "..")) {
+            if (out.items.len > 0) _ = out.pop();
+            if (missing and existsDir(try pathOf(a, out.items))) missing = false;
+            idx += 1;
+            continue;
         }
-        current = next;
+        if (missing) {
+            try out.append(a, part);
+            idx += 1;
+            continue;
+        }
+        const next = try pathOf(a, try joined(a, out.items, part));
+        const st = fsx.statAt(fsx.cwd, next, false) catch {
+            missing = true;
+            try out.append(a, part);
+            idx += 1;
+            continue;
+        };
+        if (!st.isLink()) {
+            try out.append(a, part);
+            idx += 1;
+            continue;
+        }
+        var loop = false;
+        for (seen.items) |s| if (s.dev == st.dev and s.ino == st.ino) {
+            loop = true;
+            break;
+        };
+        if (loop or seen.items.len >= 40) {
+            // The same link again, or more links than Linux will follow:
+            // readlink -m stops and keeps the name.
+            missing = true;
+            try out.append(a, part);
+            idx += 1;
+            continue;
+        }
+        try seen.append(a, .{ .dev = st.dev, .ino = st.ino });
+        const target = (try readLink(a, next)) orelse {
+            missing = true;
+            try out.append(a, part);
+            idx += 1;
+            continue;
+        };
+        var extra: std.ArrayList([]const u8) = .empty;
+        if (target.len > 0 and target[0] == '/') {
+            out.clearRetainingCapacity();
+            missing = false;
+        }
+        var ti = std.mem.tokenizeScalar(u8, target, '/');
+        while (ti.next()) |c| try extra.append(a, c);
+        // The link component is replaced by its target; idx stays so the
+        // target is what the next iteration reads.
+        var neu: std.ArrayList([]const u8) = .empty;
+        try neu.appendSlice(a, pending.items[0..idx]);
+        try neu.appendSlice(a, extra.items);
+        try neu.appendSlice(a, pending.items[idx + 1 ..]);
+        pending = neu;
     }
-    return current;
+    return pathOf(a, out.items);
+}
+
+fn joined(a: Allocator, parts: []const []const u8, last: []const u8) Allocator.Error![]const []const u8 {
+    var all: std.ArrayList([]const u8) = .empty;
+    try all.appendSlice(a, parts);
+    try all.append(a, last);
+    return all.items;
 }
 
 pub fn under(path: []const u8, root: []const u8) bool {
@@ -228,6 +314,60 @@ test "canonical paths" {
     try testing.expect(under("/a/b", "/a"));
     try testing.expect(under("/a", "/a"));
     try testing.expect(!under("/ab", "/a"));
+}
+
+test "canonical matches readlink -m, including a link whose target is missing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/canonical-m-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(try std.fmt.allocPrint(a, "{s}/deep/target", .{root}));
+    try common.atomic.makedirs(try std.fmt.allocPrint(a, "{s}/scratch/real", .{root}));
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const link = struct {
+        fn at(allocator: Allocator, from: []const u8, to: []const u8) !void {
+            var zf: [sys.path_max:0]u8 = undefined;
+            var zt: [sys.path_max:0]u8 = undefined;
+            _ = linux.symlinkat((try sys.z(&zt, to)).ptr, linux.AT.FDCWD, (try sys.z(&zf, from)).ptr);
+            _ = allocator;
+        }
+    }.at;
+    try link(a, try std.fmt.allocPrint(a, "{s}/lnk", .{root}), try std.fmt.allocPrint(a, "{s}/deep/target", .{root}));
+    try link(a, try std.fmt.allocPrint(a, "{s}/dangling", .{root}), try std.fmt.allocPrint(a, "{s}/missing/target", .{root}));
+    try link(a, try std.fmt.allocPrint(a, "{s}/rel", .{root}), "missing/target");
+    try link(a, try std.fmt.allocPrint(a, "{s}/loop", .{root}), try std.fmt.allocPrint(a, "{s}/loop", .{root}));
+    try link(a, try std.fmt.allocPrint(a, "{s}/a", .{root}), try std.fmt.allocPrint(a, "{s}/b", .{root}));
+    try link(a, try std.fmt.allocPrint(a, "{s}/b", .{root}), try std.fmt.allocPrint(a, "{s}/a", .{root}));
+    try link(a, try std.fmt.allocPrint(a, "{s}/toscratch", .{root}), try std.fmt.allocPrint(a, "{s}/scratch/not-yet", .{root}));
+    // Each path below root, and what GNU readlink -m prints for it: the
+    // contract of canonical. The host's readlink is not asked, because uutils
+    // readlink, /usr/bin/readlink on Ubuntu 26.04, exits 1 on a link cycle
+    // where GNU readlink -m keeps the name.
+    const cases = [_][2][]const u8{
+        .{ "lnk/../eessi", "deep/eessi" },
+        .{ "dangling/../eessi", "missing/eessi" },
+        .{ "dangling", "missing/target" },
+        .{ "rel/../eessi", "missing/eessi" },
+        .{ "loop/x", "loop/x" },
+        .{ "a/x", "a/x" },
+        .{ "no/such/./x/../place", "no/such/place" },
+        .{ "toscratch/sources", "scratch/not-yet/sources" },
+        .{ "deep/target/../../scratch/real", "scratch/real" },
+    };
+    for (cases) |case| {
+        const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, case[0] });
+        const want = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, case[1] });
+        const got = try canonical(a, path, "/");
+        if (!std.mem.eql(u8, got, want)) {
+            std.debug.print("canonical {s}\nreadlink  {s}\npath      {s}\n", .{ got, want, path });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // The dangling link names scratch even though scratch/not-yet does not exist.
+    const resolved = try canonical(a, try std.fmt.allocPrint(a, "{s}/toscratch/sources", .{root}), "/");
+    try testing.expect(under(resolved, try std.fmt.allocPrint(a, "{s}/scratch", .{root})));
 }
 
 test "a workspace is private even when the umask clears every bit" {
