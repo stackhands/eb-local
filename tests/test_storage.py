@@ -239,6 +239,22 @@ class StorageControls(StorageFixture):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertFalse(destination.exists())
 
+    def test_shared_scratch_metacharacters_are_literal(self):
+        # scratch[a] is a character class to the shell. A neighbour named
+        # scratcha must not become the refused path in its place.
+        scratch = self.root / "scratch[a]"
+        (self.root / "scratcha").mkdir()
+        self.config.write_text(
+            f"node_local_root = {self.nodes}\n"
+            "node_local_fstype = xfs\n"
+            f"shared_scratch = {scratch}\n"
+        )
+        self.config.chmod(0o600)
+        destination = scratch / "install"
+        run = self.run_wrapper(EB_LOCAL_PREFIX=str(destination))
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertFalse(destination.exists())
+
     def test_configured_fstype_is_enforced(self):
         write_config(self.config, self.nodes, "node_local_fstype = ext4\n")
         self.refused()
