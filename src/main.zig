@@ -20,13 +20,16 @@ pub const extend = @import("extend.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
-pub const version = "2.4.0";
+pub const version = "3.0.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
     \\directory you own.
     \\
     \\  eb-local <easyconfig> [eb options]   build and install with EasyBuild
+    \\  eb-local --explain <easyconfig> [eb options]
+    \\                                       the commands that build runs, as shell lines,
+    \\                                       its checks as comments; creates and runs nothing
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
     \\                                       Exactly one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL, and a present
@@ -59,7 +62,7 @@ const usage_text =
     \\  eb-local help | --version
     \\
     \\Every command takes --profile NAME, --project DIR (a shared project directory
-    \\instead of $HOME/.local/eessi) and --config FILE. Use env and dev with eval:
+    \\instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -325,6 +328,8 @@ const Global = struct {
     project: ?[]const u8 = null,
     config_file: ?[]const u8 = null,
     buildenv: ?[]const u8 = null,
+    /// Print what a build would run, as shell commands, and run nothing.
+    explain: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -418,8 +423,28 @@ fn locate(c: Ctx, s: config.Settings) Place {
     if (std.mem.startsWith(u8, raw, "~/") or std.mem.eql(u8, raw, "~")) {
         const home = nonEmpty(c.env.get("HOME")) orelse die("prefix {s} needs HOME", .{raw});
         raw = std.mem.concat(c.a, u8, &.{ home, raw[1..] }) catch oom();
+        if (std.mem.eql(u8, s.prefix.from, "default")) {
+            if (legacyPrefix(c, home, raw)) |old| return .{ .prefix = old, .project = false };
+        }
     }
     return .{ .prefix = storage.canonical(c.a, raw, c.cwd) catch oom(), .project = false };
+}
+
+/// eb-local 2.x installed into ~/.local/eessi by default. Where
+/// that tree exists and the new default does not, it stays in use, so
+/// installed modules do not disappear; set `prefix` to choose for good.
+fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u8 {
+    const isDir = struct {
+        fn f(path: []const u8) bool {
+            return if (fsx.statAt(fsx.cwd, path, true)) |st| st.isDir() else |_| false;
+        }
+    }.f;
+    if (isDir(default_prefix)) return null;
+    const old = std.fs.path.join(c.a, &.{ home, ".local", "eessi" }) catch oom();
+    if (!isDir(old)) return null;
+    warn("using {s}, the default before eb-local 3.0; EESSI-extend and `eb-local eb` use {s}.", .{ old, default_prefix });
+    cli.err("  Keep it with prefix = \"~/.local/eessi\" in ~/.config/eb-local/config.toml, or move it to {s}.\n", .{default_prefix});
+    return storage.canonical(c.a, old, c.cwd) catch oom();
 }
 
 // ---- env, dev, config, profiles -------------------------------------------
@@ -1396,12 +1421,73 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\if [ "$mode" = project ]; then eb "$@"; else eb --umask=022 "$@"; fi
 ;
 
+/// What a build runs, as the shell commands a person would type, with the
+/// checks it makes first as comments. Nothing is created and nothing runs, so
+/// it also works outside an allocation. $W stands for the workspace a build
+/// makes in the allocation's node-local mount.
+fn explainBuild(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
+    const a = c.a;
+    const p = place(c, s);
+    const d = durableDirs(c, p.prefix);
+    const install_var = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
+    var out: std.ArrayList(u8) = .empty;
+    const add = struct {
+        fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
+            o.appendSlice(al, text) catch oom();
+        }
+    }.f;
+    add(a, &out, "# eb-local --explain: the commands a build runs. Nothing was created or run.\n");
+    add(a, &out, str(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
+        if (p.project) "project" else "user", p.prefix, if (p.project) s.project.from else s.prefix.from,
+    }));
+    if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
+        add(a, &out, str(a, "# Checks first: Slurm job {s}, its own node-local {s} mount under {s},\n", .{ job, s.node_local_fstype.value, s.node_local_root.value }));
+    } else {
+        add(a, &out, "# Checks first: a Slurm job (there is none here, so a build would stop now),\n");
+        if (s.allocation_hint.value.len > 0) add(a, &out, str(a, "#   for example: {s}\n", .{s.allocation_hint.value}));
+        add(a, &out, str(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }));
+    }
+    add(a, &out, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n");
+    add(a, &out, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n");
+    add(a, &out, "# The commands run in a clean bash (no profile, no rc file, no BASH_ENV).\n\n");
+
+    add(a, &out, "# Clear what a login shell may carry, so it cannot redirect the install:\n");
+    add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
+    add(a, &out, "unset");
+    for (install_vars) |v| add(a, &out, str(a, " {s}", .{v}));
+    add(a, &out, "\nunset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT\n\n");
+
+    add(a, &out, "# Build and temporary space in the workspace; sources and logs beside the install:\n");
+    add(a, &out, "export WORKING_DIR=\"$W/source-index\" TMPDIR=\"$W/tmp\" TMP=\"$W/tmp\" TEMP=\"$W/tmp\"\n");
+    add(a, &out, "export EASYBUILD_BUILDPATH=\"$W/build\" EASYBUILD_TMPDIR=\"$W/tmp\" XDG_CACHE_HOME=\"$W/cache\" CARGO_HOME=\"$W/cargo\"\n");
+    add(a, &out, str(a, "export EASYBUILD_SOURCEPATH={s} EASYBUILD_TMP_LOGDIR={s} LMOD_EXACT_MATCH=no\n", .{ q(a, d.sources), q(a, d.logs) }));
+    for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
+    add(a, &out, "\n# Exactly one install variable; EESSI-extend reads it when it loads:\n");
+    add(a, &out, str(a, "export {s}={s}\n", .{ install_var, q(a, p.prefix) }));
+    add(a, &out, str(a, "module load {s}\n", .{q(a, s.stack_module.value)}));
+    add(a, &out, "if command -v eessi-arch-guard >/dev/null 2>&1; then eval \"$(eessi-arch-guard --strict --shell)\"; fi\n");
+    add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    add(a, &out, "# Each load above may change WORKING_DIR and the temporary directories,\n");
+    add(a, &out, "# so eb-local sets the workspace lines again after every load.\n");
+    if (s.site_toolchains.value.len > 0) {
+        const json = config.toolchainsJson(a, s.site_toolchains.value) catch oom();
+        add(a, &out, str(a, "export \"EESSI_SITE_TOP_LEVEL_TOOLCHAINS_${{EESSI_VERSION//./_}}\"={s}\n", .{q(a, json)}));
+    }
+    for (s.secrets.items) |sec| add(a, &out, str(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }));
+    add(a, &out, if (p.project) "eb" else "eb --umask=022");
+    for (args) |x| add(a, &out, str(a, " {s}", .{q(a, x)}));
+    add(a, &out, "\n");
+    cli.put(1, out.items);
+    return 0;
+}
+
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     if (args.len == 0) {
         cli.err("{s}", .{usage_text});
         return 2;
     }
+    if (g.explain) return explainBuild(c, s, args);
     if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job.", .{});
         cli.err("  Software is built for the CPU of the node that runs eb-local, so build\n", .{});
@@ -1983,6 +2069,8 @@ pub fn main(init: std.process.Init) u8 {
             g.config_file = value(args, &i, "--config");
         } else if (std.mem.eql(u8, x, "--env") and command == .build and rest.items.len == 0) {
             command = .env;
+        } else if (std.mem.eql(u8, x, "--explain") and command == .build and rest.items.len == 0) {
+            g.explain = true;
         } else if (command == .build and rest.items.len == 0 and subcommand(x) != null) {
             // Global options may come first: eb-local --profile gpu dev.
             command = subcommand(x).?;

@@ -1,1 +1,0 @@
-The README and the help give the order in which the site file is found, `default_profile`, `EB_LOCAL_KEEP_WORK=1`, why the modules go on the `dev` line, and the `eb-local.conf` the 1.x script reads; the stackhands table lists eb-pipeline, and `.gitignore` the Zig build and package directories.

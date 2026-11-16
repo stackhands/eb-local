@@ -6,6 +6,7 @@ test_storage; rtrash is a double that records what it was given.
 """
 import os
 from pathlib import Path
+import shlex
 import signal
 import subprocess
 import time
@@ -140,6 +141,57 @@ class Commands(StorageFixture):
     def test_a_relative_prefix_is_printed_absolute(self):
         run = self.run_wrapper(["env"], SLURM_JOB_ID="", EB_LOCAL_PREFIX="relative/prefix")
         self.assertIn(f"export EESSI_USER_INSTALL={self.root}/relative/prefix", run.stdout)
+
+    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    def test_explain_prints_the_build_and_creates_nothing(self):
+        run = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        out = run.stdout
+        self.assertIn("there is none here, so a build would stop now", out)
+        self.assertIn(f"export EESSI_USER_INSTALL={shlex.quote(str(self.prefix))}", out)
+        self.assertIn("unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL", out)
+        self.assertIn('export EASYBUILD_BUILDPATH="$W/build"', out)
+        # The extension loads after the stack, and eb comes last with the arguments as given.
+        self.assertLess(out.index("module load EESSI/2026.06"), out.index("module load EESSI-extend/2026.06-easybuild"))
+        self.assertEqual(out.rstrip().splitlines()[-1], "eb --umask=022 'recipe with space.eb' --robot")
+        self.assertFalse(self.prefix.exists())
+        self.assertEqual(list(self.job.iterdir()), [])
+        self.assertFalse((self.root / "eb.json").exists())
+
+    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    def test_explain_a_project_build_keeps_the_project_umask(self):
+        self.prefix.mkdir(parents=True)
+        self.prefix.chmod(0o2770)
+        run = self.run_wrapper(["--explain", "--project", str(self.prefix), "recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("Slurm job 123", run.stdout)
+        self.assertIn(f"export EESSI_PROJECT_INSTALL={shlex.quote(str(self.prefix))}", run.stdout)
+        self.assertEqual(run.stdout.rstrip().splitlines()[-1], "eb recipe.eb")
+        self.assertEqual(list(self.job.iterdir()), [])
+
+    @unittest.skipUnless(binary.BIN, "the shared default prefix is a feature of the Zig build")
+    def test_the_default_prefix_is_eessi_extends_and_an_older_tree_stays_in_use(self):
+        home = self.root / "home"
+        home.mkdir()
+        self.env = dict(self.env, HOME=str(home), XDG_CONFIG_HOME=str(self.root / "xdg"), SLURM_JOB_ID="")
+        self.env.pop("EB_LOCAL_PREFIX")
+
+        def chosen():
+            run = self.run_wrapper(["env"])
+            self.assertEqual(run.returncode, 0, run.stderr)
+            return [l for l in run.stdout.splitlines() if l.startswith("export EESSI_USER_INSTALL=")], run.stderr
+
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/eessi"])
+        self.assertNotIn("before eb-local 3.0", err)
+        (home / ".local" / "eessi").mkdir(parents=True)
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/.local/eessi"])
+        self.assertIn("before eb-local 3.0", err)
+        (home / "eessi").mkdir()
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/eessi"])
+        self.assertNotIn("before eb-local 3.0", err)
 
     def test_dev_refuses_a_module_name_that_is_not_one(self):
         for name in ("GSL; touch injected", "$(touch injected)", "../x", "a b", "-x", "GSL/`id`"):

@@ -22,7 +22,9 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 
 `eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
 The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
-Load the modules you link against on the `dev` line, not after it: the build environment, loaded last, puts its compiler wrappers ahead of every module's programs on `PATH`, so that no module's `gcc` or `ld` runs in their place, and `dev` checks only the modules it is given.
+The build environment has to be loaded; when, relative to the libraries, does not change the run paths.
+On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RUNPATH, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
+`dev` still loads it last, so that a module bringing another compiler cannot put its `gcc` or `ld` ahead of the wrappers on `PATH`, and it checks only the modules on the `dev` line.
 EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
 
 `tests/site/dev-tasks.sh` checks these on a cluster with EESSI 2026.06, each program then run with no modules at all:
@@ -54,7 +56,7 @@ A job script finds the build for the node it lands on by loading EESSI first:
 
 ```sh
 eval "$(eb-local env)"
-"$HOME/.local/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
+"$HOME/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
 ```
 
 ### Other compilers
@@ -155,14 +157,28 @@ eb-local eb -- example.eb --robot
 
 `--profile`, `--project` and `--config` are not this command's options. The project, site and cvmfs modes are the variables above. A caller that can pass only a program name, and then eb's own arguments, sets `EB_LOCAL_EESSI_EXTEND=1`. Every argument is then eb's, which is how an eb-stack EESSI target runs this command. The 1.x Bash script has no `eb` command.
 
+### What a build runs
+
+`eb-local --explain` prints the commands a build would run, as shell lines, with the checks it makes first as comments, and creates and runs nothing:
+
+```sh
+eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
+```
+
+The lines are what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, and run `eb`.
+`$W` stands for the workspace a build makes in the allocation's node-local mount.
+
 ## Where things go
 
 | what | where |
 |---|---|
-| installs | `$HOME/.local/eessi`, the `prefix` setting, or `--project DIR` |
+| installs | `$HOME/eessi`, the `prefix` setting, or `--project DIR` |
 | build, temporary, cache and EESSI setup directories | a unique workspace in the allocation's node-local mount |
 | downloaded source archives | `<install-prefix>/.eb-local/sources` |
 | build logs | `<install-prefix>/.eb-local/logs` |
+
+The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree.
+Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/eessi` does not, eb-local keeps using it and says so. Set `prefix` to choose either for good.
 
 A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
 Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
@@ -312,7 +328,7 @@ On a cluster whose site installs eb-local, load its module and skip the rest of 
 Otherwise, download the static binary, one file per architecture, from a [release](https://github.com/stackhands/eb-local/releases):
 
 ```sh
-v=2.4.0; f=eb-local-$v-$(uname -m)-linux-musl
+v=3.0.0; f=eb-local-$v-$(uname -m)-linux-musl
 mkdir -p ~/.local/bin && cd ~/.local/bin
 curl -fLO "https://github.com/stackhands/eb-local/releases/download/v$v/$f"
 curl -fL "https://github.com/stackhands/eb-local/releases/download/v$v/SHA256SUMS" | sha256sum -c --ignore-missing

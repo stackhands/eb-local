@@ -1,1 +1,0 @@
-A build does not pass `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` to `eb`. A startup file cannot run in the build, a trace cannot print it, and host libraries cannot be selected ahead of the toolchain.
