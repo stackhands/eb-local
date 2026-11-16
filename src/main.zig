@@ -35,6 +35,8 @@ const usage_text =
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL, and a present
     \\                                       empty value counts as set; with none set, the
     \\                                       module uses $HOME/eessi and nothing is exported
+    \\  eb-local --explain eb [--] [eb options]
+    \\                                       the script eb runs, with its arguments; runs nothing
     \\  eb-local env                         lines that make your installed modules visible
     \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work
@@ -2582,6 +2584,10 @@ pub fn main(init: std.process.Init) u8 {
         }
     }
 
+    // --explain promises that nothing runs; a command it does not explain
+    // would run as if it were not there.
+    if (g.explain and command != .build and command != .eb)
+        die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
     if (command == .site) return cmdSite(c, site);
@@ -2591,7 +2597,7 @@ pub fn main(init: std.process.Init) u8 {
     if (command == .eb) {
         if (g.profile != null or g.project != null or g.config_file != null)
             die("eb reads the install mode from the environment, not from --profile, --project or --config", .{});
-        return cmdExtend(c, rest.items);
+        return if (g.explain) explainExtend(c, rest.items) else cmdExtend(c, rest.items);
     }
     const s = loadSettings(c, g);
     return switch (command) {
@@ -2633,6 +2639,38 @@ fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     extend.apply(&env);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
     return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
+}
+
+/// What eb-local eb would run: the launcher's own script after a `set --`
+/// line with the arguments it would get, so the text runs as the launcher
+/// does. Nothing runs and nothing is created.
+fn explainExtend(c: Ctx, args: []const []const u8) u8 {
+    const a = c.a;
+    const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
+    const sel = extend.select(c.env) catch |err| switch (err) {
+        error.TooMany => {
+            cli.err("{s}\n", .{extend.too_many});
+            return 3;
+        },
+    };
+    const argv = extend.commandLine(a, sel, eb_args) catch oom();
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, "# eb-local --explain eb: the script eb-local eb runs, with its arguments. Nothing was run.\n") catch oom();
+    const name = extend.variable(sel.mode);
+    if (c.env.get(name)) |v| {
+        out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, q(a, v), @tagName(sel.mode), sel.umask }) catch oom();
+    } else {
+        out.print(a, "# No install variable is set: a user install into the module's default, $HOME/eessi; the process umask is {s}.\n", .{sel.umask}) catch oom();
+    }
+    out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
+    for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
+    out.appendSlice(a, " \"$SCRIPT\"") catch oom();
+    for (argv[5..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
+    for (argv[6..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    out.print(a, "\n{s}\n", .{extend.script}) catch oom();
+    cli.put(1, out.items);
+    return 0;
 }
 
 test "eb is the EESSI-extend command" {

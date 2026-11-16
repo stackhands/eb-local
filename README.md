@@ -156,6 +156,8 @@ export EESSI_USER_INSTALL=$HOME/eessi      # a named user prefix; it is created
 eb-local eb -- example.eb --robot
 ```
 
+`eb-local --explain eb -- example.eb --robot` prints the script this command runs, after a `set --` line with its arguments, and runs nothing; `bash` runs the printed text as this command would.
+
 `--profile`, `--project` and `--config` are not this command's options. The project, site and cvmfs modes are the variables above. A caller that can pass only a program name, and then eb's own arguments, sets `EB_LOCAL_EESSI_EXTEND=1`. Every argument is then eb's, which is how an eb-stack EESSI target runs this command. The 1.x Bash script has no `eb` command.
 
 ### What a build runs
