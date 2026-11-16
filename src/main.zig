@@ -2178,7 +2178,7 @@ test "shell quoting reads back as the same word" {
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expectEqualStrings("EESSI/2026.06", try shellQuote(a, "EESSI/2026.06"));
-    try std.testing.expectEqualStrings("/gpfs/home3/u/eessi", try shellQuote(a, "/gpfs/home3/u/eessi"));
+    try std.testing.expectEqualStrings("/home/u/eessi", try shellQuote(a, "/home/u/eessi"));
     try std.testing.expectEqualStrings("'owned space'", try shellQuote(a, "owned space"));
     try std.testing.expectEqualStrings("'a'\\''b $(x)'", try shellQuote(a, "a'b $(x)"));
     try std.testing.expectEqualStrings("''", try shellQuote(a, ""));

@@ -222,7 +222,7 @@ class SitesCli(StorageFixture):
         user = self.home / ".config" / "eb-local" / "config.toml"
         user.parent.mkdir(parents=True)
         user.write_text('default_profile = "mine"\n'
-                        'build.allocation_hint = "salloc -p rome"\n'
+                        'build.allocation_hint = "salloc -p cpu"\n'
                         '[profile.mine]\ndev.modules = ["FFTW/3.3.10-GCC-15.2.0"]\n'
                         '[profile.mine.secrets]\nMINE_TOKEN = "env:MY_TOKEN"\n'
                         '[profile.bare]\nbuild.allocation_hint = ""\n')

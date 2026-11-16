@@ -420,10 +420,10 @@ test "tables, dotted keys, strings, integers, booleans and arrays" {
         \\# site
         \\default_profile = "mine"   # comment
         \\[storage]
-        \\node_local_root = "/scratch-node"
+        \\node_local_root = "/local"
         \\shared_scratch = [
-        \\  "/scratch-shared", # one
-        \\  '/gpfs/scratch1',
+        \\  "/scratch", # one
+        \\  '/work',
         \\]
         \\[profile.gpu]
         \\dev.modules = ["CUDA/13.3.0"]
@@ -433,10 +433,10 @@ test "tables, dotted keys, strings, integers, booleans and arrays" {
     );
     try std.testing.expectEqualStrings("mine", t.get("default_profile").?.value.string);
     const storage = t.get("storage").?.value.table;
-    try std.testing.expectEqualStrings("/scratch-node", storage.get("node_local_root").?.value.string);
+    try std.testing.expectEqualStrings("/local", storage.get("node_local_root").?.value.string);
     const scratch = storage.get("shared_scratch").?.value.array;
     try std.testing.expectEqual(@as(usize, 2), scratch.len);
-    try std.testing.expectEqualStrings("/gpfs/scratch1", scratch[1].string);
+    try std.testing.expectEqualStrings("/work", scratch[1].string);
     const gpu = t.get("profile").?.value.table.get("gpu").?.value.table;
     try std.testing.expectEqualStrings("CUDA/13.3.0", gpu.get("dev").?.value.table.get("modules").?.value.array[0].string);
     try std.testing.expectEqual(@as(i64, 7), gpu.get("clean").?.value.table.get("logs_older_than_days").?.value.int);

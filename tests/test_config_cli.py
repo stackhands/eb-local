@@ -18,10 +18,10 @@ SITE = '''
 [storage]
 node_local_root = "{nodes}"
 node_local_fstype = "xfs"
-shared_scratch = ["/scratch-shared"]
+shared_scratch = ["/scratch"]
 
 [build]
-allocation_hint = "salloc -p rome -n 16"
+allocation_hint = "salloc -p cpu -n 16"
 
 [profile.gpu]
 dev.modules = ["CUDA/13.3.0"]
@@ -262,9 +262,9 @@ class ConfigCli(StorageFixture):
 
     def test_site_toolchains_reach_the_eessi_hooks(self):
         text = self.site.read_text()
-        self.assertIn('allocation_hint = "salloc -p rome -n 16"\n', text)
-        self.site.write_text(text.replace('allocation_hint = "salloc -p rome -n 16"\n',
-                                          'allocation_hint = "salloc -p rome -n 16"\n'
+        self.assertIn('allocation_hint = "salloc -p cpu -n 16"\n', text)
+        self.site.write_text(text.replace('allocation_hint = "salloc -p cpu -n 16"\n',
+                                          'allocation_hint = "salloc -p cpu -n 16"\n'
                                           'site_toolchains = ["intel/2026.1", "nvidia-compilers/26.3"]\n'))
         # A value the caller exports is replaced by the site's.
         run = self.run_tool(["--config", str(self.site), "recipe.eb"],
@@ -284,8 +284,8 @@ class ConfigCli(StorageFixture):
 
     def test_eessi_settings_reach_the_build_and_the_printed_lines(self):
         text = self.site.read_text()
-        self.site.write_text(text.replace('allocation_hint = "salloc -p rome -n 16"\n',
-                                          'allocation_hint = "salloc -p rome -n 16"\n'
+        self.site.write_text(text.replace('allocation_hint = "salloc -p cpu -n 16"\n',
+                                          'allocation_hint = "salloc -p cpu -n 16"\n'
                                           'site_toolchains = ["intel/2026.1"]\n')
                              + "[eessi]\nEESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = '1 2'\n")
         run = self.run_tool(["--config", str(self.site), "recipe.eb"])

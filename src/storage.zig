@@ -354,17 +354,17 @@ test "the mount a path lies on" {
     const a = arena.allocator();
     const info =
         \\22 1 0:21 / / rw,relatime - xfs /dev/sda1 rw
-        \\40 22 0:40 / /scratch-node rw,nosuid - xfs /dev/nvme0n1 rw
-        \\41 40 0:41 / /scratch-node/u.123 rw,nosuid shared:5 - xfs /dev/nvme0n1 rw
-        \\50 22 0:50 / /gpfs/home3 rw - gpfs home3 rw
+        \\40 22 0:40 / /local rw,nosuid - xfs /dev/nvme0n1 rw
+        \\41 40 0:41 / /local/u.123 rw,nosuid shared:5 - xfs /dev/nvme0n1 rw
+        \\50 22 0:50 / /home rw - gpfs home rw
         \\51 22 0:51 / /mnt/with\040space ro - tmpfs tmpfs ro
     ;
-    const m = (try mountOf(a, info, "/scratch-node/u.123")).?;
-    try testing.expectEqualStrings("/scratch-node/u.123", m.target);
+    const m = (try mountOf(a, info, "/local/u.123")).?;
+    try testing.expectEqualStrings("/local/u.123", m.target);
     try testing.expectEqualStrings("xfs", m.fstype);
-    try testing.expectEqualStrings("/scratch-node", (try mountOf(a, info, "/scratch-node/u.123x")).?.target);
-    try testing.expectEqualStrings("/scratch-node", (try mountOf(a, info, "/scratch-node/u.1234")).?.target);
-    try testing.expectEqualStrings("gpfs", (try mountOf(a, info, "/gpfs/home3/u/x")).?.fstype);
+    try testing.expectEqualStrings("/local", (try mountOf(a, info, "/local/u.123x")).?.target);
+    try testing.expectEqualStrings("/local", (try mountOf(a, info, "/local/u.1234")).?.target);
+    try testing.expectEqualStrings("gpfs", (try mountOf(a, info, "/home/u/x")).?.fstype);
     try testing.expectEqualStrings("/mnt/with space", (try mountOf(a, info, "/mnt/with space/a")).?.target);
     try testing.expectEqualStrings("/", (try mountOf(a, info, "/etc")).?.target);
 }

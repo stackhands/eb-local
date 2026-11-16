@@ -31,16 +31,16 @@ stat() {
 }
 module() {
     if [ "$1" = unload ]; then
-        export TMPDIR=/scratch-shared/restored WORKING_DIR=/scratch-shared/restored
-        export EASYBUILD_BUILDPATH=/scratch-shared/restored
+        export TMPDIR=/scratch/restored WORKING_DIR=/scratch/restored
+        export EASYBUILD_BUILDPATH=/scratch/restored
         return 0
     fi
     if [ "$1" = load ]; then
         python3 "$CONTROL_ROOT/capture.py" load "$@" || return
         export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4 EESSI_ACCELERATOR_TARGET= EESSI_VERSION=2026.06
         export EASYBUILD_HOOKS=/selected/hooks.py
-        export TMPDIR=/scratch-shared/module WORKING_DIR=/scratch-shared/module
-        export EASYBUILD_BUILDPATH=/scratch-shared/module
+        export TMPDIR=/scratch/module WORKING_DIR=/scratch/module
+        export EASYBUILD_BUILDPATH=/scratch/module
         return 0
     fi
     return 99
@@ -71,7 +71,7 @@ def write_config(path, nodes, extra=""):
         "# test site\n"
         f"node_local_root = {nodes}\n"
         "node_local_fstype = xfs\n"
-        f"shared_scratch = /scratch-shared /scratch-local {nodes.parent / 'shared'}\n"
+        f"shared_scratch = /scratch /work {nodes.parent / 'shared'}\n"
         "allocation_hint = salloc -n 16 -t 02:00:00\n" + extra
     )
     path.chmod(0o600)
@@ -254,13 +254,13 @@ class StorageControls(StorageFixture):
         # exists would accept the path, then make the directory through the
         # link once someone creates the target.
         self.prefix.mkdir(parents=True)
-        (self.prefix / ".eb-local").symlink_to("/scratch-shared/not-created-yet")
+        (self.prefix / ".eb-local").symlink_to("/scratch/not-created-yet")
         run = self.run_wrapper()
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn("durable prefix", run.stderr)
         self.assertFalse((self.root / "load.json").exists())
         self.assertEqual(list(self.job.iterdir()), [])
-        self.assertFalse(Path("/scratch-shared/not-created-yet").exists())
+        self.assertFalse(Path("/scratch/not-created-yet").exists())
 
     def test_missing_configuration_refuses_before_any_write(self):
         self.config.unlink()

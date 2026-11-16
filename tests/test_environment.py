@@ -53,14 +53,14 @@ eb() {
 mkdir() {
     local rewritten=() arg
     for arg in "$@"; do
-        case "$arg" in /scratch-shared/*) arg="$CONTROL_ROOT/scratch${arg#/scratch-shared}";; esac
+        case "$arg" in /scratch/*) arg="$CONTROL_ROOT/scratch${arg#/scratch}";; esac
         rewritten+=("$arg")
     done
     command mkdir "${rewritten[@]}"
 }
 cd() {
     case "${1-}" in
-        /scratch-shared/*) builtin cd "$CONTROL_ROOT/scratch${1#/scratch-shared}";;
+        /scratch/*) builtin cd "$CONTROL_ROOT/scratch${1#/scratch}";;
         *) builtin cd "$@";;
     esac
 }
