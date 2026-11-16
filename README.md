@@ -183,6 +183,49 @@ Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/ee
 A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
 Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created.
 
+## Build for every node type
+
+A module is built for the CPU target of the node that built it, so a site with several node types needs one build on each.
+When the site file lists them in `[build.targets]`, `eb-local submit` sends one batch job to each, every job running this eb-local with the same recipe, options and configuration:
+
+```sh
+eb-local submit GSL-2.8-GCC-15.2.0.eb --robot             # every target
+eb-local submit --on genoa GSL-2.8-GCC-15.2.0.eb --robot  # only these
+eb-local submit --print GSL-2.8-GCC-15.2.0.eb               # show the jobs, submit nothing
+```
+
+`--on` and `--print` come before the recipe; options after it are eb's.
+The batch scripts go to `<install-prefix>/.eb-local/jobs`, each job's output to `<install-prefix>/.eb-local/logs/submit-TARGET-JOBID.out`, and `eb-local list` then shows the module on each target.
+The site file sets the targets, as sbatch options separated by spaces; only the site file may:
+
+```toml
+[build.targets]
+cpu = "-p cpu -n 16 -t 02:00:00"
+bigmem = "-p bigmem -n 16 -t 02:00:00"
+```
+
+## What you have, and what is wrong
+
+Each CPU target has its own tree, so a module built on one node type is not there on another.
+`eb-local list` shows every module you installed, with a column per CPU target, and, with EESSI loaded, which of them this node's target lacks:
+
+```sh
+$ eval "$(eb-local env)"
+$ eb-local list
+/home/u/eessi: 2 module(s) for 2 CPU target(s)
+MODULE                   zen2  zen4*
+GSL/2.8-GCC-15.2.0       x     x
+pigz/2.8-GCCcore-15.2.0  x     -
+Not built for this node's target, x86_64/amd/zen4 (*): pigz/2.8-GCCcore-15.2.0.
+Build them in an allocation on this node type; each target needs its own build.
+```
+
+`eb-local list GSL` or `eb-local list GSL/2.8-GCC-15.2.0` narrows it.
+
+`eb-local doctor` checks, one line each, what would stop a build or a module load: the site file, the prefix and its permissions, install variables and `LD_LIBRARY_PATH` left in the shell, the allocation's node-local mount, whether EESSI is loaded and your modules are on `MODULEPATH`, and rtrash.
+Each line says `ok`, `info`, `warn` or `FAIL`; it exits 1 when one says `FAIL`, and changes nothing.
+Paste its output when asking for help.
+
 ## Clean up
 
 ```sh
@@ -231,7 +274,7 @@ dev.modules = ["CUDA/13.3.0"]
 ```
 
 `eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile; without either, `default_profile` does, from your file if it sets one, else from the site file.
-The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
+The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.site_toolchains` and `build.targets` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
 An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
 
 The site file is the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, and a 1.x `eb-local.conf` beside the program or in `/etc`.
@@ -328,7 +371,7 @@ On a cluster whose site installs eb-local, load its module and skip the rest of 
 Otherwise, download the static binary, one file per architecture, from a [release](https://github.com/stackhands/eb-local/releases):
 
 ```sh
-v=3.0.0; f=eb-local-$v-$(uname -m)-linux-musl
+v=3.1.0; f=eb-local-$v-$(uname -m)-linux-musl
 mkdir -p ~/.local/bin && cd ~/.local/bin
 curl -fLO "https://github.com/stackhands/eb-local/releases/download/v$v/$f"
 curl -fL "https://github.com/stackhands/eb-local/releases/download/v$v/SHA256SUMS" | sha256sum -c --ignore-missing

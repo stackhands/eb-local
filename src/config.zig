@@ -17,6 +17,34 @@ pub fn Setting(comptime T: type) type {
     };
 }
 
+pub const Target = struct {
+    name: []const u8,
+    /// sbatch options, words separated by spaces.
+    sbatch: []const u8,
+};
+
+/// A target name: what --on names and a job name carries.
+pub fn validTargetName(n: []const u8) bool {
+    if (n.len == 0 or n.len > 32) return false;
+    for (n) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_')) return false;
+    return true;
+}
+
+/// sbatch options eb-local passes as separate words, never through a shell:
+/// options only, and characters that need no quoting.
+pub fn validSbatchOptions(v: []const u8) bool {
+    if (v.len == 0 or v.len > 512) return false;
+    var words = std.mem.tokenizeScalar(u8, v, ' ');
+    var any = false;
+    while (words.next()) |w| {
+        any = true;
+        for (w) |ch| if (!(std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "-_=:,./+%@", ch) != null)) return false;
+    }
+    if (!any) return false;
+    var first = std.mem.tokenizeScalar(u8, v, ' ');
+    return first.next().?[0] == '-';
+}
+
 pub const Secret = struct {
     /// The variable eb receives.
     name: []const u8,
@@ -55,6 +83,9 @@ pub const Settings = struct {
     allocation_hint: Setting([]const u8) = .{ .value = "" },
     /// NAME/VERSION toolchains the EESSI hooks accept besides foss and lfoss.
     site_toolchains: Setting([]const []const u8) = .{ .value = &.{} },
+    /// Node types `eb-local submit` sends a build to: a name and the sbatch
+    /// options that place a job on that node type. Site file only.
+    targets: Setting([]const Target) = .{ .value = &.{} },
     trash: Setting(Trash) = .{ .value = .auto },
     logs_older_than_days: Setting(u32) = .{ .value = 30 },
     node_local_root: Setting([]const u8) = .{ .value = "" },
@@ -354,6 +385,19 @@ const Loader = struct {
                         for (v) |tc| if (!validToolchain(tc))
                             return l.fail("{s}:{d}: build.site_toolchains: '{s}' is not NAME/VERSION", .{ src.path, f.line, tc });
                         l.s.site_toolchains = .{ .value = v, .from = try l.where(src, f.line, null) };
+                    } else if (std.mem.eql(u8, f.key, "targets")) {
+                        if (src.layer != .site or profile != null)
+                            return l.fail("{s}:{d}: build.targets is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
+                        const per = try l.table(src, f, "build.targets");
+                        var list: std.ArrayList(Target) = .empty;
+                        for (per.entries.items) |*g| {
+                            if (!validTargetName(g.key)) return l.fail("{s}:{d}: build.targets.{s}: a target name is letters, digits, - and _", .{ src.path, g.line, g.key });
+                            const v = try l.string(src, g, "build.targets");
+                            if (!validSbatchOptions(v))
+                                return l.fail("{s}:{d}: build.targets.{s}: sbatch options, separated by spaces, with no quotes, $, ; or other shell characters", .{ src.path, g.line, g.key });
+                            try list.append(l.a, .{ .name = g.key, .sbatch = v });
+                        }
+                        l.s.targets = .{ .value = list.items, .from = try l.where(src, f.line, null) };
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
@@ -996,4 +1040,15 @@ test "the 1.x site file" {
     try std.testing.expectEqual(Trash.none, s.trash.value);
     try std.testing.expectEqualStrings("stack/mine", s.stack_module.value);
     try std.testing.expectError(error.Invalid, legacyToToml(a, "source_me = $(touch x)\n", &d));
+}
+
+test "build.targets" {
+    try std.testing.expect(validSbatchOptions("-p rome -n 16 -t 02:00:00 --constraint=scratch-node"));
+    try std.testing.expect(!validSbatchOptions("-p rome; rm -rf ~"));
+    try std.testing.expect(!validSbatchOptions("-p '$(id)'"));
+    try std.testing.expect(!validSbatchOptions("rome"));
+    try std.testing.expect(!validSbatchOptions(" "));
+    try std.testing.expect(validTargetName("genoa_h100"));
+    try std.testing.expect(!validTargetName("a b"));
+    try std.testing.expect(!validTargetName(""));
 }

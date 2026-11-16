@@ -20,7 +20,7 @@ pub const extend = @import("extend.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
-pub const version = "3.0.0";
+pub const version = "3.1.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
@@ -44,6 +44,14 @@ const usage_text =
     \\                                       environment exists for the loaded compilers
     \\  eb-local check FILE...               whether a program or library built here runs here:
     \\                                       its architecture, loader, run paths and libraries
+    \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
+    \\                                       one batch job per node type the site file lists
+    \\                                       in build.targets, each building the recipe for
+    \\                                       its CPU target; --print shows the jobs instead
+    \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
+    \\                                       what this node's target lacks
+    \\  eb-local doctor                      what in this shell, node or configuration would
+    \\                                       stop a build or a module load; changes nothing
     \\  eb-local clean [--logs-older-than DAYS] [--sources] [--workspaces] [--dry-run] [--delete]
     \\                                       remove what eb-local left behind
     \\  eb-local config [--check | --env]    the settings in force and where each came from;
@@ -851,6 +859,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
     const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
     row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
+    if (s.targets.value.len == 0) row("build.targets", "(none)", s.targets.from);
+    for (s.targets.value) |t| row(str(a, "build.targets.{s}", .{t.name}), t.sbatch, s.targets.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -1632,6 +1642,412 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     return stop(run);
 }
 
+// ---- list -----------------------------------------------------------------
+
+/// Each installation tree EESSI-extend made below PATH: one per EESSI version
+/// and CPU target, holding software/ and modules/all/. Symbolic links are not
+/// followed.
+fn findTrees(c: Ctx, path: []const u8, out: *std.ArrayList([]const u8), depth: usize) void {
+    if (depth > 12) return;
+    const fd = fsx.openDir(fsx.cwd, path, false) catch return;
+    defer sys.close(fd);
+    if (isDirAt(fd, "software") and isDirAt(fd, "modules")) {
+        out.append(c.a, path) catch oom();
+        return;
+    }
+    var it = fsx.DirIter.init(c.a, fd) catch return;
+    while (it.next() catch null) |e| {
+        if (!isDirAt(fd, e.name)) continue;
+        findTrees(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), out, depth + 1);
+    }
+}
+
+/// The CPU target a tree is for: what follows software/linux/ in its path.
+fn treeTarget(tree: []const u8) []const u8 {
+    const key = "/software/linux/";
+    const i = std.mem.lastIndexOf(u8, tree, key) orelse return tree;
+    return tree[i + key.len ..];
+}
+
+/// The EESSI version a tree is for: the directory below versions/.
+fn treeVersion(versions: []const u8, tree: []const u8) []const u8 {
+    if (tree.len <= versions.len + 1) return "";
+    const rest = tree[versions.len + 1 ..];
+    return rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse rest.len];
+}
+
+/// NAME/VERSION of every module file in a tree's modules/all.
+fn treeModules(c: Ctx, tree: []const u8, out: *std.ArrayList([]const u8)) void {
+    const all = std.fs.path.join(c.a, &.{ tree, "modules", "all" }) catch oom();
+    const fd = fsx.openDir(fsx.cwd, all, false) catch return;
+    defer sys.close(fd);
+    var names = fsx.DirIter.init(c.a, fd) catch return;
+    while (names.next() catch null) |n| {
+        if (n.name.len == 0 or n.name[0] == '.' or !isDirAt(fd, n.name)) continue;
+        const name = c.a.dupe(u8, n.name) catch oom();
+        const nfd = fsx.openDir(fd, name, false) catch continue;
+        defer sys.close(nfd);
+        var files = fsx.DirIter.init(c.a, nfd) catch continue;
+        while (files.next() catch null) |f| {
+            if (f.name.len == 0 or f.name[0] == '.' or !std.mem.endsWith(u8, f.name, ".lua")) continue;
+            const st = fsx.statAt(nfd, f.name, false) catch continue;
+            if (!st.isReg()) continue;
+            out.append(c.a, str(c.a, "{s}/{s}", .{ name, f.name[0 .. f.name.len - 4] })) catch oom();
+        }
+    }
+}
+
+const Listed = struct {
+    module: []const u8,
+    at: std.ArrayList(usize) = .empty,
+};
+
+fn listedLess(_: void, x: Listed, y: Listed) bool {
+    return std.mem.lessThan(u8, x.module, y.module);
+}
+
+fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
+    if (filters.len == 0) return true;
+    for (filters) |f| {
+        if (std.mem.eql(u8, module, f)) return true;
+        if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') return true;
+    }
+    return false;
+}
+
+/// What is installed in the prefix, for which CPU targets, and what the
+/// target of this node lacks.
+fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
+    const a = c.a;
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    var trees: std.ArrayList([]const u8) = .empty;
+    if (literalPath(c, versions)) findTrees(c, versions, &trees, 0);
+    std.mem.sort([]const u8, trees.items, {}, lessThanStr);
+
+    var several_versions = false;
+    for (trees.items) |t| {
+        if (!std.mem.eql(u8, treeVersion(versions, t), treeVersion(versions, trees.items[0]))) several_versions = true;
+    }
+    // A column for each tree, named by the last part of its target unless
+    // two trees would share that name.
+    var labels: std.ArrayList([]const u8) = .empty;
+    for (trees.items) |t| {
+        const target = treeTarget(t);
+        const short = std.fs.path.basename(target);
+        var clash = false;
+        for (trees.items) |u| {
+            if (u.ptr != t.ptr and std.mem.eql(u8, std.fs.path.basename(treeTarget(u)), short)) clash = true;
+        }
+        const base = if (clash) target else short;
+        labels.append(a, if (several_versions) str(a, "{s}:{s}", .{ treeVersion(versions, t), base }) else base) catch oom();
+    }
+
+    var rows: std.ArrayList(Listed) = .empty;
+    for (trees.items, 0..) |t, ti| {
+        var mods: std.ArrayList([]const u8) = .empty;
+        treeModules(c, t, &mods);
+        for (mods.items) |m| {
+            if (!matchesFilter(m, filters)) continue;
+            const row = for (rows.items) |*r| {
+                if (std.mem.eql(u8, r.module, m)) break r;
+            } else blk: {
+                rows.append(a, .{ .module = m }) catch oom();
+                break :blk &rows.items[rows.items.len - 1];
+            };
+            row.at.append(a, ti) catch oom();
+        }
+    }
+    std.mem.sort(Listed, rows.items, {}, listedLess);
+
+    var out: std.ArrayList(u8) = .empty;
+    const add = struct {
+        fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
+            o.appendSlice(al, text) catch oom();
+        }
+    }.f;
+    if (trees.items.len == 0 or rows.items.len == 0) {
+        add(a, &out, str(a, "Nothing{s} is installed in {s}.\n", .{ if (filters.len > 0) " that matches" else "", p.prefix }));
+        cli.put(1, out.items);
+        return 0;
+    }
+    // This node's target, when EESSI is loaded.
+    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
+    var here: ?usize = null;
+    if (here_target) |ht| for (trees.items, 0..) |t, ti| {
+        if (!std.mem.eql(u8, treeTarget(t), ht)) continue;
+        if (here_version) |hv| if (!std.mem.eql(u8, treeVersion(versions, t), hv)) continue;
+        here = ti;
+    };
+
+    var width: usize = "MODULE".len;
+    for (rows.items) |r| width = @max(width, r.module.len);
+    add(a, &out, str(a, "{s}: {d} module(s) for {d} CPU target(s)\n", .{ p.prefix, rows.items.len, trees.items.len }));
+    add(a, &out, "MODULE");
+    for (0..width - "MODULE".len + 2) |_| add(a, &out, " ");
+    for (labels.items, 0..) |l, li| add(a, &out, str(a, "{s}{s}  ", .{ l, if (here != null and here.? == li) "*" else "" }));
+    add(a, &out, "\n");
+    for (rows.items) |r| {
+        add(a, &out, r.module);
+        for (0..width - r.module.len + 2) |_| add(a, &out, " ");
+        for (labels.items, 0..) |l, li| {
+            const has = std.mem.indexOfScalar(usize, r.at.items, li) != null;
+            add(a, &out, if (has) "x" else "-");
+            const cell = l.len + @as(usize, if (here != null and here.? == li) 1 else 0);
+            for (0..cell + 1) |_| add(a, &out, " ");
+        }
+        // No trailing blanks on a row.
+        while (out.items.len > 0 and out.items[out.items.len - 1] == ' ') out.items.len -= 1;
+        add(a, &out, "\n");
+    }
+    if (here) |hi| {
+        var missing: std.ArrayList([]const u8) = .empty;
+        for (rows.items) |r| if (std.mem.indexOfScalar(usize, r.at.items, hi) == null) missing.append(a, r.module) catch oom();
+        if (missing.items.len == 0) {
+            add(a, &out, str(a, "Every module listed is built for this node's target, {s} (*).\n", .{here_target.?}));
+        } else {
+            add(a, &out, str(a, "Not built for this node's target, {s} (*): {s}.\n", .{ here_target.?, std.mem.join(a, ", ", missing.items) catch oom() }));
+            add(a, &out, "Build them in an allocation on this node type; each target needs its own build.\n");
+        }
+    } else if (here_target) |ht| {
+        add(a, &out, str(a, "Nothing is built for this node's target, {s}, yet; build in an allocation on this node type.\n", .{ht}));
+    } else {
+        add(a, &out, "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.\n");
+    }
+    cli.put(1, out.items);
+    return 0;
+}
+
+// ---- doctor ---------------------------------------------------------------
+
+fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: []const u8, args: anytype) void {
+    out.appendSlice(a, kind) catch oom();
+    out.appendSlice(a, " ") catch oom();
+    out.appendSlice(a, str(a, fmt, args)) catch oom();
+    out.appendSlice(a, "\n") catch oom();
+}
+
+/// Everything about this shell, this node and the configuration that would
+/// make a build or a module load go wrong, one line each: ok, info, warn or
+/// FAIL. Changes nothing; exits 1 when a line says FAIL.
+fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
+    const a = c.a;
+    var out: std.ArrayList(u8) = .empty;
+    var failed = false;
+    note(a, &out, "ok  ", "eb-local {s}", .{version});
+
+    // Configuration.
+    const sources = configSources(c, g);
+    for (sources) |src| note(a, &out, "ok  ", "{s} file {s}", .{ @tagName(src.layer), src.path });
+    if (s.node_local_root.value.len == 0) {
+        note(a, &out, "FAIL", "no site file sets storage.node_local_root, so builds cannot run; `eb-local site install` writes one beside the program", .{});
+        failed = true;
+    } else {
+        note(a, &out, "ok  ", "builds use the allocation's own {s} mount {s}/{s}", .{ s.node_local_fstype.value, s.node_local_root.value, s.node_local_mount.value });
+    }
+
+    // Where installs go.
+    const p = locate(c, s);
+    note(a, &out, "ok  ", "installs go to {s}: a {s} install, prefix from {s}", .{ p.prefix, if (p.project) "project" else "user", if (p.project) s.project.from else s.prefix.from });
+    var refused: std.ArrayList([]const u8) = .empty;
+    for (s.shared_scratch.value) |r| refused.append(a, r) catch oom();
+    if (s.node_local_root.value.len > 0) refused.append(a, s.node_local_root.value) catch oom();
+    for (refused.items) |r| if (r.len > 0 and storage.under(p.prefix, r)) {
+        note(a, &out, "FAIL", "{s} is under {s}, shared or node-local scratch; builds refuse it. Set prefix to durable storage you own", .{ p.prefix, r });
+        failed = true;
+    };
+    if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| {
+        var zb: [sys.path_max:0]u8 = undefined;
+        const writable = if (sys.z(&zb, p.prefix)) |zp|
+            linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0)) == .SUCCESS
+        else |_|
+            false;
+        if (!st.isDir()) {
+            note(a, &out, "FAIL", "{s} is not a directory", .{p.prefix});
+            failed = true;
+        } else if (!writable) {
+            note(a, &out, "FAIL", "you cannot write to {s}", .{p.prefix});
+            failed = true;
+        }
+        if (p.project and st.isDir()) {
+            if (st.mode & 0o002 != 0) {
+                note(a, &out, "FAIL", "project directory {s} is writable by others; anyone could add modules the group loads. chmod o-w it", .{p.prefix});
+                failed = true;
+            }
+            if (st.mode & 0o2000 == 0) note(a, &out, "warn", "project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p.prefix});
+        }
+    } else |_| {
+        if (p.project) {
+            note(a, &out, "FAIL", "project directory {s} does not exist; the project owner creates it with the project group and chmod 2770", .{p.prefix});
+            failed = true;
+        } else note(a, &out, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+    }
+
+    // What this shell carries.
+    var leftovers: usize = 0;
+    for (install_vars) |v| if (c.env.get(v)) |val| {
+        const own = ((std.mem.eql(u8, v, "EESSI_USER_INSTALL") and !p.project) or (std.mem.eql(u8, v, "EESSI_PROJECT_INSTALL") and p.project)) and
+            std.mem.eql(u8, storage.canonical(a, val, c.cwd) catch oom(), p.prefix);
+        if (own) {
+            note(a, &out, "ok  ", "{s} names your prefix, as eb-local env sets it", .{v});
+            continue;
+        }
+        leftovers += 1;
+        note(a, &out, "warn", "{s}={s} is set in this shell; eb-local builds clear it, but EESSI-extend or eb run by hand would use it", .{ v, val });
+    };
+    if (leftovers == 0) note(a, &out, "ok  ", "no other EESSI or EasyBuild install variable is set in this shell", .{});
+    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
+        note(a, &out, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+
+    // The allocation.
+    if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
+        if (s.node_local_root.value.len > 0) {
+            var r: storage.Refusal = .{};
+            if (storage.jobRoot(a, s.node_local_root.value, s.node_local_mount.value, s.node_local_fstype.value, job, userName(c), mountinfoText(c), callerUid(c), &r)) |jr| {
+                note(a, &out, "ok  ", "Slurm job {s}: build space {s}", .{ job, jr.path });
+            } else |e| switch (e) {
+                error.Refused => {
+                    note(a, &out, "FAIL", "Slurm job {s}: {s}", .{ job, r.message });
+                    failed = true;
+                },
+                error.OutOfMemory => oom(),
+            }
+        }
+    } else {
+        note(a, &out, "info", "not in a Slurm job; builds need one on the node type that will run the software{s}{s}", .{ if (s.allocation_hint.value.len > 0) ", for example: " else "", s.allocation_hint.value });
+    }
+
+    // Modules and the stack.
+    if (nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"))) |sub| {
+        note(a, &out, "ok  ", "EESSI {s} is loaded for {s}", .{ c.env.get("EESSI_VERSION") orelse "?", sub });
+    } else note(a, &out, "info", "EESSI is not loaded in this shell; eval \"$(eb-local env)\" loads it with your modules", .{});
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |_| {
+        const mp = c.env.get("MODULEPATH") orelse "";
+        var seen = false;
+        var it = std.mem.splitScalar(u8, mp, ':');
+        while (it.next()) |d| if (storage.under(d, p.prefix)) {
+            seen = true;
+        };
+        if (seen) note(a, &out, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
+    } else |_| {}
+    if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null)
+        note(a, &out, "info", "no module command in this shell; builds source Lmod's init themselves", .{});
+    if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
+        note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
+    } else note(a, &out, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});
+
+    out.appendSlice(a, if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n") catch oom();
+    cli.put(1, out.items);
+    return if (failed) 1 else 0;
+}
+
+// ---- submit ---------------------------------------------------------------
+
+const SubmitOpts = struct {
+    /// Comma-separated target names; empty means every configured target.
+    on: []const u8 = "",
+    /// Print the scripts and sbatch commands; create and submit nothing.
+    print: bool = false,
+};
+
+/// A job name part: letters, digits, '.', '-' and '_' kept, the rest '_'.
+fn jobNamePart(a: Allocator, s: []const u8) []const u8 {
+    const out = a.dupe(u8, s[0..@min(s.len, 64)]) catch oom();
+    for (out) |*ch| if (!(std.ascii.isAlphanumeric(ch.*) or ch.* == '.' or ch.* == '-' or ch.* == '_')) {
+        ch.* = '_';
+    };
+    return out;
+}
+
+/// One batch job per configured node type, each running this eb-local with
+/// the same recipe, options and configuration inside its own allocation, so
+/// a module is built for every CPU target the site has.
+fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o: SubmitOpts) u8 {
+    const a = c.a;
+    if (args.len == 0) die("submit needs an easyconfig: eb-local submit [--on NAME,...] [--print] RECIPE [eb options]", .{});
+    const all = s.targets.value;
+    if (all.len == 0) die("no build.targets in the site file, so there is nothing to submit to; build inside an allocation with eb-local RECIPE", .{});
+    var chosen: std.ArrayList(config.Target) = .empty;
+    if (o.on.len == 0) {
+        chosen.appendSlice(a, all) catch oom();
+    } else {
+        var names = std.mem.splitScalar(u8, o.on, ',');
+        while (names.next()) |n| {
+            const t = for (all) |cand| {
+                if (std.mem.eql(u8, cand.name, n)) break cand;
+            } else {
+                var known: std.ArrayList([]const u8) = .empty;
+                for (all) |k| known.append(a, k.name) catch oom();
+                die("--on {s}: no such target; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
+            };
+            chosen.append(a, t) catch oom();
+        }
+    }
+    const p = place(c, s);
+    const sbatch = (proc.which(a, "sbatch", c.env.get("PATH") orelse "") catch null) orelse
+        if (o.print) "sbatch" else die("sbatch is not on PATH", .{});
+    var self_buf: [sys.path_max]u8 = undefined;
+    const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
+
+    // The command each job runs: this program, the options that chose this
+    // configuration, and the recipe with its eb options as given.
+    var line: std.ArrayList([]const u8) = .empty;
+    line.appendSlice(a, &.{ "exec", q(a, self) }) catch oom();
+    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", q(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
+    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", q(a, pr) }) catch oom();
+    if (p.project) line.appendSlice(a, &.{ "--project", q(a, p.prefix) }) catch oom();
+    for (args) |x| line.append(a, q(a, x)) catch oom();
+    const command = std.mem.join(a, " ", line.items) catch oom();
+
+    const root = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+    const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
+    const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
+    if (!o.print) {
+        common.atomic.makedirs(jobs) catch die("cannot create {s}", .{jobs});
+        common.atomic.makedirs(logs) catch die("cannot create {s}", .{logs});
+    }
+    const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
+    const stamp = nowSecs();
+    var failed = false;
+    for (chosen.items) |t| {
+        const script = str(a,
+            \\#!/bin/bash
+            \\#SBATCH --job-name=eb-local-{s}-{s}
+            \\#SBATCH --output={s}/submit-{s}-%j.out
+            \\#SBATCH --chdir={s}
+            \\{s}
+            \\
+        , .{ t.name, recipe, logs, t.name, c.cwd, command });
+        const path = std.fs.path.join(a, &.{ jobs, str(a, "{d}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
+        var argv: std.ArrayList([]const u8) = .empty;
+        argv.append(a, sbatch) catch oom();
+        var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
+        while (words.next()) |w| argv.append(a, w) catch oom();
+        argv.append(a, path) catch oom();
+        if (o.print) {
+            say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
+            cli.put(1, script);
+            continue;
+        }
+        var why: common.atomic.Why = .{};
+        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch die("cannot write {s}", .{path});
+        say("eb-local: {s}:", .{t.name});
+        switch (runAttached(a, argv.items, c.envp)) {
+            .exit => |code| if (code != 0) {
+                warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
+                failed = true;
+            },
+            .signal => failed = true,
+        }
+    }
+    if (o.print) return 0;
+    say("", .{});
+    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
+    return if (failed) 1 else 0;
+}
+
 // ---- uninstall ------------------------------------------------------------
 
 const UninstallOpts = struct {
@@ -1988,7 +2404,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -2040,6 +2456,7 @@ pub fn main(init: std.process.Init) u8 {
     var rest: std.ArrayList([]const u8) = .empty;
     var clean: CleanOpts = .{};
     var uninstall: UninstallOpts = .{};
+    var submit: SubmitOpts = .{};
     var check = false;
     var as_env = false;
     var site: SiteOpts = .{};
@@ -2083,7 +2500,21 @@ pub fn main(init: std.process.Init) u8 {
                 } else die("rpath-wrappers takes only --for FAMILY; got '{s}'", .{x});
             },
             .check => rest.append(a, x) catch oom(),
-            .env, .profiles => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .env, .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .submit => {
+                if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
+                    submit.on = value(args, &i, "--on");
+                } else if (rest.items.len == 0 and std.mem.startsWith(u8, x, "--on=")) {
+                    submit.on = x["--on=".len..];
+                } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
+                    submit.print = true;
+                } else rest.append(a, x) catch oom();
+            },
+            .list => {
+                if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
+                if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
+                rest.append(a, x) catch oom();
+            },
             .config => {
                 if (std.mem.eql(u8, x, "--check")) {
                     check = true;
@@ -2171,6 +2602,9 @@ pub fn main(init: std.process.Init) u8 {
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
+        .list => cmdList(c, s, rest.items),
+        .doctor => cmdDoctor(c, s, g),
+        .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check => unreachable,
     };
 }
