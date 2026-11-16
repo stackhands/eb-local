@@ -2,6 +2,69 @@
 
 <!-- towncrier release notes start -->
 
+## 3.0.0 (2026-11-16)
+
+### Features
+
+- The default install prefix is `$HOME/eessi`, EESSI-extend's own default, so `eb-local`, `eb-local eb` and EESSI-extend loaded by hand share one tree. An existing `$HOME/.local/eessi`, the earlier default, stays in use while `$HOME/eessi` does not exist, with a warning; `prefix` chooses either for good.
+- `[eessi]` in the site file, your file or a profile sets `EESSI_*` variables for the EESSI module and its hooks; `env`, `dev` and builds export them before the stack loads, `eb-local config` shows them, and `config --env` prints them as themselves. The install and target variables eb-local sets itself, and the toolchain list `build.site_toolchains` sets, are refused.
+- `dev` picks the build environment for the compilers the modules bring in: GCC, CUDA, `llvm-compilers` (lfoss), `intel-compilers` or NVHPC. When Lmod has none for that family, RPATH wrappers for the compilers and linkers on `PATH` stand in, so a program never links without run paths. `dev.buildenv_for` or `EB_LOCAL_DEV_BUILDENV_FOR_<FAMILY>` names a site's own build environment per family, `config --env` leaves the default `dev.buildenv` out so the choice survives the round trip, and `eb-local rpath-wrappers` prints the wrapper lines on their own.
+- `eb-local --explain RECIPE [eb options]` prints the commands a build runs, as shell lines with its checks as comments, and creates and runs nothing; it works outside an allocation.
+- `eb-local check FILE...` reads a program or library and reports what stops it running on this node without `LD_LIBRARY_PATH`: another architecture, the host's loader or libraries under EESSI, `RUNPATH` instead of `RPATH`, run paths into another CPU target's tree, and libraries not found or found only through `LD_LIBRARY_PATH`.
+- `eb-local dev` sets `EB_LOCAL_DEV_PREFIX` to `<install-prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one, so hand builds install per target by default.
+- `eb-local eb` sources the EESSI init, loads `EESSI-extend` and runs `eb`, with no site file and no Slurm job. Exactly one of `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL` and `EESSI_CVMFS_INSTALL` may be set, and a present empty value counts as set. A non-empty user prefix is created; a project, site or cvmfs prefix is not. With none of the four set, nothing is exported: the module installs under `$HOME/eessi` (its help text says `$HOME/EESSI`). The process umask is 077, 002 or 022 for those modes, and EasyBuild keeps the umask, the sticky bit and the hooks the module sets. `EB_LOCAL_EESSI_EXTEND=1` selects the same launcher when every argument belongs to `eb`.
+- `eb-local site show` and `eb-local site install` take a site's own template file as well as a built-in template: a NAME with a slash, such as `./site.toml`, is read as a template, with the same placeholders and checks. The file is read only when it is a regular file, not a symbolic link, not writable by group or others.
+- `storage.node_local_mount` (`node_local_mount` in a 1.x `eb-local.conf`) names each allocation's mount below `storage.node_local_root`: one file name, with `%u` for the user and `%j`, which it must hold, for the job id. The default, `%u.%j`, is the layout eb-local required until now, so a site file without the key works as before; `eb-local config` shows the setting, and the `slurm` template takes it as a placeholder.
+
+### Fixes
+
+- A `shared_scratch` path is taken literally. A glob character in it is no longer expanded, so the named tree is what a build refuses and a neighbour that happens to match is not.
+- A build does not pass `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` to `eb`. A startup file cannot run in the build, a trace cannot print it, and host libraries cannot be selected ahead of the toolchain.
+- A build stopped by a signal is cleaned up, including its logs, and eb-local then dies from that signal. A shell or Slurm sees the signal instead of exit 128+n and does not continue the job. An ignored signal, as with nohup, stays ignored.
+- A build workspace is mode 0700 even when the process umask would clear those bits. mkdir was applying the umask, and a umask of 0777 left a directory this process could not enter.
+- A build, `env` and `dev` run `eessi-arch-guard` when it is on `PATH`, after loading EESSI and before EESSI-extend, in the Zig build and the Bash script, so software installs for the CPU target Slurm tasks get. On a Sapphire Rapids CPU without `waitpkg`, EESSI detects `x86_64/intel/sapphirerapids` and the guard selects `x86_64/intel/icelake`; a build from `salloc` installed into the sapphirerapids tree, and an `srun` task on the same node could not load the module. A build stops when the guard cannot select a target.
+- A file named with `--config` or `EB_LOCAL_CONFIG` that root or the program's owner owns replaces only the site file; your file was not read either, so its profiles, default profile and secrets were lost. `eb-local help` and the README now say what a named file replaces.
+- A later `dev` removes the RPATH wrapper directory a previous `dev` put first on `PATH`, so a build environment loaded afterwards is the one that compiles.
+- A project install (`--project`, `project`) keeps the umask EESSI-extend sets for one, 002. eb-local passed `eb --umask=022` and made `.eb-local/` with the caller's umask, so a second member's build failed with EACCES on EasyBuild's lock, the logs or the sources. It now makes what it creates in a project directory with umask 002 and passes no `--umask`; a user install keeps `--umask=022`.
+- A site file must be owned by root or by the program's owner, as the code already required; the README and the code's comment said one you own was used too. A refused configuration file now says who may own it.
+- A symbolic link whose target does not exist yet is resolved the way `readlink -m` does, so a dangling link from the installation prefix onto shared scratch is refused before a workspace is made.
+- Removing a build workspace, and the empty directories clean leaves behind, stays on that file system. A mount point inside the tree is left in place, as `rm --one-file-system` does.
+- Secret redaction removes the longer of two overlapping values whole, matches percent-encoding in either hex case, and uses a marker that does not contain the value. An installation log nested too deep to search is reported for the easybuild tree as well as the log tree.
+- Secret values are removed from the copy of the log EasyBuild keeps in an installation, which it compresses (`easybuild/*.log.bz2` under EESSI-extend): a log ending in `.bz2`, `.gz`, `.xz` or `.zst` is decompressed with `bzip2`, `gzip`, `xz` or `zstd` from `PATH`, cleaned and compressed again. The read-only `easybuild/` EasyBuild leaves no longer stops the check, and a log that cannot be checked or rewritten is named.
+- The lfoss warning no longer fires for a site build environment whose name has no LLVM toolchain in it; it covers a chosen GCC build environment only, and knows lmpflf.
+- The lines that say how to eval `env` or `dev` repeat the config file, profile, project and buildenv that produced them, shell-quoted, so the hint is the environment that was printed.
+- The shell conditions shellcheck SC2015 flagged are `if` statements, and the build cleanup function is called on the way out as well as from the EXIT trap, so SC2317 is not silenced with a disable comment.
+- `clean` ages each file and directory at the top of the logs as a whole, by the newest time in it, in both the binary and the Bash script. EasyBuild copies a build's easyconfig, easyblocks and hooks into `reprod_<time>_<pid>/` keeping their own older times, so `clean` removed those copies from a build made the same day and left the rest of the directory. A directory goes to the trash with `rtrash put -r`, and the counts say items rather than files.
+- `config --env` exports an empty `[eessi]` value, which is how a profile clears a setting from the site file.
+- `config --env` prints empty settings too, and `EB_LOCAL_PROFILE` empty, so the lines select no profile. A job that sourced them where the files are still in place got the default profile back beneath them, with its modules and secrets, and a value the chosen profile cleared, such as the allocation hint, came back from the file that set it. An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` now empties its setting instead of being ignored.
+- `config` prints every setting when the project directory is missing, not a directory or writable by others, and then warns; it stopped before printing anything, so the profile that named the directory could not be read. `config --check` reads the secrets too and exits 1. Every other command still stops.
+- `dev` loads each module once, where it is first named in `dev.modules` or on the command line, and a chosen build environment (`dev.buildenv` or `--buildenv`) only last: a module named in both, or twice, was printed twice. Lmod loads a repeated module once, so this changes the printed lines, not what is loaded.
+- `dev` recognises an lfoss or intel module by the `EBROOT` name EasyBuild writes, where a hyphen in the software name becomes `min`.
+- `eb-local config --env` prints `EB_LOCAL_PREFIX` and `EB_LOCAL_PROJECT` as the absolute path `env` uses, with `~/` expanded and symbolic links resolved, so sourcing the lines from another directory follows the same tree.
+- `eb-local restore NAME/VERSION` brings back from the trash what `uninstall` moved there, for every CPU target, and takes write permission away again, as EasyBuild leaves an installation. A link EasyBuild made to the module file from `modules/<class>/` comes back after the file. `uninstall` made every file writable before `rtrash put`, so `rtrash restore` brought an installation back writable; it now makes only the directories writable, which rtrash needs to move a directory and to empty the trash, and the files keep their read-only modes.
+- `env` and `dev` now export `build.site_toolchains` after the stack loads, as a build does, so `eb` run by hand accepts those toolchains too.
+- `env`, `dev` and a build load the stack and EESSI-extend in two `module load` calls, in the Zig build and the Bash script. Lmod 9.4.5 finds every module of a load before it loads any, and EESSI-extend is on `MODULEPATH` only once EESSI is loaded, so the single call exited 1 and loaded nothing unless EESSI was already loaded.
+- `uninstall` removes the links EasyBuild makes to a module file from `modules/<class>/NAME/VERSION.lua`, with the module file, and the `NAME` directories they leave empty. It left them dangling; naming the module again now removes a link an earlier `uninstall` left.
+- `zig build -Dtest-ops=true test` no longer shows a passing command-line suite as a failed command: the suite step inherits stdio, so unittest's report reaches the terminal as it is, and the step runs every time instead of being skipped while the binary is unchanged, which left an edited test unrun.
+- `zig build -Dtest-ops=true test` started in a subdirectory such as `src/` runs the command-line suite: the suite step runs in the build root, where `-s tests` finds it, instead of where `zig build` was started, where unittest stopped with `Start directory is not importable: 'tests'`.
+
+### Documentation
+
+- The README and the help give the order in which the site file is found, `default_profile`, `EB_LOCAL_KEEP_WORK=1`, why the modules go on the `dev` line, and the `eb-local.conf` the 1.x script reads; the stackhands table lists eb-pipeline, and `.gitignore` the Zig build and package directories.
+- The README says what a cluster test showed: loading the build environment before or after the libraries gives the same run paths; it has to be loaded, and `dev` loads it last only so that no other compiler's `gcc` or `ld` comes ahead of its wrappers.
+- The README's per-target build example names a partition placeholder rather than a site's partition, and says the build environment compiles with `-march=native`.
+- The README, the help and `eb-local.conf.example` describe no particular site: their examples use a neutral one (node-local mounts under `/local`, shared scratch `/scratch` and `/work`, partition `cpu`, a project under `/path/to/project`), and the help no longer names the tool eb-local replaced at one site.
+
+### Removals
+
+- The `snellius` site template is no longer built into eb-local, whose built-in templates are for no particular site; it is now the worked example `examples/sites/snellius.toml`, with the same settings. `eb-local site install snellius [--set partition=genoa]` becomes `eb-local site install examples/sites/snellius.toml [--set partition=genoa]`, run from a checkout of eb-local. A site file already installed needs no change.
+
+### Miscellaneous
+
+- News fragments in `changelog.d/`, assembled into `CHANGELOG.md` by towncrier at release, as in the other stackhands repositories.
+- The acceptance scripts in `tests/site/` name no partition or node feature, which go on the `sbatch` line, and find the allocation's mount from `node_local_root` and `node_local_mount` in the site file, so they run at any site.
+
+
 ## 2.4.0
 
 * `eb-local uninstall` keeps a module that another installed module

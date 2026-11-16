@@ -1,1 +1,0 @@
-`[eessi]` in the site file, your file or a profile sets `EESSI_*` variables for the EESSI module and its hooks; `env`, `dev` and builds export them before the stack loads, `eb-local config` shows them, and `config --env` prints them as themselves. The install and target variables eb-local sets itself, and the toolchain list `build.site_toolchains` sets, are refused.

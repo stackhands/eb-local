@@ -1,1 +1,0 @@
-`eb-local check FILE...` reads a program or library and reports what stops it running on this node without `LD_LIBRARY_PATH`: another architecture, the host's loader or libraries under EESSI, `RUNPATH` instead of `RPATH`, run paths into another CPU target's tree, and libraries not found or found only through `LD_LIBRARY_PATH`.

@@ -1,1 +1,0 @@
-`eb-local config --env` prints `EB_LOCAL_PREFIX` and `EB_LOCAL_PROJECT` as the absolute path `env` uses, with `~/` expanded and symbolic links resolved, so sourcing the lines from another directory follows the same tree.

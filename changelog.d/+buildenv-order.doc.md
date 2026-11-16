@@ -1,1 +1,0 @@
-The README says what a cluster test showed: loading the build environment before or after the libraries gives the same run paths; it has to be loaded, and `dev` loads it last only so that no other compiler's `gcc` or `ld` comes ahead of its wrappers.

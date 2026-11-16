@@ -1,1 +1,0 @@
-`dev` loads each module once, where it is first named in `dev.modules` or on the command line, and a chosen build environment (`dev.buildenv` or `--buildenv`) only last: a module named in both, or twice, was printed twice. Lmod loads a repeated module once, so this changes the printed lines, not what is loaded.

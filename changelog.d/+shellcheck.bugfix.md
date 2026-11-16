@@ -1,1 +1,0 @@
-The shell conditions shellcheck SC2015 flagged are `if` statements, and the build cleanup function is called on the way out as well as from the EXIT trap, so SC2317 is not silenced with a disable comment.

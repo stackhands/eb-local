@@ -1,1 +1,0 @@
-`eb-local site show` and `eb-local site install` take a site's own template file as well as a built-in template: a NAME with a slash, such as `./site.toml`, is read as a template, with the same placeholders and checks. The file is read only when it is a regular file, not a symbolic link, not writable by group or others.

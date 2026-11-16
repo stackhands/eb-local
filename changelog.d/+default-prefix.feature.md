@@ -1,1 +1,0 @@
-The default install prefix is `$HOME/eessi`, EESSI-extend's own default, so `eb-local`, `eb-local eb` and EESSI-extend loaded by hand share one tree. An existing `$HOME/.local/eessi`, the earlier default, stays in use while `$HOME/eessi` does not exist, with a warning; `prefix` chooses either for good.
