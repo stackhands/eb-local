@@ -66,7 +66,7 @@
 
 ### Removals
 
-- The `snellius` site template is no longer built into eb-local, whose built-in templates are for no particular site; it is now the worked example `examples/sites/snellius.toml`, with the same settings. `eb-local site install snellius [--set partition=genoa]` becomes `eb-local site install examples/sites/snellius.toml [--set partition=genoa]`, run from a checkout of eb-local. A site file already installed needs no change.
+- The site template written for one particular site is no longer built into eb-local, whose built-in templates are for no particular site; it is now a worked example under `examples/sites/`, with the same settings. `eb-local site install NAME` for it becomes `eb-local site install examples/sites/FILE`, run from a checkout of eb-local. A site file already installed needs no change.
 
 ### Miscellaneous
 
@@ -90,11 +90,11 @@
 ## 2.3.0
 
 * `eb-local site list | show NAME | install NAME`: site file templates
-  built into the program, `snellius` and `slurm`, with placeholders filled
-  by `--set KEY=VALUE`. `install` writes `config.toml` beside the program
-  (or `--to FILE`), mode 644, only after the rendered file loads as a site
-  file; it replaces a file only with `--force` and never writes through a
-  symbolic link.
+  built into the program, `slurm` and one for a particular site, with
+  placeholders filled by `--set KEY=VALUE`. `install` writes `config.toml`
+  beside the program (or `--to FILE`), mode 644, only after the rendered
+  file loads as a site file; it replaces a file only with `--force` and
+  never writes through a symbolic link.
 * `eb-local config --env` prints the settings in force as `export
   EB_LOCAL_...` lines; `EB_LOCAL_SECRET_<NAME>=SOURCE` sets a secret's
   source and is checked as the `[secrets]` table is.
@@ -124,8 +124,8 @@
   refused the installation directories, so 2.1.1 trashed the module files
   and left the installations. Installations now go first, in their own
   call, so a refusal leaves every module file in place. Found by running
-  against rtrash 0.1.4 on Snellius; the test double now refuses a
-  directory without `-r` as rtrash does.
+  against rtrash 0.1.4 on a production cluster; the test double now
+  refuses a directory without `-r` as rtrash does.
 
 ## 2.1.1
 
@@ -170,9 +170,9 @@ suite runs against both.
 
 * `eb-local dev [MODULE...]`: the lines that load EESSI, the named modules
   and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson
-  build programs that run without `LD_LIBRARY_PATH`. Checked on Snellius
-  for C with FFTW and OpenMP, MPI, CMake against GSL, a Python venv with a
-  compiled package, and an R package.
+  build programs that run without `LD_LIBRARY_PATH`. Checked on a
+  production cluster for C with FFTW and OpenMP, MPI, CMake against GSL, a
+  Python venv with a compiled package, and an R package.
 * `eb-local env`: the lines that make your installed modules visible;
   `--env` keeps working. Before the first install the stack is loaded
   alone, because EESSI-extend refuses a missing install directory and Lmod

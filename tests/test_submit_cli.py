@@ -31,8 +31,8 @@ class Submit(StorageFixture):
         self.site = self.root / "site.toml"
         self.write_site(
             "[build.node_types]\n"
-            'rome = "-p rome -n 16 -t 02:00:00 --constraint=scratch-node"\n'
-            'genoa = "-p genoa -n 16 -t 02:00:00"\n')
+            'cpu = "-p cpu -n 16 -t 02:00:00 --constraint=local-disk"\n'
+            'gpu = "-p gpu -n 16 -t 02:00:00"\n')
         self.env["EB_LOCAL_CONFIG"] = str(self.site)
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -61,36 +61,36 @@ class Submit(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         calls = self.calls()
         self.assertEqual(len(calls), 2)
-        self.assertTrue(calls[0].startswith("-p rome -n 16 -t 02:00:00 --constraint=scratch-node "), calls[0])
-        self.assertTrue(calls[1].startswith("-p genoa -n 16 -t 02:00:00 "), calls[1])
+        self.assertTrue(calls[0].startswith("-p cpu -n 16 -t 02:00:00 --constraint=local-disk "), calls[0])
+        self.assertTrue(calls[1].startswith("-p gpu -n 16 -t 02:00:00 "), calls[1])
         self.assertEqual(run.stdout.count("Submitted batch job 4242"), 2)
         scripts = sorted((self.prefix / ".eb-local" / "jobs").iterdir())
         self.assertEqual([s.name.split("-", 1)[1] for s in scripts],
-                         ["genoa-my_recipe.eb.sh", "rome-my_recipe.eb.sh"])
-        text = scripts[1].read_text()
-        self.assertIn("#SBATCH --job-name=eb-local-rome-my_recipe.eb", text)
+                         ["cpu-my_recipe.eb.sh", "gpu-my_recipe.eb.sh"])
+        text = scripts[0].read_text()
+        self.assertIn("#SBATCH --job-name=eb-local-cpu-my_recipe.eb", text)
         self.assertIn(f"#SBATCH --chdir={os.path.realpath(self.root)}", text)
         last = text.rstrip().splitlines()[-1]
         self.assertEqual(shlex.split(last)[0], "exec")
         self.assertEqual(shlex.split(last)[-2:], ["my recipe.eb", "--robot"])
-        self.assertEqual(os.stat(scripts[1]).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(scripts[0]).st_mode & 0o777, 0o700)
 
     def test_on_chooses_node_types_and_names_the_known_ones(self):
-        run = self.run_tool(["submit", "--on", "genoa", "recipe.eb"], SLURM_JOB_ID="")
+        run = self.run_tool(["submit", "--on", "gpu", "recipe.eb"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(self.calls()), 1)
-        self.assertTrue(self.calls()[0].startswith("-p genoa "))
+        self.assertTrue(self.calls()[0].startswith("-p gpu "))
         run = self.run_tool(["submit", "--on", "milan", "recipe.eb"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 2)
-        self.assertIn("rome, genoa", run.stderr)
+        self.assertIn("cpu, gpu", run.stderr)
 
     def test_print_shows_the_jobs_and_submits_nothing(self):
         run = self.run_tool(["submit", "--print", "recipe.eb", "--dry-run"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.prefix.exists())
-        self.assertIn("# rome: ", run.stdout)
-        self.assertIn("#SBATCH --job-name=eb-local-genoa-recipe.eb", run.stdout)
+        self.assertIn("# cpu: ", run.stdout)
+        self.assertIn("#SBATCH --job-name=eb-local-gpu-recipe.eb", run.stdout)
         # --dry-run after the recipe is eb's, not submit's.
         self.assertIn("recipe.eb --dry-run", run.stdout)
 
@@ -133,8 +133,8 @@ class Submit(StorageFixture):
         explained = self.run_tool(["--explain", "my recipe.eb", "--robot"], SLURM_JOB_ID="")
         self.assertEqual(explained.returncode, 0, explained.stderr)
         lines = self.batch_lines(explained.stdout, "#   ")
-        self.assertEqual([l[:3] for l in lines], [["sbatch", "-p", "rome"], ["sbatch", "-p", "genoa"]])
-        self.assertIn("--job-name=eb-local-rome-my_recipe.eb", lines[0])
+        self.assertEqual([l[:3] for l in lines], [["sbatch", "-p", "cpu"], ["sbatch", "-p", "gpu"]])
+        self.assertIn("--job-name=eb-local-cpu-my_recipe.eb", lines[0])
         self.assertIn(f"--chdir={self.root}", lines[0])
         self.assertIn("--output=%x-%j.out", lines[0])
         refused = self.run_tool(["my recipe.eb", "--robot"], SLURM_JOB_ID="")
@@ -143,7 +143,7 @@ class Submit(StorageFixture):
         # Each job runs what submit's job for that node type runs.
         run = self.run_tool(["submit", "my recipe.eb", "--robot"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        script = next((self.prefix / ".eb-local" / "jobs").glob("*-rome-*"))
+        script = next((self.prefix / ".eb-local" / "jobs").glob("*-cpu-*"))
         wrap = next(w for w in lines[0] if w.startswith("--wrap="))[len("--wrap="):]
         self.assertEqual(wrap, script.read_text().rstrip().splitlines()[-1])
 
@@ -171,17 +171,17 @@ class Submit(StorageFixture):
         self.assertEqual(self.calls(), [])
 
     def test_node_types_are_checked_and_belong_to_the_site_file(self):
-        for bad in ('rome = "-p rome; touch injected"\n', 'rome = "-p $(id)"\n', 'rome = "rome"\n'):
+        for bad in ('cpu = "-p cpu; touch injected"\n', 'cpu = "-p $(id)"\n', 'cpu = "cpu"\n'):
             with self.subTest(bad=bad):
                 self.write_site("[build.node_types]\n" + bad)
                 run = self.run_tool(["config"], SLURM_JOB_ID="")
                 self.assertEqual(run.returncode, 2, run.stdout)
-                self.assertIn("build.node_types.rome", run.stderr)
+                self.assertIn("build.node_types.cpu", run.stderr)
         self.assertFalse((self.root / "injected").exists())
         self.write_site("")
         user = self.root / "xdg" / "eb-local" / "config.toml"
         user.parent.mkdir(parents=True)
-        user.write_text('[build.node_types]\nrome = "-p rome"\n')
+        user.write_text('[build.node_types]\ncpu = "-p cpu"\n')
         run = self.run_tool(["config"], SLURM_JOB_ID="", XDG_CONFIG_HOME=str(self.root / "xdg"))
         self.assertEqual(run.returncode, 2)
         self.assertIn("build.node_types is a site setting", run.stderr)
@@ -190,8 +190,8 @@ class Submit(StorageFixture):
         run = self.run_tool(["config"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         rows = {l.split()[0]: l for l in run.stdout.splitlines() if l.startswith("build.node_types")}
-        self.assertIn("-p rome -n 16 -t 02:00:00 --constraint=scratch-node", rows["build.node_types.rome"])
-        self.assertIn("-p genoa -n 16 -t 02:00:00", rows["build.node_types.genoa"])
+        self.assertIn("-p cpu -n 16 -t 02:00:00 --constraint=local-disk", rows["build.node_types.cpu"])
+        self.assertIn("-p gpu -n 16 -t 02:00:00", rows["build.node_types.gpu"])
         self.write_site("")
         run = self.run_tool(["config"], SLURM_JOB_ID="")
         self.assertRegex(run.stdout, r"(?m)^build\.node_types\s+\(none\)")
