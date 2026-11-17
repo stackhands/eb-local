@@ -403,18 +403,8 @@ EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
 
 ### Site files from a template
 
-eb-local carries one site file template, `slurm`, for any Slurm cluster whose jobs get a node-local disk.
-A site can keep its own template in a file, named with a slash, in a repository of its own; `examples/sites/example.toml` is a worked example of such a file, for a site that does not exist.
-
-```sh
-eb-local site list                                  # the built-in templates and their placeholders
-eb-local site show slurm --set node_local_root=/local --set shared_scratch=/scratch   # rendered and checked
-eb-local site install ./site.toml --set partition=gpu   # a template file of the site's own
-```
-
-`install` writes `config.toml` beside the program (or `--to FILE`), mode 644, only after the rendered file loads as a site file; it never replaces an existing file without `--force`, and never through a symbolic link.
-A `--set` value cannot hold a quote, a backslash or a control character.
-A template file is read only when it is a regular file, not a symbolic link, not writable by group or others.
+eb-local carries one site file template, `slurm`, for any Slurm cluster whose jobs get a node-local disk; a site can keep its own in a repository of its own.
+[Write the site file for a cluster](docs/howto/write-a-site-file.md) renders, installs and checks one.
 
 ### The configuration as variables
 

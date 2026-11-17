@@ -12,6 +12,7 @@ import subprocess
 import unittest
 
 import binary
+import howto
 from test_storage import StorageFixture
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "sites"
@@ -88,6 +89,21 @@ class SitesCli(StorageFixture):
         run = self.run_tool(["site", "show", "slurm", "--set", "node_local_mount=%u"] + PATHS)
         self.assertEqual(run.returncode, 2, run.stdout)
         self.assertIn("storage.node_local_mount must be one file name", run.stderr)
+
+    def test_the_how_to_shows_what_list_and_show_print(self):
+        commands = [(c, out) for c, out in howto.shown("write-a-site-file") if c.startswith("eb-local site ")]
+        self.assertEqual([c.split()[2] for c, _ in commands], ["list", "show", "install"])
+        for command, out in commands[:2]:
+            with self.subTest(command=command):
+                run = self.run_tool(shlex.split(command)[1:])
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(run.stdout, out)
+        # The page installs beside the program, as /usr/local/bin/eb-local.
+        command, out = commands[2]
+        target = self.root / "config.toml"
+        run = self.run_tool(shlex.split(command)[1:] + ["--to", str(target)])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout, out.replace("/usr/local/bin/config.toml", str(target)))
 
     def test_install_writes_a_site_file_the_program_then_reads(self):
         target = self.root / "etc" / "config.toml"

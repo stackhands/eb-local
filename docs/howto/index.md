@@ -9,5 +9,6 @@ The title names the task.
 :maxdepth: 1
 
 install
+write-a-site-file
 scope-secrets
 ```

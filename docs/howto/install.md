@@ -74,7 +74,7 @@ eb-local 3.1.0 (x86_64-linux-musl, safe, zig 0.17.1, 8755a6a)
 
 The last part of the version line is the commit: `8755a6a` is release 3.1.0, and a build from source shows the commit it was built from.
 `eb-local env` and `eb-local dev` work from here.
-A build with EasyBuild also needs a site file beside the program, which `eb-local site install` writes.
+A build with EasyBuild also needs a site file, which [Write the site file for a cluster](write-a-site-file.md) installs.
 
 ## If it fails
 
@@ -87,5 +87,6 @@ A build with EasyBuild also needs a site file beside the program, which `eb-loca
 
 ## Related
 
+-   [Write the site file for a cluster](write-a-site-file.md)
 -   [The eb-local command](../reference/cli.md)
 -   [The configuration files](../reference/configuration.md)
