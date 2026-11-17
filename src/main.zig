@@ -50,7 +50,9 @@ const usage_text =
     \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
-    \\  eb-local env                         lines that make your installed modules visible
+    \\  eb-local env [--strict]                lines that make your installed modules visible;
+    \\                                       --strict exits when the EESSI init file is missing
+    \\                                       (also when EB_LOCAL_ENV_STRICT=1)
     \\  eb-local dev [--buildenv MODULE] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
@@ -225,7 +227,19 @@ fn moduleLoaded(c: Ctx, module: []const u8) bool {
     return false;
 }
 
-fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
+/// Before `env` or `dev` lines run, optionally refuse when CVMFS has not mounted EESSI.
+const env_strict_prelude =
+    \\repo=${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}
+    \\ver=${EESSI_VERSION:-2026.06}
+    \\init=${repo}/versions/${ver}/init/lmod/bash
+    \\if [[ ! -e $init ]]; then
+    \\  echo "eb-local: missing ${init}; mount EESSI with CVMFS, use the EESSI container, or set EESSI_CVMFS_REPO and EESSI_VERSION." >&2
+    \\  exit 2
+    \\fi
+    \\
+;
+
+fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool) []const u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
@@ -233,6 +247,7 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
+    if (strict) add(a, &out, env_strict_prelude);
     add(a, &out, lmod_init);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
     add(a, &out,
@@ -408,6 +423,8 @@ const Global = struct {
     buildenv: ?[]const u8 = null,
     /// Print what a build would run, as shell commands, and run nothing.
     explain: bool = false,
+    /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
+    env_strict: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -522,10 +539,16 @@ fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u
 
 // ---- env, dev, config, profiles -------------------------------------------
 
+fn envStrict(c: Ctx, g: Global) bool {
+    if (g.env_strict) return true;
+    const v = c.env.get("EB_LOCAL_ENV_STRICT") orelse return false;
+    return v.len > 0 and !std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "false");
+}
+
 fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const p = place(c, s);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    cli.put(1, environmentLines(c, s, p));
+    cli.put(1, environmentLines(c, s, p, envStrict(c, g)));
     return 0;
 }
 
@@ -545,7 +568,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const installed = place(c, s);
     evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed)) catch oom();
+    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g))) catch oom();
     // The modules the program uses first, the build environment last, so
     // its wrappers come first on PATH. When the program links, they record
     // a run path for each directory on LIBRARY_PATH, which the modules set
@@ -3042,7 +3065,12 @@ pub fn main(init: std.process.Init) u8 {
                 } else die("rpath-wrappers takes only --for FAMILY or --unwrapped; got '{s}'", .{x});
             },
             .check => rest.append(a, x) catch oom(),
-            .env, .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .env => {
+                if (std.mem.eql(u8, x, "--strict")) {
+                    g.env_strict = true;
+                } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
+            },
+            .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
                     cache.modulepath = value(args, &i, "--modulepath");
