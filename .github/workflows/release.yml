@@ -40,6 +40,8 @@ jobs:
           fi
           ! grep -aq EB_LOCAL_TEST_MOUNTINFO out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_PRELUDE out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_CVMFS_ERRNO out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_CVMFS_CONFIG out/bin/eb-local
           got=$(out/bin/eb-local --version)
           case "${got}" in "${want}"*) ;; *) echo "version '${got}' does not match tag ${GITHUB_REF_NAME}"; exit 1 ;; esac
           mkdir dist

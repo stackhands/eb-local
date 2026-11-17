@@ -124,6 +124,9 @@ pub const Settings = struct {
     /// Absolute prefixes, besides EESSI and the install prefix, that doctor
     /// and a clearing build treat as approved. Site file only.
     approved_prefixes: Setting([]const []const u8) = .{ .value = &.{} },
+    /// How many tasks `doctor --cvmfs` uses for a metadata read. 0 runs none.
+    /// `--cvmfs-parallel` overrides it. Off, and the flag, stay off unless set.
+    cvmfs_parallel: Setting(u8) = .{ .value = 0 },
     eessi: std.ArrayList(EessiVar) = .empty,
 };
 
@@ -511,6 +514,13 @@ const Loader = struct {
                         for (v) |p| if (!validAbsolute(p))
                             return l.fail("{s}:{d}: doctor.approved_prefixes takes absolute paths without a trailing slash", .{ src.path, f.line });
                         l.s.approved_prefixes = .{ .value = v, .from = try l.where(src, f.line, null) };
+                    } else if (std.mem.eql(u8, f.key, "cvmfs_parallel")) {
+                        const v = switch (f.value) {
+                            .int => |n| n,
+                            else => return l.fail("{s}:{d}: doctor.cvmfs_parallel must be an integer from 0 to 8", .{ src.path, f.line }),
+                        };
+                        if (v < 0 or v > 8) return l.fail("{s}:{d}: doctor.cvmfs_parallel must be an integer from 0 to 8", .{ src.path, f.line });
+                        l.s.cvmfs_parallel = .{ .value = @intCast(v), .from = try l.where(src, f.line, profile) };
                     } else return l.fail("{s}:{d}: unknown key doctor.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
@@ -802,6 +812,11 @@ pub fn load(
         const off = std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false");
         if (!on and !off) return l.fail("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES is true or false", .{});
         s.clear_foreign_prefixes = .{ .value = on, .from = "environment EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES" };
+    };
+    if (env.get("EB_LOCAL_DOCTOR_CVMFS_PARALLEL")) |v| if (v.len > 0) {
+        const n = std.fmt.parseInt(u8, v, 10) catch return l.fail("EB_LOCAL_DOCTOR_CVMFS_PARALLEL is an integer from 0 to 8", .{});
+        if (n > 8) return l.fail("EB_LOCAL_DOCTOR_CVMFS_PARALLEL is an integer from 0 to 8", .{});
+        s.cvmfs_parallel = .{ .value = n, .from = "environment EB_LOCAL_DOCTOR_CVMFS_PARALLEL" };
     };
     if (s.build_secrets.value) |names| for (names) |name| {
         for (s.secrets.items) |sec| {
@@ -1283,6 +1298,31 @@ test "clear_foreign_prefixes is off unless set, and approved prefixes are site-o
     try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/\"]\n", .layer = .site }}, "trailing slash");
     try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "maybe");
     try t.refuse(&none, "true or false");
+}
+
+test "doctor.cvmfs_parallel is 0 unless set, and stays between 0 and 8" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const none = [_]Source{};
+    const bare = try t.load(&none, .{});
+    try std.testing.expectEqual(@as(u8, 0), bare.cvmfs_parallel.value);
+
+    const user =
+        \\[profile.mine.doctor]
+        \\cvmfs_parallel = 2
+    ;
+    var s = try t.load(&.{.{ .path = "user.toml", .text = user, .layer = .user }}, .{ .profile = "mine" });
+    try std.testing.expectEqual(@as(u8, 2), s.cvmfs_parallel.value);
+    try std.testing.expectEqualStrings("user profile mine, user.toml:2", s.cvmfs_parallel.from);
+
+    try t.env.put("EB_LOCAL_DOCTOR_CVMFS_PARALLEL", "1");
+    s = try t.load(&.{.{ .path = "user.toml", .text = user, .layer = .user }}, .{ .profile = "mine" });
+    try std.testing.expectEqual(@as(u8, 1), s.cvmfs_parallel.value);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_DOCTOR_CVMFS_PARALLEL", s.cvmfs_parallel.from);
+
+    try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\ncvmfs_parallel = 9\n", .layer = .user }}, "0 to 8");
+    try t.env.put("EB_LOCAL_DOCTOR_CVMFS_PARALLEL", "many");
+    try t.refuse(&none, "0 to 8");
 }
 
 test "module names" {

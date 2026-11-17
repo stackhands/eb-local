@@ -31,6 +31,8 @@ pub const lmodcache = @import("lmodcache.zig");
 pub const modulerc = @import("modulerc.zig");
 /// Foreign prefixes and container binds `doctor` reports.
 pub const foreign = @import("foreign.zig");
+/// CernVM-FS checks for `doctor --cvmfs`. A build does not call them.
+pub const cvmfs = @import("cvmfs.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -82,8 +84,12 @@ const usage_text =
     \\                                       prints an sbatch line for each node type
     \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
     \\                                       what this node's target lacks
-    \\  eb-local doctor                      what in this shell, node or configuration would
-    \\                                       stop a build or a module load; changes nothing
+    \\  eb-local doctor [--cvmfs] [--cvmfs-parallel N]
+    \\                                       what in this shell, node or configuration would
+    \\                                       stop a build or a module load; changes nothing.
+    \\                                       --cvmfs checks the CernVM-FS client.
+    \\                                       --cvmfs-parallel N (1 to 8) reads repository
+    \\                                       metadata from N tasks inside an allocation
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
     \\                      --timestamp FILE [--spider CMD]
     \\                                       write Lmod's spiderT.lua for those module
@@ -1146,6 +1152,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     row("build.clear_foreign_prefixes", if (s.clear_foreign_prefixes.value) "true" else "false", s.clear_foreign_prefixes.from);
     const approved = std.mem.join(a, " ", s.approved_prefixes.value) catch oom();
     row("doctor.approved_prefixes", if (approved.len == 0) "(none)" else approved, s.approved_prefixes.from);
+    row("doctor.cvmfs_parallel", str(a, "{d}", .{s.cvmfs_parallel.value}), s.cvmfs_parallel.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -1227,6 +1234,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
     if (s.build_secrets.value) |names| line(a, &out, "EB_LOCAL_BUILD_SECRETS", std.mem.join(a, " ", names) catch oom());
     line(a, &out, "EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", if (s.clear_foreign_prefixes.value) "true" else "false");
+    line(a, &out, "EB_LOCAL_DOCTOR_CVMFS_PARALLEL", str(a, "{d}", .{s.cvmfs_parallel.value}));
     // [eessi] settings are environment for EESSI already; they travel as
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
@@ -2474,12 +2482,96 @@ fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: [
     out.appendSlice(a, "\n") catch oom();
 }
 
+const DoctorOpts = struct {
+    /// `--cvmfs`: check the client. Off unless the flag asks.
+    cvmfs: bool = false,
+    /// `--cvmfs-parallel`. Null uses `doctor.cvmfs_parallel`.
+    parallel: ?u8 = null,
+};
+
+fn cvmfsConfigRoot(c: Ctx) []const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CVMFS_CONFIG"))) |p| return p;
+    }
+    return "/etc/cvmfs";
+}
+
+fn cvmfsMountOverride(c: Ctx) ?[]const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CVMFS_ERRNO"))) |v| return v;
+    }
+    return null;
+}
+
+/// The CernVM-FS client: the mount, the proxy in force, `cvmfs_config` when
+/// it is on PATH, and an optional metadata read. Returns whether a line said
+/// FAIL. A build does not run this.
+fn reportCvmfs(c: Ctx, tasks: u8, out: *std.ArrayList(u8)) bool {
+    const a = c.a;
+    const repo = cvmfs.repository(c.env);
+    const mount = cvmfs.mountState(repo.path, cvmfsMountOverride(c));
+    var failed = false;
+    switch (mount) {
+        .ok => note(a, out, "ok  ", "CernVM-FS repository {s} is mounted", .{repo.path}),
+        .enotconn => {
+            note(a, out, "FAIL", "CernVM-FS repository {s} is a stale FUSE mount: transport endpoint is not connected", .{repo.path});
+            failed = true;
+        },
+        .eio => note(a, out, "warn", "CernVM-FS repository {s} returned an input/output error", .{repo.path}),
+        .absent => note(a, out, "info", "CernVM-FS repository {s} is not mounted", .{repo.path}),
+    }
+    const proxy = cvmfs.readProxy(a, c.env, cvmfsConfigRoot(c), repo.name) catch oom();
+    switch (proxy.mode) {
+        .unset => note(a, out, "info", "CernVM-FS HTTP proxy is unset", .{}),
+        .direct => if (proxy.host_injected) {
+            note(a, out, "warn", "CernVM-FS HTTP proxy mode is direct, from environment CVMFS_HTTP_PROXY; a host can inject this", .{});
+        } else note(a, out, "info", "CernVM-FS HTTP proxy mode is direct, from {s}", .{proxy.from}),
+        .proxy => if (proxy.host_injected) {
+            note(a, out, "warn", "CernVM-FS HTTP proxy {s}, from environment CVMFS_HTTP_PROXY; a host can inject this", .{proxy.value});
+        } else note(a, out, "info", "CernVM-FS HTTP proxy {s}, from {s}", .{ proxy.value, proxy.from }),
+    }
+    const path_env = c.env.get("PATH") orelse "";
+    if (proc.which(a, "cvmfs_config", path_env) catch null) |exe| {
+        if (mount == .enotconn) {
+            note(a, out, "info", "cvmfs_config probe was not run; the mount is stale", .{});
+        } else {
+            const probe = cvmfs.runTool(a, exe, &.{ exe, "probe", repo.name }, c.envp);
+            if (probe.timed_out) {
+                note(a, out, "warn", "cvmfs_config probe {s} timed out", .{repo.name});
+            } else if (probe.code == 0) {
+                note(a, out, "ok  ", "cvmfs_config probe {s} exited 0", .{repo.name});
+            } else note(a, out, "warn", "cvmfs_config probe {s} exited {d}", .{ repo.name, probe.code });
+        }
+        const check = cvmfs.runTool(a, exe, &.{ exe, "chksetup" }, c.envp);
+        if (check.timed_out) {
+            note(a, out, "warn", "cvmfs_config chksetup timed out", .{});
+        } else if (check.code == 0) {
+            note(a, out, "ok  ", "cvmfs_config chksetup exited 0", .{});
+        } else note(a, out, "warn", "cvmfs_config chksetup exited {d}", .{check.code});
+    } else note(a, out, "info", "cvmfs_config is not on PATH, so probe and chksetup were not run", .{});
+    if (tasks > 0) {
+        const srun = proc.which(a, "srun", path_env) catch null;
+        const ran = cvmfs.parallelProbe(a, repo.path, tasks, nonEmpty(c.env.get("SLURM_JOB_ID")) != null, mount == .enotconn, srun, c.envp);
+        switch (ran.kind) {
+            .off => {},
+            .stale => note(a, out, "info", "parallel metadata read was not run; the mount is stale", .{}),
+            .outside => note(a, out, "info", "parallel metadata read of {d} tasks runs only inside an allocation", .{ran.tasks}),
+            .srun_ok => note(a, out, "ok  ", "srun -n {d} read metadata of {s}", .{ ran.tasks, repo.path }),
+            .srun_fail => note(a, out, "warn", "srun -n {d} read metadata of {s} and exited {d}", .{ ran.tasks, repo.path, ran.code }),
+            .srun_timeout => note(a, out, "warn", "srun -n {d} read metadata of {s} and timed out", .{ ran.tasks, repo.path }),
+            .fork_ok => note(a, out, "ok  ", "parallel metadata read of {d} tasks on {s}", .{ ran.tasks, repo.path }),
+            .fork_fail => note(a, out, "warn", "parallel metadata read of {d} tasks on {s}: {d} failed", .{ ran.tasks, repo.path, ran.code }),
+        }
+    }
+    return failed;
+}
+
 /// Everything about this shell, this node and the configuration that would
 /// make a build, `eb-local eb` or a module load go wrong, one line each: ok,
 /// info, warn or FAIL. Changes nothing; exits 1 when a line says FAIL. A
 /// build needs a site file and `eb-local eb` does not, so without one what
 /// stops `eb-local eb` is a FAIL, and with one what stops a build is.
-fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
+fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     var failed = false;
@@ -2648,6 +2740,11 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
     } else note(a, &out, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});
+
+    if (opts.cvmfs) {
+        const tasks = opts.parallel orelse s.cvmfs_parallel.value;
+        if (reportCvmfs(c, tasks, &out)) failed = true;
+    }
 
     out.appendSlice(a, if (site)
         (if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n")
@@ -3270,6 +3367,8 @@ pub fn main(init: std.process.Init) u8 {
     var module_aliases: std.ArrayList(modulerc.Alias) = .empty;
     var module_hidden: std.ArrayList([]const u8) = .empty;
     var modulerc_dry_run = false;
+    var doctor_cvmfs = false;
+    var doctor_parallel: ?u8 = null;
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -3349,7 +3448,18 @@ pub fn main(init: std.process.Init) u8 {
                     g.env_strict = true;
                 } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
             },
-            .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .profiles => die("profiles takes only --project, --profile and --config; got '{s}'", .{x}),
+            .doctor => {
+                if (std.mem.eql(u8, x, "--cvmfs")) {
+                    doctor_cvmfs = true;
+                } else if (std.mem.eql(u8, x, "--cvmfs-parallel") or joined(x, "--cvmfs-parallel") != null) {
+                    const v = if (joined(x, "--cvmfs-parallel")) |got| got else value(args, &i, "--cvmfs-parallel");
+                    const n = std.fmt.parseInt(u8, v, 10) catch die("--cvmfs-parallel needs a number from 1 to 8", .{});
+                    if (n < 1 or n > 8) die("--cvmfs-parallel needs a number from 1 to 8", .{});
+                    doctor_parallel = n;
+                    doctor_cvmfs = true;
+                } else die("doctor takes --cvmfs and --cvmfs-parallel; got '{s}'", .{x});
+            },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
                     cache.modulepath = value(args, &i, "--modulepath");
@@ -3539,7 +3649,7 @@ pub fn main(init: std.process.Init) u8 {
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
         .list => cmdList(c, s, rest.items),
-        .doctor => cmdDoctor(c, s, g),
+        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc => unreachable,
     };
@@ -3557,6 +3667,7 @@ test {
     _ = lmodcache;
     _ = modulerc;
     _ = foreign;
+    _ = cvmfs;
 }
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {

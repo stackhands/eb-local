@@ -24,6 +24,7 @@ An empty variable is ignored, unless the table says what it does.
 | =EB_LOCAL_BUILD_ALLOCATION_HINT=      | =build.allocation_hint=; empty, it empties it                            |
 | =EB_LOCAL_BUILD_SECRETS=              | =build.secrets=, with blanks between the names; empty, a build gets none |
 | =EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES= | =build.clear_foreign_prefixes=; =true= or =1= sets it, =false= or =0= clears it |
+| =EB_LOCAL_DOCTOR_CVMFS_PARALLEL= | =doctor.cvmfs_parallel=; an integer from 0 to 8. =0= reads no metadata in parallel |
 | =EB_LOCAL_CLEAN_TRASH=                | =clean.trash=                                                            |
 | =EB_LOCAL_TRASH=                      | =clean.trash=, the 1.x name; =EB_LOCAL_CLEAN_TRASH= wins over it         |
 | =EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS= | =clean.logs_older_than_days=                                             |

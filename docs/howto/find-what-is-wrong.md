@@ -158,6 +158,27 @@ The build keeps the entry.
 Set `build.clear_foreign_prefixes = true` in the configuration, or `EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES=true` for one build, and doctor then says the build drops it.
 Neither is set unless you set it.
 
+## The CernVM-FS client
+
+`eb-local doctor --cvmfs` checks the repository this shell would read.
+It reports the mount, the HTTP proxy in force and the file or variable that set it, and the result of `cvmfs_config probe` and `cvmfs_config chksetup` when that program is on `PATH`.
+A build does not run this check.
+
+```bash
+eb-local doctor --cvmfs
+```
+
+```text
+ok   CernVM-FS repository /cvmfs/software.eessi.io is mounted
+info CernVM-FS HTTP proxy mode is direct, from /etc/cvmfs/default.local
+ok   cvmfs_config probe software.eessi.io exited 0
+ok   cvmfs_config chksetup exited 0
+```
+
+A stale mount, whose kernel status is transport endpoint is not connected, is a `FAIL`, and the probe is not run.
+`--cvmfs-parallel N`, or `doctor.cvmfs_parallel`, reads repository metadata from N tasks, and only inside an allocation.
+It uses `srun` when that is on `PATH`.
+
 ## Check that it worked
 
 `eb-local doctor` in the same shell ends with this line, and exits 0:
