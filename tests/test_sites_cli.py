@@ -121,7 +121,7 @@ class SitesCli(StorageFixture):
     def test_install_refusals(self):
         target = self.root / "config.toml"
         cases = [
-            (["site", "install", "slurm", "--to", str(target)], "needs --set node_local_root=VALUE"),
+            (["site", "install", "slurm", "--to", str(target)], "needs --set node_local_root=VALUE and --set shared_scratch=VALUE"),
             (["site", "install", "slurm", "--to", str(target), "--set", "node_local_root=relative",
               "--set", "shared_scratch=/s"], "node_local_root"),
             (["site", "install", "slurm", "--to", str(target), "--set", 'partition=a"b'] + PATHS, "without quotes"),

@@ -143,7 +143,7 @@ Outside a job, `doctor` says `info not in a Slurm job` in its place, and does no
 | Message | Cause | What to do |
 |---|---|---|
 | `eb-local: /usr/local/bin/config.toml exists; --force replaces it` | A site file is there already. | Compare it with what `site show` prints, then install again with `--force`. |
-| `eb-local: template slurm needs --set node_local_root=VALUE` | The placeholder has no default. | Add the `--set`. |
+| `eb-local: template slurm needs --set node_local_root=VALUE and --set shared_scratch=VALUE` | Every placeholder with no default is named, in the order the template writes them. | Add each `--set`. `eb-local site list` prints the names. |
 | `eb-local: template slurm has no placeholder NAME (it has: ...)` | `--set` names a placeholder the template does not have. | Use a name from the list. |
 | `eb-local: --set NAME: the value must be non-empty, without quotes, backslashes or control characters` | Each value goes inside a TOML string. | Give a value without them. |
 | `eb-local: template slurm:10: storage.node_local_root must be one absolute path without a trailing slash` | The value on line 10 of the rendered file is not a path from `/`. | Give the absolute path. |

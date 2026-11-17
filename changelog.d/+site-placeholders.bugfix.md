@@ -1,0 +1,1 @@
+`eb-local site show` and `site install` name every placeholder that has no default, in one message, in the order the template writes them. `slurm` therefore asks for `--set node_local_root=VALUE` and `--set shared_scratch=VALUE` together.
