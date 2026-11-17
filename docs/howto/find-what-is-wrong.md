@@ -109,6 +109,22 @@ These steps run them and read what they say.
 
 When you ask the site for help, include the output of `eb-local doctor` and of `eb-local config`; neither shows the value of a secret.
 
+## Check the EESSI client and module order
+
+Before a site build, run the standalone, non-mutating readiness probe from the repository checkout:
+
+```bash
+./eb-local-readiness --prefix /opt/site/eessi
+```
+
+The repository defaults to `EESSI_CVMFS_REPO`, or `/cvmfs/software.eessi.io`.
+The prefix defaults to `EB_LOCAL_PREFIX`, `EESSI_SITE_SOFTWARE_PREFIX`, `EESSI_PROJECT_INSTALL` or `EESSI_USER_INSTALL`, in that order.
+A ready shell reports that the repository is mounted with CVMFS and that local modules precede EESSI on `MODULEPATH`.
+
+The probe exits 1 when the repository is missing, no local module directory is on `MODULEPATH`, or upstream EESSI modules occur first.
+It warns but exits 0 for another filesystem because a site may deliberately expose CVMFS through a bind mount.
+Use `--mountinfo FILE` to check a saved node mount table or a container's view.
+
 ## Check that it worked
 
 `eb-local doctor` in the same shell ends with this line, and exits 0:

@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""The standalone EESSI readiness probe."""
+
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PROBE = ROOT / "eb-local-readiness"
+
+
+class ReadinessProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory(prefix="eb-local-readiness-")
+        self.root = Path(self.work.name)
+        self.repo = self.root / "eessi"
+        self.local = self.root / "local"
+        self.upstream_modules = self.repo / "init" / "modules"
+        self.local_modules = self.local / "versions" / "2026.06" / "modules" / "all"
+        self.upstream_modules.mkdir(parents=True)
+        self.local_modules.mkdir(parents=True)
+        self.mountinfo = self.root / "mountinfo"
+
+    def tearDown(self):
+        self.work.cleanup()
+
+    def run_probe(self, modulepath, fstype="cvmfs"):
+        self.mountinfo.write_text(
+            "81 1 0:81 / {} rw,relatime - {} source rw\n".format(self.repo, fstype)
+        )
+        env = dict(os.environ, MODULEPATH=modulepath)
+        return subprocess.run(
+            [
+                str(PROBE),
+                "--repo",
+                str(self.repo),
+                "--prefix",
+                str(self.local),
+                "--mountinfo",
+                str(self.mountinfo),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_ready_client_and_module_order(self):
+        run = self.run_probe("{}:{}".format(self.local_modules, self.upstream_modules))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("mounted with cvmfs", run.stdout)
+        self.assertIn("ok   local modules precede EESSI", run.stdout)
+
+    def test_upstream_modules_first_is_a_failure(self):
+        run = self.run_probe("{}:{}".format(self.upstream_modules, self.local_modules))
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("FAIL EESSI precedes local modules", run.stdout)
+
+    def test_a_site_bind_mount_is_a_warning(self):
+        run = self.run_probe(
+            "{}:{}".format(self.local_modules, self.upstream_modules), fstype="ext4"
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("warn EESSI repository", run.stdout)
+        self.assertIn("site bind mount", run.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
