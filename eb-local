@@ -28,6 +28,7 @@
 set -eo pipefail   # no -u: the Lmod init reads unset variables
 
 usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+version() { echo "eb-local 1.x (frozen Bash script)"; }
 
 die() {
     echo "eb-local: $*" >&2
@@ -59,6 +60,7 @@ allow_delete=false
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
+        --version) version; exit 0 ;;
         --project)
             [ -n "${2:-}" ] || die "--project needs a directory"
             prefix="$2"; mode=project; shift 2 ;;
