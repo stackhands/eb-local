@@ -170,7 +170,7 @@ A failed build keeps its workspace until the job ends.
 A build exits with `eb`'s status.
 Stopped by a signal, it removes the secret values from the logs and then stops with the same signal.
 
-### &#x2013;explain
+### `--explain`
 
 Print the script a build runs, and create and run nothing, inside a Slurm job or outside one.
 The output is, in order: comments that say where the build installs, the checks it makes first, and whether each secret reaches `eb`; the variables it sets for the script, with `W` standing for its workspace; a `set --` line with the script's arguments; and the script itself.
@@ -186,7 +186,7 @@ Otherwise the command exits with `eb`'s status.
 
 With `EB_LOCAL_EESSI_EXTEND` set, not empty and not `0`, every argument of `eb-local` goes to `eb`, as after `eb-local eb --`.
 
-### &#x2013;explain eb
+### `--explain eb`
 
 Print the script `eb` runs, after a `set --` line with its arguments, and run nothing.
 With more than one install variable set, it prints nothing on stdout and exits 3.

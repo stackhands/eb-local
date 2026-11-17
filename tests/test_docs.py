@@ -54,6 +54,13 @@ class OrgPages(unittest.TestCase):
             if "_build" not in page.parts and page.read_text().startswith(GENERATED):
                 self.assertTrue((ORG / page.relative_to(DOCS).with_suffix(".org")).is_file(), page)
 
+    def test_no_written_page_has_a_character_reference(self):
+        # Outside verbatim, Org writes -- as &#x2013; and ... as &#x2026;, so
+        # a heading --explain came out as an en dash and explain.
+        found = [f"{rel.with_suffix('.md')}:{n}" for rel in sources()
+                 for n, line in enumerate((DOCS / rel.with_suffix(".md")).read_text().splitlines(), 1) if "&#x" in line]
+        self.assertEqual(found, [])
+
     def test_the_api_pages_are_not_committed(self):
         tracked = subprocess.run(["git", "ls-files", "docs/" + API], cwd=DOCS.parent, capture_output=True, text=True)
         if tracked.returncode != 0:
