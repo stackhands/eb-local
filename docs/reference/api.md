@@ -1,0 +1,28 @@
+<!-- Generated from docs/orgmode/reference/api.org by docs/export.el; edit that file. -->
+
+# API
+
+The API pages are generated from the code on every build, so they match the commit the site was built from.
+A declaration's doc comment is its description.
+
+- [Zig API](api/zig/index.md): every `pub` declaration, one page per source file, read with the compiler's own parser by `docs/tools/zig_api.zig`, each linked to its source line at that commit.
+- {zig:autodoc}`Zig autodoc </>`: the same declarations in the browser `zig build docs` makes, with search and source views.
+
+```{toctree}
+:hidden:
+
+api/zig/index
+```
+
+The program is one Zig module, `src/main.zig`, which imports each component as a `pub` declaration, so each has its page:
+
+| Component | What it is |
+|---|---|
+| `toml` | the part of TOML 1.0 the configuration files use |
+| `config` | the settings, their layers, and where each value came from |
+| `secrets` | where a secret's value comes from, and its removal from logs |
+| `sites` | the site file templates `eb-local site` renders |
+| `storage` | where a build may write: the allocation's node-local mount and the install prefix |
+| `rpath` | the RPATH wrappers `dev` writes for compilers without a build environment |
+| `elfcheck` | `eb-local check`: what a program needs and where it finds it |
+| `extend` | `eb-local eb`: EasyBuild through EESSI-extend, without a site file |

@@ -31,6 +31,17 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "eb-local", .root_module = mod, .linkage = .static });
     b.installArtifact(exe);
 
+    // The Zig autodoc site, into <prefix>/docs, which the documentation
+    // serves at api/. A compile of its own: asking the installed binary for
+    // docs would add -femit-docs to every build of it.
+    const doc_exe = b.addExecutable(.{ .name = "eb-local", .root_module = mod });
+    const docs = b.addInstallDirectory(.{
+        .source_dir = doc_exe.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    b.step("docs", "Generate the Zig autodoc site").dependOn(&docs.step);
+
     const unit = b.addTest(.{ .root_module = mod });
     b.step("unit", "Run the unit tests").dependOn(&b.addRunArtifact(unit).step);
 

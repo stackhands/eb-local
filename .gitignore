@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 build/
 docs/_build/
+docs/reference/api/
 .zig-cache/
 zig-out/
 zig-pkg/

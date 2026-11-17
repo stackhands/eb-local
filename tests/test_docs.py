@@ -19,6 +19,8 @@ DOCS = Path(__file__).resolve().parents[1] / "docs"
 ORG = DOCS / "orgmode"
 GENERATED = "<!-- Generated from docs/orgmode/"
 WRITTEN_WITH = "9.6."
+# Written from the code as the site is built; neither committed nor from Org.
+API = "reference/api/"
 
 
 def sources():
@@ -39,7 +41,7 @@ class OrgPages(unittest.TestCase):
     def test_each_org_source_has_its_page_in_one_table_of_contents(self):
         listed, pending = [], ["index.md"]
         while pending:
-            entries = toctree_entries(pending.pop())
+            entries = [entry for entry in toctree_entries(pending.pop()) if not entry.startswith(API)]
             listed += entries
             pending += [entry + ".md" for entry in entries]
         self.assertEqual(sorted(listed), [str(rel.with_suffix("")) for rel in sources() if rel != Path("index.org")])
@@ -51,6 +53,14 @@ class OrgPages(unittest.TestCase):
         for page in DOCS.rglob("*.md"):
             if "_build" not in page.parts and page.read_text().startswith(GENERATED):
                 self.assertTrue((ORG / page.relative_to(DOCS).with_suffix(".org")).is_file(), page)
+
+    def test_the_api_pages_are_not_committed(self):
+        tracked = subprocess.run(["git", "ls-files", "docs/" + API], cwd=DOCS.parent, capture_output=True, text=True)
+        if tracked.returncode != 0:
+            self.skipTest("not in a git checkout")
+        self.assertEqual(tracked.stdout, "")
+        ignored = subprocess.run(["git", "check-ignore", "-q", "docs/" + API + "zig/index.md"], cwd=DOCS.parent)
+        self.assertEqual(ignored.returncode, 0, "docs/.gitignore or .gitignore should ignore the API pages")
 
     @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
     def test_the_pages_are_what_their_org_sources_export_to(self):
