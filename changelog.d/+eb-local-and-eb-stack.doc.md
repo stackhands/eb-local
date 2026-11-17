@@ -1,0 +1,1 @@
+The explanation "eb-local and eb-stack" says what each tool does, that an eb-stack EESSI-extend target runs eb-local with `EB_LOCAL_EESSI_EXTEND=1` while eb-local never runs eb-stack, why the split falls at one build, and which tool a task needs; how eb-stack plans and finds gaps stays in its own documentation.

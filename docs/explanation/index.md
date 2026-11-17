@@ -8,6 +8,7 @@ Nothing here is a step to follow.
 ```{toctree}
 :maxdepth: 1
 
+eb-local-and-eb-stack
 install-variables
 run-paths
 ```

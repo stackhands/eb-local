@@ -146,5 +146,6 @@ jq-1.8.1
 
 -   [Install software on top of EESSI with EasyBuild](install-software.md)
 -   [Build for every node type](build-for-every-node-type.md)
+-   [eb-local and eb-stack](../explanation/eb-local-and-eb-stack.md)
 -   eb-stack's [Classify a site module list](https://eb-stack.rgoswami.me/howto/stack-gap.html)
 -   eb-stack's [Tutorial: foreign recipe to verified EasyBuild package](https://eb-stack.rgoswami.me/tutorial.html)
