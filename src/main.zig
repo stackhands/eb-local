@@ -1656,6 +1656,15 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\declare -A saved
     \\for v in "${keep[@]}"; do saved[$v]=${!v}; done
     \\restore() { for v in "${keep[@]}"; do export "$v=${saved[$v]}"; done; }
+    \\# A load that works fills stderr with the modules' own messages; one that
+    \\# fails leaves Lmod's reason there, so only a failed load shows it.
+    \\load() {
+    \\    local err="${saved[TMPDIR]}/module-load.err" line
+    \\    module load "$1" >/dev/null 2>"$err" && return
+    \\    echo "eb-local: could not load $1:" >&2
+    \\    while IFS= read -r line; do echo "${line:+  $line}" >&2; done < "$err"
+    \\    exit 1
+    \\}
     \\
 ++ lmod_init ++
     \\type module >/dev/null 2>&1 || {
@@ -1674,7 +1683,7 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\# is on MODULEPATH only once the stack is loaded. The extension reads
     \\# WORKING_DIR and EASYBUILD_SOURCEPATH as it loads, so whatever the
     \\# stack module set, the paths go back first.
-    \\module load "$stack" >/dev/null 2>&1 || { echo "eb-local: could not load $stack" >&2; exit 1; }
+    \\load "$stack"
     \\restore
     \\# Tasks run with the CPU target eessi-arch-guard selects, which can be
     \\# below the one EESSI detects: on a CPU without a flag GCC enables for the
@@ -1690,7 +1699,7 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\    eval "$delta"
     \\    restore
     \\fi
-    \\module load "$extend" >/dev/null 2>&1 || { echo "eb-local: could not load $extend" >&2; exit 1; }
+    \\load "$extend"
     \\restore
     \\# EESSI-extend chose the install path as it loaded. eb-local checked the
     \\# prefix's versions tree, lists it and cleans its logs of secrets, so an
