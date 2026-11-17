@@ -33,6 +33,14 @@ def messages():
     return [m for m in found if m]
 
 
+def words():
+    """The string literals of src/main.zig that hold a letter. The note
+    "{s} {s}" writes a variable's name, then one of these, which a function
+    such as ownInstallVar returns."""
+    found = re.findall(r'"((?:[^"\\\n]|\\.)*)"', MAIN.read_text())
+    return {re.sub(r"\\(.)", r"\1", w) for w in found if re.search("[A-Za-z]", w)}
+
+
 def shown():
     """(page, line) for each line of an example block the how-to guides show
     after a command that runs eb-local doctor."""
@@ -56,10 +64,15 @@ class DoctorLinesInTheGuides(unittest.TestCase):
         formats = messages()
         self.assertGreater(len(formats), 30)
         source = MAIN.read_text()
+        self.assertIn('"{s} {s}", .{ v, why }', source)
+        literals = words()
         for page, line in shown():
             with self.subTest(page=page, line=line):
                 if line[:4] in LEVELS and line[4:5] == " ":
-                    self.assertTrue(any(f.fullmatch(line[5:]) for f in formats), "no message of doctor's has these words")
+                    text = line[5:]
+                    named = text.partition(" ")[2] in literals
+                    self.assertTrue(named or any(f.fullmatch(text) for f in formats),
+                                    "no message of doctor's has these words")
                 else:
                     self.assertIn(line, source)
 

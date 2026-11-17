@@ -156,6 +156,7 @@ Outside a job, =doctor= says =info not in a Slurm job= in its place, and does no
 * Related
 
 - [[file:install.org][Install eb-local]]
+- [[file:set-site-defaults.org][Set a site's EasyBuild defaults and default prefix]]
 - [[file:../reference/configuration.org][The configuration files]]
 - [[file:../reference/cli.org][The eb-local command]]
 - [[file:../reference/refusals.org][Refusals]]

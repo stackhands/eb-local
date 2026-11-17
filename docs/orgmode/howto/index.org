@@ -9,6 +9,7 @@ The title names the task.
 
 install
 write-a-site-file
+set-site-defaults
 load-eessi
 compile
 install-software

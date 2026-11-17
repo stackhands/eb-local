@@ -59,55 +59,12 @@ A refusal says what it refused and why, and what the command then did not do; it
 The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree, with the same permissions.
 That is why the default is not `$HOME/.local/eessi`: EESSI-extend, loaded with no install variable set, installs under `$HOME/eessi`, so any other default would split one user's modules into two trees, of which `eb-local env` shows one.
 Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/eessi` does not, eb-local keeps using it and says so. Set `prefix` to choose either for good.
-A site that wants another default for everyone sets it where EESSI-extend reads it too, as the next section shows; an Lmod hook cannot.
+A site that wants another default for everyone sets it where EESSI-extend reads it too; an Lmod hook cannot.
 
-## A site Lmod hook
+## A site's defaults
 
-A site can set EasyBuild defaults of its own when `EESSI-extend` loads, with an Lmod hook, and needs no eb-local setting for it.
-EESSI's `SitePackage.lua` registers EESSI's load hook and then runs the site's file, `/cvmfs/software.eessi.io/host_injections/2026.06/.lmod/SitePackage.lua`, so a load hook there calls EESSI's first:
-
-```lua
-local hook = require("Hook")
-
--- EasyBuild's source and build paths, set as EESSI-extend loads.
-local function site_load_hook(t)
-    if t.modFullName:find("^EESSI%-extend/") then
-        local home, user = os.getenv("HOME"), os.getenv("USER")
-        setenv("EASYBUILD_SOURCEPATH", pathJoin(home, ".local/easybuild/sources"))
-        setenv("EASYBUILD_BUILDPATH", pathJoin("/tmp", user, "easybuild-build"))
-    end
-end
-
-hook.register("load", function(t)
-    eessi_load_hook(t)
-    site_load_hook(t)
-end)
-```
-
-Build, source and temporary paths from a hook work.
-They apply when EESSI-extend is loaded by hand and under `eb-local eb`.
-An eb-local build puts its own workspace and `.eb-local/sources` back after EESSI-extend loads, so the build uses those, and the two do not conflict.
-Lmod undoes only what a module file sets, so the hook's values stay set after `module unload EESSI-extend`.
-
-An install path from a hook stops eb-local.
-`EASYBUILD_INSTALLPATH`, `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` set in a hook replaces the install path EESSI-extend chose, while the `MODULEPATH` the module set still names its own tree.
-EasyBuild would then install, and write its logs, outside the prefix eb-local checked, where `eb-local env` and `list` do not show what it installed and eb-local does not remove secret values from those logs, so a build and `eb-local eb` stop once EESSI-extend has loaded, before `eb` runs.
-A hook sets no install path.
-
-A default install prefix cannot come from a load hook.
-EESSI-extend reads `EESSI_USER_INSTALL` and the other install variables as its module file runs, and Lmod runs the load hook after that.
-A hook that sets `EESSI_USER_INSTALL=$HOME/.local/eessi` when no install variable is set is too late for that load, which installs under `$HOME/eessi`.
-The value stays after `module unload`, so the next load in the same shell installs under `$HOME/.local/eessi`, and which tree a user gets depends on what their shell did before.
-A build and `eb-local eb` say so when loading EESSI-extend sets an install variable.
-A hook for the `EESSI` module itself does not run: that module sets `LMOD_PACKAGE_PATH`, through which Lmod finds EESSI's `SitePackage.lua` and so the site's, and neither is in effect for the command that loads it.
-
-So another default goes into the environment before EESSI-extend loads, for example `EESSI_USER_INSTALL` set by a login script in `/etc/profile.d`, and into eb-local's site file as `prefix`, before the file's first table, so that eb-local builds there too:
-
-```toml
-prefix = "~/.local/eessi"
-```
-
-`eb-local doctor` then says that `EESSI_USER_INSTALL` names your prefix.
+A site sets EasyBuild paths for every user with an Lmod hook that runs as `EESSI-extend` loads, and another default prefix with a login script and `prefix` in the site file.
+[Set a site's EasyBuild defaults and default prefix](docs/howto/set-site-defaults.md) has the steps, and [Where EESSI-extend installs](docs/explanation/install-variables.md) says why a hook can set neither an install path nor the prefix.
 
 ## Build for every node type
 

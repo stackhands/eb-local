@@ -158,6 +158,7 @@ Outside a job, `doctor` says `info not in a Slurm job` in its place, and does no
 ## Related
 
 -   [Install eb-local](install.md)
+-   [Set a site's EasyBuild defaults and default prefix](set-site-defaults.md)
 -   [The configuration files](../reference/configuration.md)
 -   [The eb-local command](../reference/cli.md)
 -   [Refusals](../reference/refusals.md)

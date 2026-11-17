@@ -63,7 +63,7 @@ They also stop when `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_M
 
 Three things move the install path:
 
--   a site Lmod hook that sets one, which the README's [A site Lmod hook](../index.md#a-site-lmod-hook) warns against;
+-   a site Lmod hook that sets one, which [Set a site's EasyBuild defaults and default prefix](../howto/set-site-defaults.md) warns against;
 -   a changed EESSI-extend;
 -   an `EESSI_CVMFS_REPO` with a character such as `-`.
 
@@ -92,4 +92,4 @@ eb-local: loading EESSI-extend set EESSI_USER_INSTALL=/home/alice/.local/eessi; 
   A site Lmod hook that sets an install variable acts only on the next load. See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html
 ```
 
-A site that wants another default prefix sets it before EESSI-extend loads, in a login script, and as `prefix` in eb-local's site file, as the README's [A site Lmod hook](../index.md#a-site-lmod-hook) shows.
+A site that wants another default prefix sets it before EESSI-extend loads, in a login script, and as `prefix` in eb-local's site file, as [Set a site's EasyBuild defaults and default prefix](../howto/set-site-defaults.md) shows.

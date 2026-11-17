@@ -13,7 +13,14 @@ import unittest
 import binary
 from test_storage import StorageFixture
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+SITE_DEFAULTS = Path(__file__).resolve().parents[1] / "docs" / "orgmode" / "howto" / "set-site-defaults.org"
+
+
+def guide_block(language):
+    """The one source block in LANGUAGE of the site defaults guide, unindented."""
+    found = re.search(rf"^( *)#\+begin_src {language}\n(.*?)^\1#\+end_src$", SITE_DEFAULTS.read_text(), re.M | re.S)
+    indent = len(found.group(1))
+    return "".join(line[indent:] for line in found.group(2).splitlines(keepends=True))
 
 # eessi-arch-guard --strict --shell: a reload, a guard that keeps the
 # target, or one that cannot select a target.
@@ -145,23 +152,40 @@ class ListAndDoctor(StorageFixture):
                 self.assertIn("warn EASYBUILD_PREFIX=/tmp/u/easybuild is set in this shell", run.stdout)
                 self.assertIn("warn EASYBUILD_INSTALLPATH=", run.stdout)
 
-    def test_the_readme_default_for_a_site_is_one_prefix_for_eb_local_and_eessi_extend(self):
-        text = README.read_text()
-        section = text[text.index("\n## A site Lmod hook\n"):]
-        line = re.search(r"```toml\n(prefix = .*)\n```", section).group(1)
+    def login(self, home, **extra):
+        """What the guide's login script leaves in EESSI_USER_INSTALL."""
+        script = guide_block("sh") + 'printf %s "${EESSI_USER_INSTALL-unset}"\n'
+        run = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"], "HOME": str(home), **extra},
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run.stdout
+
+    def test_the_guide_default_for_a_site_is_one_prefix_for_eb_local_and_eessi_extend(self):
+        line = guide_block("toml").strip()
+        self.assertRegex(line, r"^prefix = ")
         home = self.root / "home"
         home.mkdir()
+        exported = self.login(home)
+        self.assertEqual(exported, f"{home}/.local/eessi")
+        self.assertEqual(os.stat(exported).st_mode & 0o777, 0o700)
         site = self.root / "site.toml"
         site.write_text(f'{line}\n\n[storage]\nnode_local_root = "{self.nodes}"\nnode_local_fstype = "xfs"\n'
                         'shared_scratch = ["/scratch"]\n')
         site.chmod(0o644)
         del self.env["EB_LOCAL_PREFIX"]
-        run = self.run_tool(["doctor"], HOME=str(home), EB_LOCAL_CONFIG=str(site),
-                            EESSI_USER_INSTALL=str(home / ".local" / "eessi"))
+        run = self.run_tool(["doctor"], HOME=str(home), EB_LOCAL_CONFIG=str(site), EESSI_USER_INSTALL=exported)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f"ok   installs go to {home}/.local/eessi: a user install, prefix from site {site}:1\n", run.stdout)
         self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
         self.assertNotIn("warn EESSI_USER_INSTALL", run.stdout)
+
+    def test_the_guide_login_script_leaves_a_shell_with_an_install_variable_alone(self):
+        home = self.root / "home"
+        home.mkdir()
+        for name in ("EESSI_USER_INSTALL", "EESSI_PROJECT_INSTALL", "EESSI_SITE_INSTALL", "EESSI_CVMFS_INSTALL"):
+            with self.subTest(name=name):
+                self.assertEqual(self.login(home, **{name: ""}), "" if name == "EESSI_USER_INSTALL" else "unset")
+                self.assertFalse((home / ".local").exists())
 
     def guard_path(self):
         bin = self.root / "guard-bin"
