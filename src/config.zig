@@ -127,6 +127,9 @@ pub const Settings = struct {
     /// How many tasks `doctor --cvmfs` uses for a metadata read. 0 runs none.
     /// `--cvmfs-parallel` overrides it. Off, and the flag, stay off unless set.
     cvmfs_parallel: Setting(u8) = .{ .value = 0 },
+    /// Transports `doctor --mpi` may hello inside an allocation: `ofi`, `ucx`.
+    /// Site file only. Empty runs no hello. A build never reads this.
+    mpi_transports: Setting([]const []const u8) = .{ .value = &.{} },
     eessi: std.ArrayList(EessiVar) = .empty,
 };
 
@@ -521,6 +524,13 @@ const Loader = struct {
                         };
                         if (v < 0 or v > 8) return l.fail("{s}:{d}: doctor.cvmfs_parallel must be an integer from 0 to 8", .{ src.path, f.line });
                         l.s.cvmfs_parallel = .{ .value = @intCast(v), .from = try l.where(src, f.line, profile) };
+                    } else if (std.mem.eql(u8, f.key, "mpi_transports")) {
+                        if (src.layer != .site or profile != null)
+                            return l.fail("{s}:{d}: doctor.mpi_transports is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
+                        const v = try l.stringList(src, f, "doctor.mpi_transports");
+                        for (v) |name| if (std.meta.stringToEnum(enum { ofi, ucx }, name) == null)
+                            return l.fail("{s}:{d}: doctor.mpi_transports takes ofi or ucx", .{ src.path, f.line });
+                        l.s.mpi_transports = .{ .value = v, .from = try l.where(src, f.line, null) };
                     } else return l.fail("{s}:{d}: unknown key doctor.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
@@ -1323,6 +1333,25 @@ test "doctor.cvmfs_parallel is 0 unless set, and stays between 0 and 8" {
     try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\ncvmfs_parallel = 9\n", .layer = .user }}, "0 to 8");
     try t.env.put("EB_LOCAL_DOCTOR_CVMFS_PARALLEL", "many");
     try t.refuse(&none, "0 to 8");
+}
+
+test "doctor.mpi_transports is a site list of ofi and ucx" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const none = [_]Source{};
+    const bare = try t.load(&none, .{});
+    try std.testing.expectEqual(@as(usize, 0), bare.mpi_transports.value.len);
+
+    const site =
+        \\[doctor]
+        \\mpi_transports = ["ofi", "ucx"]
+    ;
+    const s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expectEqualStrings("ofi", s.mpi_transports.value[0]);
+    try std.testing.expectEqualStrings("ucx", s.mpi_transports.value[1]);
+    try std.testing.expectEqualStrings("site site.toml:2", s.mpi_transports.from);
+    try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\nmpi_transports = [\"ofi\"]\n", .layer = .user }}, "site setting");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\nmpi_transports = [\"tcp\"]\n", .layer = .site }}, "ofi or ucx");
 }
 
 test "module names" {

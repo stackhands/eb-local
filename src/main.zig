@@ -33,6 +33,8 @@ pub const modulerc = @import("modulerc.zig");
 pub const foreign = @import("foreign.zig");
 /// CernVM-FS checks for `doctor --cvmfs`. A build does not call them.
 pub const cvmfs = @import("cvmfs.zig");
+/// MPI transport checks for `doctor --mpi`. A build does not call them.
+pub const mpi = @import("mpi.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -84,12 +86,14 @@ const usage_text =
     \\                                       prints an sbatch line for each node type
     \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
     \\                                       what this node's target lacks
-    \\  eb-local doctor [--cvmfs] [--cvmfs-parallel N]
+    \\  eb-local doctor [--cvmfs] [--cvmfs-parallel N] [--mpi]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing.
     \\                                       --cvmfs checks the CernVM-FS client.
     \\                                       --cvmfs-parallel N (1 to 8) reads repository
-    \\                                       metadata from N tasks inside an allocation
+    \\                                       metadata from N tasks inside an allocation.
+    \\                                       --mpi reports libfabric and UCX, and inside an
+    \\                                       allocation runs a two-rank hello per approved transport
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
     \\                      --timestamp FILE [--spider CMD]
     \\                                       write Lmod's spiderT.lua for those module
@@ -1153,6 +1157,8 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     const approved = std.mem.join(a, " ", s.approved_prefixes.value) catch oom();
     row("doctor.approved_prefixes", if (approved.len == 0) "(none)" else approved, s.approved_prefixes.from);
     row("doctor.cvmfs_parallel", str(a, "{d}", .{s.cvmfs_parallel.value}), s.cvmfs_parallel.from);
+    const transports = std.mem.join(a, " ", s.mpi_transports.value) catch oom();
+    row("doctor.mpi_transports", if (transports.len == 0) "(none)" else transports, s.mpi_transports.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -2487,6 +2493,8 @@ const DoctorOpts = struct {
     cvmfs: bool = false,
     /// `--cvmfs-parallel`. Null uses `doctor.cvmfs_parallel`.
     parallel: ?u8 = null,
+    /// `--mpi`: report fabrics and, in an allocation, run the hello. Off unless the flag asks.
+    mpi: bool = false,
 };
 
 fn cvmfsConfigRoot(c: Ctx) []const u8 {
@@ -2564,6 +2572,114 @@ fn reportCvmfs(c: Ctx, tasks: u8, out: *std.ArrayList(u8)) bool {
         }
     }
     return failed;
+}
+
+fn bindWord(c: Ctx, name: []const u8) []const u8 {
+    return nonEmpty(c.env.get(name)) orelse "unset";
+}
+
+/// libfabric, UCX and Slurm binding, then a two-rank hello for each
+/// site-approved transport. The hello's variables are not put in this
+/// process, and a build does not set them. Nothing here is a FAIL.
+fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8)) void {
+    const a = c.a;
+    const path_env = c.env.get("PATH") orelse "";
+    if (proc.which(a, "fi_info", path_env) catch null) |exe| {
+        const info = mpi.summarize(a, exe, &.{ exe, "-l" }, c.envp);
+        if (info.timed_out) {
+            note(a, out, "warn", "fi_info timed out", .{});
+        } else if (info.code != 0) {
+            note(a, out, "warn", "fi_info exited {d}", .{info.code});
+        } else note(a, out, "info", "fi_info: {s}", .{info.line});
+    } else note(a, out, "info", "fi_info is not on PATH", .{});
+    if (proc.which(a, "ucx_info", path_env) catch null) |exe| {
+        const info = mpi.summarize(a, exe, &.{ exe, "-v" }, c.envp);
+        if (info.timed_out) {
+            note(a, out, "warn", "ucx_info timed out", .{});
+        } else if (info.code != 0) {
+            note(a, out, "warn", "ucx_info exited {d}", .{info.code});
+        } else note(a, out, "info", "ucx_info: {s}", .{info.line});
+    } else note(a, out, "info", "ucx_info is not on PATH", .{});
+    const cpu = bindWord(c, "SLURM_CPU_BIND");
+    const list = bindWord(c, "SLURM_CPU_BIND_LIST");
+    const mem = bindWord(c, "SLURM_MEM_BIND");
+    if (std.mem.eql(u8, cpu, "unset") and std.mem.eql(u8, list, "unset") and std.mem.eql(u8, mem, "unset")) {
+        note(a, out, "info", "no Slurm CPU or memory bind is set", .{});
+    } else note(a, out, "info", "Slurm bind SLURM_CPU_BIND={s} SLURM_CPU_BIND_LIST={s} SLURM_MEM_BIND={s}", .{ cpu, list, mem });
+
+    if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
+        note(a, out, "info", "MPI hello was not compiled; this shell is not inside an allocation", .{});
+        return;
+    }
+    if (s.mpi_transports.value.len == 0) {
+        note(a, out, "info", "no site-approved MPI transport is configured", .{});
+        return;
+    }
+    const mpicc = proc.which(a, "mpicc", path_env) catch null;
+    const mpirun = proc.which(a, "mpirun", path_env) catch null;
+    if (mpicc == null) {
+        note(a, out, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
+        return;
+    }
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = fsx.realpath(fsx.cwd, ".", &cwd_buf) catch ".";
+    const work = std.fmt.allocPrint(a, "{s}/.zig-cache/mpi-hello-{d}", .{ cwd, linux.getpid() }) catch oom();
+    common.atomic.makedirs(work) catch {
+        note(a, out, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
+        return;
+    };
+    defer fsx.deleteTree(a, fsx.cwd, work) catch {};
+    var seen_ofi = false;
+    var seen_ucx = false;
+    for (s.mpi_transports.value) |name| {
+        const transport = mpi.parseTransport(name) orelse continue;
+        switch (transport) {
+            .ofi => {
+                if (seen_ofi) continue;
+                seen_ofi = true;
+            },
+            .ucx => {
+                if (seen_ucx) continue;
+                seen_ucx = true;
+            },
+        }
+        const hello = mpi.runHello(a, transport, mpicc, mpirun, work, c.env, c.envp) catch oom();
+        const label = @tagName(transport);
+        if (hello.missing_compiler) {
+            note(a, out, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
+            return;
+        }
+        if (hello.compile_timeout) {
+            note(a, out, "warn", "mpicc for {s} timed out", .{label});
+            continue;
+        }
+        if (hello.compile_code != 0) {
+            note(a, out, "warn", "mpicc for {s} exited {d}", .{ label, hello.compile_code });
+            continue;
+        }
+        if (hello.missing_launcher) {
+            note(a, out, "info", "mpirun is not on PATH, so the MPI hello was not run", .{});
+            return;
+        }
+        if (hello.run_timeout) {
+            note(a, out, "warn", "mpirun for {s} timed out", .{label});
+            continue;
+        }
+        if (hello.run_code != 0) {
+            note(a, out, "warn", "mpirun for {s} exited {d}", .{ label, hello.run_code });
+            continue;
+        }
+        if (hello.ranks.len != 2 or hello.ranks[0].size != 2 or hello.ranks[1].size != 2) {
+            note(a, out, "warn", "MPI {s} hello did not report two ranks", .{label});
+            continue;
+        }
+        if (mpi.sharedCpu(hello.ranks)) {
+            note(a, out, "warn", "MPI {s} hello ranks share cpu {d} with {s}", .{ label, hello.ranks[0].cpu, hello.override_text });
+            continue;
+        }
+        const cpus = std.fmt.allocPrint(a, "{d},{d}", .{ hello.ranks[0].cpu, hello.ranks[1].cpu }) catch oom();
+        note(a, out, "ok  ", "MPI {s} hello size {d} on cpus {s} with {s}", .{ label, hello.ranks[0].size, cpus, hello.override_text });
+    }
 }
 
 /// Everything about this shell, this node and the configuration that would
@@ -2745,6 +2861,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         const tasks = opts.parallel orelse s.cvmfs_parallel.value;
         if (reportCvmfs(c, tasks, &out)) failed = true;
     }
+    if (opts.mpi) reportMpi(c, s, &out);
 
     out.appendSlice(a, if (site)
         (if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n")
@@ -3369,6 +3486,7 @@ pub fn main(init: std.process.Init) u8 {
     var modulerc_dry_run = false;
     var doctor_cvmfs = false;
     var doctor_parallel: ?u8 = null;
+    var doctor_mpi = false;
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -3458,7 +3576,9 @@ pub fn main(init: std.process.Init) u8 {
                     if (n < 1 or n > 8) die("--cvmfs-parallel needs a number from 1 to 8", .{});
                     doctor_parallel = n;
                     doctor_cvmfs = true;
-                } else die("doctor takes --cvmfs and --cvmfs-parallel; got '{s}'", .{x});
+                } else if (std.mem.eql(u8, x, "--mpi")) {
+                    doctor_mpi = true;
+                } else die("doctor takes --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
             },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
@@ -3649,7 +3769,7 @@ pub fn main(init: std.process.Init) u8 {
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
         .list => cmdList(c, s, rest.items),
-        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel }),
+        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc => unreachable,
     };
@@ -3668,6 +3788,12 @@ test {
     _ = modulerc;
     _ = foreign;
     _ = cvmfs;
+    _ = mpi;
+}
+
+test "a build script selects no MPI transport" {
+    try std.testing.expect(std.mem.indexOf(u8, build_script, "OMPI_MCA") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build_script, "FI_PROVIDER") == null);
 }
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {

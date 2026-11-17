@@ -84,12 +84,14 @@ directory you own.
                                        prints an sbatch line for each node type
   eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
                                        what this node's target lacks
-  eb-local doctor [--cvmfs] [--cvmfs-parallel N]
+  eb-local doctor [--cvmfs] [--cvmfs-parallel N] [--mpi]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing.
                                        --cvmfs checks the CernVM-FS client.
                                        --cvmfs-parallel N (1 to 8) reads repository
-                                       metadata from N tasks inside an allocation
+                                       metadata from N tasks inside an allocation.
+                                       --mpi reports libfabric and UCX, and inside an
+                                       allocation runs a two-rank hello per approved transport
   eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
                       --timestamp FILE [--spider CMD]
                                        write Lmod's spiderT.lua for those module
@@ -350,6 +352,12 @@ When `cvmfs_config` is on `PATH`, it runs `cvmfs_config probe` and `cvmfs_config
 `--cvmfs-parallel N`, or `doctor.cvmfs_parallel` when the flag is omitted, reads repository metadata from N tasks, and only inside an allocation.
 It uses `srun -n N stat` when `srun` is on `PATH`, and otherwise reads from N processes of its own.
 A build does not run these checks and does not set a CernVM-FS variable.
+With `--mpi`, it reports whether `fi_info` and `ucx_info` are on `PATH`, and any Slurm CPU or memory bind in `SLURM_CPU_BIND`, `SLURM_CPU_BIND_LIST` and `SLURM_MEM_BIND`.
+Inside an allocation it compiles a two-rank hello with `mpicc` and runs it with `mpirun -np 2` for each transport in `doctor.mpi_transports`.
+The hello for `ofi` is run with `OMPI_MCA_pml` set to cm and `OMPI_MCA_mtl` set to ofi.
+The hello for `ucx` is run with `OMPI_MCA_pml` set to ucx and `OMPI_MCA_mtl` set to ^ofi.
+Those variables are set only on that hello. A build does not set them, and it does not set `FI_PROVIDER`.
+Outside an allocation the hello is not compiled.
 Where the shell has a module command, a build keeps it and its `MODULEPATH`, so doctor checks that a directory on `MODULEPATH` holds `stack.module`.
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on `PATH`, as a build asks it, and shows the target it selects; a guard that cannot select one is a `warn`, since a build's own run of it decides.
 With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
@@ -359,6 +367,7 @@ It changes nothing, and exits 1 when a line says `FAIL`.
 |---|---|
 | `--cvmfs` | Check the CernVM-FS client. Off unless this flag, or `--cvmfs-parallel`, is given. |
 | `--cvmfs-parallel N` | Also read repository metadata from N tasks, 1 to 8, inside an allocation. Implies `--cvmfs`. |
+| `--mpi` | Report libfabric, UCX and Slurm binding, and run a two-rank hello per site-approved transport inside an allocation. Off unless this flag is given. |
 
 ### lmod-cache
 

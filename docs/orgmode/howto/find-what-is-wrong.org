@@ -177,6 +177,26 @@ A stale mount, whose kernel status is transport endpoint is not connected, is a 
 =--cvmfs-parallel N=, or =doctor.cvmfs_parallel=, reads repository metadata from N tasks, and only inside an allocation.
 It uses =srun= when that is on =PATH=.
 
+* An MPI transport
+
+=eb-local doctor --mpi= reports =fi_info=, =ucx_info= and any Slurm CPU or memory bind.
+Inside an allocation it runs a two-rank hello for each transport in =doctor.mpi_transports=.
+A build does not set the variables that hello uses.
+
+#+begin_src bash
+eb-local doctor --mpi
+#+end_src
+
+#+begin_example
+info fi_info: provider: tcp
+info ucx_info: # UCT version=1.16.0
+info no Slurm CPU or memory bind is set
+ok   MPI ofi hello size 2 on cpus 0,1 with OMPI_MCA_pml=cm OMPI_MCA_mtl=ofi
+#+end_example
+
+Ranks that share one CPU are a warning.
+Outside an allocation the hello is not compiled.
+
 * Check that it worked
 
 =eb-local doctor= in the same shell ends with this line, and exits 0:

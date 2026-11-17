@@ -85,7 +85,7 @@ class ForeignPrefixes(StorageFixture):
         conf.mkdir(parents=True)
         (conf / "config.toml").write_text('[doctor]\napproved_prefixes = ["/opt/host"]\n')
         (conf / "config.toml").chmod(0o600)
-        refused = self.run_tool(["doctor"], HOME=str(home))
+        refused = self.run_tool(["doctor"], HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
         self.assertEqual(refused.returncode, 2, refused.stderr)
         self.assertIn("doctor.approved_prefixes is a site setting", refused.stderr)
 
