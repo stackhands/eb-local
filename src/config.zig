@@ -8,8 +8,14 @@ const toml = @import("toml.zig");
 const storage = @import("storage.zig");
 const Allocator = std.mem.Allocator;
 
+/// What `clean` and `uninstall` do with what they remove: `rtrash` moves it
+/// to the trash, and stops when rtrash is not on `PATH`; `none` removes
+/// nothing without `--delete`; `auto` is `rtrash` when rtrash is on `PATH`,
+/// else `none`.
 pub const Trash = enum { auto, rtrash, none };
 
+/// A value and where it came from, as `eb-local config` shows it: `default`,
+/// a file and line with its layer and profile, a variable or an option.
 pub fn Setting(comptime T: type) type {
     return struct {
         value: T,
@@ -48,6 +54,8 @@ pub fn validSbatchOptions(v: []const u8) bool {
     return first.next().?[0] == '-';
 }
 
+/// A secret: the variable eb receives, and where its value is read from.
+/// The value itself is read only for a build, by `secrets.resolve`.
 pub const Secret = struct {
     /// The variable eb receives.
     name: []const u8,
@@ -64,6 +72,8 @@ pub const EessiVar = struct {
     from: []const u8,
 };
 
+/// Every setting in force, each with where it came from. The defaults here
+/// are the built-in ones; `load` puts the files, variables and options on top.
 pub const Settings = struct {
     profile: ?[]const u8 = null,
     /// EESSI-extend's own default, so `eb-local eb` and EESSI-extend loaded
@@ -141,6 +151,8 @@ pub fn ebRoot(a: Allocator, software: []const u8) Allocator.Error![]const u8 {
 /// The EB_LOCAL_DEV_BUILDENV_FOR_* word for "no build environment".
 pub const no_buildenv = "none";
 
+/// Whose file a source is. Only the site layer may set the storage settings,
+/// `build.site_toolchains` and `build.node_types`.
 pub const Layer = enum { site, user };
 
 /// EB_LOCAL_SECRET_NAME=SOURCE names where the secret NAME comes from.
@@ -153,6 +165,9 @@ pub const Source = struct {
     layer: Layer,
 };
 
+/// Values from the command line, which `load` puts above every other layer.
+/// The program sets `profile`, `project` and `buildenv` from `--profile`,
+/// `--project` and `--buildenv`; no option sets `prefix`.
 pub const Overrides = struct {
     profile: ?[]const u8 = null,
     prefix: ?[]const u8 = null,
@@ -160,10 +175,14 @@ pub const Overrides = struct {
     buildenv: ?[]const u8 = null,
 };
 
+/// Why the configuration was refused, filled in when `error.Invalid` is
+/// returned: one message naming the file and line, or the variable.
 pub const Diagnostic = struct {
     message: []const u8 = "",
 };
 
+/// `error.Invalid` when a file, variable or option is refused, with the
+/// reason in the `Diagnostic`.
 pub const Error = error{Invalid} || Allocator.Error;
 
 /// Module names as Lmod writes them. Anything else could change the meaning
@@ -217,10 +236,14 @@ pub fn validEessiName(name: []const u8) bool {
     return true;
 }
 
+/// A value [eessi] may give: at most 4096 bytes, with no line break or NUL.
 pub fn validEessiValue(v: []const u8) bool {
     return v.len <= 4096 and std.mem.indexOfAny(u8, v, "\n\r\x00") == null;
 }
 
+/// A source a secret may name: `env:` and a variable name, `file:` and an
+/// absolute or `~/` path, or `nimvault:` and an entry that does not start
+/// with `-`. None may hold a line break or NUL.
 pub fn validSecretSource(source: []const u8) bool {
     inline for (.{ "env:", "file:", "nimvault:" }) |kind| {
         if (std.mem.startsWith(u8, source, kind)) {

@@ -7,6 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// A value as the file wrote it: one of the kinds this parser accepts.
 pub const Value = union(enum) {
     string: []const u8,
     int: i64,
@@ -14,6 +15,8 @@ pub const Value = union(enum) {
     array: []const Value,
     table: *Table,
 
+    /// The kind of `v` with its article, as an error message names it:
+    /// "a string", "an integer".
     pub fn kindName(v: Value) []const u8 {
         return switch (v) {
             .string => "a string",
@@ -25,18 +28,21 @@ pub const Value = union(enum) {
     }
 };
 
+/// One key of a table, its value, and the line that set it.
 pub const Entry = struct {
     key: []const u8,
     value: Value,
     line: usize,
 };
 
+/// A table's keys in the order the file gives them.
 pub const Table = struct {
     entries: std.ArrayList(Entry) = .empty,
     /// Defined by a `[header]` (not only implied by a dotted name).
     explicit: bool = false,
     line: usize = 0,
 
+    /// The entry for `key`, or null when the table has none.
     pub fn get(t: *const Table, key: []const u8) ?*const Entry {
         for (t.entries.items) |*e| if (std.mem.eql(u8, e.key, key)) return e;
         return null;
@@ -54,10 +60,13 @@ pub const Diagnostic = struct {
     message: []const u8 = "",
 };
 
+/// `error.Invalid` when the text is not accepted, with the line and reason
+/// in the `Diagnostic`.
 pub const Error = error{Invalid} || Allocator.Error;
 
-/// Deepest nesting of arrays, and most keys and array items, accepted.
+/// Deepest nesting of arrays accepted.
 pub const max_depth = 32;
+/// Most keys and array items, counted together, one file may hold.
 pub const max_entries = 10_000;
 
 const Parser = struct {

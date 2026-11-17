@@ -9,17 +9,26 @@ const sys = common.sys;
 const fsx = common.fsx;
 const proc = common.proc;
 const cli = common.cli;
+/// The part of TOML the configuration files are written in.
 pub const toml = @import("toml.zig");
+/// The settings in force, and where each came from.
 pub const config = @import("config.zig");
+/// Where a secret's value comes from, and its removal from the logs.
 pub const secrets = @import("secrets.zig");
+/// The site file templates `eb-local site` renders.
 pub const sites = @import("sites.zig");
+/// Where a build may write: the allocation's node-local mount and the prefix.
 pub const storage = @import("storage.zig");
+/// The RPATH wrappers `dev` writes for compilers without a build environment.
 pub const rpath = @import("rpath.zig");
+/// `eb-local check`: what a program needs, and where it finds it.
 pub const elfcheck = @import("elfcheck.zig");
+/// `eb-local eb`: EasyBuild through EESSI-extend, without a site file.
 pub const extend = @import("extend.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
+/// The version `eb-local --version` prints, and the release it is.
 pub const version = "3.1.0";
 
 const usage_text =
@@ -2866,6 +2875,9 @@ fn subcommand(word: []const u8) ?Command {
     return if (cmd == .build) null else cmd;
 }
 
+/// Run the command the arguments name, and return its exit status. With
+/// `EB_LOCAL_EESSI_EXTEND` set, not empty and not `0`, every argument is
+/// eb's, as for `eb-local eb --`.
 pub fn main(init: std.process.Init) u8 {
     const a = init.arena.allocator();
     const argv_all = init.minimal.args.toSlice(a) catch die("cannot read the arguments", .{});

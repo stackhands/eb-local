@@ -14,14 +14,21 @@ const fsx = common.fsx;
 const proc = common.proc;
 const Allocator = std.mem.Allocator;
 
+/// The install EESSI-extend makes, chosen by which install variable is set:
+/// `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL` or
+/// `EESSI_CVMFS_INSTALL`.
 pub const Mode = enum { user, project, site, cvmfs };
 
+/// What `select` chose: the install mode, and the umask the launcher runs
+/// with for it, the one EESSI-extend sets for that mode.
 pub const Selection = struct {
     mode: Mode,
     /// Process umask, as octal digits: 077, 002 or 022.
     umask: []const u8,
 };
 
+/// `error.TooMany` when more than one install variable is set, a present
+/// empty one included; `tooMany` says which.
 pub const SelectError = error{TooMany};
 
 const Name = struct {
@@ -246,6 +253,10 @@ pub const script =
     \\exec eb "$@"
 ;
 
+/// The argument vector that runs eb through EESSI-extend for `sel`: a bash
+/// with no profile and no rc file running the launcher script, with the
+/// umask and the mode as its first arguments and `eb_args` after them. The
+/// caller owns the slice, not the strings in it.
 pub fn commandLine(a: Allocator, sel: Selection, eb_args: []const []const u8) Allocator.Error![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(a);

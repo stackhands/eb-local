@@ -16,6 +16,8 @@ pub const Refusal = struct {
     fix: []const u8 = "",
 };
 
+/// `error.Refused` when a path may not be used, with what and why in the
+/// `Refusal`.
 pub const Error = error{Refused} || Allocator.Error;
 
 fn refuse(a: Allocator, r: *Refusal, comptime what: []const u8, what_args: anytype, comptime fix: []const u8, fix_args: anytype) Error {
@@ -29,6 +31,8 @@ fn refuse(a: Allocator, r: *Refusal, comptime what: []const u8, what_args: anyty
     return error.Refused;
 }
 
+/// A line of `/proc/self/mountinfo`: where the file system is mounted, its
+/// type, and its mount options.
 pub const Mount = struct {
     target: []const u8,
     fstype: []const u8,
@@ -194,11 +198,14 @@ fn joined(a: Allocator, parts: []const []const u8, last: []const u8) Allocator.E
     return all.items;
 }
 
+/// Whether `path` is `root` or below it, compared by whole components; both
+/// are already canonical.
 pub fn under(path: []const u8, root: []const u8) bool {
     if (std.mem.eql(u8, path, root)) return true;
     return std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
 }
 
+/// The allocation's node-local mount that `jobRoot` checked.
 pub const JobRoot = struct {
     path: []const u8,
 };
@@ -353,6 +360,8 @@ pub fn removeTreeDevice(a: Allocator, path: []const u8, dev: u64) (fsx.Error || 
     try removeOnDevice(a, fsx.cwd, path, dev);
 }
 
+/// Remove `path` and everything under it on its own file system, as
+/// `removeTreeDevice` does for the device `path` is on.
 pub fn removeTree(a: Allocator, path: []const u8) (fsx.Error || Allocator.Error)!void {
     const st = try fsx.statAt(fsx.cwd, path, false);
     try removeTreeDevice(a, path, st.dev);

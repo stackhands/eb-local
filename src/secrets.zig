@@ -19,15 +19,21 @@ pub const value_limit = 64 * 1024;
 /// How long nimvault may take (a GPG agent may ask for a passphrase).
 pub const nimvault_timeout_ms = 30_000;
 
+/// A secret's value, read for one build: the variable eb receives, and
+/// what it is set to.
 pub const Resolved = struct {
     name: []const u8,
     value: []const u8,
 };
 
+/// Why a secret could not be read, filled in when `error.Unavailable` is
+/// returned. It names the secret and its source, never a value.
 pub const Failure = struct {
     message: []const u8 = "",
 };
 
+/// `error.Unavailable` when a secret's source cannot give its value, with
+/// the reason in the `Failure`.
 pub const Error = error{Unavailable} || Allocator.Error;
 
 /// Which nimvault runs and which vault it reads.
@@ -305,11 +311,14 @@ pub const max_depth = 16;
 /// How long a decompressor or compressor may take over one log.
 pub const codec_timeout_ms = 30 * 60_000;
 
+/// A log that could not be checked or rewritten, and why.
 pub const Failed = struct {
     path: []const u8,
     why: []const u8,
 };
 
+/// What `redactTree` did: how many logs it rewrote without the values, and
+/// the logs it left as they were, by reason.
 pub const RedactReport = struct {
     files: usize = 0,
     too_large: std.ArrayList([]const u8) = .empty,
@@ -411,6 +420,7 @@ fn redactFile(a: Allocator, dir: sys.fd_t, name: []const u8, path: []const u8, v
     report.files += 1;
 }
 
+/// Which files below a directory `redactTree` checks.
 pub const Filter = enum {
     /// Every regular file.
     all,
