@@ -273,10 +273,11 @@ Without `rtrash` and without `--delete`, it removes nothing and exits 1.
 ### config
 
 Print every setting in force, with where its value came from: `default`, a file and line with its layer and profile, a variable, or an option.
+[The configuration files](configuration.md) lists the settings.
 
 | Option | Meaning |
 |---|---|
-| `--check` | Also read each secret, and print `ok` or why not in place of its source, never the value. |
+| `--check` | Also read each secret, and print `ok`, or `FAILED:` and why, where the file that set it would be; never the value. |
 | `--env` | Print the settings as `export EB_LOCAL_...` lines for a shell, with each secret's source and never its value. |
 
 It exits 1 with `--check` when a secret cannot be read or the project directory cannot be used.
@@ -335,6 +336,7 @@ A value with a quote, a backslash or a control character is refused.
 
 ## See also
 
+-   [The configuration files](configuration.md), for each setting.
 -   [Refusals](refusals.md), for what each refusal means.
 -   [Give a secret only to the builds that need it](../howto/scope-secrets.md).
 -   [Where EESSI-extend installs](../explanation/install-variables.md).

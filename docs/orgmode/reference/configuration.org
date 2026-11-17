@@ -1,0 +1,119 @@
+#+title: The configuration files
+
+eb-local reads its settings from up to two TOML files, from =EB_LOCAL_*= variables, and from options.
+=eb-local config= prints each setting in force and where its value came from, and =eb-local profiles= prints the profiles the files define.
+
+* Files
+
+| File                                                                                                                                                       | Layer |
+|------------------------------------------------------------------------------------------------------------------------------------------------------------+-------|
+| The site file: the first that exists of =config.toml= beside the program, =/etc/eb-local/config.toml=, =eb-local.conf= beside the program and =/etc/eb-local.conf= | site  |
+| =$XDG_CONFIG_HOME/eb-local/config.toml=, or =$HOME/.config/eb-local/config.toml= when =XDG_CONFIG_HOME= is unset or empty                                    | user  |
+
+=--config FILE=, or =EB_LOCAL_CONFIG=FILE= without it, names a file to read in place of one of the two: in place of the site file when root or the owner of the program owns FILE, and in place of the user file when you do.
+The other file is still read.
+A FILE that does not exist, or that someone else owns, stops eb-local.
+
+eb-local reads a file only when it is a regular file, not a symbolic link, not writable by group or others, and at most 1 MiB; a site file must belong to root or to the owner of the program, and a user file to you.
+A file that fails any of these stops eb-local; none is skipped.
+
+A file whose name does not end in =.toml= is a 1.x =eb-local.conf=: one =key = value= line per setting, with =#= starting a comment.
+
+| 1.x key             | Setting                     |
+|---------------------+-----------------------------|
+| =node_local_root=   | =storage.node_local_root=   |
+| =node_local_mount=  | =storage.node_local_mount=  |
+| =node_local_fstype= | =storage.node_local_fstype= |
+| =shared_scratch=    | =storage.shared_scratch=    |
+| =stack_module=      | =stack.module=              |
+| =extend_module=     | =stack.extend=              |
+| =allocation_hint=   | =build.allocation_hint=     |
+| =dev_buildenv=      | =dev.buildenv=              |
+| =trash=             | =clean.trash=               |
+
+* Layers
+
+A setting takes its value from the last of these that sets it:
+
+1. the built-in default;
+2. the site file;
+3. the profile in force, in the site file;
+4. the user file;
+5. the profile in force, in the user file;
+6. an =EB_LOCAL_*= variable;
+7. an option: =--project=, or =--buildenv= for =dev=.
+
+A secret, or an =[eessi]= variable, replaces only the one of the same name an earlier layer set.
+
+* Profiles
+
+A profile is a table =[profile.NAME]= that holds any setting a file's top level may, except =default_profile= and the site settings.
+The profile in force is the one =--profile= names, else =EB_LOCAL_PROFILE=, else =default_profile= from the user file, else =default_profile= from the site file.
+An empty =EB_LOCAL_PROFILE= or =default_profile= selects no profile; =--profile= needs a name.
+A name that neither file defines is refused, with the names they do define:
+
+#+begin_example
+eb-local: no profile 'huge' (defined: small, big)
+#+end_example
+Every profile in both files is checked when the files are read, the profile in force or not.
+
+* Settings
+
+A key is written in full at the top of a file, as =dev.modules = [...]=, or without its table's name under the table's header, as =modules = [...]= under =[dev]=.
+The default is what =eb-local config= prints for a setting that nothing sets.
+The site settings, =storage.*=, =build.site_toolchains= and =build.node_types=, may be set only in the site file, outside any profile.
+
+| Key                          | Value                                                 | Default                                    | Meaning                                                                                                                                 |
+|------------------------------+-------------------------------------------------------+--------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------|
+| =default_profile=            | a profile name                                        |                                            | The profile in force when neither =--profile= nor =EB_LOCAL_PROFILE= names one. Outside any profile.                                    |
+| =prefix=                     | a path; =~/= is your home directory                   | =$HOME/eessi=                              | Where your installs go, and what =env= loads.                                                                                           |
+| =project=                    | a path                                                | =(none)=                                   | A project directory, which replaces =prefix= for installs a group shares.                                                              |
+| =stack.module=               | a module name                                         | =EESSI/2026.06=                            | The EESSI module.                                                                                                                       |
+| =stack.extend=               | a module name                                         | =EESSI-extend/2026.06-easybuild=           | The EESSI-extend module.                                                                                                                |
+| =dev.buildenv=               | a module name                                         | =buildenv/default-foss-2026.1=             | The build environment =dev= loads for the GCC compilers. Set, it is loaded whatever the compilers.                                      |
+| =dev.buildenv_for.cuda=      | a module name, or =""=                                | =buildenv/default-foss-2026.1-CUDA-13.3.0= | The build environment for the CUDA compilers, when Lmod has it; otherwise, or when empty, the GCC one.                                 |
+| =dev.buildenv_for.llvm=      | a module name, or =""=                                | =buildenv/default-lfoss-2026.1=            | The build environment for =llvm-compilers=, when Lmod has it; otherwise, or when empty, eb-local's RPATH wrappers.                     |
+| =dev.buildenv_for.intel=     | a module name, or =""=                                | =buildenv/default-intel-2026.1=            | The build environment for =intel-compilers=, when Lmod has it; otherwise, or when empty, eb-local's RPATH wrappers.                    |
+| =dev.buildenv_for.nvhpc=     | a module name, or =""=                                | =(none: RPATH wrappers)=                   | The build environment for NVHPC, when Lmod has it; otherwise, or when empty, eb-local's RPATH wrappers.                                 |
+| =dev.modules=                | an array of module names                              | =(none)=                                   | Modules =dev= loads before those named on its command line.                                                                            |
+| =build.allocation_hint=      | a string                                              | =(none)=                                   | The allocation a build started outside a Slurm job suggests, such as =salloc -p cpu -n 16 -t 02:00:00=.                                 |
+| =build.site_toolchains=      | an array of =NAME/VERSION=                            | =(none)=                                   | Toolchains EESSI's hooks accept besides foss and lfoss; EasyBuild gets them as =EESSI_SITE_TOP_LEVEL_TOOLCHAINS_<EESSI version>=. Site setting. |
+| =build.node_types=           | a table of strings                                    | =(none)=                                   | Each node type's name, of letters, digits, =-= and =_=, and the =sbatch= options that place a job there. Site setting.                  |
+| =build.secrets=              | an array of secret names                              | =(every secret)=                           | The secrets a build gets; =[]= gives it none.                                                                                          |
+| =clean.trash=                | =auto=, =rtrash= or =none=                            | =auto=                                     | What =clean= and =uninstall= do with what they remove: =rtrash= moves it to the trash, =none= removes nothing without =--delete=, and =auto= is =rtrash= when rtrash is on =PATH=, else =none=. |
+| =clean.logs_older_than_days= | an integer from 0 to 99999                            | =30=                                       | The age, in whole days, past which =clean= removes a log.                                                                              |
+| =nimvault.program=           | an absolute path                                      | =(nimvault on PATH)=                       | The nimvault program that reads =nimvault:= secrets.                                                                                    |
+| =nimvault.vault=             | an absolute path, or one starting =~/=                | =(nimvault finds it)=                      | The vault nimvault reads, passed as =--vault=.                                                                                          |
+| =storage.node_local_root=    | an absolute path                                      | =(not set)=                                | The directory that holds the allocations' node-local mounts. Site setting.                                                              |
+| =storage.node_local_mount=   | a file name, with =%j=                                | =%u.%j=                                    | The name of each allocation's mount below the root: =%u= is the user and =%j= the job id. Site setting.                                 |
+| =storage.node_local_fstype=  | a file system type                                    | =xfs=                                      | The type each allocation's mount must have. Site setting.                                                                               |
+| =storage.shared_scratch=     | an array of absolute paths                            | =(none)=                                   | Shared scratch file systems, where no prefix, sources or logs may be. Site setting.                                                     |
+| =[eessi]=                    | a table of =EESSI_*= names and strings                | =(none)=                                   | Variables for the EESSI module and its EasyBuild hooks, which =env=, =dev= and a build export before EESSI loads.                      |
+| =[secrets]=                  | a table of names and sources                          | =(none)=                                   | Where each secret's value comes from: =env:VARIABLE=, =file:PATH= or =nimvault:ENTRY=.                                                   |
+
+A module name starts with a letter or digit, and holds letters, digits, =.=, =_=, =+=, =-= and single slashes, with no slash at the end and no part =..=.
+An unknown key, a value of the wrong type, a key set twice and a value a setting does not take are each refused, naming the file and the line.
+
+** [eessi]
+
+=[eessi]= takes =EESSI_*= names other than those eb-local sets itself: =EESSI_USER_INSTALL=, =EESSI_PROJECT_INSTALL=, =EESSI_SITE_INSTALL=, =EESSI_CVMFS_INSTALL=, =EESSI_SITE_SOFTWARE_PREFIX=, =EESSI_SOFTWARE_SUBDIR_OVERRIDE=, =EESSI_ACCELERATOR_TARGET_OVERRIDE= and =EESSI_OVERRIDE_GPU_CHECK=, and the =EESSI_SITE_TOP_LEVEL_TOOLCHAINS_*= ones =build.site_toolchains= sets.
+Each value is one line of at most 4096 bytes.
+
+** [secrets]
+
+A secret's name is the variable =eb= gets: letters, digits and =_=, not starting with a digit.
+It may not be =PATH=, =HOME=, =USER=, =SHELL=, =TMPDIR=, =MODULEPATH=, =PYTHONPATH=, =BASH_ENV= or =ENV=, nor start with =LD_=, =EESSI_=, =EASYBUILD_=, =LMOD_=, =SLURM_=, =EB_LOCAL_= or =BASH_FUNC_=.
+
+| Source           | The value                                                                                                                                   |
+|------------------+---------------------------------------------------------------------------------------------------------------------------------------------|
+| =env:VARIABLE=   | The variable VARIABLE in eb-local's environment.                                                                                            |
+| =file:PATH=      | The file PATH, an absolute path or one starting =~/=: a regular file, not a symbolic link, that you own, with no access for group or others and one link. |
+| =nimvault:ENTRY= | What =nimvault get ENTRY= prints, with =--vault= when =nimvault.vault= is set, within 30 seconds. An ENTRY starting with =-= is refused.      |
+
+A value is read only for a build, or by =eb-local config --check=.
+No value may be empty or hold a NUL byte; one from a file or from nimvault may be at most 64 KiB, and loses one newline at its end.
+
+* See also
+
+- [[file:cli.org][The eb-local command]], for =eb-local config= and =eb-local profiles=.
+- [[file:../howto/scope-secrets.org][Give a secret only to the builds that need it]].
