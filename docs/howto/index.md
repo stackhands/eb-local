@@ -8,5 +8,6 @@ The title names the task.
 ```{toctree}
 :maxdepth: 1
 
+install
 scope-secrets
 ```

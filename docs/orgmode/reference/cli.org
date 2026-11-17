@@ -332,6 +332,13 @@ A value with a quote, a backslash or a control character is refused.
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |
 
+* The 1.x Bash script
+
+The Bash script =eb-local=, 1.x, is frozen: it gains no commands, and it is removed in 4.0.0, when the test suite's default run against it ends too.
+It needs GNU coreutils, util-linux =findmnt=, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
+It reads one site file, =eb-local.conf=: the file =EB_LOCAL_CONFIG= names, else the one beside the script, else =/etc/eb-local.conf=, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
+Its =key = value= lines are the 1.x keys [[file:configuration.org][The configuration files]] lists.
+
 * See also
 
 - [[file:configuration.org][The configuration files]], for each setting.

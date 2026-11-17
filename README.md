@@ -480,36 +480,8 @@ A secret a build does not get is not read, so it cannot stop that build. A name 
 
 ## Install
 
-On a cluster whose site installs eb-local, load its module and skip the rest of this section.
-
-Otherwise, download the static binary, one file per architecture, from a [release](https://github.com/stackhands/eb-local/releases):
-
-```sh
-v=3.1.0; f=eb-local-$v-$(uname -m)-linux-musl
-mkdir -p ~/.local/bin && cd ~/.local/bin
-curl -fLO "https://github.com/stackhands/eb-local/releases/download/v$v/$f"
-curl -fL "https://github.com/stackhands/eb-local/releases/download/v$v/SHA256SUMS" | sha256sum -c --ignore-missing
-mv "$f" eb-local && chmod 755 eb-local
-eb-local --version
-```
-
-`env` and `dev` work once `~/.local/bin` is on `PATH`.
-Building with EasyBuild also needs a site file beside the program: `eb-local site install slurm` with your cluster's paths, or the site's own template file.
-To build from source: `zig build --release=safe` with Zig 0.17.1.
-
-Each release binary has a build provenance attestation and, from 2.4.0, a CycloneDX SBOM (`$f.cdx.json` beside it) with its own attestation.
-With the GitHub CLI, check both before the `mv`:
-
-```sh
-gh attestation verify "$f" --repo stackhands/eb-local
-gh attestation verify "$f" --repo stackhands/eb-local --predicate-type https://cyclonedx.org/bom
-```
-
-The Bash script (`eb-local`, 1.x) is frozen: it gains no commands, and it is removed in 4.0.0, when the suite's default run against it ends too.
-It needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
-It reads one site file, `eb-local.conf`: the file `EB_LOCAL_CONFIG` names, else the one beside the script, else `/etc/eb-local.conf`, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
-Its `key = value` lines set `node_local_root`, `node_local_mount`, `node_local_fstype`, `shared_scratch`, `allocation_hint`, `stack_module`, `extend_module`, `dev_buildenv` and `trash`.
-A site's easyconfig installs the program and its site configuration.
+On a cluster whose site installs eb-local, load its module.
+Otherwise, download the static binary for your architecture from a [release](https://github.com/stackhands/eb-local/releases), or build it from source with Zig 0.17.1: [Install eb-local](docs/howto/install.md) has the steps and the checks.
 
 ## Test
 
