@@ -74,6 +74,7 @@ eb-local 3.1.0 (x86_64-linux-musl, safe, zig 0.17.1, 8755a6a)
 ```
 
 The last part of the version line is the commit: `8755a6a` is release 3.1.0, and a build from source shows the commit it was built from.
+`./eb-local --version` in a source checkout prints `eb-local 1.x (frozen Bash script)`, the compatibility script kept for old installs; this page checks the installed binary on your `PATH`.
 `eb-local env` and `eb-local dev` work from here.
 `eb-local env --strict` refuses load lines until the EESSI init file exists, as [Load EESSI before a build](load-eessi.md) describes.
 Site operators refresh Lmod's cache with `eb-local lmod-cache`, as [Refresh the module cache](refresh-the-module-cache.md) describes.
