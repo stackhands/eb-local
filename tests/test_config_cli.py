@@ -219,6 +219,30 @@ class ConfigCli(StorageFixture):
         self.assertIn("profile                      (none)", run.stdout)
         self.assertRegex(run.stdout, r"dev\.modules\s+GSL/2\.8-GCC-15\.2\.0\s+\[user .*mine\.toml:1\]")
 
+    def test_an_option_takes_its_value_after_an_equals_sign_as_after_a_space(self):
+        # --config=FILE was a word of a build's: eb got it, the file went
+        # unread, and env refused it while naming --config as its own.
+        named = "--config=" + str(self.site)
+        for args in ([named, "config"], ["config", named]):
+            with self.subTest(args=args):
+                run = self.run_tool(args, SLURM_JOB_ID="")
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertRegex(run.stdout, r"storage\.node_local_root\s+\S+\s+\[site .*site\.toml:")
+        run = self.run_tool(["env", named], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        run = self.run_tool([named, "--explain", "recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("\nset -- ", run.stdout)
+        self.assertNotIn("--config=", run.stdout)
+        # An empty --project= made the current directory the project.
+        for args in (["--project=", "config"], ["--profile=", "config"], ["--config=", "config"],
+                     ["dev", "--buildenv="], ["submit", "--on=", "recipe.eb"]):
+            with self.subTest(args=args):
+                run = self.run_tool(args, SLURM_JOB_ID="")
+                option = next(a for a in args if a.endswith("="))[:-1]
+                self.assertEqual((run.returncode, run.stdout), (2, ""), run.stderr)
+                self.assertEqual(run.stderr, f"eb-local: {option} needs a value\n")
+
     def test_profiles_lists_every_profile(self):
         run = self.run_tool(["profiles"])
         self.assertEqual(run.returncode, 0, run.stderr)

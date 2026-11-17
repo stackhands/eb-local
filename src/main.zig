@@ -2936,6 +2936,14 @@ pub fn main(init: std.process.Init) u8 {
             return xs[idx.*];
         }
     }.get;
+    const joined = struct {
+        /// The value of OPT=VALUE when X is that; empty, as after a space, it is refused.
+        fn get(x: []const u8, opt: []const u8) ?[]const u8 {
+            if (!std.mem.startsWith(u8, x, opt) or x.len == opt.len or x[opt.len] != '=') return null;
+            if (x.len == opt.len + 1) die("{s} needs a value", .{opt});
+            return x[opt.len + 1 ..];
+        }
+    }.get;
     while (i < args.len) : (i += 1) {
         const x: []const u8 = args[i];
         if (command == .eb and std.mem.eql(u8, x, "--")) {
@@ -2948,14 +2956,16 @@ pub fn main(init: std.process.Init) u8 {
             return 0;
         } else if (std.mem.eql(u8, x, "--project")) {
             g.project = value(args, &i, "--project");
-        } else if (std.mem.startsWith(u8, x, "--project=")) {
-            g.project = x["--project=".len..];
+        } else if (joined(x, "--project")) |v| {
+            g.project = v;
         } else if (std.mem.eql(u8, x, "--profile")) {
             g.profile = value(args, &i, "--profile");
-        } else if (std.mem.startsWith(u8, x, "--profile=")) {
-            g.profile = x["--profile=".len..];
+        } else if (joined(x, "--profile")) |v| {
+            g.profile = v;
         } else if (std.mem.eql(u8, x, "--config")) {
             g.config_file = value(args, &i, "--config");
+        } else if (joined(x, "--config")) |v| {
+            g.config_file = v;
         } else if (std.mem.eql(u8, x, "--env") and command == .build and rest.items.len == 0) {
             command = .env;
         } else if (std.mem.eql(u8, x, "--explain") and command == .build and rest.items.len == 0) {
@@ -2978,8 +2988,8 @@ pub fn main(init: std.process.Init) u8 {
             .submit => {
                 if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
                     submit.on = value(args, &i, "--on");
-                } else if (rest.items.len == 0 and std.mem.startsWith(u8, x, "--on=")) {
-                    submit.on = x["--on=".len..];
+                } else if (rest.items.len == 0 and joined(x, "--on") != null) {
+                    submit.on = joined(x, "--on").?;
                 } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
                     submit.print = true;
                 } else rest.append(a, x) catch oom();
@@ -3016,8 +3026,8 @@ pub fn main(init: std.process.Init) u8 {
             .dev => {
                 if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
-                } else if (std.mem.startsWith(u8, x, "--buildenv=")) {
-                    g.buildenv = x["--buildenv=".len..];
+                } else if (joined(x, "--buildenv")) |v| {
+                    g.buildenv = v;
                 } else if (x.len > 0 and x[0] == '-') {
                     die("dev does not know the option '{s}'", .{x});
                 } else if (!config.validModule(x)) {
