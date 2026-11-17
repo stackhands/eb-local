@@ -61,3 +61,11 @@ explanation/index
 
 reference/index
 ```
+
+```{toctree}
+:hidden:
+:caption: Project
+
+contributing
+changelog
+```

@@ -92,22 +92,9 @@ A build gets every secret unless `build.secrets` names the ones it gets, and the
 On a cluster whose site installs eb-local, load its module.
 Otherwise, download the static binary for your architecture from a [release](https://github.com/stackhands/eb-local/releases), or build it from source with Zig 0.17.1: [Install eb-local](docs/howto/install.md) has the steps and the checks.
 
-## Test
+## Contributing
 
-```sh
-python3 -m unittest discover -s tests                    # the Bash script, until 4.0.0
-zig build unit && zig build test                          # the Zig build: unit tests, then the same suite
-```
-
-`zig build test` runs the suite against a debug build with the test seams; with `-Dtest-ops=true`, as CI runs it, against the binary it builds.
-
-A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
-
-`prek run --all-files` runs the hooks in `prek.toml`, and `prek install` runs them on each commit: whitespace and end-of-file fixes, YAML and TOML checks, `zig fmt --check`, shellcheck and codespell.
-
-The documentation is this README and the pages under `docs/`. A page with an Org source in `docs/orgmode/` is written from it, so edit the Org file and run `emacs --batch -Q -l docs/export.el`; `tests/test_docs.py` checks that the two agree where Emacs is installed. `python -m sphinx -W -b html docs docs/_build/html` builds the site, as CI does; it needs Zig 0.17.1 on `PATH`, to write the API reference from the code.
-
-`tests/site/` holds the site acceptance scripts: the development tasks of [Compile your code against EESSI](docs/howto/compile.md), and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
+[Contributing](docs/contributing.md) has the tests, the news fragment each change adds, the site acceptance scripts in `tests/site/`, and how to build these pages.
 
 ## License
 
