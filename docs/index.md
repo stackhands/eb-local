@@ -26,4 +26,3 @@ howto/scope-secrets
 reference/refusals
 explanation/install-variables
 ```
-

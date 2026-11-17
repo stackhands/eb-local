@@ -522,6 +522,8 @@ zig build unit && zig build test                          # the Zig build: unit 
 
 A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type `feature`, `bugfix`, `doc`, `removal` or `misc`; `towncrier build --draft --version 2.1.2` shows the release notes it makes.
 
+`prek run --all-files` runs the hooks in `prek.toml`, and `prek install` runs them on each commit: whitespace and end-of-file fixes, YAML and TOML checks, `zig fmt --check`, shellcheck and codespell.
+
 The documentation is this README and the pages under `docs/`. A page with an Org source in `docs/orgmode/` is written from it, so edit the Org file and run `emacs --batch -Q -l docs/export.el`; `tests/test_docs.py` checks that the two agree where Emacs is installed. `python -m sphinx -W -b html docs docs/_build/html` builds the site, as CI does.
 
 `tests/site/` holds the site acceptance scripts: the development tasks above, and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
