@@ -173,11 +173,33 @@ const Place = struct {
     project: bool,
 };
 
-/// Whether NAME=VALUE is what `eb-local env` sets for P: its install
-/// variable, naming its prefix.
-fn ownInstallVar(c: Ctx, p: Place, name: []const u8, value: []const u8) bool {
+/// What `eb-local env` set, if NAME=VALUE is that: its install variable,
+/// naming P's prefix, or, when the extension env loads for a prefix that
+/// exists is loaded, the install path it chose in the prefix's versions
+/// tree, or the EasyBuild prefix it sets beside that path.
+fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: []const u8) ?[]const u8 {
     const mine = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
-    return std.mem.eql(u8, name, mine) and std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix);
+    if (std.mem.eql(u8, name, mine)) {
+        return if (std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix)) "names your prefix, as eb-local env sets it" else null;
+    }
+    const is_path = std.mem.eql(u8, name, "EASYBUILD_INSTALLPATH");
+    if (!is_path and !std.mem.eql(u8, name, "EASYBUILD_PREFIX")) return null;
+    if (!moduleLoaded(c, s.extend_module.value)) return null;
+    const installpath = nonEmpty(c.env.get("EASYBUILD_INSTALLPATH")) orelse return null;
+    const versions = std.fs.path.join(c.a, &.{ p.prefix, "versions" }) catch oom();
+    const path = storage.canonical(c.a, installpath, c.cwd) catch oom();
+    if (!storage.under(path, versions) or std.mem.eql(u8, path, versions)) return null;
+    return if (is_path) "is in your prefix, as EESSI-extend sets it when eb-local env loads it" else "is EESSI-extend's own, set when eb-local env loads it";
+}
+
+/// Whether Lmod lists MODULE, a name or a name and version, as loaded.
+fn moduleLoaded(c: Ctx, module: []const u8) bool {
+    var it = std.mem.splitScalar(u8, c.env.get("LOADEDMODULES") orelse "", ':');
+    while (it.next()) |m| {
+        if (std.mem.eql(u8, m, module)) return true;
+        if (std.mem.startsWith(u8, m, module) and m.len > module.len and m[module.len] == '/') return true;
+    }
+    return false;
 }
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
@@ -1924,7 +1946,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const started: i64 = nowSecs();
 
     for (leftover_vars) |v| if (c.env.get(v)) |val| {
-        if (!ownInstallVar(c, p, v, val))
+        if (ownInstallVar(c, s, p, v, val) == null)
             warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
     };
     var env = c.env.clone(a) catch oom();
@@ -2256,8 +2278,8 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     // What this shell carries.
     var leftovers: usize = 0;
     for (install_vars) |v| if (c.env.get(v)) |val| {
-        if (ownInstallVar(c, p, v, val)) {
-            note(a, &out, "ok  ", "{s} names your prefix, as eb-local env sets it", .{v});
+        if (ownInstallVar(c, s, p, v, val)) |why| {
+            note(a, &out, "ok  ", "{s} {s}", .{ v, why });
             continue;
         }
         leftovers += 1;

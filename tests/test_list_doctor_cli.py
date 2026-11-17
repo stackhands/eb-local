@@ -122,6 +122,28 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("warn LD_LIBRARY_PATH is set", run.stdout)
         self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
 
+    def test_doctor_takes_what_eessi_extend_set_for_eb_local_env_as_its_own(self):
+        # eval "$(eb-local env)" loads EESSI-extend once the prefix exists, and
+        # the extension sets the install path and EasyBuild's prefix.
+        self.prefix.mkdir(parents=True)
+        tree = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+        shell = dict(EESSI_USER_INSTALL=str(self.prefix), EASYBUILD_INSTALLPATH=str(tree),
+                     EASYBUILD_PREFIX="/tmp/u/easybuild",
+                     LOADEDMODULES="EESSI/2026.06:EasyBuild/5.4.2:EESSI-extend/2026.06-easybuild")
+        run = self.run_tool(["doctor"], **shell)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("warn EASYBUILD", run.stdout)
+        self.assertIn("ok   EASYBUILD_INSTALLPATH is in your prefix, as EESSI-extend sets it when eb-local env loads it\n", run.stdout)
+        self.assertIn("ok   EASYBUILD_PREFIX is EESSI-extend's own, set when eb-local env loads it\n", run.stdout)
+        # Without the extension loaded, or with its install path elsewhere,
+        # they are what an earlier session left.
+        for change in ({"LOADEDMODULES": "EESSI/2026.06"}, {"EASYBUILD_INSTALLPATH": "/elsewhere"}):
+            with self.subTest(**change):
+                run = self.run_tool(["doctor"], **dict(shell, **change))
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("warn EASYBUILD_PREFIX=/tmp/u/easybuild is set in this shell", run.stdout)
+                self.assertIn("warn EASYBUILD_INSTALLPATH=", run.stdout)
+
     def test_the_readme_default_for_a_site_is_one_prefix_for_eb_local_and_eessi_extend(self):
         text = README.read_text()
         section = text[text.index("\n## A site Lmod hook\n"):]
