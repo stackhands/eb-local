@@ -315,6 +315,17 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(old.exists())
 
+    @unittest.skipUnless(binary.BIN, "clean.trash is a setting of the Zig build")
+    def test_clean_says_clean_trash_none_keeps_the_logs_with_rtrash_there(self):
+        self.with_rtrash()
+        old, = self.logs(40)
+        run = self.run_wrapper(["clean"], SLURM_JOB_ID="", EB_LOCAL_CLEAN_TRASH="none")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("clean.trash is none [environment EB_LOCAL_CLEAN_TRASH]; nothing removed", run.stderr)
+        self.assertNotIn("rtrash is not installed", run.stderr)
+        self.assertTrue(old.exists())
+        self.assertFalse((self.root / "trashed").exists())
+
     def test_clean_dry_run_lists_and_keeps(self):
         self.with_rtrash()
         old, = self.logs(40)

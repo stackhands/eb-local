@@ -138,12 +138,25 @@ class Uninstall(StorageFixture):
     def test_without_rtrash_nothing_goes_unless_asked(self):
         run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"])
         self.assertEqual(run.returncode, 1)
+        self.assertIn("rtrash is not installed; nothing removed", run.stderr)
         self.assertTrue(all(p.exists() for p in self.installs + self.modules))
         run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(any(p.exists() for p in self.installs + self.modules))
         # The emptied NAME directories go too.
         self.assertFalse(self.installs[0].parent.exists())
+
+    def test_clean_trash_none_is_what_keeps_them_with_rtrash_there(self):
+        (self.bin / "rtrash").write_text(RTRASH)
+        (self.bin / "rtrash").chmod(0o755)
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"], PATH=f"{self.bin}:/usr/bin:/bin",
+                            EB_LOCAL_CLEAN_TRASH="none")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("clean.trash is none [environment EB_LOCAL_CLEAN_TRASH]; nothing removed. "
+                      "Pass --delete to delete for good, or set clean.trash to auto or rtrash.", run.stderr)
+        self.assertNotIn("rtrash is not installed", run.stderr)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+        self.assertFalse((self.root / "trashed").exists())
 
     def test_with_rtrash_both_targets_go_to_the_trash(self):
         (self.bin / "rtrash").write_text(RTRASH)

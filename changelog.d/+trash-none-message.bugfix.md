@@ -1,0 +1,1 @@
+`eb-local clean` and `eb-local uninstall` say `clean.trash is none`, with where it was set, when that setting keeps them from removing anything without `--delete`; they said `rtrash is not installed` even with rtrash on `PATH`.

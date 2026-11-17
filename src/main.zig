@@ -1601,7 +1601,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
-        warn("rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.", .{});
+        notTrashed(s);
         return 1;
     }
     // Build workspaces are node-local scratch the scheduler removes anyway;
@@ -2697,6 +2697,14 @@ fn makeWritable(c: Ctx, path: []const u8, depth: usize) void {
 /// Takes write permission from everyone, as EasyBuild does to an
 /// installation (EESSI-extend sets EASYBUILD_READ_ONLY_INSTALLDIR); a
 /// symbolic link is not followed.
+/// Why clean or uninstall removed nothing without --delete: clean.trash
+/// is none, or it is auto and rtrash is not on PATH.
+fn notTrashed(s: config.Settings) void {
+    if (s.trash.value == .none) {
+        warn("clean.trash is none [{s}]; nothing removed. Pass --delete to delete for good, or set clean.trash to auto or rtrash.", .{s.trash.from});
+    } else warn("rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.", .{});
+}
+
 fn makeReadOnly(c: Ctx, path: []const u8, depth: usize) void {
     if (depth > 64) return;
     const st = fsx.statAt(fsx.cwd, path, false) catch return;
@@ -2756,7 +2764,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         .none => {},
     }
     if (trash != .rtrash and !o.delete) {
-        warn("rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.", .{});
+        notTrashed(s);
         return 1;
     }
     for (found.installs.items) |d| makeWritable(c, d, 0);
