@@ -1,0 +1,1 @@
+The how-to "Find what is wrong with a build or a module" reads `eb-local doctor` and `eb-local list`, and the CPU targets a module is built for; the reference lists what `doctor` checks. A test checks each `doctor` line the how-to guides show against the messages in the code.

@@ -85,5 +85,6 @@ The batch scripts go to `<install prefix>/.eb-local/jobs`, and each job's output
 ## Related
 
 -   [Install software on top of EESSI with EasyBuild](install-software.md)
+-   [Find what is wrong with a build or a module](find-what-is-wrong.md): which CPU targets a module is built for
 -   [Run paths, and one build per CPU target](../explanation/run-paths.md)
 -   [The configuration files](../reference/configuration.md): `build.node_types`

@@ -111,5 +111,6 @@ The column marked =*= is this node's CPU target.
 
 - [[file:load-eessi.org][Load EESSI and the software you installed]]
 - [[file:build-for-every-node-type.org][Build for every node type]]
+- [[file:find-what-is-wrong.org][Find what is wrong with a build or a module]]
 - [[file:../explanation/install-variables.org][Where EESSI-extend installs]]
 - [[file:../reference/refusals.org][Refusals]]

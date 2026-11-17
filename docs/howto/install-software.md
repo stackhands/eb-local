@@ -113,5 +113,6 @@ The column marked `*` is this node's CPU target.
 
 -   [Load EESSI and the software you installed](load-eessi.md)
 -   [Build for every node type](build-for-every-node-type.md)
+-   [Find what is wrong with a build or a module](find-what-is-wrong.md)
 -   [Where EESSI-extend installs](../explanation/install-variables.md)
 -   [Refusals](../reference/refusals.md)

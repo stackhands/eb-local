@@ -14,5 +14,6 @@ load-eessi
 compile
 install-software
 build-for-every-node-type
+find-what-is-wrong
 scope-secrets
 ```
