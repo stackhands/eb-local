@@ -8,6 +8,7 @@ const std = @import("std");
 
 const tool = "eb-local";
 
+/// Inputs for `eb-local lmod-cache`.
 pub const Options = struct {
     modulepath: []const u8 = "",
     cache_dir: []const u8 = "",
