@@ -109,10 +109,23 @@ When you ask the site for help, include the output of =eb-local doctor= and of =
 
 * Check the EESSI client and module order
 
-Before a site build, run the standalone, non-mutating readiness probe from the repository checkout:
+Before a site build, run the standalone, non-mutating readiness probe =eb-local-readiness=.
+Release 3.1.0 ships the =eb-local= binary only; the script is in the repository on =main=, not in the release archive.
+
+From a checkout, run it from the repository root:
 
 #+begin_src bash
 ./eb-local-readiness --prefix /opt/site/eessi
+#+end_src
+
+Without a checkout, copy the script from =main= onto =PATH=.
+The commit pinned here matches published =main=:
+
+#+begin_src bash
+curl -fsSL -o ~/.local/bin/eb-local-readiness \
+  https://raw.githubusercontent.com/stackhands/eb-local/8cc1d02b38c163accd7973d1ac8e8ab12e013427/eb-local-readiness
+chmod 0755 ~/.local/bin/eb-local-readiness
+eb-local-readiness --prefix /opt/site/eessi
 #+end_src
 
 The repository defaults to =EESSI_CVMFS_REPO=, or =/cvmfs/software.eessi.io=.
