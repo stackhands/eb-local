@@ -91,6 +91,7 @@ A build gets every secret unless `build.secrets` names the ones it gets, and the
 
 On a cluster whose site installs eb-local, load its module.
 Otherwise, download the static binary for your architecture from a [release](https://github.com/stackhands/eb-local/releases), or build it from source with Zig 0.17.1: [Install eb-local](docs/howto/install.md) has the steps and the checks.
+In a source checkout, `./eb-local --version` is the frozen Bash 1.x compatibility script; the installed Zig binary is the `eb-local` command this README and the docs describe.
 
 ## Contributing
 
