@@ -1,0 +1,1 @@
+The how-to "Clean up after builds, and remove what you installed" covers `eb-local clean`, the workspace a failed build keeps, `eb-local uninstall` and `eb-local restore`, with what each prints; the reference has the details the README had.

@@ -1,0 +1,1 @@
+The explanation "Where a build puts things, and why" holds the README's "Where things go": what goes in the workspace and what in the prefix, why the work happens on a node-local mount of the job's own, why installs, sources and logs stay in the prefix, and why the default prefix is `$HOME/eessi`, with the notice a pre-3.0 `$HOME/.local/eessi` gets.

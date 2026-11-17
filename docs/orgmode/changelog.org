@@ -1,0 +1,10 @@
+#+title: Changelog
+
+# CHANGELOG.md at the top of the repository is the one changelog; this page
+# shows it, from its first release.
+
+#+begin_export md
+```{include} ../CHANGELOG.md
+:start-after: <!-- towncrier release notes start -->
+```
+#+end_export

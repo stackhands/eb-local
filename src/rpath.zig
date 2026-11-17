@@ -99,6 +99,9 @@ pub const script =
     \\
 ;
 
+/// `NoCacheDir` when the cache directory, `$XDG_CACHE_HOME`, else
+/// `$HOME/.cache`, is unset, empty or relative; `Unsafe` when the wrappers'
+/// directory is not one the caller owns, or a wrapper cannot be written.
 pub const Error = error{ NoCacheDir, Unsafe } || sys.Error || Allocator.Error;
 
 /// The directory for the wrappers of `found`: below the user's cache

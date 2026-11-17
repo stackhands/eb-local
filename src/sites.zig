@@ -7,6 +7,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// A site file template: the name `eb-local site` takes, and its TOML text
+/// with placeholders.
 pub const Template = struct { name: []const u8, text: []const u8 };
 
 /// The built-in templates, for no particular site; a site keeps its own in a file.
@@ -14,15 +16,21 @@ pub const all = [_]Template{
     .{ .name = "slurm", .text = @embedFile("sites/slurm.toml") },
 };
 
+/// The built-in template called `name`, or null when there is none.
 pub fn find(name: []const u8) ?Template {
     for (all) |t| if (std.mem.eql(u8, t.name, name)) return t;
     return null;
 }
 
+/// One `--set NAME=VALUE`: the placeholder it fills, and its value.
 pub const Set = struct { name: []const u8, value: []const u8 };
 
+/// Why a `--set` or a template was refused, filled in when `error.Invalid`
+/// is returned.
 pub const Diagnostic = struct { message: []const u8 = "" };
 
+/// `error.Invalid` when a `--set` or a template is refused, with the
+/// reason in the `Diagnostic`.
 pub const Error = error{Invalid} || Allocator.Error;
 
 fn fail(a: Allocator, d: *Diagnostic, comptime fmt: []const u8, args: anytype) Error {

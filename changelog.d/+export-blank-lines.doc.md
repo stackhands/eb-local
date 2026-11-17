@@ -1,0 +1,1 @@
+`docs/export.el` writes no blank at the end of a line. Org's Markdown indented the empty lines of a list item, such as those around a code block in a numbered step, and the whitespace hook then changed the written page, which no longer matched its Org source.

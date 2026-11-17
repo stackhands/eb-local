@@ -1,0 +1,1 @@
+The documentation has a Contributing page, with the tests, the news fragments, the site acceptance scripts in `tests/site/`, how to build the pages and how to write one, and a Changelog page that shows `CHANGELOG.md`. The README's Test section points at the Contributing page.

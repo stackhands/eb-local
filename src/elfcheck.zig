@@ -28,6 +28,9 @@ const max_phnum = 4096;
 const max_dynamic = 64 * 1024;
 const max_strtab = 16 * 1024 * 1024;
 
+/// What an ELF file says about its dynamic linking: its machine, its
+/// program interpreter (the loader), the libraries it names as `DT_NEEDED`,
+/// and its `DT_RPATH` and `DT_RUNPATH`; null where it has none.
 pub const Elf = struct {
     machine: u16,
     interp: ?[]const u8 = null,
@@ -36,6 +39,11 @@ pub const Elf = struct {
     runpath: ?[]const u8 = null,
 };
 
+/// Why `parse` read nothing: `NotElf64` for a file too short for an ELF
+/// header or without the ELF magic, `Unsupported` for a 32-bit or
+/// big-endian one, `Truncated` when the file ends before a part its headers
+/// name, and `Damaged` for a header field out of bounds, a string with no
+/// end, or a read that fails.
 pub const ParseError = error{ NotElf64, Unsupported, Truncated, Damaged } || sys.Error || Allocator.Error;
 
 const Phdr = struct { type: u32, offset: u64, vaddr: u64, filesz: u64 };
@@ -154,6 +162,8 @@ pub fn hostMachine() u16 {
     };
 }
 
+/// The name `check` prints for the ELF machine `m`: `x86_64`, `aarch64`,
+/// `riscv64`, `i386`, `arm`, or "another architecture".
 pub fn machineName(m: u16) []const u8 {
     return switch (m) {
         62 => "x86_64",

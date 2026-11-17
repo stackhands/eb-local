@@ -11,12 +11,13 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import textwrap
 import unittest
 
 import binary
+import howto
 from test_storage import StorageFixture
 
-README = Path(__file__).resolve().parents[1] / "README.md"
 
 SBATCH = r'''#!/bin/sh
 printf '%s\n' "$*" >> "$CONTROL_ROOT/sbatch-calls"
@@ -94,17 +95,16 @@ class Submit(StorageFixture):
         # --dry-run after the recipe is eb's, not submit's.
         self.assertIn("recipe.eb --dry-run", run.stdout)
 
-    def readme_section(self):
-        text = README.read_text()
-        start = text.index("\n## Build for every node type\n")
-        return text[start:text.index("\n## ", start + 1)]
+    def page_blocks(self, language):
+        """The LANGUAGE source blocks of the how-to on node types, dedented."""
+        text = (howto.HOWTO / "build-for-every-node-type.org").read_text()
+        return [textwrap.dedent(b) for b in re.findall(rf"^ *#\+begin_src {language}\n(.*?)^ *#\+end_src\n", text, re.M | re.S)]
 
-    def test_the_readme_commands_run_against_the_readme_node_types(self):
-        section = self.readme_section()
-        site = re.search(r"```toml\n(.*?)```", section, re.S).group(1)
+    def test_the_how_to_commands_run_against_its_node_types(self):
+        site = self.page_blocks("toml")[0]
         self.assertTrue(site.startswith("[build.node_types]\n"), site)
         self.write_site(site)
-        commands = re.search(r"```sh\n(.*?)```", section, re.S).group(1).splitlines()
+        commands = next(b for b in self.page_blocks("bash") if b.startswith("eb-local submit ")).splitlines()
         self.assertEqual(len(commands), 3, commands)
         for line in commands:
             argv = shlex.split(line, comments=True)
@@ -115,16 +115,19 @@ class Submit(StorageFixture):
         self.assertEqual(len(self.calls()), 3, self.calls())
         self.assertTrue(self.calls()[2].startswith("-p gpu "), self.calls())
 
-    def test_the_readme_shows_the_lines_explain_prints(self):
-        section = self.readme_section()
-        self.write_site(re.search(r"```toml\n(.*?)```", section, re.S).group(1))
-        shown = re.search(r"```console\n\$ (.*?)\n(.*?)```", section, re.S)
-        run = self.run_tool(shlex.split(shown.group(1))[1:], SLURM_JOB_ID="")
+    def test_the_how_to_shows_the_lines_explain_prints(self):
+        self.write_site(self.page_blocks("toml")[0])
+        command, shown = next((c, out) for c, out in howto.shown("build-for-every-node-type")
+                              if c.startswith("eb-local --explain "))
+        run = self.run_tool(shlex.split(command)[1:], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
         printed = (run.stdout.replace(str(Path(binary.BIN).resolve()), "/usr/local/bin/eb-local")
                    .replace(f"--chdir={self.root} ", "--chdir=/home/alice "))
-        for line in shown.group(2).splitlines():
+        for line in shown.splitlines():
             self.assertIn(line + "\n", printed)
+        # The line the page runs is the first job printed, without its "#   ".
+        job = next(b for b in self.page_blocks("bash") if b.startswith("sbatch "))
+        self.assertIn(f"#   {job}", printed)
 
     def batch_lines(self, text, indent):
         return [shlex.split(l[len(indent):]) for l in text.splitlines() if l.startswith(indent + "sbatch ")]

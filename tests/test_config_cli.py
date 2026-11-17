@@ -59,7 +59,7 @@ root = os.environ["CONTROL_ROOT"]
 names = ["SOURCE_TOKEN", "OTHER_TOKEN", "LM_LICENSE_FILE"]
 seen = {n: os.environ.get(n) for n in names}
 site = {n: v for n, v in os.environ.items() if "TOP_LEVEL_TOOLCHAINS" in n or n == "EB_LOCAL_SITE_TOOLCHAINS"}
-open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site, "eessi": os.environ.get("EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220")}))
+open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site, "eessi": os.environ.get("EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220"), "MY_OTHER": os.environ.get("MY_OTHER")}))
 log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-test.log")
 open(log, "w").write("".join(f"{n}={v}\n" for n, v in seen.items()))
 PY
@@ -185,7 +185,7 @@ class ConfigCli(StorageFixture):
         self.assertEqual(run.stdout.count("FFTW/3.3.10-GCC-15.2.0"), 1, run.stdout)
 
     def test_global_options_may_come_before_the_command(self):
-        # The README's form, eb-local --profile gpu dev, with the user file's profile.
+        # The command reference's form, eb-local --profile NAME dev, with the user file's profile.
         before = self.run_tool(["--profile", "licensed", "dev"], SLURM_JOB_ID="")
         after = self.run_tool(["dev", "--profile", "licensed"], SLURM_JOB_ID="")
         self.assertEqual(before.returncode, 0, before.stderr)
@@ -218,6 +218,30 @@ class ConfigCli(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("profile                      (none)", run.stdout)
         self.assertRegex(run.stdout, r"dev\.modules\s+GSL/2\.8-GCC-15\.2\.0\s+\[user .*mine\.toml:1\]")
+
+    def test_an_option_takes_its_value_after_an_equals_sign_as_after_a_space(self):
+        # --config=FILE was a word of a build's: eb got it, the file went
+        # unread, and env refused it while naming --config as its own.
+        named = "--config=" + str(self.site)
+        for args in ([named, "config"], ["config", named]):
+            with self.subTest(args=args):
+                run = self.run_tool(args, SLURM_JOB_ID="")
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertRegex(run.stdout, r"storage\.node_local_root\s+\S+\s+\[site .*site\.toml:")
+        run = self.run_tool(["env", named], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        run = self.run_tool([named, "--explain", "recipe.eb"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("\nset -- ", run.stdout)
+        self.assertNotIn("--config=", run.stdout)
+        # An empty --project= made the current directory the project.
+        for args in (["--project=", "config"], ["--profile=", "config"], ["--config=", "config"],
+                     ["dev", "--buildenv="], ["submit", "--on=", "recipe.eb"]):
+            with self.subTest(args=args):
+                run = self.run_tool(args, SLURM_JOB_ID="")
+                option = next(a for a in args if a.endswith("="))[:-1]
+                self.assertEqual((run.returncode, run.stdout), (2, ""), run.stderr)
+                self.assertEqual(run.stderr, f"eb-local: {option} needs a value\n")
 
     def test_profiles_lists_every_profile(self):
         run = self.run_tool(["profiles"])
@@ -285,9 +309,12 @@ class ConfigCli(StorageFixture):
 
         run = self.run_tool(["--config", str(self.site), "recipe.eb"], EB_LOCAL_BUILD_SECRETS="")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        seen = json.loads((self.root / "eb.json").read_text())["secrets"]
-        self.assertEqual(seen, {"SOURCE_TOKEN": None, "OTHER_TOKEN": None, "LM_LICENSE_FILE": None})
+        received = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(received["secrets"], {"SOURCE_TOKEN": None, "OTHER_TOKEN": None, "LM_LICENSE_FILE": None})
         self.assertNotIn("removed secret values", run.stdout)
+        # Nor does OTHER_TOKEN's value arrive as MY_OTHER, its env: source,
+        # where the logs would not be cleaned of it.
+        self.assertIsNone(received["MY_OTHER"])
 
         run = self.run_tool(["--config", str(self.site), "recipe.eb"], EB_LOCAL_BUILD_SECRETS="LM_LICENSE_FILE")
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
@@ -320,7 +347,7 @@ class ConfigCli(StorageFixture):
         self.assertIn(f"# SOURCE_TOKEN reaches eb's environment from file:{self.token}; logs are cleaned of it afterwards.\n",
                       run.stdout)
         self.assertIn(f"# OTHER_TOKEN stays out of eb's environment and is not read: build.secrets [user {self.user}:{top}] "
-                      "does not name it.\n", run.stdout)
+                      "does not name it. MY_OTHER, the variable it comes from, stays out too.\n", run.stdout)
 
     def test_site_toolchains_reach_the_eessi_hooks(self):
         text = self.site.read_text()
@@ -389,6 +416,8 @@ class ConfigCli(StorageFixture):
             'colour = "blue"\n': "unknown key colour",
             '[storage]\nnode_local_root = "/tmp"\n': "site setting",
             '[secrets]\nLD_PRELOAD = "env:X"\n': "not a variable name",
+            '[secrets]\nLICENCE = "nimvault:-x"\n': "config.toml:2: secret LICENCE: a nimvault entry may not start with -",
+            '[secrets]\nTOKEN = "file:token"\n': "config.toml:2: secret TOKEN: file: takes an absolute path or one starting ~/",
             '[profile.p]\nstack.module = "EESSI;id"\n': "not a module name",
             '[build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",
             '[profile.p.build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",

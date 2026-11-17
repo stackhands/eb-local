@@ -14,14 +14,21 @@ const fsx = common.fsx;
 const proc = common.proc;
 const Allocator = std.mem.Allocator;
 
+/// The install EESSI-extend makes, chosen by which install variable is set:
+/// `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL` or
+/// `EESSI_CVMFS_INSTALL`.
 pub const Mode = enum { user, project, site, cvmfs };
 
+/// What `select` chose: the install mode, and the umask the launcher runs
+/// with for it, the one EESSI-extend sets for that mode.
 pub const Selection = struct {
     mode: Mode,
     /// Process umask, as octal digits: 077, 002 or 022.
     umask: []const u8,
 };
 
+/// `error.TooMany` when more than one install variable is set, a present
+/// empty one included; `tooMany` says which.
 pub const SelectError = error{TooMany};
 
 const Name = struct {
@@ -160,7 +167,8 @@ pub const script =
     \\ver=${EESSI_VERSION:-2026.06}
     \\init=${repo}/versions/${ver}/init/lmod/bash
     \\if [[ ! -e $init ]]; then
-    \\  echo "eb-local: missing ${init}" >&2
+    \\  echo "eb-local: missing ${init}, the EESSI init; eb was not run." >&2
+    \\  echo "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere." >&2
     \\  exit 2
     \\fi
     \\# shellcheck disable=SC1090
@@ -205,11 +213,11 @@ pub const script =
     \\  site) root=${EESSI_SITE_SOFTWARE_PATH:-} from=EESSI_SITE_SOFTWARE_PATH ;;
     \\  *) root=${EESSI_SOFTWARE_PATH:-} from=EESSI_SOFTWARE_PATH ;;
     \\esac
-    \\readme='See "Where EESSI-extend installs" in the README.'
+    \\see='See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html'
     \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
     \\  if [[ -n ${!v+set} ]]; then
     \\    echo "eb-local: ${v}=${!v} is set in this shell and would put part of this install outside ${root}; nothing was built." >&2
-    \\    echo "  Unset it: EasyBuild installs software and modules below the install path EESSI-extend sets. ${readme}" >&2
+    \\    echo "  Unset it: EasyBuild installs software and modules below the install path EESSI-extend sets. ${see}" >&2
     \\    exit 2
     \\  fi
     \\done
@@ -223,29 +231,33 @@ pub const script =
     \\  [[ ${!v+set:${!v}} == "${was[$v]}" ]] && continue
     \\  if [[ -n ${!v+set} ]]; then what="set $v=${!v}"; else what="unset $v"; fi
     \\  echo "eb-local: loading EESSI-extend ${what}; this install still goes under ${root}, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere." >&2
-    \\  echo "  A site Lmod hook that sets an install variable acts only on the next load. ${readme}" >&2
+    \\  echo "  A site Lmod hook that sets an install variable acts only on the next load. ${see}" >&2
     \\done
     \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
     \\  if [[ -n ${!v+set} ]]; then
     \\    echo "eb-local: loading EESSI-extend set ${v}=${!v}, which would put part of this install outside ${root}; nothing was built." >&2
-    \\    echo "  A site Lmod hook or a changed EESSI-extend set it. ${readme}" >&2
+    \\    echo "  A site Lmod hook or a changed EESSI-extend set it. ${see}" >&2
     \\    exit 2
     \\  fi
     \\done
     \\if [[ -z $root ]]; then
     \\  echo "eb-local: ${from} is empty or not set, so where a ${mode} install goes cannot be checked; nothing was built." >&2
-    \\  echo "  The EESSI module that ${init} loads sets it: check that EESSI_CVMFS_REPO and EESSI_VERSION name the EESSI you mean. ${readme}" >&2
+    \\  echo "  The EESSI module that ${init} loads sets it: check that EESSI_CVMFS_REPO and EESSI_VERSION name the EESSI you mean. ${see}" >&2
     \\  exit 2
     \\fi
     \\installpath=${EASYBUILD_INSTALLPATH-}
     \\if [[ /$installpath/ == */../* || ( $installpath != "$root" && $installpath != "$root"/* ) ]]; then
     \\  echo "eb-local: EESSI-extend set the install path to ${installpath:-nothing}, outside ${root}, where a ${mode} install goes; nothing was built." >&2
-    \\  echo "  The install variable did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. ${readme}" >&2
+    \\  echo "  The install variable did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. ${see}" >&2
     \\  exit 2
     \\fi
     \\exec eb "$@"
 ;
 
+/// The argument vector that runs eb through EESSI-extend for `sel`: a bash
+/// with no profile and no rc file running the launcher script, with the
+/// umask and the mode as its first arguments and `eb_args` after them. The
+/// caller owns the slice, not the strings in it.
 pub fn commandLine(a: Allocator, sel: Selection, eb_args: []const []const u8) Allocator.Error![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(a);
@@ -673,7 +685,7 @@ test "an install path outside the selected tree stops eb" {
         try testing.expectEqualStrings("", out.stdout);
         const said = try std.fmt.allocPrint(a, "eb-local: EESSI-extend set the install path to {s}, outside {s}, where a user install goes; nothing was built.\n" ++
             "  The install variable did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, " ++
-            "which EESSI-extend matches as a Lua pattern, did. See \"Where EESSI-extend installs\" in the README.\n", .{ moved, mine });
+            "which EESSI-extend matches as a Lua pattern, did. See \"Where EESSI-extend installs\": https://stackhands.github.io/eb-local/explanation/install-variables.html\n", .{ moved, mine });
         try testing.expectEqualStrings(said, out.stderr);
     }
     try r.env.put("FAKE_INSTALLPATH", mine);
@@ -691,7 +703,7 @@ test "an EasyBuild install path for software or modules alone stops eb" {
     const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: EASYBUILD_INSTALLPATH_MODULES=/home/alice/old-modules is set in this shell " ++
         "and would put part of this install outside {s}/home/eessi; nothing was built.\n" ++
         "  Unset it: EasyBuild installs software and modules below the install path EESSI-extend sets. " ++
-        "See \"Where EESSI-extend installs\" in the README.\n", .{r.root});
+        "See \"Where EESSI-extend installs\": https://stackhands.github.io/eb-local/explanation/install-variables.html\n", .{r.root});
     try testing.expectEqualStrings(said, out.stderr);
 
     _ = r.env.swapRemove("EASYBUILD_INSTALLPATH_MODULES");
@@ -701,7 +713,7 @@ test "an EasyBuild install path for software or modules alone stops eb" {
     try testing.expectEqualStrings("", hooked.stdout);
     const hook_said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: loading EESSI-extend set EASYBUILD_INSTALLPATH_SOFTWARE=/home/alice/old-software, " ++
         "which would put part of this install outside {s}/home/eessi; nothing was built.\n" ++
-        "  A site Lmod hook or a changed EESSI-extend set it. See \"Where EESSI-extend installs\" in the README.\n", .{r.root});
+        "  A site Lmod hook or a changed EESSI-extend set it. See \"Where EESSI-extend installs\": https://stackhands.github.io/eb-local/explanation/install-variables.html\n", .{r.root});
     try testing.expectEqualStrings(hook_said, hooked.stderr);
 }
 
@@ -716,7 +728,7 @@ test "an install variable set as the module loads is reported and does not move 
     try testing.expect(std.mem.startsWith(u8, envVar(out.stdout, "EASYBUILD_INSTALLPATH").?, default));
     const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: loading EESSI-extend set EESSI_USER_INSTALL=/home/alice/.local/eessi; " ++
         "this install still goes under {s}, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere.\n" ++
-        "  A site Lmod hook that sets an install variable acts only on the next load. See \"Where EESSI-extend installs\" in the README.\n", .{default});
+        "  A site Lmod hook that sets an install variable acts only on the next load. See \"Where EESSI-extend installs\": https://stackhands.github.io/eb-local/explanation/install-variables.html\n", .{default});
     try testing.expectEqualStrings(said, out.stderr);
 }
 
@@ -731,7 +743,7 @@ test "a site install with no site tree cannot be checked" {
     try testing.expect(std.mem.startsWith(u8, out.stderr, "eb-local: EESSI_SITE_SOFTWARE_PATH is empty or not set, so where a site install goes cannot be checked; nothing was built.\n" ++
         "  The EESSI module that "));
     try testing.expect(std.mem.endsWith(u8, out.stderr, "/init/lmod/bash loads sets it: check that EESSI_CVMFS_REPO and EESSI_VERSION name the EESSI you mean. " ++
-        "See \"Where EESSI-extend installs\" in the README.\n"));
+        "See \"Where EESSI-extend installs\": https://stackhands.github.io/eb-local/explanation/install-variables.html\n"));
 }
 
 test "the default user tree is $HOME/eessi as Lmod joins it" {
@@ -754,7 +766,8 @@ test "a missing version is reported" {
     try testing.expectEqual(@as(u32, 2), out.term.code());
     const init = try initPath(r.arena.allocator(), &r.env);
     try testing.expect(std.mem.endsWith(u8, init, "/versions/2025.06/init/lmod/bash"));
-    const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: missing {s}\n", .{init});
+    const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: missing {s}, the EESSI init; eb was not run.\n" ++
+        "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere.\n", .{init});
     try testing.expectEqualStrings(said, out.stderr);
 }
 

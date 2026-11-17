@@ -1,13 +1,68 @@
-"""Sphinx configuration for the eb-local documentation."""
+"""Sphinx configuration for the eb-local documentation.
+
+The pages are Org files under docs/orgmode/, written here as MyST by
+docs/export.el. The API reference is generated from the code as the build
+runs, and is not committed.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+_here = os.path.dirname(os.path.abspath(__file__))
+_repo = os.path.dirname(_here)
+sys.path.insert(0, os.path.join(_here, "_ext"))
 
 project = "eb-local"
 author = "eb-local developers"
 copyright = "Copyright (c) eb-local developers"
 
-extensions = ["myst_parser", "sphinx_copybutton"]
+extensions = ["myst_parser", "sphinx_copybutton", "zig_domain"]
 myst_enable_extensions = ["colon_fence", "deflist"]
 myst_heading_anchors = 3
 exclude_patterns = ["_build"]
+
+# -- API reference -----------------------------------------------------------
+# docs/tools/zig_api.zig writes reference/api/zig/ from the doc comments as
+# the build starts, and `zig build docs` puts the autodoc site at api/ when
+# it ends. Both need Zig 0.17.1 on PATH.
+zig_autodoc_root = "api/"
+
+
+def _zig(*args):
+    zig = shutil.which("zig")
+    if zig is None:
+        raise RuntimeError("the API reference needs Zig 0.17.1 on PATH")
+    subprocess.run([zig, *args], cwd=_repo, check=True)
+
+
+def _api_pages(app):
+    _zig("run", "docs/tools/zig_api.zig", "--", "--module", "eb-local", "--root", "src/main.zig",
+         "--out", os.path.join(_here, "reference", "api", "zig"),
+         "--source-url", "https://github.com/stackhands/eb-local/blob/{ref}/", "--title", "Zig API")
+
+
+def _autodoc(app, exception):
+    if exception is not None or app.builder.format != "html":
+        return
+    with tempfile.TemporaryDirectory() as prefix:
+        _zig("build", "docs", "--prefix", prefix)
+        site = os.path.join(app.outdir, "api")
+        shutil.rmtree(site, ignore_errors=True)
+        shutil.copytree(os.path.join(prefix, "docs"), site)
+
+
+def _edit_link(app, pagename, templatename, context, doctree):
+    """Point "edit this page" at the Org source; the API pages have none."""
+    context["page_source_suffix"] = None if pagename.startswith("reference/api/") else ".org"
+
+
+def setup(app):
+    app.connect("builder-inited", _api_pages)
+    app.connect("build-finished", _autodoc)
+    app.connect("html-page-context", _edit_link)
 
 html_theme = "shibuya"
 html_title = "eb-local"
@@ -70,5 +125,5 @@ html_context = {
     "source_user": "stackhands",
     "source_repo": "eb-local",
     "source_version": "main",
-    "source_docs_path": "/docs/",
+    "source_docs_path": "/docs/orgmode/",
 }

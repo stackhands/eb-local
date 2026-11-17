@@ -1,0 +1,1 @@
+`eb-local doctor` says that `eb-local eb` stops when `EESSI_PROJECT_INSTALL` names no directory, since EESSI-extend then refuses to load; it said `ok` and named the variable as the project install `eb-local eb` would make. As for its other checks of `eb-local eb`, that is a `FAIL` without a site file and a `warn` with one.

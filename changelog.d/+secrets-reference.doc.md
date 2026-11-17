@@ -1,0 +1,1 @@
+The configuration reference says that `eb-local doctor` reads every secret, as `eb-local config --check` does, and that a build that does not get a secret from `env:VARIABLE` runs `eb` without VARIABLE.

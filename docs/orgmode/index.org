@@ -1,0 +1,73 @@
+#+title: eb-local
+
+#+begin_export md
+```{image} _static/logo-light.svg
+:alt: eb-local
+:width: 420px
+:class: light-only
+```
+
+```{image} _static/logo-dark.svg
+:alt: eb-local
+:width: 420px
+:class: dark-only
+```
+#+end_export
+
+eb-local builds your own code and installs software on top of the European Environment for Scientific Software Installations (EESSI) 2026.06, into a directory you or your project own.
+=eval "$(eb-local dev MODULE...)"= sets up a shell in which =gcc=, =make= and CMake link against EESSI's libraries, so the programs run without =LD_LIBRARY_PATH=.
+=eb-local RECIPE.eb= installs a recipe with EasyBuild and EESSI-extend, inside a Slurm allocation, and builds on the allocation's node-local disk.
+=eval "$(eb-local env)"= makes what you installed visible in a new shell or job.
+eb-local is one static binary.
+It needs EESSI 2026.06 from the CernVM File System (CVMFS); a build also needs a site file and a Slurm allocation.
+
+| You want to                       | Read                                        |
+|-----------------------------------+---------------------------------------------|
+| learn by doing, start to finish   | [[file:tutorials/index.org][Tutorials]]     |
+| get one task done                 | [[file:howto/index.org][How-to guides]]     |
+| understand why it works this way  | [[file:explanation/index.org][Explanation]] |
+| look up a command, setting or API | [[file:reference/index.org][Reference]]     |
+
+#+begin_export md
+```{include} ../README.md
+:start-after: <!-- docs:start -->
+:end-before: <!-- stackhands:begin -->
+:relative-docs: docs/
+```
+
+```{toctree}
+:hidden:
+:caption: Tutorials
+
+tutorials/index
+```
+
+```{toctree}
+:hidden:
+:caption: How-to guides
+
+howto/index
+```
+
+```{toctree}
+:hidden:
+:caption: Explanation
+
+explanation/index
+```
+
+```{toctree}
+:hidden:
+:caption: Reference
+
+reference/index
+```
+
+```{toctree}
+:hidden:
+:caption: Project
+
+contributing
+changelog
+```
+#+end_export

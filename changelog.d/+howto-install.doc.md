@@ -1,0 +1,1 @@
+The how-to "Install eb-local" has the steps to install a release, with its checksums and attestations, or to build from source, what the main branch has that release 3.1.0 lacks, and what to do when a step fails. The README points to it, and the reference describes the frozen 1.x Bash script.

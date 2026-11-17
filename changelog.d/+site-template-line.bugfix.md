@@ -1,0 +1,1 @@
+`eb-local site show` and `site install` name the template and its line when a rendered value does not load, as in `template slurm:10: storage.node_local_root must be one absolute path without a trailing slash`. They named the file install would write, `config.toml` beside the program by default, which is the site file in use, though neither command had written it.

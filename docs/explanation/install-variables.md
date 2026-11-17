@@ -63,7 +63,7 @@ They also stop when `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_M
 
 Three things move the install path:
 
--   a site Lmod hook that sets one, which the README's [A site Lmod hook](../index.md#a-site-lmod-hook) warns against;
+-   a site Lmod hook that sets one, which [Set a site's EasyBuild defaults and default prefix](../howto/set-site-defaults.md) warns against;
 -   a changed EESSI-extend;
 -   an `EESSI_CVMFS_REPO` with a character such as `-`.
 
@@ -75,7 +75,7 @@ A build there used to say `installing into /home/alice/eessi (user)` while EasyB
 
 ```text
 eb-local: loading EESSI-extend/2026.06-easybuild set the install path to /opt/eessi-mirror/versions/2026.06/software/linux/x86_64/amd/zen4, outside /home/alice/eessi/versions, the tree eb-local checked; nothing was built.
-  EESSI_USER_INSTALL did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. See "Where EESSI-extend installs" in the README.
+  EESSI_USER_INSTALL did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html
 ```
 
 ## A variable set as the module loads
@@ -89,7 +89,7 @@ It does see a load that sets or unsets one, and says so:
 
 ```text
 eb-local: loading EESSI-extend set EESSI_USER_INSTALL=/home/alice/.local/eessi; this install still goes under /home/alice/eessi, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere.
-  A site Lmod hook that sets an install variable acts only on the next load. See "Where EESSI-extend installs" in the README.
+  A site Lmod hook that sets an install variable acts only on the next load. See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html
 ```
 
-A site that wants another default prefix sets it before EESSI-extend loads, in a login script, and as `prefix` in eb-local's site file, as the README's [A site Lmod hook](../index.md#a-site-lmod-hook) shows.
+A site that wants another default prefix sets it before EESSI-extend loads, in a login script, and as `prefix` in eb-local's site file, as [Set a site's EasyBuild defaults and default prefix](../howto/set-site-defaults.md) shows.

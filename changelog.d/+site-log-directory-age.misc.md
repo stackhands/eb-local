@@ -1,0 +1,1 @@
+`tests/site/build-job.sh` ages the log directory its `clean` check makes, as well as the log in it. `clean` takes a directory among the logs once neither it nor anything in it is newer than the cutoff, so the check found nothing to clean and failed twice. The command reference and the clean-up guide say that a directory's own time counts.

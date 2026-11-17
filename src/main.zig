@@ -9,17 +9,26 @@ const sys = common.sys;
 const fsx = common.fsx;
 const proc = common.proc;
 const cli = common.cli;
+/// The part of TOML the configuration files are written in.
 pub const toml = @import("toml.zig");
+/// The settings in force, and where each came from.
 pub const config = @import("config.zig");
+/// Where a secret's value comes from, and its removal from the logs.
 pub const secrets = @import("secrets.zig");
+/// The site file templates `eb-local site` renders.
 pub const sites = @import("sites.zig");
+/// Where a build may write: the allocation's node-local mount and the prefix.
 pub const storage = @import("storage.zig");
+/// The RPATH wrappers `dev` writes for compilers without a build environment.
 pub const rpath = @import("rpath.zig");
+/// `eb-local check`: what a program needs, and where it finds it.
 pub const elfcheck = @import("elfcheck.zig");
+/// `eb-local eb`: EasyBuild through EESSI-extend, without a site file.
 pub const extend = @import("extend.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
+/// The version `eb-local --version` prints, and the release it is.
 pub const version = "3.1.0";
 
 const usage_text =
@@ -40,8 +49,10 @@ const usage_text =
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
     \\  eb-local env                         lines that make your installed modules visible
-    \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
-    \\                                       so gcc, make, cmake and meson just work
+    \\  eb-local dev [--buildenv MODULE] [MODULE...]
+    \\                                       the same, plus MODULEs and a build environment,
+    \\                                       so gcc, make, cmake and meson just work;
+    \\                                       --buildenv names the build environment to load
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -61,8 +72,10 @@ const usage_text =
     \\                                       what this node's target lacks
     \\  eb-local doctor                      what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing
-    \\  eb-local clean [--logs-older-than DAYS] [--sources] [--workspaces] [--dry-run] [--delete]
-    \\                                       remove what eb-local left behind
+    \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
+    \\                 [--dry-run] [--delete]
+    \\                                       remove what eb-local left behind; --no-logs
+    \\                                       leaves the logs
     \\  eb-local config [--check | --env]    the settings in force and where each came from;
     \\                                       --check also reads every secret (values not shown);
     \\                                       --env prints them as EB_LOCAL_* lines for export
@@ -78,8 +91,8 @@ const usage_text =
     \\                                       writes config.toml beside this program, mode 644
     \\  eb-local help | --version
     \\
-    \\Every command takes --profile NAME, --project DIR (a shared project directory
-    \\instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
+    \\Every command but eb takes --profile NAME, --project DIR (a shared project
+    \\directory instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -173,11 +186,33 @@ const Place = struct {
     project: bool,
 };
 
-/// Whether NAME=VALUE is what `eb-local env` sets for P: its install
-/// variable, naming its prefix.
-fn ownInstallVar(c: Ctx, p: Place, name: []const u8, value: []const u8) bool {
+/// What `eb-local env` set, if NAME=VALUE is that: its install variable,
+/// naming P's prefix, or, when the extension env loads for a prefix that
+/// exists is loaded, the install path it chose in the prefix's versions
+/// tree, or the EasyBuild prefix it sets beside that path.
+fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: []const u8) ?[]const u8 {
     const mine = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
-    return std.mem.eql(u8, name, mine) and std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix);
+    if (std.mem.eql(u8, name, mine)) {
+        return if (std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix)) "names your prefix, as eb-local env sets it" else null;
+    }
+    const is_path = std.mem.eql(u8, name, "EASYBUILD_INSTALLPATH");
+    if (!is_path and !std.mem.eql(u8, name, "EASYBUILD_PREFIX")) return null;
+    if (!moduleLoaded(c, s.extend_module.value)) return null;
+    const installpath = nonEmpty(c.env.get("EASYBUILD_INSTALLPATH")) orelse return null;
+    const versions = std.fs.path.join(c.a, &.{ p.prefix, "versions" }) catch oom();
+    const path = storage.canonical(c.a, installpath, c.cwd) catch oom();
+    if (!storage.under(path, versions) or std.mem.eql(u8, path, versions)) return null;
+    return if (is_path) "is in your prefix, as EESSI-extend sets it when eb-local env loads it" else "is EESSI-extend's own, set when eb-local env loads it";
+}
+
+/// Whether Lmod lists MODULE, a name or a name and version, as loaded.
+fn moduleLoaded(c: Ctx, module: []const u8) bool {
+    var it = std.mem.splitScalar(u8, c.env.get("LOADEDMODULES") orelse "", ':');
+    while (it.next()) |m| {
+        if (std.mem.eql(u8, m, module)) return true;
+        if (std.mem.startsWith(u8, m, module) and m.len > module.len and m[module.len] == '/') return true;
+    }
+    return false;
 }
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
@@ -467,11 +502,6 @@ fn locate(c: Ctx, s: config.Settings) Place {
 /// that tree exists and the new default does not, it stays in use, so
 /// installed modules do not disappear; set `prefix` to choose for good.
 fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u8 {
-    const isDir = struct {
-        fn f(path: []const u8) bool {
-            return if (fsx.statAt(fsx.cwd, path, true)) |st| st.isDir() else |_| false;
-        }
-    }.f;
     if (isDir(default_prefix)) return null;
     const old = std.fs.path.join(c.a, &.{ home, ".local", "eessi" }) catch oom();
     if (!isDir(old)) return null;
@@ -727,6 +757,11 @@ const Search = struct {
 fn isFile(path: []const u8) bool {
     const st = fsx.statAt(fsx.cwd, path, true) catch return false;
     return st.isReg();
+}
+
+fn isDir(path: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, path, true) catch return false;
+    return st.isDir();
 }
 
 /// The directories the loader under `root` searches last: those its
@@ -1032,11 +1067,14 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         error.OutOfMemory => oom(),
     };
     const target = o.to orelse std.fs.path.join(a, &.{ selfDir(a), "config.toml" }) catch oom();
-    // The file must load as the site file it is about to become.
+    // The file must load as the site file it is about to become. A refusal
+    // names the template's line, which is the rendered file's: no value
+    // holds a newline, and the target is not written yet.
     var empty = std.process.Environ.Map.init(a);
     var cd: config.Diagnostic = .{};
-    _ = config.load(a, &.{.{ .path = target, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
-        error.Invalid => die("template {s}: {s}", .{ t.name, cd.message }),
+    const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
+    _ = config.load(a, &.{.{ .path = label, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
+        error.Invalid => die("{s}", .{cd.message}),
         error.OutOfMemory => oom(),
     };
     if (show) {
@@ -1563,7 +1601,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
-        warn("rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.", .{});
+        notTrashed(s);
         return 1;
     }
     // Build workspaces are node-local scratch the scheduler removes anyway;
@@ -1643,6 +1681,19 @@ fn lmodInits(a: Allocator, env: *const std.process.Environ.Map) [3][]const u8 {
     };
 }
 
+/// Whether a directory on `modulepath` holds the module `name`: a Lua file,
+/// a Tcl file, or for a name without a version, a directory of versions.
+fn onModulePath(a: Allocator, modulepath: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, modulepath, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const file = std.fs.path.join(a, &.{ dir, name }) catch oom();
+        const lua = std.fmt.allocPrint(a, "{s}.lua", .{file}) catch oom();
+        for ([_][]const u8{ lua, file }) |path| if (fsx.statAt(fsx.cwd, path, true)) |_| return true else |_| {};
+    }
+    return false;
+}
+
 fn readable(path: []const u8) bool {
     var zb: [sys.path_max:0]u8 = undefined;
     const zp = sys.z(&zb, path) catch return false;
@@ -1705,25 +1756,25 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\# prefix's versions tree, lists it and cleans its logs of secrets, so an
     \\# install path anything else chose stops the build. An install variable
     \\# a load hook sets acts only on the next load.
-    \\readme='See "Where EESSI-extend installs" in the README.'
+    \\see='See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html'
     \\for v in EESSI_USER_INSTALL EESSI_PROJECT_INSTALL EESSI_SITE_INSTALL EESSI_CVMFS_INSTALL; do
     \\    if [ "$v" = "$install_var" ]; then want=set:$prefix; else want=; fi
     \\    [ "${!v+set:${!v}}" = "$want" ] && continue
     \\    if [ -n "${!v+set}" ]; then what="set $v=${!v}"; else what="unset $v"; fi
     \\    echo "eb-local: loading $extend $what; this build still installs into $prefix, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere." >&2
-    \\    echo "  A site Lmod hook that sets an install variable acts only on the next load. $readme" >&2
+    \\    echo "  A site Lmod hook that sets an install variable acts only on the next load. $see" >&2
     \\done
     \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
     \\    if [ -n "${!v+set}" ]; then
     \\        echo "eb-local: loading $extend set $v=${!v}, which would put part of the install outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
-    \\        echo "  A site Lmod hook or a changed EESSI-extend set it. $readme" >&2
+    \\        echo "  A site Lmod hook or a changed EESSI-extend set it. $see" >&2
     \\        exit 2
     \\    fi
     \\done
     \\installpath=${EASYBUILD_INSTALLPATH-}
     \\if [[ $installpath != "$prefix"/versions/?* || /$installpath/ == */../* ]]; then
     \\    echo "eb-local: loading $extend set the install path to ${installpath:-nothing}, outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
-    \\    echo "  $install_var did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. $readme" >&2
+    \\    echo "  $install_var did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. $see" >&2
     \\    exit 2
     \\fi
     \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.
@@ -1817,7 +1868,11 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     for (s.secrets.items) |sec| {
         if (config.buildGets(s, sec.name)) {
             out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
-        } else out.print(a, "# {s} stays out of eb's environment and is not read: build.secrets [{s}] does not name it.\n", .{ sec.name, s.build_secrets.from }) catch oom();
+        } else {
+            out.print(a, "# {s} stays out of eb's environment and is not read: build.secrets [{s}] does not name it.", .{ sec.name, s.build_secrets.from }) catch oom();
+            if (config.withheldSource(s, sec)) |name| out.print(a, " {s}, the variable it comes from, stays out too.", .{name}) catch oom();
+            out.append(a, '\n') catch oom();
+        }
     }
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
@@ -1924,13 +1979,16 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const started: i64 = nowSecs();
 
     for (leftover_vars) |v| if (c.env.get(v)) |val| {
-        if (!ownInstallVar(c, p, v, val))
+        if (ownInstallVar(c, s, p, v, val) == null)
             warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
     };
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
     for (shell_startup) |name| _ = env.swapRemove(name);
+    for (s.secrets.items) |sec| if (config.withheldSource(s, sec)) |name| {
+        _ = env.swapRemove(name);
+    };
     var dropped_loader = false;
     for (host_loader) |name| {
         if (env.swapRemove(name)) dropped_loader = true;
@@ -2131,6 +2189,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
     add(a, &out, "MODULE");
     for (0..width - "MODULE".len + 2) |_| add(a, &out, " ");
     for (labels.items, 0..) |l, li| add(a, &out, str(a, "{s}{s}  ", .{ l, if (here != null and here.? == li) "*" else "" }));
+    while (out.items[out.items.len - 1] == ' ') out.items.len -= 1;
     add(a, &out, "\n");
     for (rows.items) |r| {
         add(a, &out, r.module);
@@ -2256,8 +2315,8 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     // What this shell carries.
     var leftovers: usize = 0;
     for (install_vars) |v| if (c.env.get(v)) |val| {
-        if (ownInstallVar(c, p, v, val)) {
-            note(a, &out, "ok  ", "{s} names your prefix, as eb-local env sets it", .{v});
+        if (ownInstallVar(c, s, p, v, val)) |why| {
+            note(a, &out, "ok  ", "{s} {s}", .{ v, why });
             continue;
         }
         leftovers += 1;
@@ -2277,7 +2336,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     if (extend.select(c.env)) |sel| {
         const name = extend.variable(sel.mode);
         if (c.env.get(name)) |v| {
-            note(a, &out, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+            // `eb-local eb` creates a user prefix, but EESSI-extend refuses
+            // to load for a project directory that is not there.
+            if (sel.mode == .project and !isDir(v)) {
+                note(a, &out, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
+                if (!site) failed = true;
+            } else note(a, &out, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
         } else note(a, &out, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
     } else |_| {
         note(a, &out, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
@@ -2330,6 +2394,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
             note(a, &out, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} can be read; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
             if (site) failed = true;
         }
+    } else if (!onModulePath(a, c.env.get("MODULEPATH") orelse "", s.stack_module.value)) {
+        // A build keeps the shell's module command, and with it MODULEPATH,
+        // and sources no init that would put EESSI's modules there.
+        const repo = nonEmpty(c.env.get("EESSI_CVMFS_REPO")) orelse "/cvmfs/software.eessi.io";
+        note(a, &out, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
+        if (site) failed = true;
     }
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
@@ -2653,6 +2723,14 @@ fn makeWritable(c: Ctx, path: []const u8, depth: usize) void {
 /// Takes write permission from everyone, as EasyBuild does to an
 /// installation (EESSI-extend sets EASYBUILD_READ_ONLY_INSTALLDIR); a
 /// symbolic link is not followed.
+/// Why clean or uninstall removed nothing without --delete: clean.trash
+/// is none, or it is auto and rtrash is not on PATH.
+fn notTrashed(s: config.Settings) void {
+    if (s.trash.value == .none) {
+        warn("clean.trash is none [{s}]; nothing removed. Pass --delete to delete for good, or set clean.trash to auto or rtrash.", .{s.trash.from});
+    } else warn("rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.", .{});
+}
+
 fn makeReadOnly(c: Ctx, path: []const u8, depth: usize) void {
     if (depth > 64) return;
     const st = fsx.statAt(fsx.cwd, path, false) catch return;
@@ -2712,7 +2790,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         .none => {},
     }
     if (trash != .rtrash and !o.delete) {
-        warn("rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.", .{});
+        notTrashed(s);
         return 1;
     }
     for (found.installs.items) |d| makeWritable(c, d, 0);
@@ -2844,6 +2922,9 @@ fn subcommand(word: []const u8) ?Command {
     return if (cmd == .build) null else cmd;
 }
 
+/// Run the command the arguments name, and return its exit status. With
+/// `EB_LOCAL_EESSI_EXTEND` set, not empty and not `0`, every argument is
+/// eb's, as for `eb-local eb --`.
 pub fn main(init: std.process.Init) u8 {
     const a = init.arena.allocator();
     const argv_all = init.minimal.args.toSlice(a) catch die("cannot read the arguments", .{});
@@ -2902,21 +2983,36 @@ pub fn main(init: std.process.Init) u8 {
             return xs[idx.*];
         }
     }.get;
+    const joined = struct {
+        /// The value of OPT=VALUE when X is that; empty, as after a space, it is refused.
+        fn get(x: []const u8, opt: []const u8) ?[]const u8 {
+            if (!std.mem.startsWith(u8, x, opt) or x.len == opt.len or x[opt.len] != '=') return null;
+            if (x.len == opt.len + 1) die("{s} needs a value", .{opt});
+            return x[opt.len + 1 ..];
+        }
+    }.get;
     while (i < args.len) : (i += 1) {
         const x: []const u8 = args[i];
+        if (command == .eb and std.mem.eql(u8, x, "--")) {
+            // eb's own --help, and any option eb-local also knows, is eb's.
+            for (args[i..]) |arg| rest.append(a, arg) catch oom();
+            break;
+        }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
             cli.put(1, usage_text);
             return 0;
         } else if (std.mem.eql(u8, x, "--project")) {
             g.project = value(args, &i, "--project");
-        } else if (std.mem.startsWith(u8, x, "--project=")) {
-            g.project = x["--project=".len..];
+        } else if (joined(x, "--project")) |v| {
+            g.project = v;
         } else if (std.mem.eql(u8, x, "--profile")) {
             g.profile = value(args, &i, "--profile");
-        } else if (std.mem.startsWith(u8, x, "--profile=")) {
-            g.profile = x["--profile=".len..];
+        } else if (joined(x, "--profile")) |v| {
+            g.profile = v;
         } else if (std.mem.eql(u8, x, "--config")) {
             g.config_file = value(args, &i, "--config");
+        } else if (joined(x, "--config")) |v| {
+            g.config_file = v;
         } else if (std.mem.eql(u8, x, "--env") and command == .build and rest.items.len == 0) {
             command = .env;
         } else if (std.mem.eql(u8, x, "--explain") and command == .build and rest.items.len == 0) {
@@ -2939,8 +3035,8 @@ pub fn main(init: std.process.Init) u8 {
             .submit => {
                 if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
                     submit.on = value(args, &i, "--on");
-                } else if (rest.items.len == 0 and std.mem.startsWith(u8, x, "--on=")) {
-                    submit.on = x["--on=".len..];
+                } else if (rest.items.len == 0 and joined(x, "--on") != null) {
+                    submit.on = joined(x, "--on").?;
                 } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
                     submit.print = true;
                 } else rest.append(a, x) catch oom();
@@ -2977,8 +3073,8 @@ pub fn main(init: std.process.Init) u8 {
             .dev => {
                 if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
-                } else if (std.mem.startsWith(u8, x, "--buildenv=")) {
-                    g.buildenv = x["--buildenv=".len..];
+                } else if (joined(x, "--buildenv")) |v| {
+                    g.buildenv = v;
                 } else if (x.len > 0 and x[0] == '-') {
                     die("dev does not know the option '{s}'", .{x});
                 } else if (!config.validModule(x)) {

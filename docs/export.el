@@ -89,8 +89,11 @@ first row of a table that has none."
           contents))
 
 (defun eb-local-docs--tidy (text _backend _info)
-  "One blank line between blocks, and a single newline at the end."
-  (concat (string-trim (replace-regexp-in-string "\n\\(?:[ \t]*\n\\)\\{2,\\}" "\n\n" text)) "\n"))
+  "One blank line between blocks, no blank at the end of a line, and a
+single newline at the end.  Org's Markdown indents the empty lines of a
+list item, such as those around a block in a numbered step."
+  (let ((text (replace-regexp-in-string "[ \t]+$" "" text)))
+    (concat (string-trim (replace-regexp-in-string "\n\n\n+" "\n\n" text)) "\n")))
 
 (org-export-define-derived-backend 'eb-local-myst 'md
   :translate-alist '((src-block . eb-local-docs--src-block)
@@ -108,6 +111,9 @@ first row of a table that has none."
 (defun eb-local-docs-export (out)
   "Write each Org page under docs/orgmode as MyST under OUT."
   (let ((src (expand-file-name "orgmode" eb-local-docs-root))
+        ;; With Babel, an inline source block exports its results, and a
+        ;; batch export runs nothing, so src_sh{...} would come out empty.
+        (org-export-use-babel nil)
         (org-md-headline-style 'atx)
         (org-md-toplevel-hlevel 2)
         (org-export-with-toc nil)

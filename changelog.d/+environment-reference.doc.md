@@ -1,0 +1,1 @@
+The reference lists the environment variables eb-local reads, with the setting each one replaces, and the variables `eb-local env`, `eb-local dev` and a build set or clear. A test fails when the page leaves out an `EB_LOCAL_*` variable the program reads, names one it does not, or leaves out a variable a build sets or `env` unsets.

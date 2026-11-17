@@ -1,0 +1,1 @@
+The how-to "Run EasyBuild through EESSI-extend without a site file" installs with `eb-local eb` into your home, another directory or a project, and from a program that passes only eb's arguments; the reference has the install modes and the details the README had, and says that the printed build script runs with `W` set to a workspace a build made.

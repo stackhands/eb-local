@@ -8,8 +8,14 @@ const toml = @import("toml.zig");
 const storage = @import("storage.zig");
 const Allocator = std.mem.Allocator;
 
+/// What `clean` and `uninstall` do with what they remove: `rtrash` moves it
+/// to the trash, and stops when rtrash is not on `PATH`; `none` removes
+/// nothing without `--delete`; `auto` is `rtrash` when rtrash is on `PATH`,
+/// else `none`.
 pub const Trash = enum { auto, rtrash, none };
 
+/// A value and where it came from, as `eb-local config` shows it: `default`,
+/// a file and line with its layer and profile, a variable or an option.
 pub fn Setting(comptime T: type) type {
     return struct {
         value: T,
@@ -48,6 +54,8 @@ pub fn validSbatchOptions(v: []const u8) bool {
     return first.next().?[0] == '-';
 }
 
+/// A secret: the variable eb receives, and where its value is read from.
+/// The value itself is read only for a build, by `secrets.resolve`.
 pub const Secret = struct {
     /// The variable eb receives.
     name: []const u8,
@@ -64,6 +72,8 @@ pub const EessiVar = struct {
     from: []const u8,
 };
 
+/// Every setting in force, each with where it came from. The defaults here
+/// are the built-in ones; `load` puts the files, variables and options on top.
 pub const Settings = struct {
     profile: ?[]const u8 = null,
     /// EESSI-extend's own default, so `eb-local eb` and EESSI-extend loaded
@@ -141,6 +151,8 @@ pub fn ebRoot(a: Allocator, software: []const u8) Allocator.Error![]const u8 {
 /// The EB_LOCAL_DEV_BUILDENV_FOR_* word for "no build environment".
 pub const no_buildenv = "none";
 
+/// Whose file a source is. Only the site layer may set the storage settings,
+/// `build.site_toolchains` and `build.node_types`.
 pub const Layer = enum { site, user };
 
 /// EB_LOCAL_SECRET_NAME=SOURCE names where the secret NAME comes from.
@@ -153,6 +165,9 @@ pub const Source = struct {
     layer: Layer,
 };
 
+/// Values from the command line, which `load` puts above every other layer.
+/// The program sets `profile`, `project` and `buildenv` from `--profile`,
+/// `--project` and `--buildenv`; no option sets `prefix`.
 pub const Overrides = struct {
     profile: ?[]const u8 = null,
     prefix: ?[]const u8 = null,
@@ -160,10 +175,14 @@ pub const Overrides = struct {
     buildenv: ?[]const u8 = null,
 };
 
+/// Why the configuration was refused, filled in when `error.Invalid` is
+/// returned: one message naming the file and line, or the variable.
 pub const Diagnostic = struct {
     message: []const u8 = "",
 };
 
+/// `error.Invalid` when a file, variable or option is refused, with the
+/// reason in the `Diagnostic`.
 pub const Error = error{Invalid} || Allocator.Error;
 
 /// Module names as Lmod writes them. Anything else could change the meaning
@@ -217,22 +236,42 @@ pub fn validEessiName(name: []const u8) bool {
     return true;
 }
 
+/// A value [eessi] may give: at most 4096 bytes, with no line break or NUL.
 pub fn validEessiValue(v: []const u8) bool {
     return v.len <= 4096 and std.mem.indexOfAny(u8, v, "\n\r\x00") == null;
 }
 
-pub fn validSecretSource(source: []const u8) bool {
+/// What `checkSecretSource` found.
+pub const SourceCheck = union(enum) {
+    ok,
+    /// Not env:, file: or nimvault:, as when a value is written in its place.
+    unknown,
+    /// One of those, and what is wrong with the rest of it.
+    refused: []const u8,
+};
+
+/// Whether a secret may name `source`: `env:` and a variable name, `file:`
+/// and an absolute or `~/` path, or `nimvault:` and an entry that does not
+/// start with `-`. None may hold a line break or NUL.
+pub fn checkSecretSource(source: []const u8) SourceCheck {
     inline for (.{ "env:", "file:", "nimvault:" }) |kind| {
         if (std.mem.startsWith(u8, source, kind)) {
             const rest = source[kind.len..];
-            if (rest.len == 0 or std.mem.indexOfAny(u8, rest, "\n\r\x00") != null) return false;
-            if (comptime std.mem.eql(u8, kind, "env:")) return validEnvName(rest);
-            if (comptime std.mem.eql(u8, kind, "file:")) return rest[0] == '/' or std.mem.startsWith(u8, rest, "~/");
-            // An entry starting with '-' would reach nimvault as an option.
-            return rest[0] != '-';
+            if (std.mem.indexOfAny(u8, rest, "\n\r\x00") != null) return .{ .refused = "a source may not hold a line break or NUL" };
+            if (comptime std.mem.eql(u8, kind, "env:")) {
+                if (!validEnvName(rest)) return .{ .refused = "env: takes a variable name of letters, digits and _, not starting with a digit" };
+            } else if (comptime std.mem.eql(u8, kind, "file:")) {
+                if (!std.mem.startsWith(u8, rest, "/") and !std.mem.startsWith(u8, rest, "~/"))
+                    return .{ .refused = "file: takes an absolute path or one starting ~/" };
+            } else if (rest.len == 0) {
+                return .{ .refused = "nimvault: takes an entry" };
+            } else if (rest[0] == '-') {
+                return .{ .refused = "a nimvault entry may not start with -, since nimvault would read it as an option" };
+            }
+            return .ok;
         }
     }
-    return false;
+    return .unknown;
 }
 
 /// Whether a build gets the secret `name`: build.secrets names it, or
@@ -249,6 +288,16 @@ pub fn buildSecrets(a: Allocator, s: Settings) Allocator.Error![]Secret {
     errdefer out.deinit(a);
     for (s.secrets.items) |sec| if (buildGets(s, sec.name)) try out.append(a, sec);
     return out.toOwnedSlice(a);
+}
+
+/// The variable whose value would bring a secret the build does not get
+/// into its environment under another name: the one an `env:` source
+/// names. Null for a secret the build gets, another kind of source, or a
+/// variable a secret may not set, such as PATH, which the build needs.
+pub fn withheldSource(s: Settings, sec: Secret) ?[]const u8 {
+    if (buildGets(s, sec.name) or !std.mem.startsWith(u8, sec.source, "env:")) return null;
+    const name = sec.source["env:".len..];
+    return if (validSecretName(name)) name else null;
 }
 
 fn validEnvName(name: []const u8) bool {
@@ -473,8 +522,11 @@ const Loader = struct {
                 for (sub.entries.items) |*f| {
                     if (!validSecretName(f.key)) return l.fail("{s}:{d}: secret {s}: not a variable name a secret may set", .{ src.path, f.line, f.key });
                     const v = try l.string(src, f, "a secret");
-                    if (!validSecretSource(v))
-                        return l.fail("{s}:{d}: secret {s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a configuration file", .{ src.path, f.line, f.key });
+                    switch (checkSecretSource(v)) {
+                        .ok => {},
+                        .unknown => return l.fail("{s}:{d}: secret {s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a configuration file", .{ src.path, f.line, f.key }),
+                        .refused => |why| return l.fail("{s}:{d}: secret {s}: {s}", .{ src.path, f.line, f.key, why }),
+                    }
                     const ff = try l.where(src, f.line, profile);
                     // A later layer replaces a secret of the same name.
                     for (l.s.secrets.items, 0..) |old, i| if (std.mem.eql(u8, old.name, f.key)) {
@@ -695,8 +747,11 @@ pub fn load(
             const v = env.get(k).?;
             if (v.len == 0) continue;
             if (!validSecretName(name)) return l.fail("{s}: {s} is not a variable name a secret may set", .{ k, name });
-            if (!validSecretSource(v))
-                return l.fail("{s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable", .{k});
+            switch (checkSecretSource(v)) {
+                .ok => {},
+                .unknown => return l.fail("{s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable", .{k}),
+                .refused => |why| return l.fail("{s}: {s}", .{ k, why }),
+            }
             for (s.secrets.items, 0..) |old, i| if (std.mem.eql(u8, old.name, name)) {
                 _ = s.secrets.orderedRemove(i);
                 break;
@@ -937,7 +992,12 @@ test "refusals" {
     try r.one(&t, "[secrets]\nTOKEN = \"hunter2\"\n", .user, "never written");
     try r.one(&t, "[secrets]\nLD_PRELOAD = \"env:X\"\n", .user, "not a variable name");
     try r.one(&t, "[secrets]\nPATH = \"env:X\"\n", .user, "not a variable name");
-    try r.one(&t, "[secrets]\nT = \"file:relative\"\n", .user, "never written");
+    try r.one(&t, "[secrets]\nT = \"file:relative\"\n", .user, "c.toml:2: secret T: file: takes an absolute path or one starting ~/");
+    try r.one(&t, "[secrets]\nT = \"env:1X\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
+    try r.one(&t, "[secrets]\nT = \"env:\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
+    try r.one(&t, "[secrets]\nT = \"nimvault:\"\n", .user, "c.toml:2: secret T: nimvault: takes an entry");
+    try r.one(&t, "[secrets]\nT = \"nimvault:--recipient\"\n", .user, "c.toml:2: secret T: a nimvault entry may not start with -");
+    try r.one(&t, "[secrets]\nT = \"nimvault:a\\nb\"\n", .user, "c.toml:2: secret T: a source may not hold a line break or NUL");
     try r.one(&t, "[stack]\nmodule = \"EESSI;rm -rf ~\"\n", .user, "not a module name");
     try r.one(&t, "[dev]\nmodules = [\"$(id)\"]\n", .user, "not a module name");
     try r.one(&t, "[dev]\nmodules = \"GSL\"\n", .user, "array of strings");
@@ -953,6 +1013,25 @@ test "refusals" {
     try r.one(&t, "[build]\nsecrets = [\"TOKEN\"]\n", .user, "build.secrets [user c.toml:2] names TOKEN, but no secret TOKEN is defined");
     t.env.put("EB_LOCAL_STACK_MODULE", "a b") catch unreachable;
     try r.one(&t, "", .user, "EB_LOCAL_STACK_MODULE");
+}
+
+test "a refused secret source says what is wrong with it" {
+    for ([_][]const u8{ "env:MY_TOKEN", "file:/run/token", "file:~/.secrets/token", "nimvault:licences/flexlm" }) |source|
+        try std.testing.expectEqual(.ok, std.meta.activeTag(checkSecretSource(source)));
+    for ([_][]const u8{ "hunter2", "", "ENV:X", "vault:x" }) |source|
+        try std.testing.expectEqual(.unknown, std.meta.activeTag(checkSecretSource(source)));
+
+    var t = Fixture.init();
+    defer t.deinit();
+    try t.env.put("EB_LOCAL_SECRET_T", "nimvault:-x");
+    try t.refuse(&.{}, "EB_LOCAL_SECRET_T: a nimvault entry may not start with -, since nimvault would read it as an option");
+    try t.env.put("EB_LOCAL_SECRET_T", "file:token");
+    try t.refuse(&.{}, "EB_LOCAL_SECRET_T: file: takes an absolute path or one starting ~/");
+    try t.env.put("EB_LOCAL_SECRET_T", "hunter2");
+    try t.refuse(&.{}, "EB_LOCAL_SECRET_T: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable");
+    try t.env.put("EB_LOCAL_SECRET_T", "env:MY_TOKEN");
+    const s = try t.load(&.{}, .{});
+    try std.testing.expectEqualStrings("env:MY_TOKEN", s.secrets.items[0].source);
 }
 
 test "build.secrets names the secrets a build gets" {
@@ -1005,6 +1084,34 @@ test "build.secrets names the secrets a build gets" {
         "is defined: add it to [secrets], or set EB_LOCAL_SECRET_LM_LICENSE_FILE=SOURCE");
     try t.env.put("EB_LOCAL_BUILD_SECRETS", "SOURCE_TOKEN LD_PRELOAD");
     try t.refuse(&sources, "EB_LOCAL_BUILD_SECRETS: LD_PRELOAD is not a variable name a secret may set");
+}
+
+test "a build without a secret goes without the variable its env: source names" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const text =
+        \\[build]
+        \\secrets = ["SOURCE_TOKEN"]
+        \\[secrets]
+        \\SOURCE_TOKEN = "env:MY_TOKEN"
+        \\MIRROR_PASSWORD = "env:MY_MIRROR"
+        \\LM_LICENSE_FILE = "nimvault:licences/flexlm"
+        \\SEARCH_PATH = "env:PATH"
+    ;
+    const sources = [_]Source{.{ .path = "u.toml", .text = text, .layer = .user }};
+    const withheld = struct {
+        fn all(tt: *Fixture, from: []const Source) ![]const u8 {
+            const s = try tt.load(from, .{});
+            var out: std.ArrayList(u8) = .empty;
+            for (s.secrets.items) |sec| if (withheldSource(s, sec)) |name| try out.print(tt.arena.allocator(), "{s} ", .{name});
+            return out.items;
+        }
+    };
+    try std.testing.expectEqualStrings("MY_MIRROR ", try withheld.all(&t, &sources));
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "MIRROR_PASSWORD");
+    try std.testing.expectEqualStrings("MY_TOKEN ", try withheld.all(&t, &sources));
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "");
+    try std.testing.expectEqualStrings("MY_TOKEN MY_MIRROR ", try withheld.all(&t, &sources));
 }
 
 test "storage.node_local_mount" {

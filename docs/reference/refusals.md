@@ -5,7 +5,7 @@
 A build checks where it would work and where it would install, and stops before it makes anything there when either is wrong.
 `eb-local clean` checks the trees it would remove from before it removes anything, and `eb-local doctor` reports what a build would refuse.
 This page lists each refusal: what it refused, why, and what to change.
-The README's [Where things go](../index.md#where-things-go) says where each thing goes, and [Where EESSI-extend installs](../explanation/install-variables.md) has the refusals of `eb-local eb` and of an install path EESSI-extend moves.
+[Where a build puts things, and why](../explanation/where-things-go.md) says where each thing goes, and [Where EESSI-extend installs](../explanation/install-variables.md) has the refusals of `eb-local eb` and of an install path EESSI-extend moves.
 
 ## The form
 
@@ -62,7 +62,7 @@ eb-local: clean --workspaces works only inside the Slurm job that made the works
 A build makes its workspace in the allocation's node-local mount, `<storage.node_local_root>/<storage.node_local_mount>`, with your user name for `%u` and the job id for `%j`.
 `eb-local clean --workspaces` removes workspaces only there.
 Only the site file sets the `storage` settings.
-With the README's site file, `storage.node_local_root` is `/local` and `storage.node_local_mount` is `%u.%j`, so job 4242 of the user `alice` has `/local/alice.4242`.
+With `storage.node_local_root` set to `/local` and `storage.node_local_mount` at its default, `%u.%j`, job 4242 of the user `alice` has `/local/alice.4242`.
 The checks run in this order, and the first that fails is the refusal:
 
 `no site file sets storage.node_local_root`

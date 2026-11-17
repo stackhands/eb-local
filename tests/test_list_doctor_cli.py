@@ -13,7 +13,14 @@ import unittest
 import binary
 from test_storage import StorageFixture
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+SITE_DEFAULTS = Path(__file__).resolve().parents[1] / "docs" / "orgmode" / "howto" / "set-site-defaults.org"
+
+
+def guide_block(language):
+    """The one source block in LANGUAGE of the site defaults guide, unindented."""
+    found = re.search(rf"^( *)#\+begin_src {language}\n(.*?)^\1#\+end_src$", SITE_DEFAULTS.read_text(), re.M | re.S)
+    indent = len(found.group(1))
+    return "".join(line[indent:] for line in found.group(2).splitlines(keepends=True))
 
 # eessi-arch-guard --strict --shell: a reload, a guard that keeps the
 # target, or one that cannot select a target.
@@ -34,8 +41,13 @@ esac
 class ListAndDoctor(StorageFixture):
     def setUp(self):
         super().setUp()
-        # The module double stands in for Lmod's, whose init sets LMOD_CMD.
+        # The module double stands in for Lmod's, whose init sets LMOD_CMD,
+        # and EESSI's init puts the directory of the EESSI module on MODULEPATH.
         self.env["LMOD_CMD"] = "/usr/share/lmod/lmod/libexec/lmod"
+        self.eessi_modules = self.root / "init" / "modules"
+        (self.eessi_modules / "EESSI").mkdir(parents=True)
+        (self.eessi_modules / "EESSI" / "2026.06.lua").write_text("-- module\n")
+        self.env["MODULEPATH"] = str(self.eessi_modules)
 
     def run_tool(self, args, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
@@ -66,6 +78,7 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(lines[2].split(), ["GSL/2.8-GCC-15.2.0", "x", "x"])
         self.assertEqual(lines[3].split(), ["pigz/2.8-GCCcore-15.2.0", "x", "-"])
         self.assertIn("Load EESSI", lines[-1])
+        self.assertEqual([line for line in lines if line != line.rstrip()], [], "a line ends in a blank")
 
     def test_list_names_what_this_nodes_target_lacks(self):
         self.two_targets()
@@ -122,23 +135,62 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("warn LD_LIBRARY_PATH is set", run.stdout)
         self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
 
-    def test_the_readme_default_for_a_site_is_one_prefix_for_eb_local_and_eessi_extend(self):
-        text = README.read_text()
-        section = text[text.index("\n## A site Lmod hook\n"):]
-        line = re.search(r"```toml\n(prefix = .*)\n```", section).group(1)
+    def test_doctor_takes_what_eessi_extend_set_for_eb_local_env_as_its_own(self):
+        # eval "$(eb-local env)" loads EESSI-extend once the prefix exists, and
+        # the extension sets the install path and EasyBuild's prefix.
+        self.prefix.mkdir(parents=True)
+        tree = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+        shell = dict(EESSI_USER_INSTALL=str(self.prefix), EASYBUILD_INSTALLPATH=str(tree),
+                     EASYBUILD_PREFIX="/tmp/u/easybuild",
+                     LOADEDMODULES="EESSI/2026.06:EasyBuild/5.4.2:EESSI-extend/2026.06-easybuild")
+        run = self.run_tool(["doctor"], **shell)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("warn EASYBUILD", run.stdout)
+        self.assertIn("ok   EASYBUILD_INSTALLPATH is in your prefix, as EESSI-extend sets it when eb-local env loads it\n", run.stdout)
+        self.assertIn("ok   EASYBUILD_PREFIX is EESSI-extend's own, set when eb-local env loads it\n", run.stdout)
+        # Without the extension loaded, or with its install path elsewhere,
+        # they are what an earlier session left.
+        for change in ({"LOADEDMODULES": "EESSI/2026.06"}, {"EASYBUILD_INSTALLPATH": "/elsewhere"}):
+            with self.subTest(**change):
+                run = self.run_tool(["doctor"], **dict(shell, **change))
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("warn EASYBUILD_PREFIX=/tmp/u/easybuild is set in this shell", run.stdout)
+                self.assertIn("warn EASYBUILD_INSTALLPATH=", run.stdout)
+
+    def login(self, home, **extra):
+        """What the guide's login script leaves in EESSI_USER_INSTALL."""
+        script = guide_block("sh") + 'printf %s "${EESSI_USER_INSTALL-unset}"\n'
+        run = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"], "HOME": str(home), **extra},
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run.stdout
+
+    def test_the_guide_default_for_a_site_is_one_prefix_for_eb_local_and_eessi_extend(self):
+        line = guide_block("toml").strip()
+        self.assertRegex(line, r"^prefix = ")
         home = self.root / "home"
         home.mkdir()
+        exported = self.login(home)
+        self.assertEqual(exported, f"{home}/.local/eessi")
+        self.assertEqual(os.stat(exported).st_mode & 0o777, 0o700)
         site = self.root / "site.toml"
         site.write_text(f'{line}\n\n[storage]\nnode_local_root = "{self.nodes}"\nnode_local_fstype = "xfs"\n'
                         'shared_scratch = ["/scratch"]\n')
         site.chmod(0o644)
         del self.env["EB_LOCAL_PREFIX"]
-        run = self.run_tool(["doctor"], HOME=str(home), EB_LOCAL_CONFIG=str(site),
-                            EESSI_USER_INSTALL=str(home / ".local" / "eessi"))
+        run = self.run_tool(["doctor"], HOME=str(home), EB_LOCAL_CONFIG=str(site), EESSI_USER_INSTALL=exported)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f"ok   installs go to {home}/.local/eessi: a user install, prefix from site {site}:1\n", run.stdout)
         self.assertIn("ok   EESSI_USER_INSTALL names your prefix", run.stdout)
         self.assertNotIn("warn EESSI_USER_INSTALL", run.stdout)
+
+    def test_the_guide_login_script_leaves_a_shell_with_an_install_variable_alone(self):
+        home = self.root / "home"
+        home.mkdir()
+        for name in ("EESSI_USER_INSTALL", "EESSI_PROJECT_INSTALL", "EESSI_SITE_INSTALL", "EESSI_CVMFS_INSTALL"):
+            with self.subTest(name=name):
+                self.assertEqual(self.login(home, **{name: ""}), "" if name == "EESSI_USER_INSTALL" else "unset")
+                self.assertFalse((home / ".local").exists())
 
     def guard_path(self):
         bin = self.root / "guard-bin"
@@ -216,14 +268,43 @@ class ListAndDoctor(StorageFixture):
 
     def test_doctor_outside_an_allocation_and_with_modules_off_modulepath(self):
         self.install("x86_64/amd/zen2", "GSL/2.8-GCC-15.2.0")
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH="/somewhere/else")
+        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}")
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertIn("info not in a Slurm job", run.stdout)
         self.assertIn("warn your modules are not on MODULEPATH", run.stdout)
         inside = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen2" / "modules" / "all"
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{inside}")
+        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}:{inside}")
         self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
+
+    def test_doctor_fails_where_no_directory_on_modulepath_holds_the_eessi_module(self):
+        # A shell with Lmod but without EESSI's init: builds keep its
+        # MODULEPATH, and Lmod cannot find EESSI/2026.06 there.
+        repo = self.root / "repo"
+        for modulepath in ("", "/somewhere/else"):
+            with self.subTest(MODULEPATH=modulepath):
+                run = self.run_tool(["doctor"], MODULEPATH=modulepath, EESSI_CVMFS_REPO=str(repo))
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn("FAIL no directory on MODULEPATH in this shell holds stack.module, EESSI/2026.06 [default], "
+                              "so builds, env and dev cannot load it; "
+                              f"module use {repo}/init/modules adds EESSI's module directory\n", run.stdout)
+                self.assertTrue(run.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
+        # A Tcl module file has no extension; a name without a version is a directory.
+        tcl = self.root / "tcl"
+        (tcl / "EESSI").mkdir(parents=True)
+        (tcl / "EESSI" / "2026.06").write_text("#%Module\n")
+        for extra in ({}, {"EB_LOCAL_STACK_MODULE": "EESSI"}):
+            with self.subTest(**extra):
+                run = self.run_tool(["doctor"], MODULEPATH=f"/somewhere/else:{tcl}", **extra)
+                self.assertEqual(run.returncode, 0, run.stdout)
+                self.assertNotIn("holds stack.module", run.stdout)
+        run = self.run_tool(["doctor"], EB_LOCAL_STACK_MODULE="site/eessi")
+        self.assertIn("holds stack.module, site/eessi [environment EB_LOCAL_STACK_MODULE], so", run.stdout)
+        # With no module command, a build sources an init, which sets MODULEPATH.
+        run = self.run_tool(["doctor"], LMOD_CMD="", MODULESHOME="", MODULEPATH="")
+        self.assertNotIn("holds stack.module", run.stdout)
+        run = self.without_a_site_file(MODULEPATH="")
+        self.assertIn("warn no directory on MODULEPATH in this shell holds stack.module", run.stdout)
 
     def test_doctor_fails_on_a_secret_every_build_would_stop_on(self):
         secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC")
@@ -299,9 +380,16 @@ class ListAndDoctor(StorageFixture):
         self.assertTrue(run.stdout.rstrip().endswith(
             "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file."), run.stdout)
 
-        run = self.without_a_site_file(EESSI_PROJECT_INSTALL="/project/climate")
+        # EESSI-extend refuses to load for a project directory that is not there.
+        project = self.root / "project"
+        run = self.without_a_site_file(EESSI_PROJECT_INSTALL=str(project))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"FAIL EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
+                      "and `eb-local eb` stops", run.stdout)
+        project.mkdir()
+        run = self.without_a_site_file(EESSI_PROJECT_INSTALL=str(project))
         self.assertEqual(run.returncode, 0, run.stdout)
-        self.assertIn("ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL=/project/climate", run.stdout)
+        self.assertIn(f"ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL={project}", run.stdout)
 
         run = self.without_a_site_file(EESSI_USER_INSTALL="/home/alice/eessi", EESSI_SITE_INSTALL="")
         self.assertEqual(run.returncode, 1, run.stdout)
@@ -316,6 +404,11 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("is missing, so `eb-local eb` stops", run.stdout)
         self.assertIn("warn more than one of EESSI_USER_INSTALL", run.stdout)
         self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+        project = self.root / "project"
+        run = self.run_tool(["doctor"], EESSI_CVMFS_REPO=str(self.root / "repo"), EESSI_PROJECT_INSTALL=str(project))
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn(f"warn EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
+                      "and `eb-local eb` stops", run.stdout)
 
 
 if __name__ == "__main__":
