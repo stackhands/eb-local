@@ -19,6 +19,11 @@ echo spider-failed >&2
 exit 9
 """
 
+UPDATE = """#!/bin/sh
+echo "$0 $@" >>"$EB_LOCAL_UPDATE_LOG"
+exit 0
+"""
+
 
 def run(args):
     return subprocess.run(
@@ -97,6 +102,42 @@ class LmodCache(unittest.TestCase):
         got = run(["--modulepath", "/modules", "--cache-dir", "cache", "--timestamp", "/tmp/stamp"])
         self.assertEqual(got.returncode, 2, got.stderr)
         self.assertIn("not an absolute path", got.stderr)
+
+    def test_prefix_dry_run_lists_cpu_and_accelerator_module_trees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "versions/2026.06/software/linux/x86_64/amd/zen4"
+            (base / "modules/all").mkdir(parents=True)
+            (base / "accel/nvidia/cc90/modules/all").mkdir(parents=True)
+            got = run(["--prefix", str(root), "--dry-run"])
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertIn(str(base), got.stdout)
+            self.assertIn("modules/all", got.stdout)
+            self.assertIn("accel/nvidia/cc90/modules/all", got.stdout)
+
+    def test_prefix_invokes_lmods_cache_updater_for_each_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "calls.log"
+            updater = root / "update_lmod_system_cache_files"
+            updater.write_text(UPDATE)
+            updater.chmod(updater.stat().st_mode | stat.S_IEXEC)
+            cpu = root / "versions/2026.06/software/linux/x86_64/amd/zen4"
+            (cpu / "modules/all").mkdir(parents=True)
+            (cpu / "accel/nvidia/cc90/modules/all").mkdir(parents=True)
+            env = {**os.environ, "EB_LOCAL_UPDATE_LOG": str(log)}
+            got = subprocess.run(
+                [binary.BIN, "lmod-cache", "--prefix", str(root), "--update-cmd", str(updater)],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(got.returncode, 0, got.stderr)
+            lines = log.read_text().strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("modules/all", lines[0])
+            self.assertIn("accel/nvidia/cc90/modules/all", lines[0])
+            self.assertIn(f"-d {cpu}/.lmod/cache", lines[0])
 
 
 if __name__ == "__main__":

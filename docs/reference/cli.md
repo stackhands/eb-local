@@ -22,6 +22,7 @@ eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [NAME[/VERSION]...]
 eb-local [OPTION]... doctor
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD]
+eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
                    [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
@@ -93,6 +94,13 @@ directory you own.
                                        that fails leaves both files unchanged.
                                        --spider names the spider program;
                                        default: spider. Does not read the site file
+  eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD]
+                      [--dry-run]
+                                       for every CPU target under DIR, refresh
+                                       .lmod/cache with Lmod's cache updater
+                                       (like EESSI's update_lmod_caches.sh).
+                                       --dry-run lists targets; existing
+                                       --modulepath mode is unchanged
   eb-local modulerc --module-tree DIR [--default MODULE]...
                      [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
                                        write DIR/.modulerc.lua with the
@@ -337,16 +345,24 @@ It changes nothing, and exits 1 when a line says `FAIL`.
 Write `spiderT.lua` in `--cache-dir` from Lmod's `spider -o spiderT`, for every directory in `--modulepath`, then set `--timestamp` one second older than that file.
 Lmod treats a newer timestamp as a stale cache and does not show the modules the cache names.
 A `spider` that cannot start, exits non-zero, or writes nothing leaves the cache and the timestamp as they were.
+
+With `--prefix`, the command walks every CPU target under the prefix (`versions/*/software/…` or `software/…`), prepends each accelerator's `modules/all` directory on that CPU (as EESSI's filesystem-layer `update_lmod_caches.sh` does), and runs Lmod's `update_lmod_system_cache_files` into `<cpu>/.lmod/cache`.
+`--dry-run` lists each target, cache directory and colon-separated `MODULEPATH`; it changes no file.
+
 It does not read the site file. `--profile`, `--project` and `--config` are accepted and ignored.
 
 | Option | Meaning |
 |---|---|
-| `--modulepath DIR[:DIR]` | The module directories, separated by colons. Absolute. Required. |
-| `--cache-dir DIR` | The directory that receives `spiderT.lua`. Absolute. Required. Created if it is missing. |
-| `--timestamp FILE` | The timestamp file Lmod compares with the cache. Absolute. Required. |
-| `--spider CMD` | The `spider` program. Default: `spider` on `PATH`. |
+| `--modulepath DIR[:DIR]` | The module directories, separated by colons. Absolute. Required without `--prefix`. |
+| `--cache-dir DIR` | The directory that receives `spiderT.lua`. Absolute. Required without `--prefix`. Created if it is missing. |
+| `--timestamp FILE` | The timestamp file Lmod compares with the cache. Absolute. Required without `--prefix`. |
+| `--spider CMD` | The `spider` program for single-target mode. Default: `spider` on `PATH`. |
+| `--prefix DIR` | Walk `DIR` for CPU targets and refresh each `.lmod/cache` with Lmod's cache updater. Absolute. |
+| `--eessi-version VER` | With `--prefix`, only `DIR/versions/VER/software`; default is every `versions/*/software`. |
+| `--update-cmd CMD` | Lmod's `update_lmod_system_cache_files` program. Default: `DIR/compat/linux/$(uname -m)/usr/share/Lmod/libexec/update_lmod_system_cache_files`. |
+| `--dry-run` | With `--prefix`, list targets only. |
 
-Exit 0 means both files were written. Exit 2 is a missing or relative path. Exit 127 means `spider` could not be started. Any other exit is `spider`'s, and the files are unchanged.
+Exit 0 means both files were written or every prefix target was updated. Exit 2 is a missing or relative path. Exit 127 means `spider` or the cache updater could not be started. Any other exit is the child program's, and caches are left as they were on failure.
 
 ### modulerc
 

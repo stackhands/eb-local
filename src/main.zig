@@ -90,6 +90,13 @@ const usage_text =
     \\                                       that fails leaves both files unchanged.
     \\                                       --spider names the spider program;
     \\                                       default: spider. Does not read the site file
+    \\  eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD]
+    \\                      [--dry-run]
+    \\                                       for every CPU target under DIR, refresh
+    \\                                       .lmod/cache with Lmod's cache updater
+    \\                                       (like EESSI's update_lmod_caches.sh).
+    \\                                       --dry-run lists targets; existing
+    \\                                       --modulepath mode is unchanged
     \\  eb-local modulerc --module-tree DIR [--default MODULE]...
     \\                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
     \\                                       write DIR/.modulerc.lua with the
@@ -3320,6 +3327,20 @@ pub fn main(init: std.process.Init) u8 {
                     cache.spider = value(args, &i, "--spider");
                 } else if (joined(x, "--spider")) |v| {
                     cache.spider = v;
+                } else if (std.mem.eql(u8, x, "--prefix")) {
+                    cache.prefix = value(args, &i, "--prefix");
+                } else if (joined(x, "--prefix")) |v| {
+                    cache.prefix = v;
+                } else if (std.mem.eql(u8, x, "--eessi-version")) {
+                    cache.eessi_version = value(args, &i, "--eessi-version");
+                } else if (joined(x, "--eessi-version")) |v| {
+                    cache.eessi_version = v;
+                } else if (std.mem.eql(u8, x, "--update-cmd")) {
+                    cache.update_cmd = value(args, &i, "--update-cmd");
+                } else if (joined(x, "--update-cmd")) |v| {
+                    cache.update_cmd = v;
+                } else if (std.mem.eql(u8, x, "--dry-run")) {
+                    cache.dry_run = true;
                 } else die("lmod-cache does not know '{s}'", .{x});
             },
             .modulerc => {

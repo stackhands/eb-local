@@ -16,7 +16,7 @@ This page writes both, with the timestamp one second older.
 
 ## Steps
 
-1.  Write the cache. `--modulepath` is the same colon-separated list a user would have on `MODULEPATH`:
+1.  Write the cache for one tree. `--modulepath` is the same colon-separated list a user would have on `MODULEPATH`:
 
     ```bash
     eb-local lmod-cache \
@@ -32,6 +32,15 @@ This page writes both, with the timestamp one second older.
     ```
 
     `spiderT.lua` is what `spider -o spiderT` wrote. The timestamp file's modification time is one second earlier, which is the mark Lmod uses to trust the cache.
+
+    To refresh every CPU target under an install prefix (and each target's accelerator module trees), use `--prefix` instead. It runs Lmod's `update_lmod_system_cache_files` once per target, as the European Environment for Scientific Software Installations (EESSI) publisher script `update_lmod_caches.sh` does:
+
+    ```bash
+    eb-local lmod-cache --prefix /opt/eessi-mirror
+    eb-local lmod-cache --prefix /home/alice/eessi --eessi-version 2026.06 --dry-run
+    ```
+
+    `--dry-run` prints each CPU target directory, its `.lmod/cache` path and the `MODULEPATH` that would be passed to the updater.
 2.  Point Lmod at those two paths, in the `lmodrc.lua` the site already loads. The cache directory is the directory that now holds `spiderT.lua`, and the timestamp is the file named above.
 3.  Run it again after the next install. A build pipeline can use the same command as its cache command, with the paths written out. `[caches].command` is not a shell, so the paths are absolute.
 
@@ -39,7 +48,8 @@ This page writes both, with the timestamp one second older.
 
 | Message | Cause | What to do |
 |---|---|---|
-| `lmod-cache needs --modulepath, --cache-dir and --timestamp` | One of the three is missing. | Pass all three. |
+| `lmod-cache needs --modulepath, --cache-dir and --timestamp` | Single-target mode without one of the three. | Pass all three, or use `--prefix` instead. |
+| `under PREFIX found no CPU target with modules/all` | `--prefix` did not find `software/…/modules/all`. | Check the prefix or pass `--eessi-version`. |
 | `--cache-dir DIR is not an absolute path` | `DIR` is relative, as is a module directory or the timestamp. | Pass absolute paths. The cache is read later from another working directory. |
 | `cannot run spider: FileNotFound. Install Lmod and put spider on PATH, as https://lmod.readthedocs.io/en/latest/030_installing.html describes, or pass --spider with its path` | `spider` is not on `PATH`. | Install Lmod, or pass `--spider` with the program's path. |
 | `spider exited N; the cache was not changed` | `spider` failed. The previous `spiderT.lua` and timestamp are untouched. | Read the lines above that one, fix the module directories, and run it again. |
