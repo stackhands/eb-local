@@ -1,0 +1,1 @@
+`eb-local lmod-cache` writes Lmod's `spiderT.lua` for the module directories it is given, and a timestamp one second older, so Lmod trusts the cache. A `spider` that fails leaves both files unchanged.
