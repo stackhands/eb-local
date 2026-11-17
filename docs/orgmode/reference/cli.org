@@ -15,6 +15,7 @@ eb-local [OPTION]... env
 eb-local [OPTION]... dev [--buildenv MODULE] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check FILE...
+eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [NAME[/VERSION]...]
 eb-local [OPTION]... doctor
@@ -25,7 +26,7 @@ eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--w
                            [--dry-run] [--delete]
 eb-local [OPTION]... config [--check | --env]
 eb-local [OPTION]... profiles
-eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete]
+eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
 eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
 eb-local help | -h | --help | --version
@@ -68,6 +69,10 @@ directory you own.
                                        first; dev adds them after a build environment
   eb-local check FILE...               whether a program or library built here runs here:
                                        its architecture, loader, run paths and libraries
+  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
+                                       the same for every ELF file in those installations,
+                                       the dev tree, or DIR; a file that is not ELF is skipped.
+                                       --quiet prints a file only when it has a problem
   eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
                                        one batch job per node type the site file lists
                                        in build.node_types, each building the recipe for
@@ -99,9 +104,11 @@ directory you own.
                                        --check also reads every secret (values not shown);
                                        --env prints them as EB_LOCAL_* lines for export
   eb-local profiles                    the profiles the configuration defines
-  eb-local uninstall NAME/VERSION... [--dry-run] [--delete]
+  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
                                        remove an installation and its module file, for
-                                       every CPU target, to the trash with rtrash
+                                       every CPU target, to the trash with rtrash.
+                                       --usage-log asks eb-keep-logs whether the prefix
+                                       is in FILE, and removes nothing when that exits 2
   eb-local restore NAME/VERSION... [--dry-run]
                                        bring them back from the trash, read-only again
   eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -281,7 +288,19 @@ A problem is a line of its own, after =problem:=, below the line it concerns:
 | =LIBRARY comes from the host, not from EESSI=                                                                    | EESSI is loaded, and the library resolves outside it.                                       |
 
 =check= follows the libraries the file names, not theirs; run it on a library to check that one's.
-It exits 0 when there are no problems, 1 when there are, and 2 when a file cannot be read.
+
+=--module NAME/VERSION=, =--dev= and =--prefix DIR= audit every ELF file in place of the files named on the line.
+A file that is not ELF is skipped, and a symbolic link is not followed, so a link cannot point the audit outside the tree.
+=--module= may be repeated, and further =NAME/VERSION= words after it name more modules.
+Each must be installed. Every CPU target's installation is audited, and the module files are not: they are not ELF.
+=--dev= reads =EB_LOCAL_DEV_PREFIX= when it is set, and otherwise =<prefix>/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR=, with =$EESSI_ACCELERATOR_TARGET= appended when that is set.
+=--prefix= is any directory and does not read the site file.
+The three are alternatives to naming files, and to each other.
+=--quiet= prints a file only when it has a problem, and still ends with the summary line.
+With no ELF file in the tree, and without =--quiet=, =check= says =eb-local check: no ELF files= and then =eb-local check: no problems=.
+
+It exits 0 when there are no problems, 1 when there are, and 2 when a named file cannot be read or is not ELF, or when a file in a tree cannot be read.
+A file that is not ELF is not a failure of a tree audit.
 
 ** submit
 
@@ -384,13 +403,22 @@ Print each profile the configuration files define, with the layer and the file t
 Remove each installation =NAME/VERSION= names, for every CPU target, with its module files and the links EasyBuild makes to them from =modules/CLASS/=, and print what it removes.
 EasyBuild leaves an installation read-only; =uninstall= makes its directories writable first.
 
-| Option      | Meaning                                                                   |
-|-------------+---------------------------------------------------------------------------|
-| =--dry-run= | Print what would be removed, and remove nothing.                          |
-| =--delete=  | Delete for good when =clean.trash= does not move files to the trash.      |
+| Option           | Meaning                                                                                          |
+|------------------+--------------------------------------------------------------------------------------------------|
+| =--dry-run=      | Print what would be removed, and remove nothing.                                                 |
+| =--delete=       | Delete for good when =clean.trash= does not move files to the trash.                             |
+| =--usage-log FILE= | Ask =eb-keep-logs= whether the install prefix is named in FILE, and remove nothing when that command exits 2. |
 
 It removes nothing, and exits 2, when another module installed in the prefix loads one named and is not named too.
 With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
+
+=--usage-log FILE= runs =eb-keep-logs used --prefix PREFIX --require-none FILE= after that dependents check and before anything is listed or removed.
+PREFIX is the install prefix.
+eb-local does not read FILE.
+When that command exits 0, uninstall goes on as it would without the option, including a dry run.
+When it exits 2, or any other status, or =eb-keep-logs= is not on =PATH= or cannot be run, uninstall removes nothing, exits 2, and prints what =eb-keep-logs= wrote.
+Without =--usage-log=, uninstall does not run =eb-keep-logs=.
+=restore= does not take the option, and uninstall takes it once.
 
 ** restore
 

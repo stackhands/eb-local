@@ -61,6 +61,14 @@ These steps build a C program that uses FFTW and OpenMP for one node type, check
 
     The `RPATH` line, one directory for each library directory the link could use, is cut short here.
 
+    To audit every ELF file in the dev tree, rather than the one program:
+
+    ```bash
+    eb-local check --dev --quiet
+    ```
+
+    `--quiet` prints a file only when it has a problem. A file that is not ELF is skipped.
+
 5.  Repeat steps 1 to 4 on each other node type that will run the program.
     Each build goes into the directory for its own CPU target.
 

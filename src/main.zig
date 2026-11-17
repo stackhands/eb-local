@@ -68,6 +68,10 @@ const usage_text =
     \\                                       first; dev adds them after a build environment
     \\  eb-local check FILE...               whether a program or library built here runs here:
     \\                                       its architecture, loader, run paths and libraries
+    \\  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
+    \\                                       the same for every ELF file in those installations,
+    \\                                       the dev tree, or DIR; a file that is not ELF is skipped.
+    \\                                       --quiet prints a file only when it has a problem
     \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
     \\                                       one batch job per node type the site file lists
     \\                                       in build.node_types, each building the recipe for
@@ -99,9 +103,11 @@ const usage_text =
     \\                                       --check also reads every secret (values not shown);
     \\                                       --env prints them as EB_LOCAL_* lines for export
     \\  eb-local profiles                    the profiles the configuration defines
-    \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete]
+    \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
     \\                                       remove an installation and its module file, for
-    \\                                       every CPU target, to the trash with rtrash
+    \\                                       every CPU target, to the trash with rtrash.
+    \\                                       --usage-log asks eb-keep-logs whether the prefix
+    \\                                       is in FILE, and removes nothing when that exits 2
     \\  eb-local restore NAME/VERSION... [--dry-run]
     \\                                       bring them back from the trash, read-only again
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -846,102 +852,7 @@ fn readSmall(a: Allocator, path: []const u8) ?[]const u8 {
     return fsx.readAll(a, f.fd, 64 * 1024) catch null;
 }
 
-fn cmdCheck(c: Ctx, files: []const []const u8) u8 {
-    const a = c.a;
-    if (files.len == 0) die("check needs one or more programs or libraries", .{});
-    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
-    const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
-    var k: Check = .{};
-    var unreadable = false;
-    for (files) |f| {
-        const opened = fsx.openRegular(fsx.cwd, f, true) catch |e| {
-            warn("cannot open {s} ({s})", .{ f, @errorName(e) });
-            unreadable = true;
-            continue;
-        };
-        defer sys.close(opened.fd);
-        const elf = elfcheck.parse(a, opened.fd) catch |e| {
-            switch (e) {
-                error.NotElf64, error.Unsupported => warn("{s} is not a 64-bit little-endian ELF file", .{f}),
-                else => warn("cannot read {s} as ELF ({s})", .{ f, @errorName(e) }),
-            }
-            unreadable = true;
-            continue;
-        };
-        say("{s}: {s}", .{ f, elfcheck.machineName(elf.machine) });
-        if (elf.machine != elfcheck.hostMachine())
-            k.problem("built for {s}; this node is {s}", .{ elfcheck.machineName(elf.machine), elfcheck.machineName(elfcheck.hostMachine()) });
-        var buf: [sys.path_max]u8 = undefined;
-        const real = fsx.realpath(fsx.cwd, f, &buf) catch f;
-        const origin = a.dupe(u8, std.fs.path.dirname(real) orelse "/") catch oom();
-        if (elf.interp) |interp| {
-            say("  loader   {s}", .{interp});
-            if (eprefix) |ep| if (!storage.under(interp, ep))
-                k.problem("the loader is the host's, not the compatibility layer's under {s}", .{ep});
-        }
-        if (elf.rpath) |r| say("  RPATH    {s}", .{r});
-        if (elf.runpath) |r| {
-            say("  RUNPATH  {s}", .{r});
-            k.problem("RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH", .{});
-        }
-        if (elf.interp == null and elf.needed.len == 0) {
-            say("  static: no loader and no libraries", .{});
-            continue;
-        }
-
-        var sr: Search = .{};
-        if (elf.runpath == null) sr.add(a, elf.rpath, origin, "RPATH");
-        sr.add(a, c.env.get("LD_LIBRARY_PATH"), origin, "LD_LIBRARY_PATH");
-        sr.add(a, elf.runpath, origin, "RUNPATH");
-        // The loader's own directories: <root>/lib64 and the rest, where
-        // <root> is the compatibility layer for its loader, / for the host's.
-        const root = if (elf.interp) |i| (std.fs.path.dirname(std.fs.path.dirname(i) orelse "/") orelse "/") else "/";
-        for (loaderDirs(a, root)) |d| {
-            sr.dirs.append(a, d) catch oom();
-            sr.whence.append(a, "the loader's directories") catch oom();
-        }
-
-        var seen_targets: std.ArrayList([]const u8) = .empty;
-        for (sr.dirs.items, sr.whence.items) |d, why| {
-            if (std.mem.eql(u8, why, "the loader's directories")) continue;
-            const t = elfcheck.targetOf(d) orelse continue;
-            const want = target orelse continue;
-            if (std.mem.eql(u8, t, want)) continue;
-            for (seen_targets.items) |s0| {
-                if (std.mem.eql(u8, s0, t)) break;
-            } else {
-                seen_targets.append(a, t) catch oom();
-                k.problem("run paths into the {s} software tree; this shell is {s}: build it again on this node type", .{ t, want });
-            }
-        }
-
-        for (elf.needed) |n| {
-            if (std.mem.indexOfScalar(u8, n, '/') != null) {
-                say("  needs    {s}", .{n});
-                if (!isFile(n)) k.problem("{s} does not exist", .{n});
-                continue;
-            }
-            // The job may run without this shell's LD_LIBRARY_PATH, so the
-            // pick without it is the one that counts.
-            const clean = sr.find(a, n, false);
-            const with = sr.find(a, n, true);
-            const h = clean orelse {
-                if (with) |w| {
-                    say("  needs    {s} => {s}   [LD_LIBRARY_PATH]", .{ n, w.path });
-                    k.problem("{s} is found only through LD_LIBRARY_PATH", .{n});
-                } else {
-                    say("  needs    {s} => not found", .{n});
-                    k.problem("{s} is not found", .{n});
-                }
-                continue;
-            };
-            say("  needs    {s} => {s}   [{s}]", .{ n, h.path, h.why });
-            if (with) |w| if (!std.mem.eql(u8, w.path, h.path))
-                say("           LD_LIBRARY_PATH in this shell picks {s} instead", .{w.path});
-            if (eprefix != null and elfcheck.isHostPath(h.path))
-                k.problem("{s} comes from the host, not from EESSI", .{n});
-        }
-    }
+fn checkStatus(k: *const Check, unreadable: bool) u8 {
     if (k.problems > 0) {
         say("eb-local check: {d} problem(s)", .{k.problems});
         return 1;
@@ -949,6 +860,252 @@ fn cmdCheck(c: Ctx, files: []const []const u8) u8 {
     if (unreadable) return 2;
     say("eb-local check: no problems", .{});
     return 0;
+}
+
+/// Print the header for `path` once, so a quiet audit still names the file
+/// a problem belongs to.
+fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
+    if (shown.*) return;
+    say("{s}: {s}", .{ path, machine });
+    shown.* = true;
+}
+
+/// The report `check` prints for one ELF file already parsed. `quiet`
+/// skips the lines that are not problems; the problem lines are the same
+/// either way.
+fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool) void {
+    const a = c.a;
+    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
+    const machine = elfcheck.machineName(elf.machine);
+    var shown = false;
+    if (!quiet) showHeader(&shown, path, machine);
+    if (elf.machine != elfcheck.hostMachine()) {
+        showHeader(&shown, path, machine);
+        k.problem("built for {s}; this node is {s}", .{ machine, elfcheck.machineName(elfcheck.hostMachine()) });
+    }
+    var buf: [sys.path_max]u8 = undefined;
+    const real = fsx.realpath(fsx.cwd, path, &buf) catch path;
+    const origin = a.dupe(u8, std.fs.path.dirname(real) orelse "/") catch oom();
+    if (elf.interp) |interp| {
+        if (!quiet) say("  loader   {s}", .{interp});
+        if (eprefix) |ep| if (!storage.under(interp, ep)) {
+            showHeader(&shown, path, machine);
+            k.problem("the loader is the host's, not the compatibility layer's under {s}", .{ep});
+        };
+    }
+    if (elf.rpath) |r| if (!quiet) say("  RPATH    {s}", .{r});
+    if (elf.runpath) |r| {
+        if (!quiet) say("  RUNPATH  {s}", .{r});
+        showHeader(&shown, path, machine);
+        k.problem("RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH", .{});
+    }
+    if (elf.interp == null and elf.needed.len == 0) {
+        if (!quiet) say("  static: no loader and no libraries", .{});
+        return;
+    }
+
+    var sr: Search = .{};
+    if (elf.runpath == null) sr.add(a, elf.rpath, origin, "RPATH");
+    sr.add(a, c.env.get("LD_LIBRARY_PATH"), origin, "LD_LIBRARY_PATH");
+    sr.add(a, elf.runpath, origin, "RUNPATH");
+    // The loader's own directories: <root>/lib64 and the rest, where
+    // <root> is the compatibility layer for its loader, / for the host's.
+    const root = if (elf.interp) |i| (std.fs.path.dirname(std.fs.path.dirname(i) orelse "/") orelse "/") else "/";
+    for (loaderDirs(a, root)) |d| {
+        sr.dirs.append(a, d) catch oom();
+        sr.whence.append(a, "the loader's directories") catch oom();
+    }
+
+    var seen_targets: std.ArrayList([]const u8) = .empty;
+    for (sr.dirs.items, sr.whence.items) |d, why| {
+        if (std.mem.eql(u8, why, "the loader's directories")) continue;
+        const t = elfcheck.targetOf(d) orelse continue;
+        const want = target orelse continue;
+        if (std.mem.eql(u8, t, want)) continue;
+        for (seen_targets.items) |s0| {
+            if (std.mem.eql(u8, s0, t)) break;
+        } else {
+            seen_targets.append(a, t) catch oom();
+            showHeader(&shown, path, machine);
+            k.problem("run paths into the {s} software tree; this shell is {s}: build it again on this node type", .{ t, want });
+        }
+    }
+
+    for (elf.needed) |n| {
+        if (std.mem.indexOfScalar(u8, n, '/') != null) {
+            if (!quiet) say("  needs    {s}", .{n});
+            if (!isFile(n)) {
+                showHeader(&shown, path, machine);
+                k.problem("{s} does not exist", .{n});
+            }
+            continue;
+        }
+        // The job may run without this shell's LD_LIBRARY_PATH, so the
+        // pick without it is the one that counts.
+        const clean = sr.find(a, n, false);
+        const with = sr.find(a, n, true);
+        const h = clean orelse {
+            showHeader(&shown, path, machine);
+            if (with) |w| {
+                if (!quiet) say("  needs    {s} => {s}   [LD_LIBRARY_PATH]", .{ n, w.path });
+                k.problem("{s} is found only through LD_LIBRARY_PATH", .{n});
+            } else {
+                if (!quiet) say("  needs    {s} => not found", .{n});
+                k.problem("{s} is not found", .{n});
+            }
+            continue;
+        };
+        if (!quiet) say("  needs    {s} => {s}   [{s}]", .{ n, h.path, h.why });
+        if (!quiet) if (with) |w| if (!std.mem.eql(u8, w.path, h.path))
+            say("           LD_LIBRARY_PATH in this shell picks {s} instead", .{w.path});
+        if (eprefix != null and elfcheck.isHostPath(h.path)) {
+            showHeader(&shown, path, machine);
+            k.problem("{s} comes from the host, not from EESSI", .{n});
+        }
+    }
+}
+
+/// Open `path` and report it. A tree audit (`skip_non_elf`) skips a file
+/// that is not 64-bit little-endian ELF; naming the file does not.
+/// True when an ELF file was audited.
+fn auditFile(c: Ctx, k: *Check, path: []const u8, quiet: bool, skip_non_elf: bool, unreadable: *bool) bool {
+    const opened = fsx.openRegular(fsx.cwd, path, !skip_non_elf) catch |e| {
+        warn("cannot open {s} ({s})", .{ path, @errorName(e) });
+        unreadable.* = true;
+        return false;
+    };
+    defer sys.close(opened.fd);
+    const elf = elfcheck.parse(c.a, opened.fd) catch |e| {
+        if (skip_non_elf and (e == error.NotElf64 or e == error.Unsupported)) return false;
+        switch (e) {
+            error.NotElf64, error.Unsupported => warn("{s} is not a 64-bit little-endian ELF file", .{path}),
+            else => warn("cannot read {s} as ELF ({s})", .{ path, @errorName(e) }),
+        }
+        unreadable.* = true;
+        return false;
+    };
+    reportElf(c, k, path, elf, quiet);
+    return true;
+}
+
+fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool) u8 {
+    if (files.len == 0) die("check needs one or more programs or libraries", .{});
+    var k: Check = .{};
+    var unreadable = false;
+    for (files) |f| _ = auditFile(c, &k, f, quiet, false, &unreadable);
+    return checkStatus(&k, unreadable);
+}
+
+/// How deep a tree audit walks. A module or dev tree is far shallower.
+const check_walk_max = 64;
+
+/// Every regular file under `root`, not through a symbolic link. A file
+/// that is not ELF is skipped. `elfs` counts the files that were audited.
+fn walkElfs(c: Ctx, root: []const u8, quiet: bool, k: *Check, unreadable: *bool, elfs: *usize, depth: usize) void {
+    if (depth > check_walk_max) {
+        warn("{s} is too deep to check", .{root});
+        unreadable.* = true;
+        return;
+    }
+    const fd = fsx.openDir(fsx.cwd, root, false) catch |e| {
+        warn("cannot open {s} ({s})", .{ root, @errorName(e) });
+        unreadable.* = true;
+        return;
+    };
+    defer sys.close(fd);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = fsx.DirIter.init(c.a, fd) catch oom();
+    while (true) {
+        const entry = it.next() catch |e| {
+            warn("cannot read {s} ({s})", .{ root, @errorName(e) });
+            unreadable.* = true;
+            break;
+        } orelse break;
+        if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) continue;
+        names.append(c.a, c.a.dupe(u8, entry.name) catch oom()) catch oom();
+    }
+    std.mem.sort([]const u8, names.items, {}, lessThanStr);
+    for (names.items) |name| {
+        const st = fsx.statAt(fd, name, false) catch |e| {
+            const path = std.fs.path.join(c.a, &.{ root, name }) catch oom();
+            warn("cannot stat {s} ({s})", .{ path, @errorName(e) });
+            unreadable.* = true;
+            continue;
+        };
+        if (st.isLink()) continue;
+        const path = std.fs.path.join(c.a, &.{ root, name }) catch oom();
+        if (st.isDir()) {
+            walkElfs(c, path, quiet, k, unreadable, elfs, depth + 1);
+        } else if (st.isReg()) {
+            if (auditFile(c, k, path, quiet, true, unreadable)) elfs.* += 1;
+        }
+    }
+}
+
+/// The dev tree `dev` names: `EB_LOCAL_DEV_PREFIX` when the shell set it,
+/// otherwise `<prefix>/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR`, with
+/// `$EESSI_ACCELERATOR_TARGET` appended when that is set.
+fn devTree(c: Ctx, s: config.Settings) []const u8 {
+    if (nonEmpty(c.env.get("EB_LOCAL_DEV_PREFIX"))) |raw|
+        return storage.canonical(c.a, raw, c.cwd) catch oom();
+    const eessi_version = nonEmpty(c.env.get("EESSI_VERSION")) orelse
+        die("check --dev needs EB_LOCAL_DEV_PREFIX, or EESSI_VERSION and EESSI_SOFTWARE_SUBDIR", .{});
+    const sub = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR")) orelse
+        die("check --dev needs EB_LOCAL_DEV_PREFIX, or EESSI_VERSION and EESSI_SOFTWARE_SUBDIR", .{});
+    const base = std.fs.path.join(c.a, &.{ place(c, s).prefix, "dev", eessi_version, sub }) catch oom();
+    const raw = if (nonEmpty(c.env.get("EESSI_ACCELERATOR_TARGET"))) |accel|
+        std.fs.path.join(c.a, &.{ base, accel }) catch oom()
+    else
+        base;
+    return storage.canonical(c.a, raw, c.cwd) catch oom();
+}
+
+const CheckMode = enum { module, dev, prefix };
+
+/// Audit every ELF file in the installations `--module` names, in the dev
+/// tree, or under `--prefix`. `s` is set for a module or the dev tree.
+fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const []const u8, prefix_dir: []const u8, quiet: bool) u8 {
+    const a = c.a;
+    var roots: std.ArrayList([]const u8) = .empty;
+    switch (mode) {
+        .prefix => {
+            const dir = storage.canonical(a, prefix_dir, c.cwd) catch oom();
+            if (!isDir(dir)) die("check --prefix needs a directory; {s} is not one", .{dir});
+            roots.append(a, dir) catch oom();
+        },
+        .dev => {
+            const dir = devTree(c, s.?);
+            if (!isDir(dir)) die("check --dev: {s} is not a directory", .{dir});
+            roots.append(a, dir) catch oom();
+        },
+        .module => {
+            if (modules.len == 0) die("check --module needs NAME/VERSION, as module avail shows it", .{});
+            const p = place(c, s.?);
+            const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+            if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+                if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; check leaves it alone.", .{versions});
+            } else |_| die("nothing is installed in {s}", .{p.prefix});
+            var found: Found = .{};
+            for (modules) |m| {
+                if (!config.validModule(m)) die("'{s}' is not a module name", .{m});
+                var parts = std.mem.splitScalar(u8, m, '/');
+                const name = parts.next().?;
+                const ver = parts.next() orelse die("check --module needs NAME/VERSION; '{s}' has no version", .{m});
+                if (parts.next() != null) die("check --module needs NAME/VERSION; '{s}' has more parts", .{m});
+                const before = found.installs.items.len;
+                findInstalls(c, versions, name, ver, &found, 0);
+                if (found.installs.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
+            }
+            roots.appendSlice(a, found.installs.items) catch oom();
+        },
+    }
+    var k: Check = .{};
+    var unreadable = false;
+    var elfs: usize = 0;
+    for (roots.items) |root| walkElfs(c, root, quiet, &k, &unreadable, &elfs, 0);
+    if (elfs == 0 and !quiet and !unreadable) say("eb-local check: no ELF files", .{});
+    return checkStatus(&k, unreadable);
 }
 
 fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
@@ -2595,6 +2752,8 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
 const UninstallOpts = struct {
     dry_run: bool = false,
     delete: bool = false,
+    /// A usage log `eb-keep-logs used` reads. Null leaves uninstall as it was.
+    usage_log: ?[]const u8 = null,
 };
 
 const Found = struct {
@@ -2813,6 +2972,11 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         for (dependents.items) |f| warn("  {s}", .{f});
         return 2;
     }
+    // The usage log is eb-keep-logs' to read. Exit 2 from
+    // `used --require-none` means the prefix is named there, or the log
+    // could not be read; either way nothing is removed. Without the
+    // option this is not consulted.
+    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return 2;
     for (found.installs.items) |d| {
         if (!storage.under(d, versions)) die("{s} is outside {s}", .{ d, versions });
         say("  {s}/", .{d});
@@ -2860,6 +3024,40 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         sys.unlinkat(fsx.cwd, parent, linux.AT.REMOVEDIR) catch {};
     };
     return 0;
+}
+
+/// Relay lines `eb-keep-logs` wrote, without interpreting them.
+fn relayChild(text: []const u8) void {
+    var lines = std.mem.splitScalar(u8, std.mem.trim(u8, text, "\n"), '\n');
+    while (lines.next()) |line| if (line.len > 0) cli.err("  {s}\n", .{line});
+}
+
+/// True when uninstall must stop: `eb-keep-logs used --prefix PREFIX
+/// --require-none FILE` is missing, cannot be run, or exits non-zero.
+/// Exit 2 is the refusal that command documents.
+fn usageRefuses(c: Ctx, prefix: []const u8, log: []const u8) bool {
+    const bin = (proc.which(c.a, "eb-keep-logs", c.env.get("PATH") orelse "") catch oom()) orelse {
+        warn("eb-keep-logs is not on PATH, so the usage log cannot be read; nothing was removed.", .{});
+        return true;
+    };
+    const r = proc.run(c.a, bin, &.{ bin, "used", "--prefix", prefix, "--require-none", log }, c.envp, .{
+        .stdout_limit = 1 << 20,
+        .stderr_limit = 64 << 10,
+        .timeout_ms = 120_000,
+    }) catch |e| {
+        warn("cannot run eb-keep-logs ({s}); nothing was removed.", .{@errorName(e)});
+        return true;
+    };
+    defer r.deinit(c.a);
+    if (r.term.code() == 0) return false;
+    if (r.term.code() == 2) {
+        warn("eb-keep-logs used --prefix {s} --require-none exited 2; nothing was removed.", .{prefix});
+    } else {
+        warn("eb-keep-logs used exited {d}; nothing was removed.", .{r.term.code()});
+    }
+    relayChild(r.stderr);
+    relayChild(r.stdout);
+    return true;
 }
 
 // ---- restore --------------------------------------------------------------
@@ -3011,6 +3209,10 @@ pub fn main(init: std.process.Init) u8 {
     var uninstall: UninstallOpts = .{};
     var submit: SubmitOpts = .{};
     var check = false;
+    var check_quiet = false;
+    var check_dev = false;
+    var check_prefix: ?[]const u8 = null;
+    var check_modules: std.ArrayList([]const u8) = .empty;
     var as_env = false;
     var site: SiteOpts = .{};
     var family: []const u8 = "";
@@ -3076,7 +3278,25 @@ pub fn main(init: std.process.Init) u8 {
                     only_unwrapped = true;
                 } else die("rpath-wrappers takes only --for FAMILY or --unwrapped; got '{s}'", .{x});
             },
-            .check => rest.append(a, x) catch oom(),
+            .check => {
+                if (std.mem.eql(u8, x, "--quiet")) {
+                    check_quiet = true;
+                } else if (std.mem.eql(u8, x, "--dev")) {
+                    check_dev = true;
+                } else if (std.mem.eql(u8, x, "--prefix")) {
+                    check_prefix = value(args, &i, "--prefix");
+                } else if (joined(x, "--prefix")) |v| {
+                    check_prefix = v;
+                } else if (std.mem.eql(u8, x, "--module")) {
+                    check_modules.append(a, value(args, &i, "--module")) catch oom();
+                } else if (joined(x, "--module")) |v| {
+                    check_modules.append(a, v) catch oom();
+                } else if (x.len > 0 and x[0] == '-') {
+                    die("check does not know '{s}'", .{x});
+                } else if (check_modules.items.len > 0) {
+                    check_modules.append(a, x) catch oom();
+                } else rest.append(a, x) catch oom();
+            },
             .env => {
                 if (std.mem.eql(u8, x, "--strict")) {
                     g.env_strict = true;
@@ -3196,6 +3416,12 @@ pub fn main(init: std.process.Init) u8 {
                     uninstall.dry_run = true;
                 } else if (command == .uninstall and std.mem.eql(u8, x, "--delete")) {
                     uninstall.delete = true;
+                } else if (command == .uninstall and std.mem.eql(u8, x, "--usage-log")) {
+                    if (uninstall.usage_log != null) die("uninstall takes one --usage-log", .{});
+                    uninstall.usage_log = value(args, &i, "--usage-log");
+                } else if (command == .uninstall and joined(x, "--usage-log") != null) {
+                    if (uninstall.usage_log != null) die("uninstall takes one --usage-log", .{});
+                    uninstall.usage_log = joined(x, "--usage-log").?;
                 } else if (x.len > 0 and x[0] == '-') {
                     die("{s} does not know '{s}'", .{ @tagName(command), x });
                 } else if (!config.validModule(x)) {
@@ -3226,7 +3452,16 @@ pub fn main(init: std.process.Init) u8 {
         if (only_unwrapped and family.len > 0) die("rpath-wrappers takes --for FAMILY or --unwrapped, not both", .{});
         return cmdRpathWrappers(c, family, only_unwrapped);
     }
-    if (command == .check) return cmdCheck(c, rest.items);
+    if (command == .check) {
+        const modes: usize = @as(usize, @intFromBool(check_dev)) + @intFromBool(check_prefix != null) + @intFromBool(check_modules.items.len > 0);
+        if (modes > 1 or (modes == 1 and rest.items.len > 0))
+            die("check takes files, or one of --module, --dev and --prefix", .{});
+        if (modes == 0) return cmdCheck(c, rest.items, check_quiet);
+        if (check_prefix) |dir| return cmdCheckTree(c, null, .prefix, &.{}, dir, check_quiet);
+        const s = loadSettings(c, g);
+        if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet);
+        return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet);
+    }
     // The install mode is the four EESSI variables, not the site file.
     if (command == .eb) {
         if (g.profile != null or g.project != null or g.config_file != null)

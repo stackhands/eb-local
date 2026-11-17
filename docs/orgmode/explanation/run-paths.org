@@ -13,6 +13,7 @@ On a cluster with EESSI 2026.06, GSL loaded before and after =buildenv/default-f
 Its =gcc= and =ld= wrappers each record the run paths, so one real =gcc= or one real =ld= ahead of them on =PATH= does no harm.
 A program loses its run paths only when both are bypassed, or when its compiler has no wrapper.
 The link still succeeds, and the program fails when it starts; =eb-local check PROGRAM= shows this first.
+=check --dev=, =check --module NAME/VERSION= and =check --prefix DIR= apply that audit to every ELF file in the dev tree, an installed module or a directory, and skip a file that is not ELF.
 =dev= chooses the build environment from the compilers loaded when it runs, so the modules you link against go on the =dev= line, not after it.
 
 * Why not LD_LIBRARY_PATH
