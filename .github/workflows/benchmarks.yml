@@ -1,0 +1,56 @@
+name: benchmarks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install Airspeed Velocity
+        run: python -m pip install --disable-pip-version-check 'asv==0.6.6'
+      - name: Build base and pull request binaries
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git worktree add --detach /tmp/eb-local-base "$BASE_SHA"
+          git worktree add --detach /tmp/eb-local-pr "$PR_SHA"
+          zig build --build-file /tmp/eb-local-base/build.zig --release=safe \
+            --prefix "$RUNNER_TEMP/base"
+          zig build --build-file /tmp/eb-local-pr/build.zig --release=safe \
+            --prefix "$RUNNER_TEMP/pr"
+      - name: Benchmark base and pull request
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          asv machine --yes
+          EB_LOCAL_BENCH_BIN="$RUNNER_TEMP/base/bin/eb-local" \
+            asv run -E "existing:$(which python)" \
+            --set-commit-hash "$BASE_SHA" --record-samples --quick
+          EB_LOCAL_BENCH_BIN="$RUNNER_TEMP/pr/bin/eb-local" \
+            asv run -E "existing:$(which python)" \
+            --set-commit-hash "$PR_SHA" --record-samples --quick
+          printf 'base_sha=%s\npr_sha=%s\n' "$BASE_SHA" "$PR_SHA" \
+            > .asv/results/metadata.txt
+      - uses: HaoZeke/asv-perch@v1.2.2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          results-path: .asv/results/
+          metadata-file: .asv/results/metadata.txt
