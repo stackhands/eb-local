@@ -60,6 +60,36 @@ eb-local: no profile 'huge' (defined: small, big)
 
 Every profile in both files is checked when the files are read, the profile in force or not.
 
+A user file with three profiles, of which `mine` is in force unless another is named:
+
+```toml
+# ~/.config/eb-local/config.toml
+default_profile = "mine"
+
+[profile.mine]
+dev.modules = ["FFTW/3.3.10-GCC-15.2.0"]
+
+[profile.group]
+project = "/path/to/project/eessi"
+
+[profile.gpu]
+dev.modules = ["CUDA/13.3.0"]
+```
+
+`eb-local profiles` lists them, with the file that defines each:
+
+```text
+mine                 user /home/alice/.config/eb-local/config.toml
+group                user /home/alice/.config/eb-local/config.toml
+gpu                  user /home/alice/.config/eb-local/config.toml
+```
+
+`eb-local --profile gpu config` shows `dev.modules` from the `gpu` profile, and the line that set it:
+
+```text
+dev.modules                  CUDA/13.3.0   [user profile gpu, /home/alice/.config/eb-local/config.toml:10]
+```
+
 ## Settings
 
 A key is written in full at the top of a file, as `dev.modules = [...]`, or without its table's name under the table's header, as `modules = [...]` under `[dev]`.
@@ -101,6 +131,7 @@ An unknown key, a value of the wrong type, a key set twice and a value a setting
 
 `[eessi]` takes `EESSI_*` names other than those eb-local sets itself: `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL`, `EESSI_CVMFS_INSTALL`, `EESSI_SITE_SOFTWARE_PREFIX`, `EESSI_SOFTWARE_SUBDIR_OVERRIDE`, `EESSI_ACCELERATOR_TARGET_OVERRIDE` and `EESSI_OVERRIDE_GPU_CHECK`, and the `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_*` ones `build.site_toolchains` sets.
 Each value is one line of at most 4096 bytes.
+`eb-local config` shows each value, so a credential belongs in `[secrets]` instead.
 
 ### [secrets]
 

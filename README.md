@@ -78,68 +78,8 @@ eb-local restore pigz/2.8-GCCcore-15.2.0        # back from the trash, read-only
 ## Configuration
 
 Settings come from, lowest first: built-in defaults, the site file, a site profile, your file, your profile, `EB_LOCAL_*` variables, options.
-`eb-local config` prints every setting and where it came from; `eb-local profiles` lists the profiles.
-`--config FILE`, or `EB_LOCAL_CONFIG=FILE` without it, is read in place of the site file when root or the program's owner owns it, otherwise in place of your file when you own it.
-The other file is still read, so a named site file keeps your profiles and secrets, and a file of yours cannot set the storage settings.
-
-```toml
-# ~/.config/eb-local/config.toml
-default_profile = "mine"
-
-[profile.mine]
-dev.modules = ["FFTW/3.3.10-GCC-15.2.0"]
-
-[profile.group]
-project = "/path/to/project/eessi"
-
-[profile.gpu]
-dev.modules = ["CUDA/13.3.0"]
-```
-
-`eb-local --profile gpu dev` or `EB_LOCAL_PROFILE=gpu` selects a profile; without either, `default_profile` does, from your file if it sets one, else from the site file.
-The keys are `default_profile` (outside any profile), `prefix`, `project`, `stack.module`, `stack.extend`, `dev.buildenv`, `dev.buildenv_for.{cuda,llvm,intel,nvhpc}`, `dev.modules`, `build.allocation_hint`, `build.secrets`, `build.site_toolchains` and `build.node_types` (site file only), `clean.trash` (`auto`, `rtrash` or `none`), `clean.logs_older_than_days`, `nimvault.program`, `nimvault.vault`, `[eessi]` and `[secrets]`; the variables are `EB_LOCAL_PREFIX`, `EB_LOCAL_PROJECT`, `EB_LOCAL_STACK_MODULE`, `EB_LOCAL_STACK_EXTEND`, `EB_LOCAL_DEV_BUILDENV`, `EB_LOCAL_DEV_BUILDENV_FOR_{CUDA,LLVM,INTEL,NVHPC}` (`none` for the RPATH wrappers), `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_BUILD_SECRETS`, `EB_LOCAL_CLEAN_TRASH`, `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS`, `EB_LOCAL_NIMVAULT_PROGRAM`, `EB_LOCAL_NIMVAULT_VAULT` and `EB_LOCAL_SECRET_<NAME>`.
-An unknown key, a wrong type, a duplicate key or an unsafe module name is an error naming its file and line, in every profile, selected or not.
-
-The site file is the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, and a 1.x `eb-local.conf` beside the program or in `/etc`.
-It also holds the storage settings, which only it may set:
-
-```toml
-[storage]
-node_local_root = "/local"               # where allocation mounts are
-node_local_mount = "%u.%j"               # each allocation's mount below it: %u the user, %j the job id
-node_local_fstype = "xfs"
-shared_scratch = ["/scratch", "/work"]
-
-[build]
-allocation_hint = "salloc -p cpu -n 16 -t 02:00:00"
-site_toolchains = ["intel/2026.1"]       # toolchains EESSI's hooks accept besides foss and lfoss
-```
-
-`site_toolchains` reaches EasyBuild as `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_<EESSI version>`, so users build recipes on those toolchains without setting the variable; `eb-local config` shows it.
-`env` and `dev` print it too, after the stack loads, for `eb` run by hand.
-
-Other settings for the EESSI module and its EasyBuild hooks go in `[eessi]`, in the site file, your file or a profile; `env`, `dev` and builds export them before the stack loads:
-
-```toml
-[eessi]
-EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220 = "1"
-```
-
-`[eessi]` takes `EESSI_*` names other than the install and target variables eb-local sets itself (`EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL`, `EESSI_CVMFS_INSTALL`, `EESSI_SITE_SOFTWARE_PREFIX`, `EESSI_SOFTWARE_SUBDIR_OVERRIDE`, `EESSI_ACCELERATOR_TARGET_OVERRIDE`, `EESSI_OVERRIDE_GPU_CHECK`) and the `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_*` ones `site_toolchains` sets. `eb-local eb` reads the four install variables from the environment instead.
-`eb-local config` shows each value; a credential belongs in `[secrets]`, not here.
-
-### Site files from a template
-
-eb-local carries one site file template, `slurm`, for any Slurm cluster whose jobs get a node-local disk; a site can keep its own in a repository of its own.
-[Write the site file for a cluster](docs/howto/write-a-site-file.md) renders, installs and checks one.
-
-### The configuration as variables
-
-`eb-local config --env` prints the settings in force as `export EB_LOCAL_...` lines, secrets as `EB_LOCAL_SECRET_<NAME>=<source>`, so a job script, a container or CI carries the same configuration without the files; [Load EESSI and the software you installed](docs/howto/load-eessi.md) shows how, and [The environment variables](docs/reference/environment.md) lists them.
-
-A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root or the program's owner (a site file) or by you (your file); otherwise eb-local stops.
-A site file you own is refused unless you own the program too, since only the site file sets the storage settings and `build.site_toolchains`.
-A 1.x `eb-local.conf` is read as before.
+`eb-local config` prints every setting and where it came from, and `eb-local profiles` the profiles; `eb-local config --env` prints the settings as variables for a job script, a container or CI.
+[The configuration files](docs/reference/configuration.md) lists the files, the profiles and every setting, [The environment variables](docs/reference/environment.md) the variables, and [Write the site file for a cluster](docs/howto/write-a-site-file.md) has the steps for a site file.
 
 ## Secrets
 

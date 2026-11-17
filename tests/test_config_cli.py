@@ -185,7 +185,7 @@ class ConfigCli(StorageFixture):
         self.assertEqual(run.stdout.count("FFTW/3.3.10-GCC-15.2.0"), 1, run.stdout)
 
     def test_global_options_may_come_before_the_command(self):
-        # The README's form, eb-local --profile gpu dev, with the user file's profile.
+        # The command reference's form, eb-local --profile NAME dev, with the user file's profile.
         before = self.run_tool(["--profile", "licensed", "dev"], SLURM_JOB_ID="")
         after = self.run_tool(["dev", "--profile", "licensed"], SLURM_JOB_ID="")
         self.assertEqual(before.returncode, 0, before.stderr)

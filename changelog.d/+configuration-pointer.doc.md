@@ -1,0 +1,1 @@
+The configuration reference shows a user file with profiles and what `eb-local profiles` and `eb-local --profile gpu config` print for it. It also notes that `eb-local config` shows each `[eessi]` value. The README's Configuration section points to the reference, the environment variables and the site file how-to in place of repeating them.
