@@ -12,6 +12,17 @@ Build your own code and install software on top of [EESSI](https://www.eessi.io)
 Documentation: <https://stackhands.github.io/eb-local/>
 
 <!-- docs:start -->
+## When EESSI-extend alone is enough
+
+eb-local loads EESSI's own `EESSI-extend` module unchanged and runs `eb`; the install goes where EESSI-extend puts it, with EESSI's hooks.
+If you build on one node type, interactively, and need nothing below, `module load EESSI-extend` and `eb` is the same install ([Building on top of EESSI](https://www.eessi.io/docs/using_eessi/building_on_eessi/)).
+eb-local adds what that leaves to each user:
+
+- `eb-local dev` puts EasyBuild's RPATH compiler wrappers in front of your own `gcc` or `mpicc`, so a program you compile runs later with no modules loaded;
+- a build runs only inside a Slurm job, in the job's node-local disk, and refuses shared scratch as a work or install directory, before it creates anything;
+- `eb-local list` shows which CPU targets each module you installed was built for, since EESSI-extend keeps one tree per target;
+- `eb-local uninstall` removes an install and its module file for every target, which EasyBuild leaves read-only and neither EasyBuild nor Lmod removes.
+
 ## Compile your own code
 
 ```sh
