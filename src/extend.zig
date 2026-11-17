@@ -167,7 +167,8 @@ pub const script =
     \\ver=${EESSI_VERSION:-2026.06}
     \\init=${repo}/versions/${ver}/init/lmod/bash
     \\if [[ ! -e $init ]]; then
-    \\  echo "eb-local: missing ${init}" >&2
+    \\  echo "eb-local: missing ${init}, the EESSI init; eb was not run." >&2
+    \\  echo "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere." >&2
     \\  exit 2
     \\fi
     \\# shellcheck disable=SC1090
@@ -765,7 +766,8 @@ test "a missing version is reported" {
     try testing.expectEqual(@as(u32, 2), out.term.code());
     const init = try initPath(r.arena.allocator(), &r.env);
     try testing.expect(std.mem.endsWith(u8, init, "/versions/2025.06/init/lmod/bash"));
-    const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: missing {s}\n", .{init});
+    const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: missing {s}, the EESSI init; eb was not run.\n" ++
+        "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere.\n", .{init});
     try testing.expectEqualStrings(said, out.stderr);
 }
 
