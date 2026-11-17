@@ -13,6 +13,7 @@ write-a-site-file
 load-eessi
 compile
 install-software
+eb-without-a-site-file
 build-for-every-node-type
 find-what-is-wrong
 clean-up

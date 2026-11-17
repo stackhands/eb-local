@@ -33,57 +33,13 @@ eb-local GSL-2.8-GCC-15.2.0.eb --robot
 
 ## EESSI-extend, without a site file
 
-`eb-local eb` is the way to run EasyBuild where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced. It sources that init, loads `EESSI-extend`, and execs `eb`. The module keeps EESSI's hooks, RPATH and compat layer. Host Cargo and CMake wrappers are unset first, and the compat-layer linker is put on `PATH` even when `rustc` is not installed.
-EasyBuild builds under `$WORKING_DIR/easybuild`, as the module sets it. This command leaves `WORKING_DIR` as you set it; unset, the module uses `/tmp/$USER`, so two users on one node do not share a build directory.
-
-Set at most one install variable before it. A variable that is present and empty counts as set, which is how EESSI-extend reads them. With none set, this command exports nothing and creates nothing. The loaded module then installs under `$HOME/eessi`. Its help text says `$HOME/EESSI`; on EESSI 2026.06 the module uses the lowercase directory, and does not require it to exist before the load. With more than one set, this command stops with exit 3 and names each one, its value, and what EESSI-extend would do with them.
-
-| variable | mode | prefix | process umask |
-|---|---|---|---|
-| `EESSI_USER_INSTALL` | user | created when the value is non-empty | 077 |
-| `EESSI_PROJECT_INSTALL` | project | not created; the owner sets the group and the setgid bit | 002 |
-| `EESSI_SITE_INSTALL` | site | the init's site software path | 022 |
-| `EESSI_CVMFS_INSTALL` | cvmfs | the EESSI software path | 022 |
-
-The module sets `EASYBUILD_UMASK` to the same end (and the sticky bit for a user prefix, the setgid bit for a project). This command does not pass `--umask`, so that value stands. An argument of eb's still overrides it: `--umask=022` is what a user-namespace build needs when Lmod, running as uid 0, skips a directory that others cannot search.
-
 ```sh
-eb-local eb -- example.eb --robot          # the module's default, $HOME/eessi
-export EESSI_USER_INSTALL=$HOME/eessi      # a named user prefix; it is created
-eb-local eb -- example.eb --robot
+eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot   # no site file or Slurm job; installs into $HOME/eessi
 ```
 
-`eb-local --explain eb -- example.eb --robot` prints the script this command runs, after a `set --` line with its arguments, and runs nothing; `bash` runs the printed text as this command would.
-
-`--profile`, `--project` and `--config` are not this command's options. The project, site and cvmfs modes are the variables above. A caller that can pass only a program name, and then eb's own arguments, sets `EB_LOCAL_EESSI_EXTEND=1`. Every argument is then eb's, which is how an eb-stack EESSI target runs this command. The 1.x Bash script has no `eb` command.
-
-### Where EESSI-extend installs
-
-EESSI-extend chooses the install tree as it loads: `DIR/versions/2026.06/software/linux/<target>` for `EESSI_USER_INSTALL=DIR` or `EESSI_PROJECT_INSTALL=DIR`, the same below `$HOME/eessi` with none set, the site tree `$EESSI_SITE_SOFTWARE_PATH` for `EESSI_SITE_INSTALL`, and EESSI's own `$EESSI_SOFTWARE_PATH` for `EESSI_CVMFS_INSTALL`.
-With a user and a project variable both set, it loads and makes a private user install, umask 077 and the sticky bit, in the user tree, and puts both module trees on `MODULEPATH`, the user's first; with the site or the cvmfs variable and another, it refuses to load.
-So a variable left from an earlier session, by a `.bashrc` that exports `EESSI_USER_INSTALL` or by `eval "$(eb-local env)"` for another prefix, turns a project install typed by hand into one the rest of the project cannot read.
-
-A build clears every install variable and sets its own, and names each one it cleared from your shell.
-`eb-local eb` refuses two or more, and `eb-local doctor` lists every one your shell has; unset the one you did not mean to keep.
-
-Once EESSI-extend has loaded, a build and `eb-local eb` stop with exit 2, before `eb` runs, unless `EASYBUILD_INSTALLPATH` is in the tree the install variable selects, and whenever `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` is set.
-A build's tree is `<prefix>/versions`, which eb-local checked, lists and cleans of secrets.
-Three things move the install path: a site Lmod hook that sets one (see the next section), a changed EESSI-extend, and an `EESSI_CVMFS_REPO` with a character such as `-`. EESSI-extend makes a user or project path by replacing `EESSI_CVMFS_REPO` in `$EESSI_SOFTWARE_PATH` with Lua's `string.gsub`, which reads it as a pattern, so a copy of the repository under `/opt/eessi-mirror` leaves the path unchanged and the install would go into the repository's own tree.
-Both also say when loading EESSI-extend sets or unsets an install variable, as a site hook does: the variable stays in a shell, and that shell's next load installs elsewhere.
-[Where EESSI-extend installs](docs/explanation/install-variables.md) has what each mode and mix of variables did under Lmod.
-
-### What a build runs
-
-`eb-local --explain` prints the script a build runs, and creates and runs nothing.
-The checks eb-local makes first are comments, then come the variables it sets for the script, a `set --` line with the script's arguments, and the script itself.
-A build names this command in its first line, as in `eb-local: what this runs: eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot`:
-
-```sh
-eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
-```
-
-The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, check that the install path EESSI-extend set is in `<prefix>/versions`, and run `eb`.
-`$W` stands for the workspace a build makes in the allocation's node-local mount. With `W` set to a directory, `bash` runs the printed text as a build runs its script; the checks before it and the cleaning of logs after it are eb-local's own.
+`eb-local eb` sources the EESSI init, loads `EESSI-extend`, and runs `eb`, where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced.
+[Run EasyBuild through EESSI-extend without a site file](docs/howto/eb-without-a-site-file.md) has the steps, and [Where EESSI-extend installs](docs/explanation/install-variables.md) says where each install variable sends an install and what eb-local checks.
+`eb-local --explain RECIPE` prints the script a build runs, and `eb-local --explain eb -- ARGS` the one `eb-local eb` runs; [The eb-local command](docs/reference/cli.md) says what each holds.
 
 ## Where things go
 

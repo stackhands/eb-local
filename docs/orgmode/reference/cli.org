@@ -175,11 +175,30 @@ Print the script a build runs, and create and run nothing, inside a Slurm job or
 The output is, in order: comments that say where the build installs, the checks it makes first, and whether each secret reaches =eb=; the variables it sets for the script, with =W= standing for its workspace; a =set --= line with the script's arguments; and the script itself.
 With =build.node_types= in the site file, the comments also hold an =sbatch= line for each node type, which runs the same build as a batch job there.
 
+The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of =EESSI_USER_INSTALL= or =EESSI_PROJECT_INSTALL=, load =EESSI/2026.06=, then =EESSI-extend=, which reads that variable as it loads, check that the install path EESSI-extend set is in =<prefix>/versions=, and run =eb=.
+With =W= set to a workspace a build made, which holds =build=, =cache=, =cargo=, =source-index= and =tmp=, such as one a failed build kept or one kept with =EB_LOCAL_KEEP_WORK=1=, =bash= runs the printed text as a build runs its script; the checks before it and the cleaning of logs after it are eb-local's own.
+
 ** eb
 
 Load EESSI and EESSI-extend in a bash with no profile and no rc file, and run =eb= with the arguments, with no site file and no Slurm job.
 EESSI-extend takes the install mode from the install variables, of which at most one of =EESSI_USER_INSTALL=, =EESSI_PROJECT_INSTALL=, =EESSI_SITE_INSTALL= and =EESSI_CVMFS_INSTALL= may be set; a present, empty one counts.
 With more than one set, =eb= runs nothing and the command exits 3.
+
+| Variable                | Mode    | Prefix                                                        | Process umask |
+|-------------------------+---------+---------------------------------------------------------------+---------------|
+| =EESSI_USER_INSTALL=    | user    | created when the value is not empty                           | 077           |
+| =EESSI_PROJECT_INSTALL= | project | not created; its owner sets the group and the setgid bit      | 002           |
+| =EESSI_SITE_INSTALL=    | site    | the init's site software path                                 | 022           |
+| =EESSI_CVMFS_INSTALL=   | cvmfs   | the EESSI software path                                       | 022           |
+| none                    | user    | =$HOME/eessi=, which need not exist before the module loads   | 077           |
+
+The module sets =EASYBUILD_UMASK= to the same end, with the sticky bit for a user prefix and the setgid bit for a project, and =eb= gets no =--umask=, so that value stands.
+An argument of =eb='s still overrides it: =--umask=022= is what a user-namespace build needs when Lmod, running as uid 0, skips a directory that others cannot search.
+The module's help text says =$HOME/EESSI=; on EESSI 2026.06 it uses =$HOME/eessi=.
+Before EESSI-extend loads, the script unsets host Rust and CMake wrappers, such as =RUSTC_WRAPPER= and =CMAKE_C_COMPILER_LAUNCHER=, and puts the compatibility layer's =usr/bin=, with its =ld=, first on =PATH=, even when =rustc= is not installed.
+EasyBuild builds under =$WORKING_DIR/easybuild=; the module sets =WORKING_DIR= to =/tmp/$USER= when it is not set, and =eb= leaves it as you set it.
+=--profile=, =--project= and =--config= are not options of =eb=, which stops with exit 2 when given one; the 1.x Bash script has no =eb= command.
+
 Once EESSI-extend has loaded, the script exits 2 before =eb= runs when the install path the module set is outside the tree the install variable selects, or when =EASYBUILD_INSTALLPATH_SOFTWARE= or =EASYBUILD_INSTALLPATH_MODULES= is set.
 Otherwise the command exits with =eb='s status.
 
