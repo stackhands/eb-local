@@ -25,6 +25,8 @@ An empty variable is ignored, unless the table says what it does.
 | `EB_LOCAL_DEV_MODULES` | `dev.modules`, with blanks between the names; empty, it empties it |
 | `EB_LOCAL_BUILD_ALLOCATION_HINT` | `build.allocation_hint`; empty, it empties it |
 | `EB_LOCAL_BUILD_SECRETS` | `build.secrets`, with blanks between the names; empty, a build gets none |
+| `EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES` | `build.clear_foreign_prefixes`; `true` or `1` sets it, `false` or `0` clears it |
+| `EB_LOCAL_DOCTOR_CVMFS_PARALLEL` | `doctor.cvmfs_parallel`; an integer from 0 to 8. `0` reads no metadata in parallel |
 | `EB_LOCAL_CLEAN_TRASH` | `clean.trash` |
 | `EB_LOCAL_TRASH` | `clean.trash`, the 1.x name; `EB_LOCAL_CLEAN_TRASH` wins over it |
 | `EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS` | `clean.logs_older_than_days` |
@@ -77,6 +79,10 @@ The lines `eb-local dev` prints do the same, load the modules and a build enviro
 ## Set for a build
 
 The script a build runs gets eb-local's environment without the variables `env` unsets, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`.
+With `build.clear_foreign_prefixes` or `EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES` set, it also drops entries of `PERL5LIB`, `PYTHONPATH`, `R_LIBS*`, `CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH` that lie outside the approved prefixes, and unsets a compiler-wrapper variable that resolves outside them.
+Off, which is the default, a build keeps those variables.
+The approved prefixes are the EESSI repository, the install prefix, the four EESSI install variables, `doctor.approved_prefixes` and eb-local's RPATH wrapper directory.
+`eb-local doctor` names each foreign entry either way.
 It sets these, where `W` is the workspace the build makes in its job's node-local mount:
 
 | Variable | Value |

@@ -29,6 +29,12 @@ pub const extend = @import("extend.zig");
 pub const lmodcache = @import("lmodcache.zig");
 /// `eb-local modulerc`: operator-selected Lmod defaults, aliases and hides.
 pub const modulerc = @import("modulerc.zig");
+/// Foreign prefixes and container binds `doctor` reports.
+pub const foreign = @import("foreign.zig");
+/// CernVM-FS checks for `doctor --cvmfs`. A build does not call them.
+pub const cvmfs = @import("cvmfs.zig");
+/// MPI transport checks for `doctor --mpi`. A build does not call them.
+pub const mpi = @import("mpi.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -80,8 +86,14 @@ const usage_text =
     \\                                       prints an sbatch line for each node type
     \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
     \\                                       what this node's target lacks
-    \\  eb-local doctor                      what in this shell, node or configuration would
-    \\                                       stop a build or a module load; changes nothing
+    \\  eb-local doctor [--cvmfs] [--cvmfs-parallel N] [--mpi]
+    \\                                       what in this shell, node or configuration would
+    \\                                       stop a build or a module load; changes nothing.
+    \\                                       --cvmfs checks the CernVM-FS client.
+    \\                                       --cvmfs-parallel N (1 to 8) reads repository
+    \\                                       metadata from N tasks inside an allocation.
+    \\                                       --mpi reports libfabric and UCX, and inside an
+    \\                                       allocation runs a two-rank hello per approved transport
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
     \\                      --timestamp FILE [--spider CMD]
     \\                                       write Lmod's spiderT.lua for those module
@@ -1141,6 +1153,12 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     if (s.build_secrets.value) |names| {
         row("build.secrets", if (names.len == 0) "(none)" else std.mem.join(a, " ", names) catch oom(), s.build_secrets.from);
     } else row("build.secrets", "(every secret)", s.build_secrets.from);
+    row("build.clear_foreign_prefixes", if (s.clear_foreign_prefixes.value) "true" else "false", s.clear_foreign_prefixes.from);
+    const approved = std.mem.join(a, " ", s.approved_prefixes.value) catch oom();
+    row("doctor.approved_prefixes", if (approved.len == 0) "(none)" else approved, s.approved_prefixes.from);
+    row("doctor.cvmfs_parallel", str(a, "{d}", .{s.cvmfs_parallel.value}), s.cvmfs_parallel.from);
+    const transports = std.mem.join(a, " ", s.mpi_transports.value) catch oom();
+    row("doctor.mpi_transports", if (transports.len == 0) "(none)" else transports, s.mpi_transports.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -1221,6 +1239,8 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
     if (s.build_secrets.value) |names| line(a, &out, "EB_LOCAL_BUILD_SECRETS", std.mem.join(a, " ", names) catch oom());
+    line(a, &out, "EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", if (s.clear_foreign_prefixes.value) "true" else "false");
+    line(a, &out, "EB_LOCAL_DOCTOR_CVMFS_PARALLEL", str(a, "{d}", .{s.cvmfs_parallel.value}));
     // [eessi] settings are environment for EESSI already; they travel as
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
@@ -2080,6 +2100,8 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     }
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
+    if (s.clear_foreign_prefixes.value)
+        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper variable that resolves outside them") catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
     for (buildVariables(a, "$W", d)) |kv| {
         if (std.mem.startsWith(u8, kv[1], "$W/")) {
@@ -2200,6 +2222,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     if (dropped_loader) {
         warn("LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT was set; a build does not pass them to eb,", .{});
         cli.err("  because they mix host libraries into the toolchain.\n", .{});
+    }
+    if (s.clear_foreign_prefixes.value) {
+        const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, p.prefix) catch oom();
+        foreign.scrub(a, &env, prefs) catch oom();
     }
     if (s.site_toolchains.value.len > 0)
         env.put("EB_LOCAL_SITE_TOOLCHAINS", config.toolchainsJson(a, s.site_toolchains.value) catch oom()) catch oom();
@@ -2428,6 +2454,33 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
 
 // ---- doctor ---------------------------------------------------------------
 
+fn mountinfoSoft(c: Ctx) []const u8 {
+    var path: []const u8 = "/proc/self/mountinfo";
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_MOUNTINFO"))) |p| path = p;
+    }
+    const fd = sys.openat(fsx.cwd, path, .{}, 0) catch return "";
+    defer sys.close(fd);
+    return fsx.readAll(c.a, fd, 8 << 20) catch "";
+}
+
+fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.ArrayList(u8)) void {
+    const a = c.a;
+    const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, prefix) catch oom();
+    const found = foreign.scan(a, c.env, prefs, s.clear_foreign_prefixes.value, mountinfoSoft(c)) catch oom();
+    for (found) |f| switch (f.code) {
+        .none => note(a, out, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
+        .list_keep => note(a, out, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .list_drop => note(a, out, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .wrap_keep => note(a, out, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .wrap_drop => note(a, out, "warn", "{s} resolves to {s}, outside the approved prefixes; a build unsets it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .timezone => note(a, out, "info", "timezone target {s}", .{f.path}),
+        .timezone_bind => note(a, out, "warn", "/etc/localtime is a bind mount of {s}; the runtime injected the host timezone", .{f.path}),
+        .host_lib => note(a, out, "warn", "runtime-injected host library directory {s}", .{f.path}),
+        .host_none => note(a, out, "info", "no runtime-injected host library directory was found", .{}),
+    };
+}
+
 fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: []const u8, args: anytype) void {
     out.appendSlice(a, kind) catch oom();
     out.appendSlice(a, " ") catch oom();
@@ -2435,12 +2488,206 @@ fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: [
     out.appendSlice(a, "\n") catch oom();
 }
 
+const DoctorOpts = struct {
+    /// `--cvmfs`: check the client. Off unless the flag asks.
+    cvmfs: bool = false,
+    /// `--cvmfs-parallel`. Null uses `doctor.cvmfs_parallel`.
+    parallel: ?u8 = null,
+    /// `--mpi`: report fabrics and, in an allocation, run the hello. Off unless the flag asks.
+    mpi: bool = false,
+};
+
+fn cvmfsConfigRoot(c: Ctx) []const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CVMFS_CONFIG"))) |p| return p;
+    }
+    return "/etc/cvmfs";
+}
+
+fn cvmfsMountOverride(c: Ctx) ?[]const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CVMFS_ERRNO"))) |v| return v;
+    }
+    return null;
+}
+
+/// The CernVM-FS client: the mount, the proxy in force, `cvmfs_config` when
+/// it is on PATH, and an optional metadata read. Returns whether a line said
+/// FAIL. A build does not run this.
+fn reportCvmfs(c: Ctx, tasks: u8, out: *std.ArrayList(u8)) bool {
+    const a = c.a;
+    const repo = cvmfs.repository(c.env);
+    const mount = cvmfs.mountState(repo.path, cvmfsMountOverride(c));
+    var failed = false;
+    switch (mount) {
+        .ok => note(a, out, "ok  ", "CernVM-FS repository {s} is mounted", .{repo.path}),
+        .enotconn => {
+            note(a, out, "FAIL", "CernVM-FS repository {s} is a stale FUSE mount: transport endpoint is not connected", .{repo.path});
+            failed = true;
+        },
+        .eio => note(a, out, "warn", "CernVM-FS repository {s} returned an input/output error", .{repo.path}),
+        .absent => note(a, out, "info", "CernVM-FS repository {s} is not mounted", .{repo.path}),
+    }
+    const proxy = cvmfs.readProxy(a, c.env, cvmfsConfigRoot(c), repo.name) catch oom();
+    switch (proxy.mode) {
+        .unset => note(a, out, "info", "CernVM-FS HTTP proxy is unset", .{}),
+        .direct => if (proxy.host_injected) {
+            note(a, out, "warn", "CernVM-FS HTTP proxy mode is direct, from environment CVMFS_HTTP_PROXY; a host can inject this", .{});
+        } else note(a, out, "info", "CernVM-FS HTTP proxy mode is direct, from {s}", .{proxy.from}),
+        .proxy => if (proxy.host_injected) {
+            note(a, out, "warn", "CernVM-FS HTTP proxy {s}, from environment CVMFS_HTTP_PROXY; a host can inject this", .{proxy.value});
+        } else note(a, out, "info", "CernVM-FS HTTP proxy {s}, from {s}", .{ proxy.value, proxy.from }),
+    }
+    const path_env = c.env.get("PATH") orelse "";
+    if (proc.which(a, "cvmfs_config", path_env) catch null) |exe| {
+        if (mount == .enotconn) {
+            note(a, out, "info", "cvmfs_config probe was not run; the mount is stale", .{});
+        } else {
+            const probe = cvmfs.runTool(a, exe, &.{ exe, "probe", repo.name }, c.envp);
+            if (probe.timed_out) {
+                note(a, out, "warn", "cvmfs_config probe {s} timed out", .{repo.name});
+            } else if (probe.code == 0) {
+                note(a, out, "ok  ", "cvmfs_config probe {s} exited 0", .{repo.name});
+            } else note(a, out, "warn", "cvmfs_config probe {s} exited {d}", .{ repo.name, probe.code });
+        }
+        const check = cvmfs.runTool(a, exe, &.{ exe, "chksetup" }, c.envp);
+        if (check.timed_out) {
+            note(a, out, "warn", "cvmfs_config chksetup timed out", .{});
+        } else if (check.code == 0) {
+            note(a, out, "ok  ", "cvmfs_config chksetup exited 0", .{});
+        } else note(a, out, "warn", "cvmfs_config chksetup exited {d}", .{check.code});
+    } else note(a, out, "info", "cvmfs_config is not on PATH, so probe and chksetup were not run", .{});
+    if (tasks > 0) {
+        const srun = proc.which(a, "srun", path_env) catch null;
+        const ran = cvmfs.parallelProbe(a, repo.path, tasks, nonEmpty(c.env.get("SLURM_JOB_ID")) != null, mount == .enotconn, srun, c.envp);
+        switch (ran.kind) {
+            .off => {},
+            .stale => note(a, out, "info", "parallel metadata read was not run; the mount is stale", .{}),
+            .outside => note(a, out, "info", "parallel metadata read of {d} tasks runs only inside an allocation", .{ran.tasks}),
+            .srun_ok => note(a, out, "ok  ", "srun -n {d} read metadata of {s}", .{ ran.tasks, repo.path }),
+            .srun_fail => note(a, out, "warn", "srun -n {d} read metadata of {s} and exited {d}", .{ ran.tasks, repo.path, ran.code }),
+            .srun_timeout => note(a, out, "warn", "srun -n {d} read metadata of {s} and timed out", .{ ran.tasks, repo.path }),
+            .fork_ok => note(a, out, "ok  ", "parallel metadata read of {d} tasks on {s}", .{ ran.tasks, repo.path }),
+            .fork_fail => note(a, out, "warn", "parallel metadata read of {d} tasks on {s}: {d} failed", .{ ran.tasks, repo.path, ran.code }),
+        }
+    }
+    return failed;
+}
+
+fn bindWord(c: Ctx, name: []const u8) []const u8 {
+    return nonEmpty(c.env.get(name)) orelse "unset";
+}
+
+/// libfabric, UCX and Slurm binding, then a two-rank hello for each
+/// site-approved transport. The hello's variables are not put in this
+/// process, and a build does not set them. Nothing here is a FAIL.
+fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8)) void {
+    const a = c.a;
+    const path_env = c.env.get("PATH") orelse "";
+    if (proc.which(a, "fi_info", path_env) catch null) |exe| {
+        const info = mpi.summarize(a, exe, &.{ exe, "-l" }, c.envp);
+        if (info.timed_out) {
+            note(a, out, "warn", "fi_info timed out", .{});
+        } else if (info.code != 0) {
+            note(a, out, "warn", "fi_info exited {d}", .{info.code});
+        } else note(a, out, "info", "fi_info: {s}", .{info.line});
+    } else note(a, out, "info", "fi_info is not on PATH", .{});
+    if (proc.which(a, "ucx_info", path_env) catch null) |exe| {
+        const info = mpi.summarize(a, exe, &.{ exe, "-v" }, c.envp);
+        if (info.timed_out) {
+            note(a, out, "warn", "ucx_info timed out", .{});
+        } else if (info.code != 0) {
+            note(a, out, "warn", "ucx_info exited {d}", .{info.code});
+        } else note(a, out, "info", "ucx_info: {s}", .{info.line});
+    } else note(a, out, "info", "ucx_info is not on PATH", .{});
+    const cpu = bindWord(c, "SLURM_CPU_BIND");
+    const list = bindWord(c, "SLURM_CPU_BIND_LIST");
+    const mem = bindWord(c, "SLURM_MEM_BIND");
+    if (std.mem.eql(u8, cpu, "unset") and std.mem.eql(u8, list, "unset") and std.mem.eql(u8, mem, "unset")) {
+        note(a, out, "info", "no Slurm CPU or memory bind is set", .{});
+    } else note(a, out, "info", "Slurm bind SLURM_CPU_BIND={s} SLURM_CPU_BIND_LIST={s} SLURM_MEM_BIND={s}", .{ cpu, list, mem });
+
+    if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
+        note(a, out, "info", "MPI hello was not compiled; this shell is not inside an allocation", .{});
+        return;
+    }
+    if (s.mpi_transports.value.len == 0) {
+        note(a, out, "info", "no site-approved MPI transport is configured", .{});
+        return;
+    }
+    const mpicc = proc.which(a, "mpicc", path_env) catch null;
+    const mpirun = proc.which(a, "mpirun", path_env) catch null;
+    if (mpicc == null) {
+        note(a, out, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
+        return;
+    }
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = fsx.realpath(fsx.cwd, ".", &cwd_buf) catch ".";
+    const work = std.fmt.allocPrint(a, "{s}/.zig-cache/mpi-hello-{d}", .{ cwd, linux.getpid() }) catch oom();
+    common.atomic.makedirs(work) catch {
+        note(a, out, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
+        return;
+    };
+    defer fsx.deleteTree(a, fsx.cwd, work) catch {};
+    var seen_ofi = false;
+    var seen_ucx = false;
+    for (s.mpi_transports.value) |name| {
+        const transport = mpi.parseTransport(name) orelse continue;
+        switch (transport) {
+            .ofi => {
+                if (seen_ofi) continue;
+                seen_ofi = true;
+            },
+            .ucx => {
+                if (seen_ucx) continue;
+                seen_ucx = true;
+            },
+        }
+        const hello = mpi.runHello(a, transport, mpicc, mpirun, work, c.env, c.envp) catch oom();
+        const label = @tagName(transport);
+        if (hello.missing_compiler) {
+            note(a, out, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
+            return;
+        }
+        if (hello.compile_timeout) {
+            note(a, out, "warn", "mpicc for {s} timed out", .{label});
+            continue;
+        }
+        if (hello.compile_code != 0) {
+            note(a, out, "warn", "mpicc for {s} exited {d}", .{ label, hello.compile_code });
+            continue;
+        }
+        if (hello.missing_launcher) {
+            note(a, out, "info", "mpirun is not on PATH, so the MPI hello was not run", .{});
+            return;
+        }
+        if (hello.run_timeout) {
+            note(a, out, "warn", "mpirun for {s} timed out", .{label});
+            continue;
+        }
+        if (hello.run_code != 0) {
+            note(a, out, "warn", "mpirun for {s} exited {d}", .{ label, hello.run_code });
+            continue;
+        }
+        if (hello.ranks.len != 2 or hello.ranks[0].size != 2 or hello.ranks[1].size != 2) {
+            note(a, out, "warn", "MPI {s} hello did not report two ranks", .{label});
+            continue;
+        }
+        if (mpi.sharedCpu(hello.ranks)) {
+            note(a, out, "warn", "MPI {s} hello ranks share cpu {d} with {s}", .{ label, hello.ranks[0].cpu, hello.override_text });
+            continue;
+        }
+        const cpus = std.fmt.allocPrint(a, "{d},{d}", .{ hello.ranks[0].cpu, hello.ranks[1].cpu }) catch oom();
+        note(a, out, "ok  ", "MPI {s} hello size {d} on cpus {s} with {s}", .{ label, hello.ranks[0].size, cpus, hello.override_text });
+    }
+}
+
 /// Everything about this shell, this node and the configuration that would
 /// make a build, `eb-local eb` or a module load go wrong, one line each: ok,
 /// info, warn or FAIL. Changes nothing; exits 1 when a line says FAIL. A
 /// build needs a site file and `eb-local eb` does not, so without one what
 /// stops `eb-local eb` is a FAIL, and with one what stops a build is.
-fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
+fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     var failed = false;
@@ -2553,6 +2800,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     }
     for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
         note(a, &out, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    reportForeign(c, s, p.prefix, &out);
 
     // The allocation.
     if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
@@ -2608,6 +2856,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
     } else note(a, &out, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});
+
+    if (opts.cvmfs) {
+        const tasks = opts.parallel orelse s.cvmfs_parallel.value;
+        if (reportCvmfs(c, tasks, &out)) failed = true;
+    }
+    if (opts.mpi) reportMpi(c, s, &out);
 
     out.appendSlice(a, if (site)
         (if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n")
@@ -3230,6 +3484,9 @@ pub fn main(init: std.process.Init) u8 {
     var module_aliases: std.ArrayList(modulerc.Alias) = .empty;
     var module_hidden: std.ArrayList([]const u8) = .empty;
     var modulerc_dry_run = false;
+    var doctor_cvmfs = false;
+    var doctor_parallel: ?u8 = null;
+    var doctor_mpi = false;
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -3309,7 +3566,20 @@ pub fn main(init: std.process.Init) u8 {
                     g.env_strict = true;
                 } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
             },
-            .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .profiles => die("profiles takes only --project, --profile and --config; got '{s}'", .{x}),
+            .doctor => {
+                if (std.mem.eql(u8, x, "--cvmfs")) {
+                    doctor_cvmfs = true;
+                } else if (std.mem.eql(u8, x, "--cvmfs-parallel") or joined(x, "--cvmfs-parallel") != null) {
+                    const v = if (joined(x, "--cvmfs-parallel")) |got| got else value(args, &i, "--cvmfs-parallel");
+                    const n = std.fmt.parseInt(u8, v, 10) catch die("--cvmfs-parallel needs a number from 1 to 8", .{});
+                    if (n < 1 or n > 8) die("--cvmfs-parallel needs a number from 1 to 8", .{});
+                    doctor_parallel = n;
+                    doctor_cvmfs = true;
+                } else if (std.mem.eql(u8, x, "--mpi")) {
+                    doctor_mpi = true;
+                } else die("doctor takes --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
+            },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
                     cache.modulepath = value(args, &i, "--modulepath");
@@ -3499,7 +3769,7 @@ pub fn main(init: std.process.Init) u8 {
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
         .list => cmdList(c, s, rest.items),
-        .doctor => cmdDoctor(c, s, g),
+        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc => unreachable,
     };
@@ -3516,6 +3786,14 @@ test {
     _ = extend;
     _ = lmodcache;
     _ = modulerc;
+    _ = foreign;
+    _ = cvmfs;
+    _ = mpi;
+}
+
+test "a build script selects no MPI transport" {
+    try std.testing.expect(std.mem.indexOf(u8, build_script, "OMPI_MCA") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build_script, "FI_PROVIDER") == null);
 }
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {

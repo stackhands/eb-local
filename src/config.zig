@@ -118,6 +118,18 @@ pub const Settings = struct {
     /// The secrets a build gets, by name. Null, when nothing sets
     /// build.secrets, is every secret.
     build_secrets: Setting(?[]const []const u8) = .{ .value = null },
+    /// Drop path entries and compiler wrappers that resolve outside the
+    /// approved prefixes. Off unless a file or EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES sets it.
+    clear_foreign_prefixes: Setting(bool) = .{ .value = false },
+    /// Absolute prefixes, besides EESSI and the install prefix, that doctor
+    /// and a clearing build treat as approved. Site file only.
+    approved_prefixes: Setting([]const []const u8) = .{ .value = &.{} },
+    /// How many tasks `doctor --cvmfs` uses for a metadata read. 0 runs none.
+    /// `--cvmfs-parallel` overrides it. Off, and the flag, stay off unless set.
+    cvmfs_parallel: Setting(u8) = .{ .value = 0 },
+    /// Transports `doctor --mpi` may hello inside an allocation: `ofi`, `ucx`.
+    /// Site file only. Empty runs no hello. A build never reads this.
+    mpi_transports: Setting([]const []const u8) = .{ .value = &.{} },
     eessi: std.ArrayList(EessiVar) = .empty,
 };
 
@@ -386,6 +398,13 @@ const Loader = struct {
         return v;
     }
 
+    fn boolean(l: *Loader, src: Source, e: *const toml.Entry, name: []const u8) Error!bool {
+        return switch (e.value) {
+            .boolean => |b| b,
+            else => l.fail("{s}:{d}: {s} must be true or false", .{ src.path, e.line, name }),
+        };
+    }
+
     fn stringList(l: *Loader, src: Source, e: *const toml.Entry, name: []const u8) Error![]const []const u8 {
         const items = switch (e.value) {
             .array => |v| v,
@@ -484,7 +503,35 @@ const Loader = struct {
                         for (v) |name| if (!validSecretName(name))
                             return l.fail("{s}:{d}: build.secrets: {s} is not a variable name a secret may set", .{ src.path, f.line, name });
                         l.s.build_secrets = .{ .value = v, .from = try l.where(src, f.line, profile) };
+                    } else if (std.mem.eql(u8, f.key, "clear_foreign_prefixes")) {
+                        l.s.clear_foreign_prefixes = .{ .value = try l.boolean(src, f, "build.clear_foreign_prefixes"), .from = try l.where(src, f.line, profile) };
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
+                }
+            } else if (std.mem.eql(u8, k, "doctor")) {
+                const sub = try l.table(src, e, "doctor");
+                for (sub.entries.items) |*f| {
+                    if (std.mem.eql(u8, f.key, "approved_prefixes")) {
+                        if (src.layer != .site or profile != null)
+                            return l.fail("{s}:{d}: doctor.approved_prefixes is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
+                        const v = try l.stringList(src, f, "doctor.approved_prefixes");
+                        for (v) |p| if (!validAbsolute(p))
+                            return l.fail("{s}:{d}: doctor.approved_prefixes takes absolute paths without a trailing slash", .{ src.path, f.line });
+                        l.s.approved_prefixes = .{ .value = v, .from = try l.where(src, f.line, null) };
+                    } else if (std.mem.eql(u8, f.key, "cvmfs_parallel")) {
+                        const v = switch (f.value) {
+                            .int => |n| n,
+                            else => return l.fail("{s}:{d}: doctor.cvmfs_parallel must be an integer from 0 to 8", .{ src.path, f.line }),
+                        };
+                        if (v < 0 or v > 8) return l.fail("{s}:{d}: doctor.cvmfs_parallel must be an integer from 0 to 8", .{ src.path, f.line });
+                        l.s.cvmfs_parallel = .{ .value = @intCast(v), .from = try l.where(src, f.line, profile) };
+                    } else if (std.mem.eql(u8, f.key, "mpi_transports")) {
+                        if (src.layer != .site or profile != null)
+                            return l.fail("{s}:{d}: doctor.mpi_transports is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
+                        const v = try l.stringList(src, f, "doctor.mpi_transports");
+                        for (v) |name| if (std.meta.stringToEnum(enum { ofi, ucx }, name) == null)
+                            return l.fail("{s}:{d}: doctor.mpi_transports takes ofi or ucx", .{ src.path, f.line });
+                        l.s.mpi_transports = .{ .value = v, .from = try l.where(src, f.line, null) };
+                    } else return l.fail("{s}:{d}: unknown key doctor.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
                 const sub = try l.table(src, e, "clean");
@@ -770,6 +817,17 @@ pub fn load(
         }
         s.build_secrets = .{ .value = names.items, .from = "environment EB_LOCAL_BUILD_SECRETS" };
     }
+    if (env.get("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES")) |v| if (v.len > 0) {
+        const on = std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+        const off = std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false");
+        if (!on and !off) return l.fail("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES is true or false", .{});
+        s.clear_foreign_prefixes = .{ .value = on, .from = "environment EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES" };
+    };
+    if (env.get("EB_LOCAL_DOCTOR_CVMFS_PARALLEL")) |v| if (v.len > 0) {
+        const n = std.fmt.parseInt(u8, v, 10) catch return l.fail("EB_LOCAL_DOCTOR_CVMFS_PARALLEL is an integer from 0 to 8", .{});
+        if (n > 8) return l.fail("EB_LOCAL_DOCTOR_CVMFS_PARALLEL is an integer from 0 to 8", .{});
+        s.cvmfs_parallel = .{ .value = n, .from = "environment EB_LOCAL_DOCTOR_CVMFS_PARALLEL" };
+    };
     if (s.build_secrets.value) |names| for (names) |name| {
         for (s.secrets.items) |sec| {
             if (std.mem.eql(u8, sec.name, name)) break;
@@ -1220,6 +1278,80 @@ test "[eessi] settings layer like secrets and refuse the ones eb-local owns" {
     try r.one(&t, "[eessi]\nEESSI_ = \"x\"\n", "install and target");
     try r.one(&t, "[eessi]\nEESSI_X = 1\n", "must be a string");
     try r.one(&t, "[eessi]\nEESSI_X = \"a\\nb\"\n", "one line");
+}
+
+test "clear_foreign_prefixes is off unless set, and approved prefixes are site-only" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const none = [_]Source{};
+    const bare = try t.load(&none, .{});
+    try std.testing.expect(!bare.clear_foreign_prefixes.value);
+    try std.testing.expectEqual(@as(usize, 0), bare.approved_prefixes.value.len);
+
+    const site =
+        \\[build]
+        \\clear_foreign_prefixes = true
+        \\[doctor]
+        \\approved_prefixes = ["/site/software"]
+    ;
+    var s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expect(s.clear_foreign_prefixes.value);
+    try std.testing.expectEqualStrings("/site/software", s.approved_prefixes.value[0]);
+    try std.testing.expectEqualStrings("site site.toml:4", s.approved_prefixes.from);
+
+    try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "false");
+    s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expect(!s.clear_foreign_prefixes.value);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", s.clear_foreign_prefixes.from);
+
+    try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host\"]\n", .layer = .user }}, "site setting");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/\"]\n", .layer = .site }}, "trailing slash");
+    try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "maybe");
+    try t.refuse(&none, "true or false");
+}
+
+test "doctor.cvmfs_parallel is 0 unless set, and stays between 0 and 8" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const none = [_]Source{};
+    const bare = try t.load(&none, .{});
+    try std.testing.expectEqual(@as(u8, 0), bare.cvmfs_parallel.value);
+
+    const user =
+        \\[profile.mine.doctor]
+        \\cvmfs_parallel = 2
+    ;
+    var s = try t.load(&.{.{ .path = "user.toml", .text = user, .layer = .user }}, .{ .profile = "mine" });
+    try std.testing.expectEqual(@as(u8, 2), s.cvmfs_parallel.value);
+    try std.testing.expectEqualStrings("user profile mine, user.toml:2", s.cvmfs_parallel.from);
+
+    try t.env.put("EB_LOCAL_DOCTOR_CVMFS_PARALLEL", "1");
+    s = try t.load(&.{.{ .path = "user.toml", .text = user, .layer = .user }}, .{ .profile = "mine" });
+    try std.testing.expectEqual(@as(u8, 1), s.cvmfs_parallel.value);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_DOCTOR_CVMFS_PARALLEL", s.cvmfs_parallel.from);
+
+    try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\ncvmfs_parallel = 9\n", .layer = .user }}, "0 to 8");
+    try t.env.put("EB_LOCAL_DOCTOR_CVMFS_PARALLEL", "many");
+    try t.refuse(&none, "0 to 8");
+}
+
+test "doctor.mpi_transports is a site list of ofi and ucx" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const none = [_]Source{};
+    const bare = try t.load(&none, .{});
+    try std.testing.expectEqual(@as(usize, 0), bare.mpi_transports.value.len);
+
+    const site =
+        \\[doctor]
+        \\mpi_transports = ["ofi", "ucx"]
+    ;
+    const s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expectEqualStrings("ofi", s.mpi_transports.value[0]);
+    try std.testing.expectEqualStrings("ucx", s.mpi_transports.value[1]);
+    try std.testing.expectEqualStrings("site site.toml:2", s.mpi_transports.from);
+    try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\nmpi_transports = [\"ofi\"]\n", .layer = .user }}, "site setting");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\nmpi_transports = [\"tcp\"]\n", .layer = .site }}, "ofi or ucx");
 }
 
 test "module names" {

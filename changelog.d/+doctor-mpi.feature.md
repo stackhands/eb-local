@@ -1,0 +1,1 @@
+`eb-local doctor --mpi` reports whether `fi_info` and `ucx_info` are on `PATH`, and any Slurm CPU or memory bind. Inside an allocation it compiles and runs a two-rank hello for each transport named by `doctor.mpi_transports` (`ofi` or `ucx`) and reports the `OMPI_MCA_pml` and `OMPI_MCA_mtl` values used for that run only. A build does not set those values.

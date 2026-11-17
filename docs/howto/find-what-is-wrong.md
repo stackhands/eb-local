@@ -138,6 +138,67 @@ The probe exits 1 when the repository is missing, no local module directory is o
 It warns but exits 0 for another filesystem because a site may deliberately expose CVMFS through a bind mount.
 Use `--mountinfo FILE` to check a saved node mount table or a container's view.
 
+## A path from outside the prefix
+
+A value left in the shell can point a build at the host's Perl, Python, R, CMake or pkg-config tree, or at a compiler wrapper that is not EESSI's.
+`eb-local doctor` names each entry of `PERL5LIB`, `PYTHONPATH`, `R_LIBS*`, `CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH`, and each compiler-wrapper variable, that resolves outside the EESSI repository, your prefix and `doctor.approved_prefixes`.
+It also names the timezone `/etc/localtime` resolves to, a bind mount of that file, and a host library directory a container runtime injected.
+
+```bash
+eb-local doctor
+```
+
+```text
+warn PERL5LIB entry /opt/host/perl5 is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set
+info timezone target /usr/share/zoneinfo/UTC
+info no runtime-injected host library directory was found
+```
+
+The build keeps the entry.
+Set `build.clear_foreign_prefixes = true` in the configuration, or `EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES=true` for one build, and doctor then says the build drops it.
+Neither is set unless you set it.
+
+## The CernVM-FS client
+
+`eb-local doctor --cvmfs` checks the repository this shell would read.
+It reports the mount, the HTTP proxy in force and the file or variable that set it, and the result of `cvmfs_config probe` and `cvmfs_config chksetup` when that program is on `PATH`.
+A build does not run this check.
+
+```bash
+eb-local doctor --cvmfs
+```
+
+```text
+ok   CernVM-FS repository /cvmfs/software.eessi.io is mounted
+info CernVM-FS HTTP proxy mode is direct, from /etc/cvmfs/default.local
+ok   cvmfs_config probe software.eessi.io exited 0
+ok   cvmfs_config chksetup exited 0
+```
+
+A stale mount, whose kernel status is transport endpoint is not connected, is a `FAIL`, and the probe is not run.
+`--cvmfs-parallel N`, or `doctor.cvmfs_parallel`, reads repository metadata from N tasks, and only inside an allocation.
+It uses `srun` when that is on `PATH`.
+
+## An MPI transport
+
+`eb-local doctor --mpi` reports `fi_info`, `ucx_info` and any Slurm CPU or memory bind.
+Inside an allocation it runs a two-rank hello for each transport in `doctor.mpi_transports`.
+A build does not set the variables that hello uses.
+
+```bash
+eb-local doctor --mpi
+```
+
+```text
+info fi_info: provider: tcp
+info ucx_info: # UCT version=1.16.0
+info no Slurm CPU or memory bind is set
+ok   MPI ofi hello size 2 on cpus 0,1 with OMPI_MCA_pml=cm OMPI_MCA_mtl=ofi
+```
+
+Ranks that share one CPU are a warning.
+Outside an allocation the hello is not compiled.
+
 ## Check that it worked
 
 `eb-local doctor` in the same shell ends with this line, and exits 0:
