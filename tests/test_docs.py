@@ -62,6 +62,13 @@ class OrgPages(unittest.TestCase):
         ignored = subprocess.run(["git", "check-ignore", "-q", "docs/" + API + "zig/index.md"], cwd=DOCS.parent)
         self.assertEqual(ignored.returncode, 0, "docs/.gitignore or .gitignore should ignore the API pages")
 
+    def test_each_address_of_the_site_in_the_code_names_a_page(self):
+        site = re.search(r'^html_baseurl = "(.*)"$', (DOCS / "conf.py").read_text(), re.M).group(1)
+        code = "".join(path.read_text() for path in sorted((DOCS.parent / "src").glob("*.zig")))
+        pages = re.findall(re.escape(site) + r"([\w/-]+)\.html", code)
+        self.assertIn("explanation/install-variables", pages)
+        self.assertEqual([page for page in pages if not (ORG / f"{page}.org").is_file()], [])
+
     @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
     def test_the_pages_are_what_their_org_sources_export_to(self):
         with tempfile.TemporaryDirectory() as out:

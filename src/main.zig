@@ -1740,25 +1740,25 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\# prefix's versions tree, lists it and cleans its logs of secrets, so an
     \\# install path anything else chose stops the build. An install variable
     \\# a load hook sets acts only on the next load.
-    \\readme='See "Where EESSI-extend installs" in the README.'
+    \\see='See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html'
     \\for v in EESSI_USER_INSTALL EESSI_PROJECT_INSTALL EESSI_SITE_INSTALL EESSI_CVMFS_INSTALL; do
     \\    if [ "$v" = "$install_var" ]; then want=set:$prefix; else want=; fi
     \\    [ "${!v+set:${!v}}" = "$want" ] && continue
     \\    if [ -n "${!v+set}" ]; then what="set $v=${!v}"; else what="unset $v"; fi
     \\    echo "eb-local: loading $extend $what; this build still installs into $prefix, but a shell that loads EESSI-extend by hand keeps the change, and its next load installs elsewhere." >&2
-    \\    echo "  A site Lmod hook that sets an install variable acts only on the next load. $readme" >&2
+    \\    echo "  A site Lmod hook that sets an install variable acts only on the next load. $see" >&2
     \\done
     \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
     \\    if [ -n "${!v+set}" ]; then
     \\        echo "eb-local: loading $extend set $v=${!v}, which would put part of the install outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
-    \\        echo "  A site Lmod hook or a changed EESSI-extend set it. $readme" >&2
+    \\        echo "  A site Lmod hook or a changed EESSI-extend set it. $see" >&2
     \\        exit 2
     \\    fi
     \\done
     \\installpath=${EASYBUILD_INSTALLPATH-}
     \\if [[ $installpath != "$prefix"/versions/?* || /$installpath/ == */../* ]]; then
     \\    echo "eb-local: loading $extend set the install path to ${installpath:-nothing}, outside $prefix/versions, the tree eb-local checked; nothing was built." >&2
-    \\    echo "  $install_var did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. $readme" >&2
+    \\    echo "  $install_var did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. $see" >&2
     \\    exit 2
     \\fi
     \\# The hooks of EESSI $EESSI_VERSION accept these toolchains besides foss and lfoss.

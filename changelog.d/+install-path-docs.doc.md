@@ -1,0 +1,1 @@
+A build or `eb-local eb` that stops on an install path EESSI-extend moved, or on an install variable a load sets, names the page "Where EESSI-extend installs" by its address, https://stackhands.github.io/eb-local/explanation/install-variables.html, rather than a section of the README.
