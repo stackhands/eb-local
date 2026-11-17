@@ -21,6 +21,8 @@ eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [NAME[/VERSION]...]
 eb-local [OPTION]... doctor
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD]
+eb-local modulerc --module-tree DIR [--default MODULE]...
+                   [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                            [--dry-run] [--delete]
 eb-local [OPTION]... config [--check | --env]
@@ -86,6 +88,11 @@ directory you own.
                                        that fails leaves both files unchanged.
                                        --spider names the spider program;
                                        default: spider. Does not read the site file
+  eb-local modulerc --module-tree DIR [--default MODULE]...
+                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
+                                       write DIR/.modulerc.lua with the
+                                       defaults, aliases and hidden versions named;
+                                       preserve other lines. --dry-run prints the file
   eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                  [--dry-run] [--delete]
                                        remove what eb-local left behind; --no-logs
@@ -321,6 +328,24 @@ It does not read the site file. `--profile`, `--project` and `--config` are acce
 | `--spider CMD` | The `spider` program. Default: `spider` on `PATH`. |
 
 Exit 0 means both files were written. Exit 2 is a missing or relative path. Exit 127 means `spider` could not be started. Any other exit is `spider`'s, and the files are unchanged.
+
+### modulerc
+
+Write or update `.modulerc.lua` at the root of `--module-tree`.
+The command adds only the defaults, aliases and hidden versions named explicitly; it never examines the tree to select a default.
+Existing lines are preserved, and a line already present is not duplicated.
+
+| Option | Meaning |
+|---|---|
+| `--module-tree DIR` | The absolute module tree containing `.modulerc.lua`. Required. |
+| `--default MODULE` | Add `module_version("MODULE", "default")`. Repeatable. |
+| `--alias NAME=MODULE` | Add `module_alias("NAME", "MODULE")`. Repeatable. |
+| `--hide MODULE` | Add `hide_version("MODULE")`. Repeatable. |
+| `--dry-run` | Print the complete resulting file and leave the tree unchanged. |
+
+At least one directive option is required.
+Running the same command again produces identical file contents.
+This command does not read the site file; `--profile`, `--project` and `--config` are accepted and ignored.
 
 ### clean
 
