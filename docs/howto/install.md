@@ -6,9 +6,10 @@ Install the `eb-local` program for your account, from a release or from source.
 On a cluster whose site installs eb-local, load the site's module, or use the `eb-local` already on `PATH`, and skip this page.
 
 These pages describe the code on the main branch.
-Release 3.1.0 is older: it reads `[build.targets]` and refuses `[build.node_types]`, has no `build.secrets`, its `--explain` prints a summary of the commands a build runs rather than the script and no `sbatch` line for each node type, and its user builds pass `--umask=022` to `eb`.
+Release 3.1.0 is older: it reads `[build.targets]` and refuses `[build.node_types]`, has no `build.secrets`, its `--explain` prints a summary of the commands a build runs rather than the script and no `sbatch` line for each node type, its user builds pass `--umask=022` to `eb`, and it has no `env --strict`, `lmod-cache`, or the `eb-local-readiness` script in the release archive.
 A build from the main branch prints the same version, `eb-local 3.1.0`, with its own commit.
 Until the next release, install from source to have them.
+[Find what is wrong before a build](find-what-is-wrong.md) copies `eb-local-readiness` from a pinned `main` commit when you use the release binary.
 
 ## Before you start
 
@@ -74,6 +75,8 @@ eb-local 3.1.0 (x86_64-linux-musl, safe, zig 0.17.1, 8755a6a)
 
 The last part of the version line is the commit: `8755a6a` is release 3.1.0, and a build from source shows the commit it was built from.
 `eb-local env` and `eb-local dev` work from here.
+`eb-local env --strict` refuses load lines until the EESSI init file exists, as [Load EESSI before a build](load-eessi.md) describes.
+Site operators refresh Lmod's cache with `eb-local lmod-cache`, as [Refresh the module cache](refresh-the-module-cache.md) describes.
 A build with EasyBuild also needs a site file, which [Write the site file for a cluster](write-a-site-file.md) installs.
 
 ## If it fails
