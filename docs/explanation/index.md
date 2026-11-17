@@ -11,5 +11,6 @@ Nothing here is a step to follow.
 eb-local-and-eb-stack
 install-variables
 run-paths
+secrets
 where-things-go
 ```

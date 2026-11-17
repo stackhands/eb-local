@@ -1,0 +1,1 @@
+The new explanation page "What happens to a secret" says when a build reads a secret, which builds get it, where its value goes and how the logs are cleaned of it. It also covers what a stopped build and a kept workspace leave behind, and how nimvault runs. The README's Secrets section points to it.

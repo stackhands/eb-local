@@ -143,47 +143,9 @@ A 1.x `eb-local.conf` is read as before.
 
 ## Secrets
 
-A build that needs a credential, such as a licence server or a token for a private source mirror, names where it comes from; the value is never written in a configuration file:
-
-```toml
-[secrets]
-LM_LICENSE_FILE = "nimvault:licences/flexlm"   # nimvault get licences/flexlm
-SOURCE_TOKEN = "file:~/.secrets/source-token"   # your file, mode 600
-MIRROR_PASSWORD = "env:MY_MIRROR_PASSWORD"
-```
-
-A build gets every secret unless `build.secrets` names the ones it gets, and then only those: set it to `[]` in your file and name the secrets in the profile of the builds that need them, or for one build with `EB_LOCAL_BUILD_SECRETS`, names separated by spaces:
-
-```toml
-# ~/.config/eb-local/config.toml
-[build]
-secrets = []                              # no build gets a secret it does not name
-
-[profile.licensed]
-build.secrets = ["LM_LICENSE_FILE"]       # eb-local --profile licensed MATLAB-2026a.eb
-```
-
-```sh
-EB_LOCAL_BUILD_SECRETS=SOURCE_TOKEN eb-local Private-1.0-GCC-15.2.0.eb
-```
-
-A secret a build does not get is not read, so it cannot stop that build. A name no secret has is an error that says where it was set. `eb-local config` shows `build.secrets`, and `eb-local --explain RECIPE` which secrets reach `eb`. [Give a secret only to the builds that need it](docs/howto/scope-secrets.md) has the steps.
-
-- Values are read only for a build, after every other check, and go only into the environment of `eb` and what it runs.
-- `eb-local config --check` reads each secret and reports `ok` or why not, never the value.
-- After the build, the logs written during it (in `.eb-local/logs` and each installation's `easybuild/`) have each value, its base64 form and its percent-encoded form (either hex case) replaced. The usual replacement is `<secret NAME removed by eb-local>`; a value that those words contain is replaced with `<redacted:N>` instead, so the marker does not put the value back. Where one value is a prefix of another, the longer one is removed whole. The log directory is private meanwhile. EasyBuild compresses the copy in an installation (with `bzip2` under EESSI-extend): a log ending in `.bz2`, `.gz`, `.xz` or `.zst` is decompressed and compressed again with `bzip2`, `gzip`, `xz` or `zstd` from `PATH`. A value shorter than 4 bytes, or a log that is too large or too deep to check or that cannot be decompressed, is reported instead, including an installation log nested too deep to reach. A secret a build gets reaches every program the build runs. A build stopped with a signal is cleaned up, including those logs, and eb-local then dies from that same signal, so a cancelled job does not continue; a build killed with SIGKILL leaves its logs unchecked. eb-local passes SIGINT, SIGTERM, SIGHUP and SIGQUIT on to EasyBuild, except one from the terminal, such as Ctrl-C, which reaches EasyBuild directly, and cleans the logs only once EasyBuild has exited, so the lines it writes as it stops are cleaned too. An ignored signal, as SIGHUP is under `nohup`, stays ignored. `eb-local eb` passes signals on in the same way.
-- A secret cannot set `PATH`, `LD_*`, `EESSI_*`, `EASYBUILD_*` or another variable the build depends on.
-- [nimvault](https://github.com/HaoZeke/nimvault) runs with a 30-second deadline; on failure eb-local shows its error output, never what it printed as the value.
-- nimvault finds its vault from `NIMVAULT_VAULT_REPO` or the current git repository, so a build started inside another repository reads that one. Name the vault, and the program if it is not on `PATH`:
-
-  ```toml
-  # ~/.config/eb-local/config.toml
-  [nimvault]
-  vault = "~/vault"                     # passed as nimvault get ENTRY --vault ~/vault
-  program = "/opt/nimvault/bin/nimvault"
-  ```
-
-  A profile may name its own vault. An entry starting with `-` is refused, since nimvault would read it as an option.
+A build that needs a credential, such as a licence server or a token for a private source mirror, names in `[secrets]` where its value comes from, `env:VARIABLE`, `file:PATH` or `nimvault:ENTRY`, and never the value.
+A build gets every secret unless `build.secrets` names the ones it gets, and the logs written during it are cleaned of each value it gets.
+[Give a secret only to the builds that need it](docs/howto/scope-secrets.md) has the steps, and [What happens to a secret](docs/explanation/secrets.md) says when a value is read, where it goes and what is cleaned.
 
 ## Install
 
