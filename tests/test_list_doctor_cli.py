@@ -322,9 +322,16 @@ class ListAndDoctor(StorageFixture):
         self.assertTrue(run.stdout.rstrip().endswith(
             "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file."), run.stdout)
 
-        run = self.without_a_site_file(EESSI_PROJECT_INSTALL="/project/climate")
+        # EESSI-extend refuses to load for a project directory that is not there.
+        project = self.root / "project"
+        run = self.without_a_site_file(EESSI_PROJECT_INSTALL=str(project))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertIn(f"FAIL EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
+                      "and `eb-local eb` stops", run.stdout)
+        project.mkdir()
+        run = self.without_a_site_file(EESSI_PROJECT_INSTALL=str(project))
         self.assertEqual(run.returncode, 0, run.stdout)
-        self.assertIn("ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL=/project/climate", run.stdout)
+        self.assertIn(f"ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL={project}", run.stdout)
 
         run = self.without_a_site_file(EESSI_USER_INSTALL="/home/alice/eessi", EESSI_SITE_INSTALL="")
         self.assertEqual(run.returncode, 1, run.stdout)
@@ -339,6 +346,11 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("is missing, so `eb-local eb` stops", run.stdout)
         self.assertIn("warn more than one of EESSI_USER_INSTALL", run.stdout)
         self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+        project = self.root / "project"
+        run = self.run_tool(["doctor"], EESSI_CVMFS_REPO=str(self.root / "repo"), EESSI_PROJECT_INSTALL=str(project))
+        self.assertEqual(run.returncode, 0, run.stdout)
+        self.assertIn(f"warn EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
+                      "and `eb-local eb` stops", run.stdout)
 
 
 if __name__ == "__main__":

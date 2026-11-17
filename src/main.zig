@@ -502,11 +502,6 @@ fn locate(c: Ctx, s: config.Settings) Place {
 /// that tree exists and the new default does not, it stays in use, so
 /// installed modules do not disappear; set `prefix` to choose for good.
 fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u8 {
-    const isDir = struct {
-        fn f(path: []const u8) bool {
-            return if (fsx.statAt(fsx.cwd, path, true)) |st| st.isDir() else |_| false;
-        }
-    }.f;
     if (isDir(default_prefix)) return null;
     const old = std.fs.path.join(c.a, &.{ home, ".local", "eessi" }) catch oom();
     if (!isDir(old)) return null;
@@ -762,6 +757,11 @@ const Search = struct {
 fn isFile(path: []const u8) bool {
     const st = fsx.statAt(fsx.cwd, path, true) catch return false;
     return st.isReg();
+}
+
+fn isDir(path: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, path, true) catch return false;
+    return st.isDir();
 }
 
 /// The directories the loader under `root` searches last: those its
@@ -2316,7 +2316,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     if (extend.select(c.env)) |sel| {
         const name = extend.variable(sel.mode);
         if (c.env.get(name)) |v| {
-            note(a, &out, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+            // `eb-local eb` creates a user prefix, but EESSI-extend refuses
+            // to load for a project directory that is not there.
+            if (sel.mode == .project and !isDir(v)) {
+                note(a, &out, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
+                if (!site) failed = true;
+            } else note(a, &out, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
         } else note(a, &out, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
     } else |_| {
         note(a, &out, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
