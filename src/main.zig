@@ -2166,6 +2166,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
     add(a, &out, "MODULE");
     for (0..width - "MODULE".len + 2) |_| add(a, &out, " ");
     for (labels.items, 0..) |l, li| add(a, &out, str(a, "{s}{s}  ", .{ l, if (here != null and here.? == li) "*" else "" }));
+    while (out.items[out.items.len - 1] == ' ') out.items.len -= 1;
     add(a, &out, "\n");
     for (rows.items) |r| {
         add(a, &out, r.module);

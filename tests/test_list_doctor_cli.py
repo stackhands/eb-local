@@ -66,6 +66,7 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(lines[2].split(), ["GSL/2.8-GCC-15.2.0", "x", "x"])
         self.assertEqual(lines[3].split(), ["pigz/2.8-GCCcore-15.2.0", "x", "-"])
         self.assertIn("Load EESSI", lines[-1])
+        self.assertEqual([line for line in lines if line != line.rstrip()], [], "a line ends in a blank")
 
     def test_list_names_what_this_nodes_target_lacks(self):
         self.two_targets()
