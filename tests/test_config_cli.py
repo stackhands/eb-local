@@ -272,6 +272,8 @@ class ConfigCli(StorageFixture):
             self.assertNotIn(value, text)
         self.assertIn("<secret SOURCE_TOKEN removed by eb-local>", text)
         self.assertIn("removed secret values from 1 log file(s)", run.stdout)
+        self.assertIn("secret LM_LICENSE_FILE: the nimvault: source is deprecated and is removed in 4.0.0", run.stderr)
+        self.assertNotIn("secret SOURCE_TOKEN: the nimvault", run.stderr)
         for value in seen.values():
             self.assertNotIn(value, run.stdout + run.stderr)
 

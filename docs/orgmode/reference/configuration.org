@@ -139,7 +139,7 @@ It may not be =PATH=, =HOME=, =USER=, =SHELL=, =TMPDIR=, =MODULEPATH=, =PYTHONPA
 |------------------+---------------------------------------------------------------------------------------------------------------------------------------------|
 | =env:VARIABLE=   | The variable VARIABLE in eb-local's environment.                                                                                            |
 | =file:PATH=      | The file PATH, an absolute path or one starting =~/=: a regular file, not a symbolic link, that you own, with no access for group or others and one link. |
-| =nimvault:ENTRY= | What =nimvault get ENTRY= prints, with =--vault= when =nimvault.vault= is set, within 30 seconds. An ENTRY starting with =-= is refused.      |
+| =nimvault:ENTRY= | Deprecated, and removed in 4.0.0. What =nimvault get ENTRY= prints, with =--vault= when =nimvault.vault= is set, within 30 seconds. An ENTRY starting with =-= is refused.      |
 
 A build reads the value of each secret it gets, and of no other; =eb-local config --check= and =eb-local doctor= read every secret, and never show a value.
 No value may be empty or hold a NUL byte; one from a file or from nimvault may be at most 64 KiB, and loses one newline at its end.
