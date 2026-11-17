@@ -120,6 +120,18 @@ class SitesCli(StorageFixture):
                 self.assertIn(needle, run.stderr)
                 self.assertFalse(target.exists())
 
+    def test_a_value_that_does_not_load_is_named_by_the_template_line(self):
+        # The default target may be the site file in use; neither show nor a
+        # refused install writes it, so the message names the template.
+        target = self.root / "config.toml"
+        for argv in (["site", "show", "slurm"], ["site", "install", "slurm"], ["site", "install", "slurm", "--to", str(target)]):
+            with self.subTest(argv=argv):
+                run = self.run_tool(argv + ["--set", "node_local_root=relative", "--set", "shared_scratch=/s"])
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stderr, "eb-local: template slurm:10: storage.node_local_root must be one absolute path "
+                                             "without a trailing slash\n")
+                self.assertFalse(target.exists())
+
     def test_install_does_not_replace_unless_forced_and_never_through_a_link(self):
         target = self.root / "config.toml"
         target.write_text("# the site's own\n")

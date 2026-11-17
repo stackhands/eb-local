@@ -1067,11 +1067,14 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         error.OutOfMemory => oom(),
     };
     const target = o.to orelse std.fs.path.join(a, &.{ selfDir(a), "config.toml" }) catch oom();
-    // The file must load as the site file it is about to become.
+    // The file must load as the site file it is about to become. A refusal
+    // names the template's line, which is the rendered file's: no value
+    // holds a newline, and the target is not written yet.
     var empty = std.process.Environ.Map.init(a);
     var cd: config.Diagnostic = .{};
-    _ = config.load(a, &.{.{ .path = target, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
-        error.Invalid => die("template {s}: {s}", .{ t.name, cd.message }),
+    const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
+    _ = config.load(a, &.{.{ .path = label, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
+        error.Invalid => die("{s}", .{cd.message}),
         error.OutOfMemory => oom(),
     };
     if (show) {
