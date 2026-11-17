@@ -1,0 +1,13 @@
+easyblock = 'ConfigureMake'
+name = 'Demo'
+version = '1.0'
+
+dependencies = [
+    ('GCC', '13.3.0', '', ('system',)),
+]
+
+preconfigopts = '--without-foo'
+
+patches = [
+    ('Demo-1.0_fix', 'Demo-1.0_fix.patch'),
+]

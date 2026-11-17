@@ -35,6 +35,8 @@ pub const foreign = @import("foreign.zig");
 pub const cvmfs = @import("cvmfs.zig");
 /// MPI transport checks for `doctor --mpi`. A build does not call them.
 pub const mpi = @import("mpi.zig");
+/// `eb-local overlay`: declarative site overlays for upstream easyconfigs.
+pub const recipe_overlay = @import("recipe_overlay.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -133,6 +135,13 @@ const usage_text =
     \\                                       a site file from a template built in, or from a
     \\                                       template file (a NAME with a slash); install
     \\                                       writes config.toml beside this program, mode 644
+    \\  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR]
+    \\                                       apply a digest-pinned overlay; writes a materialized
+    \\                                       easyconfig and provenance.toml, or refuses when the
+    \\                                       base digest changed
+    \\  eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
+    \\  eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
+    \\                                       run eb-stack package bump or plan by subprocess only
     \\  eb-local help | --version
     \\
     \\Every command but eb takes --profile NAME, --project DIR (a shared project
@@ -3413,7 +3422,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, submit };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -3487,6 +3496,11 @@ pub fn main(init: std.process.Init) u8 {
     var doctor_cvmfs = false;
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
+    var overlay_action: []const u8 = "";
+    var overlay_materialize: recipe_overlay.MaterializeOptions = .{};
+    var overlay_eb_stack: []const u8 = "";
+    var overlay_forward: std.ArrayList([]const u8) = .empty;
+    var overlay_passthrough = false;
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -3635,6 +3649,35 @@ pub fn main(init: std.process.Init) u8 {
                     modulerc_dry_run = true;
                 } else die("modulerc does not know '{s}'", .{x});
             },
+            .overlay => {
+                if (overlay_passthrough) {
+                    overlay_forward.append(a, x) catch oom();
+                } else if (std.mem.eql(u8, x, "--")) {
+                    overlay_passthrough = true;
+                } else if (std.mem.eql(u8, x, "--overlay")) {
+                    overlay_materialize.overlay_path = value(args, &i, "--overlay");
+                } else if (joined(x, "--overlay")) |v| {
+                    overlay_materialize.overlay_path = v;
+                } else if (std.mem.eql(u8, x, "--base")) {
+                    overlay_materialize.base_path = value(args, &i, "--base");
+                } else if (joined(x, "--base")) |v| {
+                    overlay_materialize.base_path = v;
+                } else if (std.mem.eql(u8, x, "--out-dir")) {
+                    overlay_materialize.out_dir = value(args, &i, "--out-dir");
+                } else if (joined(x, "--out-dir")) |v| {
+                    overlay_materialize.out_dir = v;
+                } else if (std.mem.eql(u8, x, "--eb-stack")) {
+                    overlay_eb_stack = value(args, &i, "--eb-stack");
+                } else if (joined(x, "--eb-stack")) |v| {
+                    overlay_eb_stack = v;
+                } else if (overlay_action.len == 0 and x.len > 0 and x[0] != '-') {
+                    overlay_action = x;
+                } else if (std.mem.eql(u8, x, "materialize") or std.mem.eql(u8, x, "bump") or std.mem.eql(u8, x, "plan")) {
+                    die("overlay action must come first: eb-local overlay materialize|bump|plan ...", .{});
+                } else {
+                    overlay_forward.append(a, x) catch oom();
+                }
+            },
             .submit => {
                 if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
                     submit.on = value(args, &i, "--on");
@@ -3728,6 +3771,13 @@ pub fn main(init: std.process.Init) u8 {
         die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
     // The cache is a pair of files. It does not read the site file.
     if (command == .@"lmod-cache") return lmodcache.run(init.io, a, cache);
+    if (command == .overlay) {
+        if (overlay_action.len == 0) die("overlay takes materialize, bump or plan", .{});
+        if (std.mem.eql(u8, overlay_action, "materialize")) return recipe_overlay.runMaterialize(init.io, a, overlay_materialize);
+        if (std.mem.eql(u8, overlay_action, "bump") or std.mem.eql(u8, overlay_action, "plan"))
+            return cmdOverlayEbStack(c, overlay_action, overlay_eb_stack, overlay_forward.items);
+        die("overlay takes materialize, bump or plan; got '{s}'", .{overlay_action});
+    }
     // A module tree's control file does not depend on eb-local configuration.
     if (command == .modulerc) return modulerc.run(init.io, a, .{
         .tree = module_tree,
@@ -3771,8 +3821,19 @@ pub fn main(init: std.process.Init) u8 {
         .list => cmdList(c, s, rest.items),
         .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc => unreachable,
+        .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
     };
+}
+
+fn cmdOverlayEbStack(c: Ctx, sub: []const u8, eb_stack: []const u8, forward: []const []const u8) u8 {
+    const program = if (eb_stack.len > 0) eb_stack else (proc.which(c.a, "eb-stack", c.env.get("PATH") orelse "") catch null) orelse
+        die("eb-stack is not on PATH; pass --eb-stack PATH for overlay {s}", .{sub});
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.append(c.a, program) catch oom();
+    argv.append(c.a, "package") catch oom();
+    argv.append(c.a, sub) catch oom();
+    for (forward) |arg| argv.append(c.a, arg) catch oom();
+    return stop(runAttached(c.a, argv.items, c.envp));
 }
 
 test {
@@ -3789,6 +3850,7 @@ test {
     _ = foreign;
     _ = cvmfs;
     _ = mpi;
+    _ = recipe_overlay;
 }
 
 test "a build script selects no MPI transport" {

@@ -1,0 +1,9 @@
+overlay_version = 1
+base_easyconfig = "OpenMPI-4.1.6-GCC-13.3.0.eb"
+base_digest = "replace-with-sha256sum-of-the-upstream-easyconfig"
+rationale = """
+OpenMPI Slurm PMI settings for this site. Rebase with eb-local overlay bump and overlay plan when upstream changes.
+"""
+
+[replace]
+preconfigopts = "'--with-pmi=slurm'"
