@@ -413,6 +413,8 @@ class ConfigCli(StorageFixture):
             'colour = "blue"\n': "unknown key colour",
             '[storage]\nnode_local_root = "/tmp"\n': "site setting",
             '[secrets]\nLD_PRELOAD = "env:X"\n': "not a variable name",
+            '[secrets]\nLICENCE = "nimvault:-x"\n': "config.toml:2: secret LICENCE: a nimvault entry may not start with -",
+            '[secrets]\nTOKEN = "file:token"\n': "config.toml:2: secret TOKEN: file: takes an absolute path or one starting ~/",
             '[profile.p]\nstack.module = "EESSI;id"\n': "not a module name",
             '[build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",
             '[profile.p.build]\nsite_toolchains = ["intel/2026.1"]\n': "site setting",

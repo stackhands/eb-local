@@ -241,21 +241,37 @@ pub fn validEessiValue(v: []const u8) bool {
     return v.len <= 4096 and std.mem.indexOfAny(u8, v, "\n\r\x00") == null;
 }
 
-/// A source a secret may name: `env:` and a variable name, `file:` and an
-/// absolute or `~/` path, or `nimvault:` and an entry that does not start
-/// with `-`. None may hold a line break or NUL.
-pub fn validSecretSource(source: []const u8) bool {
+/// What `checkSecretSource` found.
+pub const SourceCheck = union(enum) {
+    ok,
+    /// Not env:, file: or nimvault:, as when a value is written in its place.
+    unknown,
+    /// One of those, and what is wrong with the rest of it.
+    refused: []const u8,
+};
+
+/// Whether a secret may name `source`: `env:` and a variable name, `file:`
+/// and an absolute or `~/` path, or `nimvault:` and an entry that does not
+/// start with `-`. None may hold a line break or NUL.
+pub fn checkSecretSource(source: []const u8) SourceCheck {
     inline for (.{ "env:", "file:", "nimvault:" }) |kind| {
         if (std.mem.startsWith(u8, source, kind)) {
             const rest = source[kind.len..];
-            if (rest.len == 0 or std.mem.indexOfAny(u8, rest, "\n\r\x00") != null) return false;
-            if (comptime std.mem.eql(u8, kind, "env:")) return validEnvName(rest);
-            if (comptime std.mem.eql(u8, kind, "file:")) return rest[0] == '/' or std.mem.startsWith(u8, rest, "~/");
-            // An entry starting with '-' would reach nimvault as an option.
-            return rest[0] != '-';
+            if (std.mem.indexOfAny(u8, rest, "\n\r\x00") != null) return .{ .refused = "a source may not hold a line break or NUL" };
+            if (comptime std.mem.eql(u8, kind, "env:")) {
+                if (!validEnvName(rest)) return .{ .refused = "env: takes a variable name of letters, digits and _, not starting with a digit" };
+            } else if (comptime std.mem.eql(u8, kind, "file:")) {
+                if (!std.mem.startsWith(u8, rest, "/") and !std.mem.startsWith(u8, rest, "~/"))
+                    return .{ .refused = "file: takes an absolute path or one starting ~/" };
+            } else if (rest.len == 0) {
+                return .{ .refused = "nimvault: takes an entry" };
+            } else if (rest[0] == '-') {
+                return .{ .refused = "a nimvault entry may not start with -, since nimvault would read it as an option" };
+            }
+            return .ok;
         }
     }
-    return false;
+    return .unknown;
 }
 
 /// Whether a build gets the secret `name`: build.secrets names it, or
@@ -496,8 +512,11 @@ const Loader = struct {
                 for (sub.entries.items) |*f| {
                     if (!validSecretName(f.key)) return l.fail("{s}:{d}: secret {s}: not a variable name a secret may set", .{ src.path, f.line, f.key });
                     const v = try l.string(src, f, "a secret");
-                    if (!validSecretSource(v))
-                        return l.fail("{s}:{d}: secret {s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a configuration file", .{ src.path, f.line, f.key });
+                    switch (checkSecretSource(v)) {
+                        .ok => {},
+                        .unknown => return l.fail("{s}:{d}: secret {s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a configuration file", .{ src.path, f.line, f.key }),
+                        .refused => |why| return l.fail("{s}:{d}: secret {s}: {s}", .{ src.path, f.line, f.key, why }),
+                    }
                     const ff = try l.where(src, f.line, profile);
                     // A later layer replaces a secret of the same name.
                     for (l.s.secrets.items, 0..) |old, i| if (std.mem.eql(u8, old.name, f.key)) {
@@ -718,8 +737,11 @@ pub fn load(
             const v = env.get(k).?;
             if (v.len == 0) continue;
             if (!validSecretName(name)) return l.fail("{s}: {s} is not a variable name a secret may set", .{ k, name });
-            if (!validSecretSource(v))
-                return l.fail("{s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable", .{k});
+            switch (checkSecretSource(v)) {
+                .ok => {},
+                .unknown => return l.fail("{s}: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable", .{k}),
+                .refused => |why| return l.fail("{s}: {s}", .{ k, why }),
+            }
             for (s.secrets.items, 0..) |old, i| if (std.mem.eql(u8, old.name, name)) {
                 _ = s.secrets.orderedRemove(i);
                 break;
@@ -960,7 +982,12 @@ test "refusals" {
     try r.one(&t, "[secrets]\nTOKEN = \"hunter2\"\n", .user, "never written");
     try r.one(&t, "[secrets]\nLD_PRELOAD = \"env:X\"\n", .user, "not a variable name");
     try r.one(&t, "[secrets]\nPATH = \"env:X\"\n", .user, "not a variable name");
-    try r.one(&t, "[secrets]\nT = \"file:relative\"\n", .user, "never written");
+    try r.one(&t, "[secrets]\nT = \"file:relative\"\n", .user, "c.toml:2: secret T: file: takes an absolute path or one starting ~/");
+    try r.one(&t, "[secrets]\nT = \"env:1X\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
+    try r.one(&t, "[secrets]\nT = \"env:\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
+    try r.one(&t, "[secrets]\nT = \"nimvault:\"\n", .user, "c.toml:2: secret T: nimvault: takes an entry");
+    try r.one(&t, "[secrets]\nT = \"nimvault:--recipient\"\n", .user, "c.toml:2: secret T: a nimvault entry may not start with -");
+    try r.one(&t, "[secrets]\nT = \"nimvault:a\\nb\"\n", .user, "c.toml:2: secret T: a source may not hold a line break or NUL");
     try r.one(&t, "[stack]\nmodule = \"EESSI;rm -rf ~\"\n", .user, "not a module name");
     try r.one(&t, "[dev]\nmodules = [\"$(id)\"]\n", .user, "not a module name");
     try r.one(&t, "[dev]\nmodules = \"GSL\"\n", .user, "array of strings");
@@ -976,6 +1003,25 @@ test "refusals" {
     try r.one(&t, "[build]\nsecrets = [\"TOKEN\"]\n", .user, "build.secrets [user c.toml:2] names TOKEN, but no secret TOKEN is defined");
     t.env.put("EB_LOCAL_STACK_MODULE", "a b") catch unreachable;
     try r.one(&t, "", .user, "EB_LOCAL_STACK_MODULE");
+}
+
+test "a refused secret source says what is wrong with it" {
+    for ([_][]const u8{ "env:MY_TOKEN", "file:/run/token", "file:~/.secrets/token", "nimvault:licences/flexlm" }) |source|
+        try std.testing.expectEqual(.ok, std.meta.activeTag(checkSecretSource(source)));
+    for ([_][]const u8{ "hunter2", "", "ENV:X", "vault:x" }) |source|
+        try std.testing.expectEqual(.unknown, std.meta.activeTag(checkSecretSource(source)));
+
+    var t = Fixture.init();
+    defer t.deinit();
+    try t.env.put("EB_LOCAL_SECRET_T", "nimvault:-x");
+    try t.refuse(&.{}, "EB_LOCAL_SECRET_T: a nimvault entry may not start with -, since nimvault would read it as an option");
+    try t.env.put("EB_LOCAL_SECRET_T", "file:token");
+    try t.refuse(&.{}, "EB_LOCAL_SECRET_T: file: takes an absolute path or one starting ~/");
+    try t.env.put("EB_LOCAL_SECRET_T", "hunter2");
+    try t.refuse(&.{}, "EB_LOCAL_SECRET_T: a source is env:VAR, file:PATH or nimvault:ENTRY; a value is never written in a variable");
+    try t.env.put("EB_LOCAL_SECRET_T", "env:MY_TOKEN");
+    const s = try t.load(&.{}, .{});
+    try std.testing.expectEqualStrings("env:MY_TOKEN", s.secrets.items[0].source);
 }
 
 test "build.secrets names the secrets a build gets" {

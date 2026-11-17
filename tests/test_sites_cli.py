@@ -275,7 +275,7 @@ class SitesCli(StorageFixture):
         cases = {
             "EB_LOCAL_SECRET_TOKEN": ("hunter2", "never written in a variable"),
             "EB_LOCAL_SECRET_PATH": ("env:X", "not a variable name a secret may set"),
-            "EB_LOCAL_SECRET_OPT": ("nimvault:--recipient", "a source is"),
+            "EB_LOCAL_SECRET_OPT": ("nimvault:--recipient", "EB_LOCAL_SECRET_OPT: a nimvault entry may not start with -"),
         }
         for name, (value, needle) in cases.items():
             with self.subTest(name=name):
