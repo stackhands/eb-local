@@ -20,6 +20,7 @@ install-what-eessi-lacks
 find-what-is-wrong
 refresh-the-module-cache
 set-module-defaults-and-aliases
+overlay-a-recipe
 clean-up
 scope-secrets
 ```

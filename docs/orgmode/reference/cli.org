@@ -30,6 +30,9 @@ eb-local [OPTION]... profiles
 eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
 eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
+eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR]
+eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
+eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
 eb-local help | -h | --help | --version
 #+end_example
 
@@ -129,6 +132,13 @@ directory you own.
                                        a site file from a template built in, or from a
                                        template file (a NAME with a slash); install
                                        writes config.toml beside this program, mode 644
+  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR]
+                                       apply a digest-pinned overlay; writes a materialized
+                                       easyconfig and provenance.toml, or refuses when the
+                                       base digest changed
+  eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
+  eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
+                                       run eb-stack package bump or plan by subprocess only
   eb-local help | --version
 
 Every command but eb takes --profile NAME, --project DIR (a shared project
@@ -408,6 +418,20 @@ Existing lines are preserved, and a line already present is not duplicated.
 At least one directive option is required.
 Running the same command again produces identical file contents.
 This command does not read the site file; =--profile=, =--project= and =--config= are accepted and ignored.
+
+** overlay
+
+Keep site recipe changes in a digest-pinned overlay file instead of copying an upstream easyconfig.
+=materialize= applies =[replace]=, =[patches]=, and =[dependencies.add]= / =[dependencies.replace]= tables, refuses when =base_digest= no longer matches the base file, and writes =materialized-<name>= plus =provenance.toml=.
+
+| Subcommand | Meaning |
+|------------|---------|
+| =materialize= | Read =--overlay FILE= and =--base PATH=; write outputs under =--out-dir= (default: beside the overlay). Exit 2 when the base digest drifted. |
+| =bump= | Run =eb-stack package bump= with the arguments after =--=; =--eb-stack PATH= names the program when it is not on =PATH=. |
+| =plan= | Run =eb-stack package plan= the same way. |
+
+The overlay format is documented in [[file:recipe-overlay.org][Recipe overlay file]].
+These commands do not read the site file.
 
 ** clean
 
