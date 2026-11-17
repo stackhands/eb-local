@@ -108,6 +108,9 @@ first row of a table that has none."
 (defun eb-local-docs-export (out)
   "Write each Org page under docs/orgmode as MyST under OUT."
   (let ((src (expand-file-name "orgmode" eb-local-docs-root))
+        ;; With Babel, an inline source block exports its results, and a
+        ;; batch export runs nothing, so src_sh{...} would come out empty.
+        (org-export-use-babel nil)
         (org-md-headline-style 'atx)
         (org-md-toplevel-hlevel 2)
         (org-export-with-toc nil)

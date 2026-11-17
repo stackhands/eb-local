@@ -53,6 +53,17 @@ class OrgPages(unittest.TestCase):
                 self.skipTest(f"Org {org} lays pages out differently from Org {WRITTEN_WITH}x")
         self.assertEqual(stale, [], "run: emacs --batch -Q -l docs/export.el")
 
+    @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
+    def test_an_inline_source_block_comes_out_as_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copy(DOCS / "export.el", root)
+            (root / "orgmode").mkdir()
+            (root / "orgmode" / "page.org").write_text("#+TITLE: Page\n\nRun src_sh{eb-local env} first.\n")
+            run = subprocess.run(["emacs", "--batch", "-Q", "-l", str(root / "export.el")], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("Run `eb-local env` first.\n", (root / "page.md").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

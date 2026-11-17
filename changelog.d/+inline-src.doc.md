@@ -1,0 +1,1 @@
+An inline source block in an Org page, such as `src_sh{eb-local env}`, comes out as code in the page `docs/export.el` writes. It came out empty: Org's Babel exported its results by default, and a batch export runs nothing.
