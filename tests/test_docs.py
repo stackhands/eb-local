@@ -95,6 +95,20 @@ class OrgPages(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn("Run `eb-local env` first.\n", (root / "page.md").read_text())
 
+    @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
+    def test_no_line_of_a_page_ends_in_a_blank(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copy(DOCS / "export.el", root)
+            (root / "orgmode").mkdir()
+            (root / "orgmode" / "page.org").write_text(
+                "#+TITLE: Page\n\n1. Run it:\n\n   #+begin_src bash\n   eb-local env\n   #+end_src\n\n2. Then this.\n")
+            run = subprocess.run(["emacs", "--batch", "-Q", "-l", str(root / "export.el")], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            page = (root / "page.md").read_text()
+        self.assertIn("1.  Run it:\n\n    ```bash\n    eb-local env\n    ```\n\n2.  Then this.\n", page)
+        self.assertEqual([line for line in page.splitlines() if line != line.rstrip()], [])
+
 
 if __name__ == "__main__":
     unittest.main()
