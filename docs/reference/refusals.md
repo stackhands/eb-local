@@ -5,7 +5,7 @@
 A build checks where it would work and where it would install, and stops before it makes anything there when either is wrong.
 `eb-local clean` checks the trees it would remove from before it removes anything, and `eb-local doctor` reports what a build would refuse.
 This page lists each refusal: what it refused, why, and what to change.
-The README's [Where things go](../index.md#where-things-go) says where each thing goes, and [Where EESSI-extend installs](../explanation/install-variables.md) has the refusals of `eb-local eb` and of an install path EESSI-extend moves.
+[Where a build puts things, and why](../explanation/where-things-go.md) says where each thing goes, and [Where EESSI-extend installs](../explanation/install-variables.md) has the refusals of `eb-local eb` and of an install path EESSI-extend moves.
 
 ## The form
 

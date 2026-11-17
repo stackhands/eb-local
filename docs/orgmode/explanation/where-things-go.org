@@ -1,0 +1,60 @@
+#+title: Where a build puts things, and why
+
+A build writes to two places: a workspace on the allocation's node-local disk, which goes when the build or the job ends, and the install prefix, which outlives both.
+This page says what goes where, why eb-local refuses other places before it makes anything, and why the default prefix is =$HOME/eessi=.
+[[file:../reference/refusals.org][Refusals]] lists each check, and [[file:install-variables.org][Where EESSI-extend installs]] says how EESSI-extend picks the tree inside the prefix.
+
+* What goes where
+
+| What                                                   | Where                                                                                       |
+|--------------------------------------------------------+---------------------------------------------------------------------------------------------|
+| Installations and their module files                   | the prefix: =$HOME/eessi=, the =prefix= setting, or =--project DIR=                          |
+| Build, temporary and cache directories                 | a new workspace in the allocation's node-local mount, such as =/local/alice.34/eb-local.cWtPMNFE= |
+| Downloaded source archives                             | =PREFIX/.eb-local/sources=                                                                  |
+| EasyBuild's log while it runs, and a failed build's    | =PREFIX/.eb-local/logs=                                                                     |
+| A successful build's log                               | the installation's =easybuild= directory, compressed                                        |
+
+Inside the prefix, each EESSI version and CPU target has a tree of its own.
+With the prefix =/home/alice/eessi= on a Sapphire Rapids node, jq 1.8.1 is in =/home/alice/eessi/versions/2026.06/software/linux/x86_64/intel/sapphirerapids/software/jq/1.8.1-GCCcore-15.2.0=, and its module file in =modules/all/jq/= of the same tree.
+The workspace holds =build=, =cache=, =cargo=, =source-index= and =tmp=.
+A build that succeeds removes it; one that fails keeps it, for you to look into, until the job ends or =eb-local clean --workspaces= removes it.
+
+* Why the work happens on node-local disk
+
+A build makes and removes many files in its build and temporary directories while it runs.
+On the node's own disk they stay off the file systems that other jobs share, and they go with the job's mount when the job ends, whatever became of the build.
+tmpfs would hold them in the node's memory, which the compilers and the job need.
+
+So a build works only in a mount made for its job, of the file system type the site file names, owned by you.
+A shared parallel file system, tmpfs, a directory inside a larger mount, and a symbolic link are each refused before anything is made: a link could lead the build onto another job's storage or a shared one.
+=eb-local doctor= checks the mount in an allocation the same way, and says on one line what a build would refuse.
+
+* Why installs, sources and logs go in the prefix
+
+Installs, sources and logs must outlive the job, so the prefix may be neither on shared scratch nor below the node-local root.
+The sources there let the next build that needs an archive use it again, and the logs keep the record of a failed build after its workspace has gone.
+eb-local removes the values of secrets from the logs of a build.
+=eb-local clean= clears logs older than =clean.logs_older_than_days=, 30 days unless set, and with =--sources= the archives, as [[file:../howto/clean-up.org][Clean up after builds, and remove what you installed]] shows.
+
+* Why the default prefix is $HOME/eessi
+
+EESSI-extend, loaded with no install variable set, installs under =$HOME/eessi=.
+eb-local's default is the same directory, so the modules installed with a build, with =eb-local eb= and with EESSI-extend loaded by hand are in one tree, with the same permissions.
+Any other default would split one user's modules into two trees, of which =eb-local env= loads one.
+
+Before eb-local 3.0 the default was =$HOME/.local/eessi=.
+Where that directory exists and =$HOME/eessi= does not, eb-local keeps using it, and =env=, =config= and =doctor= say so first:
+
+#+begin_example
+eb-local: using /home/alice/.local/eessi, the default before eb-local 3.0; EESSI-extend and `eb-local eb` use /home/alice/eessi.
+  Keep it with prefix = "~/.local/eessi" in ~/.config/eb-local/config.toml, or move it to /home/alice/eessi.
+#+end_example
+
+=prefix= chooses either for good.
+A site that wants another default for everyone sets it where EESSI-extend reads it too, as [[file:../howto/set-site-defaults.org][Set a site's EasyBuild defaults and default prefix]] shows.
+
+* Related
+
+- [[file:../reference/refusals.org][Refusals]]
+- [[file:install-variables.org][Where EESSI-extend installs]]
+- [[file:../reference/configuration.org][The configuration files]], for =prefix= and the =storage= settings

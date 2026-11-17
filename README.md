@@ -43,23 +43,8 @@ eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot   # no site file or Slurm job;
 
 ## Where things go
 
-| what | where |
-|---|---|
-| installs | `$HOME/eessi`, the `prefix` setting, or `--project DIR` |
-| build, temporary, cache and EESSI setup directories | a unique workspace in the allocation's node-local mount |
-| downloaded source archives | `<install-prefix>/.eb-local/sources` |
-| build logs | `<install-prefix>/.eb-local/logs` |
-
-A build needs a Slurm allocation whose node-local directory, `<node_local_root>/<node_local_mount>`, is its own mount, of the configured file system type, owned by you.
-Shared parallel-file-system paths, tmpfs, enclosing mounts and symbolic-link aliases are refused before anything is created, and so is an install prefix on shared scratch or node-local storage.
-A refusal says what it refused and why, and what the command then did not do; its next line says what to change: a setting, with its value and where it was set as `eb-local config` shows it, or the variable, option or command to use.
-`eb-local doctor` says the same on one line.
-[Refusals](docs/reference/refusals.md) lists each one.
-
-The default prefix, `$HOME/eessi`, is EESSI-extend's own, so modules installed with `eb-local`, with `eb-local eb` and with EESSI-extend loaded by hand are in one tree, with the same permissions.
-That is why the default is not `$HOME/.local/eessi`: EESSI-extend, loaded with no install variable set, installs under `$HOME/eessi`, so any other default would split one user's modules into two trees, of which `eb-local env` shows one.
-Before 3.0 the default was `$HOME/.local/eessi`; where that exists and `$HOME/eessi` does not, eb-local keeps using it and says so. Set `prefix` to choose either for good.
-A site that wants another default for everyone sets it where EESSI-extend reads it too; an Lmod hook cannot.
+Installs go into `$HOME/eessi`, EESSI-extend's own default, the `prefix` setting or `--project DIR`; a build works in a new workspace in its allocation's node-local mount, and keeps source archives and logs in `<install-prefix>/.eb-local`.
+[Where a build puts things, and why](docs/explanation/where-things-go.md) says why, and [Refusals](docs/reference/refusals.md) lists what a build refuses before it makes anything.
 
 ## A site's defaults
 
