@@ -65,6 +65,28 @@ class ForeignPrefixes(StorageFixture):
         again = self.run_tool(["--explain", "recipe.eb"], EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES="1")
         self.assertIn("because build.clear_foreign_prefixes is set", again.stdout)
 
+    def test_an_explicit_false_is_byte_identical_to_the_default_build(self):
+        self.env["PERL5LIB"] = f"/opt/host/perl5:{self.prefix}/lib"
+        self.env["CC"] = "/usr/bin/gcc"
+        self.env["CONTROL_PATH_NAMES"] = "PERL5LIB CC"
+
+        default_explain = self.run_tool(["--explain", "recipe.eb"])
+        disabled_explain = self.run_tool(
+            ["--explain", "recipe.eb"], EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES="false")
+        self.assertEqual(disabled_explain.returncode, default_explain.returncode)
+        self.assertEqual(disabled_explain.stdout.encode(), default_explain.stdout.encode())
+        self.assertEqual(disabled_explain.stderr.encode(), default_explain.stderr.encode())
+
+        default = self.run_wrapper(["recipe.eb"])
+        self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
+        default_capture = (self.root / "eb.json").read_bytes()
+        (self.root / "eb.json").unlink()
+
+        disabled = self.run_wrapper(
+            ["recipe.eb"], EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES="false")
+        self.assertEqual(disabled.returncode, 0, disabled.stdout + disabled.stderr)
+        self.assertEqual((self.root / "eb.json").read_bytes(), default_capture)
+
     def test_an_injected_library_directory_is_reported(self):
         run = self.run_tool(["doctor"], APPTAINER_CONTAINLIBS="/opt/host/cuda/libcuda.so")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
