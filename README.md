@@ -155,37 +155,8 @@ prefix = "~/.local/eessi"
 
 ## Build for every node type
 
-A module is built for the CPU target of the node that built it, so a site with several node types needs one build on each.
-The site file lists them in `[build.node_types]`, each as the sbatch options that place a job there; only the site file may:
-
-```toml
-[build.node_types]
-cpu = "-p cpu -n 16 -t 02:00:00"
-gpu = "-p gpu -n 16 -t 02:00:00 --gpus=1"
-```
-
-`eb-local --explain`, and a build started outside a job, then print an `sbatch` line for each, which runs the same build as a batch job on that node type:
-
-```console
-$ eb-local --explain GSL-2.8-GCC-15.2.0.eb --robot
-# On each node type the site file lists in [build.node_types], the same build as a batch job:
-#   sbatch -p cpu -n 16 -t 02:00:00 --job-name=eb-local-cpu-GSL-2.8-GCC-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
-#   sbatch -p gpu -n 16 -t 02:00:00 --gpus=1 --job-name=eb-local-gpu-GSL-2.8-GCC-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local GSL-2.8-GCC-15.2.0.eb --robot'
-```
-
-Only those lines of the explanation are shown here. Each job runs this eb-local with the same recipe, options and configuration, in the directory `--explain` ran in, and writes its output there; `eb-local list` then shows the module on each CPU target.
-Before eb-local 3.2 the table was `[build.targets]`; eb-local reads that name, and warns, until 4.0.0.
-
-`eb-local submit` sends those jobs itself. It is deprecated, and is removed in 4.0.0:
-
-```sh
-eb-local submit GSL-2.8-GCC-15.2.0.eb --robot             # every node type
-eb-local submit --on gpu GSL-2.8-GCC-15.2.0.eb --robot    # only these
-eb-local submit --print GSL-2.8-GCC-15.2.0.eb               # show the jobs, submit nothing
-```
-
-`--on` and `--print` come before the recipe; options after it are eb's.
-The batch scripts go to `<install-prefix>/.eb-local/jobs`, and each job's output to `<install-prefix>/.eb-local/logs/submit-NODETYPE-JOBID.out`.
+A module is built for the CPU target of the node that built it; where the site file lists the node types in `[build.node_types]`, `eb-local --explain` prints an `sbatch` line for each that runs the same build there.
+[Build for every node type](docs/howto/build-for-every-node-type.md) has the steps, and `eb-local submit`, deprecated until 4.0.0.
 
 ## What you have, and what is wrong
 

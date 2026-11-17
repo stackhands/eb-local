@@ -13,5 +13,6 @@ write-a-site-file
 load-eessi
 compile
 install-software
+build-for-every-node-type
 scope-secrets
 ```

@@ -56,7 +56,7 @@ These steps build `pigz` for one node type, use it, and build for a group.
     module load pigz/2.8-GCCcore-15.2.0
     ```
 
-4.  Repeat steps 1 to 3 on each other node type that will run the software.
+4.  Repeat steps 1 to 3 on each other node type that will run the software, or have a batch job build it on each, as [Build for every node type](build-for-every-node-type.md) describes.
 
 `eb-local --explain pigz-2.8-GCCcore-15.2.0.eb --robot` prints the script the build runs, and the checks before it, and creates and runs nothing.
 
@@ -112,5 +112,6 @@ The column marked `*` is this node's CPU target.
 ## Related
 
 -   [Load EESSI and the software you installed](load-eessi.md)
+-   [Build for every node type](build-for-every-node-type.md)
 -   [Where EESSI-extend installs](../explanation/install-variables.md)
 -   [Refusals](../reference/refusals.md)

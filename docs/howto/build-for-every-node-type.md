@@ -1,0 +1,89 @@
+<!-- Generated from docs/orgmode/howto/build-for-every-node-type.org by docs/export.el; edit that file. -->
+
+# Build for every node type
+
+A module is built for the CPU target of the node that built it, so a cluster with several node types needs one build on each.
+The site file lists the node types; `eb-local --explain` then prints an `sbatch` line for each, which runs the same build as a batch job on that node type.
+These steps list the node types, as the site, and build a recipe on all of them, as a user.
+
+## Before you start
+
+-   To list the node types: the site file, as [Write the site file for a cluster](write-a-site-file.md) describes, and the `sbatch` options that place a job on each node type, on nodes with a node-local disk.
+-   To build: the recipe's file name, as for [Install software on top of EESSI with EasyBuild](install-software.md).
+
+## List the node types
+
+Add a `[build.node_types]` table to the site file, with the `sbatch` options of each node type; only the site file may set it:
+
+```toml
+[build.node_types]
+cpu = "-p cpu -n 8 -t 02:00:00"
+gpu = "-p gpu -n 8 -t 02:00:00 --gpus=1"
+```
+
+`eb-local config` shows each as `build.node_types.NAME`, with the line that sets it.
+
+## Build on every node type
+
+1.  Print the batch jobs, from the directory the jobs should run in; among the lines `--explain` prints is an `sbatch` line for each node type:
+
+    ```bash
+    eb-local --explain pigz-2.8-GCCcore-15.2.0.eb --robot
+    ```
+
+    ```text
+    # On each node type the site file lists in [build.node_types], the same build as a batch job:
+    #   sbatch -p cpu -n 8 -t 02:00:00 --job-name=eb-local-cpu-pigz-2.8-GCCcore-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local pigz-2.8-GCCcore-15.2.0.eb --robot'
+    #   sbatch -p gpu -n 8 -t 02:00:00 --gpus=1 --job-name=eb-local-gpu-pigz-2.8-GCCcore-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local pigz-2.8-GCCcore-15.2.0.eb --robot'
+    ```
+
+    A build started outside a job prints the same lines after its refusal.
+
+2.  Run each `sbatch` line, without the `#` in front:
+
+    ```bash
+    sbatch -p cpu -n 8 -t 02:00:00 --job-name=eb-local-cpu-pigz-2.8-GCCcore-15.2.0.eb --chdir=/home/alice --output=%x-%j.out --wrap='exec /usr/local/bin/eb-local pigz-2.8-GCCcore-15.2.0.eb --robot'
+    ```
+
+    Each job runs this eb-local with the same recipe, options and configuration, in the directory `--explain` ran in, and writes its output there, as `eb-local-cpu-pigz-2.8-GCCcore-15.2.0.eb-JOBID.out`.
+    A job inherits the environment of the shell that ran `sbatch`, such as `EB_LOCAL_BUILD_SECRETS`.
+
+## Check that it worked
+
+Each job's output ends as a build's does:
+
+```text
+eb-local: done. To use the modules in a new shell or job:
+  eval "$(eb-local env)"
+```
+
+`eb-local list` then shows the module in the column of each CPU target.
+
+## With eb-local submit, until 4.0.0
+
+`eb-local submit` sends those jobs itself.
+It is deprecated, says so on each run, and is removed in 4.0.0:
+
+```bash
+eb-local submit pigz-2.8-GCCcore-15.2.0.eb --robot             # every node type
+eb-local submit --on gpu pigz-2.8-GCCcore-15.2.0.eb --robot    # only these
+eb-local submit --print pigz-2.8-GCCcore-15.2.0.eb             # show the jobs, submit nothing
+```
+
+`--on` and `--print` come before the recipe; options after it are EasyBuild's.
+The batch scripts go to `<install prefix>/.eb-local/jobs`, and each job's output to `<install prefix>/.eb-local/logs/submit-NODETYPE-JOBID.out`.
+
+## If it fails
+
+| Message | Cause | What to do |
+|---|---|---|
+| `--explain` prints no `sbatch` line | The site file has no `[build.node_types]`. | Ask the site to list the node types, or build in an allocation on each. |
+| `eb-local: FILE:LINE: build.node_types is a site setting; a user file or a profile cannot change it` | Your file, or a profile, sets node types. | Remove the table from it. |
+| `eb-local: FILE:LINE: unknown key build.node_types` | eb-local 3.1.0 reads a site file written for the main branch. | Install eb-local from source, or name the table `[build.targets]` for 3.1.0. |
+| `eb-local: site FILE:LINE: [build.targets] is now [build.node_types]; eb-local reads the old name until 4.0.0` | The site file uses the table's name from before 3.2. | Rename the table. |
+
+## Related
+
+-   [Install software on top of EESSI with EasyBuild](install-software.md)
+-   [Run paths, and one build per CPU target](../explanation/run-paths.md)
+-   [The configuration files](../reference/configuration.md): `build.node_types`
