@@ -20,90 +20,7 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 ./prog                      # runs in a new shell or a job, with no modules loaded
 ```
 
-`eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
-The program then runs without `LD_LIBRARY_PATH`; do not set it, because it can mix the host's libraries into EESSI's.
-The build environment has to be loaded; when, relative to the libraries, does not matter, because the modules set `LIBRARY_PATH` and the wrappers read it when you link.
-On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RPATH entries, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
-Its `gcc` and `ld` wrappers each record the run paths, so one real `gcc` or one real `ld` ahead of them on `PATH` does no harm.
-A program loses its run paths only when both are bypassed, or when its compiler has no wrapper, such as `clang` from the `LLVM` module loaded by hand; `dev` gives such a compiler a wrapper (see [Other compilers](#other-compilers)).
-The link still succeeds and the program fails when it starts; `eb-local check PROGRAM` shows this first.
-`dev` chooses the build environment from the compilers loaded when it runs, so name every module you link against on the `dev` line, not after it.
-EESSI 2026.06 ships one build environment, `buildenv/default-foss-2026.1`, whose wrappers cover the GCC compilers; see [Other compilers](#other-compilers) for clang, flang and the rest.
-
-`tests/site/dev-tasks.sh` checks these on a cluster with EESSI 2026.06, each program then run with no modules at all:
-
-| task | the line before building |
-|---|---|
-| C with FFTW and OpenMP | `eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"` |
-| MPI | `eval "$(eb-local dev)"`, then `mpicc` |
-| CMake against GSL | `eval "$(eb-local dev GSL/2.8-GCC-15.2.0 CMake/3.31.11-GCCcore-15.2.0)"` |
-| a Python venv, with packages that compile C | `eval "$(eb-local dev Python/3.14.2-GCCcore-15.2.0)"`, then `python -m venv` and `pip install` |
-| R packages into your own library | `eval "$(eb-local dev R/4.6.1-gfbf-2026.1)"`, then `install.packages(..., lib=...)` and `R_LIBS` |
-
-Load EESSI on the node type that will run the program: it picks the binaries for the CPU it finds when it loads.
-A program built with `dev` belongs to that one CPU target, because the wrappers record run paths into `$EESSI_SOFTWARE_SUBDIR`; a binary linked on zen4 loads zen4 libraries wherever it runs and can stop with an illegal instruction on zen2.
-The build environment also puts `-march=native` in `CFLAGS`, `CXXFLAGS` and `FFLAGS`, so `make` and CMake compile the program for that CPU too.
-So build once per node type, inside an allocation on that node type, and install into a path that names the target.
-`dev` sets `EB_LOCAL_DEV_PREFIX` to one: `<install-prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one.
-
-```sh
-salloc -p <partition> -n 4 -t 00:30:00      # one allocation per node type
-eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
-mkdir -p "$EB_LOCAL_DEV_PREFIX/bin"
-gcc -O2 -fopenmp prog.c -lfftw3 -o "$EB_LOCAL_DEV_PREFIX/bin/prog"
-eb-local check "$EB_LOCAL_DEV_PREFIX/bin/prog"
-```
-
-CMake takes `-DCMAKE_INSTALL_PREFIX="$EB_LOCAL_DEV_PREFIX"`, autotools `--prefix="$EB_LOCAL_DEV_PREFIX"`.
-A job script finds the build for the node it lands on by loading EESSI first:
-
-```sh
-eval "$(eb-local env)"
-"$HOME/eessi/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR/bin/prog"   # with the default prefix
-```
-
-### Other compilers
-
-The build environment `dev` loads depends on the compilers the named modules bring in:
-
-| modules from | build environment |
-|---|---|
-| GCC (the default) | `buildenv/default-foss-2026.1` |
-| CUDA | `buildenv/default-foss-2026.1-CUDA-13.3.0`, else the GCC one |
-| `llvm-compilers` (lfoss) | `buildenv/default-lfoss-2026.1` |
-| `intel-compilers` | `buildenv/default-intel-2026.1` |
-| NVHPC | none |
-
-When Lmod has no such module, `dev` writes small RPATH wrappers for the compilers and linkers on `PATH` into `~/.cache/eb-local` and puts them first, and says so.
-Like EasyBuild's own wrappers, they add a run path for each library directory a link names with `-L` or finds through `LIBRARY_PATH`, leaving out system and compatibility-layer directories.
-Whichever build environment loads, `dev` then puts these wrappers first for each `clang`, `clang++`, `flang`, `flang-new` or `ld.lld` on `PATH` that no wrapper covers, and says so.
-Those find their linker themselves, so an `ld` wrapper never sees what they link.
-The `LLVM` module, which other modules also load, ships `clang` but is not `llvm-compilers`: with it, `dev` loads the GCC build environment, which wraps `gcc` and `ld` but not `clang`.
-`eb-local rpath-wrappers` prints the same lines on their own; with `--unwrapped`, only those for the compilers no wrapper covers.
-
-A site that installs its own build environments names them per family; an empty name means none:
-
-```toml
-[dev.buildenv_for]
-nvhpc = "buildenv/site-nvhpc-26.7"
-llvm = ""
-```
-
-Setting `dev.buildenv` (or `--buildenv`) loads that module whatever the compilers.
-
-### Check a program
-
-`eb-local check FILE...` reads a program or library and says whether it runs here without `LD_LIBRARY_PATH`.
-It prints the loader, the run paths and where each needed library resolves, ignoring the shell's `LD_LIBRARY_PATH`, and it reports these problems:
-
-- the file is built for another architecture;
-- with EESSI loaded, the loader or a library comes from the host rather than the compatibility layer;
-- the file records `RUNPATH`, which `LD_LIBRARY_PATH` overrides and the libraries' own dependencies ignore, rather than `RPATH`;
-- a run path points into the software tree of another CPU target than `$EESSI_SOFTWARE_SUBDIR`;
-- a library is not found, or is found only through `LD_LIBRARY_PATH`.
-
-It exits 0 with no problems, 1 with problems and 2 when a file cannot be read.
-It checks the libraries the file names itself; run it on a library to check that one's.
+[Compile your code against EESSI](docs/howto/compile.md) has the steps for each node type, other compilers and the checks; [Run paths, and one build per CPU target](docs/explanation/run-paths.md) says why the program needs no `LD_LIBRARY_PATH`.
 
 ## Install software with EasyBuild
 
@@ -488,7 +405,7 @@ A change adds a news fragment, `changelog.d/<pull request>.<type>.md` with type 
 
 The documentation is this README and the pages under `docs/`. A page with an Org source in `docs/orgmode/` is written from it, so edit the Org file and run `emacs --batch -Q -l docs/export.el`; `tests/test_docs.py` checks that the two agree where Emacs is installed. `python -m sphinx -W -b html docs docs/_build/html` builds the site, as CI does; it needs Zig 0.17.1 on `PATH`, to write the API reference from the code.
 
-`tests/site/` holds the site acceptance scripts: the development tasks above, and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
+`tests/site/` holds the site acceptance scripts: the development tasks of [Compile your code against EESSI](docs/howto/compile.md), and a build inside an allocation, which takes the site's partition and node-local disk feature on its `sbatch` line and finds the allocation's mount from the site file.
 
 ## License
 

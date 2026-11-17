@@ -1,0 +1,46 @@
+<!-- Generated from docs/orgmode/explanation/run-paths.org by docs/export.el; edit that file. -->
+
+# Run paths, and one build per CPU target
+
+A program built against EESSI needs EESSI's libraries when it runs.
+It finds them through the run paths its link recorded, not through `LD_LIBRARY_PATH`, and those run paths name the libraries of one CPU target.
+This page says how `eb-local dev` gets them recorded, why `LD_LIBRARY_PATH` stays unset, and why each CPU target needs a build of its own.
+[Compile your code against EESSI](../howto/compile.md) has the steps.
+
+## Where the run paths come from
+
+`eb-local dev` loads EESSI, the modules you name, and a build environment last, so `gcc`, `mpicc`, `make`, CMake and meson record where each library lives.
+The build environment has to be loaded; when, relative to the libraries, does not matter, because the modules set `LIBRARY_PATH` and the wrappers read it when you link.
+On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RPATH entries, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
+Its `gcc` and `ld` wrappers each record the run paths, so one real `gcc` or one real `ld` ahead of them on `PATH` does no harm.
+A program loses its run paths only when both are bypassed, or when its compiler has no wrapper.
+The link still succeeds, and the program fails when it starts; `eb-local check PROGRAM` shows this first.
+`dev` chooses the build environment from the compilers loaded when it runs, so the modules you link against go on the `dev` line, not after it.
+
+## Why not LD\_LIBRARY\_PATH
+
+A program with its run paths needs no `LD_LIBRARY_PATH`, and setting one can mix the host's libraries into EESSI's.
+`dev` warns when the shell has it set, and a build with EasyBuild does not pass it on to `eb`.
+The wrappers record `RPATH`, not `RUNPATH`: `LD_LIBRARY_PATH` overrides `RUNPATH`, and the loader does not use a program's `RUNPATH` for the dependencies of its libraries.
+`eb-local check` reports a file with `RUNPATH` as a problem, as it does a library found only through `LD_LIBRARY_PATH`.
+
+## Compilers without a wrapper
+
+`clang`, `clang++`, `flang`, `flang-new` and `ld.lld` find their linker themselves, so an `ld` wrapper never sees what they link.
+The `LLVM` module, which other modules also load, ships `clang` but is not `llvm-compilers`: with it, `dev` loads the GCC build environment, which wraps `gcc` and `ld` but not `clang`.
+So `dev` puts RPATH wrappers of its own first for each of those compilers on `PATH` that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded.
+Like EasyBuild's wrappers, they add a run path for each library directory a link names with `-L` or finds through `LIBRARY_PATH`, and leave out the system's and the compatibility layer's directories.
+
+## One build per CPU target
+
+EESSI chooses the binaries for the CPU it finds when it loads.
+A program built with `dev` belongs to that one CPU target, because the wrappers record run paths into `$EESSI_SOFTWARE_SUBDIR`: a binary linked on zen4 loads zen4 libraries wherever it runs, and can stop with an illegal instruction on zen2.
+The build environment also puts `-march=native` in `CFLAGS`, `CXXFLAGS` and `FFLAGS`, so `make` and CMake compile the program for that CPU too; with `buildenv/default-foss-2026.1`, `CFLAGS` is `-O2 -ftree-vectorize -march=native -fno-math-errno`.
+So a program is built once per node type, in an allocation on that node type, and installed into a path that names the target, which `dev` sets as `EB_LOCAL_DEV_PREFIX`.
+A job script that loads EESSI first then finds the build for the node it lands on.
+Software built with EasyBuild is the same: each CPU target has a tree of its own below the install prefix.
+
+## Related
+
+-   [Compile your code against EESSI](../howto/compile.md)
+-   [The eb-local command](../reference/cli.md): `dev`, `check` and `rpath-wrappers`

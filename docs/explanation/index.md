@@ -9,4 +9,5 @@ Nothing here is a step to follow.
 :maxdepth: 1
 
 install-variables
+run-paths
 ```

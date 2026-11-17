@@ -1,7 +1,7 @@
 #!/bin/bash
-# Site acceptance: the development tasks in the README (C with FFTW and
-# OpenMP, MPI, CMake against GSL, a Python venv, R packages), done with
-# eb-local on EESSI 2026.06.
+# Site acceptance: the development tasks of the how-to "Compile your code
+# against EESSI" (C with FFTW and OpenMP, MPI, CMake against GSL, a Python
+# venv, R packages), done with eb-local on EESSI 2026.06.
 #
 #   EB_LOCAL_TEST_ROOT=DIR [EB_LOCAL_BIN=eb-local] bash tests/site/dev-tasks.sh
 #

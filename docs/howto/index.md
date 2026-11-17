@@ -10,5 +10,6 @@ The title names the task.
 
 install
 write-a-site-file
+compile
 scope-secrets
 ```

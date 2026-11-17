@@ -228,6 +228,20 @@ For each `FILE`, print its machine, its program interpreter (the loader), its `R
 eb-local check: no problems
 ```
 
+A problem is a line of its own, after `problem:`, below the line it concerns:
+
+| Problem | When |
+|---|---|
+| `built for MACHINE; this node is MACHINE` | The file is for another architecture. |
+| `the loader is the host's, not the compatibility layer's under DIR` | EESSI is loaded, and the file names a loader outside its compatibility layer. |
+| `RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH` | The file records `RUNPATH` rather than `RPATH`. |
+| `run paths into the TARGET software tree; this shell is TARGET: build it again on this node type` | A run path, or a directory in `LD_LIBRARY_PATH`, leads into the tree of a CPU target other than `$EESSI_SOFTWARE_SUBDIR`. |
+| `LIBRARY does not exist` | The file names a library by its path, and there is none. |
+| `LIBRARY is not found` | No run path, no directory in `LD_LIBRARY_PATH` and none of the loader's directories holds the library. |
+| `LIBRARY is found only through LD_LIBRARY_PATH` | The same, but a directory in `LD_LIBRARY_PATH` holds it. |
+| `LIBRARY comes from the host, not from EESSI` | EESSI is loaded, and the library resolves outside it. |
+
+`check` follows the libraries the file names, not theirs; run it on a library to check that one's.
 It exits 0 when there are no problems, 1 when there are, and 2 when a file cannot be read.
 
 ### submit
