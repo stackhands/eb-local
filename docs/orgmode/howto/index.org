@@ -14,6 +14,7 @@ compile
 install-software
 eb-without-a-site-file
 build-for-every-node-type
+install-what-eessi-lacks
 find-what-is-wrong
 clean-up
 scope-secrets
