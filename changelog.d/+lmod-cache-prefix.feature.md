@@ -1,0 +1,1 @@
+`eb-local lmod-cache --prefix` walks every CPU target's `modules/all` tree (and nested accelerator module trees), then runs Lmod's `update_lmod_system_cache_files` for each, matching EESSI's publisher cache refresh. `--dry-run` lists the targets; single-target `--modulepath` mode is unchanged.
