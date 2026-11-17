@@ -29,7 +29,7 @@ class Check(unittest.TestCase):
     def tree(self, target):
         """A library directory in an EESSI software tree for `target`."""
         lib = self.root / "versions/2026.06/software/linux" / target / "software/libdemo/1.0/lib"
-        lib.mkdir(parents=True)
+        lib.mkdir(parents=True, exist_ok=True)
         (self.root / "demo.c").write_text("int demo(void) { return 7; }\n")
         subprocess.run([GCC, "-shared", "-fPIC", "-o", str(lib / "libdemo.so"), str(self.root / "demo.c")], check=True)
         return lib
@@ -123,6 +123,106 @@ class Check(unittest.TestCase):
         run = self.check()
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("check needs", run.stderr)
+
+    def install_elf(self, *flags, dest="tree"):
+        """An ELF program and a text file under `dest`, and a link to the program."""
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", *flags)
+        tree = self.root / dest
+        (tree / "bin").mkdir(parents=True)
+        (tree / "bin" / "prog").write_bytes(prog.read_bytes())
+        (tree / "notes.txt").write_text("not elf\n")
+        (tree / "bin" / "alias").symlink_to("prog")
+        outside = self.root / "outside"
+        outside.mkdir(exist_ok=True)
+        (outside / "other").write_bytes(prog.read_bytes())
+        link = tree / "linked"
+        if not link.exists():
+            link.symlink_to(outside)
+        return tree
+
+    def test_prefix_audits_elf_files_and_skips_the_rest(self):
+        tree = self.install_elf("-Wl,--disable-new-dtags")
+        run = self.check("--prefix", tree, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(str(tree / "bin" / "prog"), run.stdout)
+        self.assertIn("no problems", run.stdout)
+        self.assertNotIn("notes.txt", run.stdout + run.stderr)
+        self.assertNotIn("is not a 64-bit", run.stderr)
+        self.assertNotIn("alias", run.stdout)
+        self.assertNotIn("other", run.stdout)
+        self.assertEqual(run.stdout.count(str(tree / "bin" / "prog")), 1)
+
+    def test_quiet_prints_a_file_only_when_it_has_a_problem(self):
+        tree = self.install_elf("-Wl,--enable-new-dtags", dest="noisy")
+        run = self.check("--prefix", tree, "--quiet")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn(str(tree / "bin" / "prog"), run.stdout)
+        self.assertIn("problem:", run.stdout)
+        self.assertIn("--disable-new-dtags", run.stdout)
+        self.assertNotIn("loader", run.stdout)
+        self.assertNotIn("notes.txt", run.stdout + run.stderr)
+        clean = self.install_elf("-Wl,--disable-new-dtags", dest="quiet")
+        run = self.check("--prefix", clean, "--quiet", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stdout.strip(), "eb-local check: no problems")
+
+    def test_a_tree_with_no_elf_file_says_so(self):
+        tree = self.root / "empty"
+        (tree / "doc").mkdir(parents=True)
+        (tree / "doc" / "readme").write_text("text\n")
+        run = self.check("--prefix", tree)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("eb-local check: no ELF files", run.stdout)
+        self.assertIn("eb-local check: no problems", run.stdout)
+        self.assertNotIn("is not a 64-bit", run.stderr)
+
+    def test_module_audits_each_installation(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
+        prefix = self.root / "eessi"
+        install = prefix / "versions/2026.06/software/linux/x86_64/amd/zen4/software/demo/1.0"
+        (install / "bin").mkdir(parents=True)
+        (install.parent.parent.parent / "modules").mkdir(parents=True)
+        (install / "bin" / "demo").write_bytes(prog.read_bytes())
+        (install / "README").write_text("not elf\n")
+        run = self.check("--module", "demo/1.0", EB_LOCAL_PREFIX=str(prefix),
+                         EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(str(install / "bin" / "demo"), run.stdout)
+        self.assertNotIn("README", run.stdout + run.stderr)
+        missing = self.check("--module", "missing/1.0", EB_LOCAL_PREFIX=str(prefix))
+        self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+        self.assertIn("is not installed", missing.stderr)
+
+    def test_dev_uses_the_dev_prefix_or_the_eessi_target(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
+        named = self.root / "named-dev"
+        (named / "bin").mkdir(parents=True)
+        (named / "bin" / "prog").write_bytes(prog.read_bytes())
+        run = self.check("--dev", EB_LOCAL_DEV_PREFIX=str(named), EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(str(named / "bin" / "prog"), run.stdout)
+        prefix = self.root / "eessi"
+        computed = prefix / "dev/2026.06/x86_64/amd/zen4/accel"
+        (computed / "bin").mkdir(parents=True)
+        (computed / "bin" / "prog").write_bytes(prog.read_bytes())
+        run = self.check("--dev", EB_LOCAL_PREFIX=str(prefix), EESSI_VERSION="2026.06",
+                         EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4", EESSI_ACCELERATOR_TARGET="accel")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(str(computed / "bin" / "prog"), run.stdout)
+        absent = self.check("--dev")
+        self.assertNotEqual(absent.returncode, 0)
+        self.assertIn("EB_LOCAL_DEV_PREFIX", absent.stderr)
+
+    def test_the_tree_modes_are_alternatives(self):
+        run = self.check("--dev", "--prefix", str(self.root))
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("one of --module, --dev and --prefix", run.stderr)
+        run = self.check(self.root / "notes.txt", "--dev")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("one of --module, --dev and --prefix", run.stderr)
 
 
 if __name__ == "__main__":

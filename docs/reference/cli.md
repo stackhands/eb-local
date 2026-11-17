@@ -17,6 +17,7 @@ eb-local [OPTION]... env
 eb-local [OPTION]... dev [--buildenv MODULE] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check FILE...
+eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [NAME[/VERSION]...]
 eb-local [OPTION]... doctor
@@ -70,6 +71,10 @@ directory you own.
                                        first; dev adds them after a build environment
   eb-local check FILE...               whether a program or library built here runs here:
                                        its architecture, loader, run paths and libraries
+  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
+                                       the same for every ELF file in those installations,
+                                       the dev tree, or DIR; a file that is not ELF is skipped.
+                                       --quiet prints a file only when it has a problem
   eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
                                        one batch job per node type the site file lists
                                        in build.node_types, each building the recipe for
@@ -283,7 +288,19 @@ A problem is a line of its own, after `problem:`, below the line it concerns:
 | `LIBRARY comes from the host, not from EESSI` | EESSI is loaded, and the library resolves outside it. |
 
 `check` follows the libraries the file names, not theirs; run it on a library to check that one's.
-It exits 0 when there are no problems, 1 when there are, and 2 when a file cannot be read.
+
+`--module NAME/VERSION`, `--dev` and `--prefix DIR` audit every ELF file in place of the files named on the line.
+A file that is not ELF is skipped, and a symbolic link is not followed, so a link cannot point the audit outside the tree.
+`--module` may be repeated, and further `NAME/VERSION` words after it name more modules.
+Each must be installed. Every CPU target's installation is audited, and the module files are not: they are not ELF.
+`--dev` reads `EB_LOCAL_DEV_PREFIX` when it is set, and otherwise `<prefix>/dev/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR`, with `$EESSI_ACCELERATOR_TARGET` appended when that is set.
+`--prefix` is any directory and does not read the site file.
+The three are alternatives to naming files, and to each other.
+`--quiet` prints a file only when it has a problem, and still ends with the summary line.
+With no ELF file in the tree, and without `--quiet`, `check` says `eb-local check: no ELF files` and then `eb-local check: no problems`.
+
+It exits 0 when there are no problems, 1 when there are, and 2 when a named file cannot be read or is not ELF, or when a file in a tree cannot be read.
+A file that is not ELF is not a failure of a tree audit.
 
 ### submit
 
