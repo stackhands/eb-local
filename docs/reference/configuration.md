@@ -42,7 +42,7 @@ A setting takes its value from the last of these that sets it:
 3.  the profile in force, in the site file;
 4.  the user file;
 5.  the profile in force, in the user file;
-6.  an `EB_LOCAL_*` variable;
+6.  an `EB_LOCAL_*` variable, as [Environment variables](environment.md) lists them;
 7.  an option: `--project`, or `--buildenv` for `dev`.
 
 A secret, or an `[eessi]` variable, replaces only the one of the same name an earlier layer set.
