@@ -1,0 +1,45 @@
+name: large file audit
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Audit repository history
+        id: audit
+        continue-on-error: true
+        uses: HaoZeke/large-file-auditor@v0.1.0
+        with:
+          file-size-threshold: 500K
+      - name: Name commits that added large files
+        if: steps.audit.outcome == 'failure'
+        env:
+          LARGE_FILES: ${{ steps.audit.outputs.large-files-list }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          for item in json.loads(os.environ.get("LARGE_FILES") or "[]"):
+              blob = item["blobSha"]
+              commits = subprocess.run(
+                  ["git", "log", "--all", "--format=%H %s", f"--find-object={blob}"],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              ).stdout.rstrip()
+              print(f"{item.get('path', blob)} ({item['sizeHuman']})")
+              print(commits or f"no fetched commit found for blob {blob}")
+          raise SystemExit("large-file-auditor rejected this pull request")
+          PY
