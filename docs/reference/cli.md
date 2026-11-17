@@ -3,7 +3,7 @@
 # The eb-local command
 
 `eb-local` builds and installs software with EasyBuild on top of EESSI 2026.06, into a directory you or your project own, and prints the shell lines that load EESSI and what you installed.
-This page describes the static binary, eb-local 3.1.0.
+This page describes the static binary on this branch's `main`.
 The 1.x Bash script, frozen until it is removed in 4.0.0, has a build, `env`, `dev` and `clean` only.
 
 ## Synopsis
@@ -156,6 +156,9 @@ Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 ```text
 eb-local 3.1.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
+
+Since `v3.1.0`, no CLI flag was removed or renamed on `main`.
+The command line added `--strict` on `env`, `--unwrapped` on `rpath-wrappers`, and `lmod-cache` with `--modulepath`, `--cache-dir`, `--timestamp` and `--spider`.
 
 ## Commands
 
