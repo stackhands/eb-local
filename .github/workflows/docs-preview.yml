@@ -1,0 +1,24 @@
+name: documentation preview
+
+on:
+  workflow_run:
+    workflows: [pages]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: HaoZeke/doc-previewer@v0.0.1
+        with:
+          workflow_run_id: ${{ github.event.workflow_run.id }}
+          head_sha: ${{ github.event.workflow_run.head_sha }}
+          artifact_name: documentation
+          zip_display_name: documentation.zip
+          comment_header: "### Documentation preview"
