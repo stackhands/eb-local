@@ -167,28 +167,15 @@ Each CPU target has its own tree, so a module built on one node type is not ther
 ## Clean up
 
 ```sh
-eb-local clean --dry-run            # what would go
-eb-local clean                      # logs older than 30 days, to the trash with rtrash
-eb-local clean --sources            # downloaded archives too
-eb-local clean --workspaces --no-logs   # inside an allocation: its leftover workspaces
-```
-
-With [rtrash](https://github.com/HaoZeke/rtrash) on `PATH`, files go to the trash (`rtrash list`, `rtrash restore`); without it, nothing is deleted unless you pass `--delete`.
-A directory among the logs, such as the `reprod_*` copies of a failed build's easyconfig, easyblocks and hooks, goes whole once nothing in it is newer than the cutoff: the copies keep their originals' older times.
-`clean` never follows a symbolic link out of the installation directory.
-
-To remove something you installed, for every CPU target you built it for:
-
-```sh
-eb-local uninstall pigz/2.8-GCCcore-15.2.0 --dry-run
-eb-local uninstall pigz/2.8-GCCcore-15.2.0      # to the trash with rtrash, or --delete
+eb-local clean --dry-run                        # what would go
+eb-local clean                                  # logs older than 30 days, to the trash with rtrash
+eb-local clean --sources                        # downloaded archives too
+eb-local clean --workspaces --no-logs           # inside an allocation: its leftover workspaces
+eb-local uninstall pigz/2.8-GCCcore-15.2.0      # for every CPU target, to the trash with rtrash
 eb-local restore pigz/2.8-GCCcore-15.2.0        # back from the trash, read-only again
 ```
 
-EasyBuild leaves installations read-only, so `rm -rf` fails on them; `uninstall` makes their directories writable first, and removes the module files with them, along with the links EasyBuild makes to each from `modules/<class>/`.
-If another module you installed loads the one you name, `uninstall` lists it and removes nothing, because that module would then fail to load; name both in the same command to remove both.
-`restore` brings back what `uninstall` moved to the trash, for every CPU target, with `rtrash restore`, and takes write permission away again, as EasyBuild does.
-`rtrash restore` on one path brings back read-only files in writable directories: rtrash moves a directory, and empties the trash, only when its directories are writable.
+[Clean up after builds, and remove what you installed](docs/howto/clean-up.md) has the steps, and [The eb-local command](docs/reference/cli.md) the options.
 
 ## Configuration
 

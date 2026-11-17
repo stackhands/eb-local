@@ -284,7 +284,9 @@ Remove what eb-local left in the prefix, or the project directory: by default th
 | =--delete=                | Delete for good when =clean.trash= does not move files to the trash.                                        |
 
 Files go to the trash with =rtrash= as =clean.trash= says; workspaces are deleted.
-Without =rtrash= and without =--delete=, it removes nothing and exits 1.
+A directory among the logs, such as the =reprod_*= copies of a failed build's easyconfig, easyblocks and hooks, goes whole once nothing in it is newer than the cutoff: the copies keep their originals' older times.
+=clean= never follows a symbolic link out of the installation directory.
+With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
 
 ** config
 
@@ -304,7 +306,8 @@ Print each profile the configuration files define, with the layer and the file t
 
 ** uninstall
 
-Remove each installation =NAME/VERSION= names, for every CPU target, with its module files, and print what it removes.
+Remove each installation =NAME/VERSION= names, for every CPU target, with its module files and the links EasyBuild makes to them from =modules/CLASS/=, and print what it removes.
+EasyBuild leaves an installation read-only; =uninstall= makes its directories writable first.
 
 | Option      | Meaning                                                                   |
 |-------------+---------------------------------------------------------------------------|
@@ -312,7 +315,7 @@ Remove each installation =NAME/VERSION= names, for every CPU target, with its mo
 | =--delete=  | Delete for good when =clean.trash= does not move files to the trash.      |
 
 It removes nothing, and exits 2, when another module installed in the prefix loads one named and is not named too.
-Without =rtrash= and without =--delete=, it removes nothing and exits 1.
+With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
 
 ** restore
 
@@ -322,7 +325,8 @@ Bring each =NAME/VERSION= that =uninstall= moved to the trash back, for every CP
 |-------------+------------------------------------------------------|
 | =--dry-run= | Print what would come back, and restore nothing.     |
 
-One that is not in the trash for the prefix is exit 2.
+One that is not in the trash for the prefix is exit 2, and so is a path in the trash more than once, as after two =uninstall= runs: it restores nothing, and names the =rtrash restore= command for that path.
+=rtrash restore= on one path brings back read-only files in writable directories: rtrash moves a directory, and empties the trash, only when its directories are writable.
 
 ** site
 
