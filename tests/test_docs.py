@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The pages docs/export.el writes from docs/orgmode.
 
-Each Org source has its page, in the index's table of contents, and each
-written page has its source. Where Emacs is installed, a fresh export
-must match the committed pages; another Org than the one that wrote them
-may lay a page out differently, and then the comparison is skipped.
+Each Org source has its page, listed once in the table of contents of
+the front page or of its section's index, and each written page has its
+source. Where Emacs is installed, a fresh export must match the
+committed pages; another Org than the one that wrote them may lay a
+page out differently, and then the comparison is skipped.
 """
 import os
 from pathlib import Path
@@ -24,11 +25,24 @@ def sources():
     return sorted(path.relative_to(ORG) for path in ORG.rglob("*.org"))
 
 
+def toctree_entries(page):
+    """The pages the toctrees of PAGE list, as paths under docs/ without a suffix."""
+    entries = []
+    for toctree in re.findall(r"```\{toctree\}\n(.*?)```", (DOCS / page).read_text(), re.S):
+        for line in toctree.splitlines():
+            if line and not line.startswith(":"):
+                entries.append(str(Path(page).parent / line))
+    return entries
+
+
 class OrgPages(unittest.TestCase):
-    def test_each_org_source_has_its_page_in_the_table_of_contents(self):
-        toctree = re.search(r"```\{toctree\}\n(.*?)```", (DOCS / "index.md").read_text(), re.S).group(1)
-        entries = [line for line in toctree.splitlines() if line and not line.startswith(":")]
-        self.assertEqual(sorted(entries), [str(rel.with_suffix("")) for rel in sources()])
+    def test_each_org_source_has_its_page_in_one_table_of_contents(self):
+        listed, pending = [], ["index.md"]
+        while pending:
+            entries = toctree_entries(pending.pop())
+            listed += entries
+            pending += [entry + ".md" for entry in entries]
+        self.assertEqual(sorted(listed), [str(rel.with_suffix("")) for rel in sources() if rel != Path("index.org")])
         for rel in sources():
             page = DOCS / rel.with_suffix(".md")
             self.assertTrue(page.read_text().startswith(f"{GENERATED}{rel} by docs/export.el; edit that file. -->\n"), page)

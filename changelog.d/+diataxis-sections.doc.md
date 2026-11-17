@@ -1,0 +1,1 @@
+The documentation has four sections, each with an index page: tutorials, how-to guides, explanation and reference. The front page is written from `docs/orgmode/index.org`, as the other pages are, and says where to read for what. The tutorial is eb-stack's, which the tutorials page links.

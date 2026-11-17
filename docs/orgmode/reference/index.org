@@ -1,0 +1,12 @@
+#+title: Reference
+
+Descriptions of what there is: commands, settings, files, environment variables, exit statuses, refusals and the API.
+Each page states facts in the order the thing itself has them.
+
+#+begin_export md
+```{toctree}
+:maxdepth: 1
+
+refusals
+```
+#+end_export

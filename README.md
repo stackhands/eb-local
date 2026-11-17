@@ -7,11 +7,11 @@
 
 # eb-local
 
-<!-- docs:start -->
 Build your own code and install software on top of [EESSI](https://www.eessi.io) (the European Environment for Scientific Software Installations) 2026.06, without knowing EasyBuild's RPATH wrappers, `buildenv` or `LD_LIBRARY_PATH`.
 
 Documentation: <https://stackhands.github.io/eb-local/>
 
+<!-- docs:start -->
 ## Compile your own code
 
 ```sh
