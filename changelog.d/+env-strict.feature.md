@@ -1,0 +1,1 @@
+`eb-local env --strict` and `EB_LOCAL_ENV_STRICT=1` prepend a check that the EESSI init file exists before the load lines. The load-eessi how-to names it for hosts where CVMFS is not mounted yet.
