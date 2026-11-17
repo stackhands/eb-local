@@ -41,8 +41,13 @@ esac
 class ListAndDoctor(StorageFixture):
     def setUp(self):
         super().setUp()
-        # The module double stands in for Lmod's, whose init sets LMOD_CMD.
+        # The module double stands in for Lmod's, whose init sets LMOD_CMD,
+        # and EESSI's init puts the directory of the EESSI module on MODULEPATH.
         self.env["LMOD_CMD"] = "/usr/share/lmod/lmod/libexec/lmod"
+        self.eessi_modules = self.root / "init" / "modules"
+        (self.eessi_modules / "EESSI").mkdir(parents=True)
+        (self.eessi_modules / "EESSI" / "2026.06.lua").write_text("-- module\n")
+        self.env["MODULEPATH"] = str(self.eessi_modules)
 
     def run_tool(self, args, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
@@ -263,14 +268,43 @@ class ListAndDoctor(StorageFixture):
 
     def test_doctor_outside_an_allocation_and_with_modules_off_modulepath(self):
         self.install("x86_64/amd/zen2", "GSL/2.8-GCC-15.2.0")
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH="/somewhere/else")
+        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}")
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertIn("info not in a Slurm job", run.stdout)
         self.assertIn("warn your modules are not on MODULEPATH", run.stdout)
         inside = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen2" / "modules" / "all"
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{inside}")
+        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}:{inside}")
         self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
+
+    def test_doctor_fails_where_no_directory_on_modulepath_holds_the_eessi_module(self):
+        # A shell with Lmod but without EESSI's init: builds keep its
+        # MODULEPATH, and Lmod cannot find EESSI/2026.06 there.
+        repo = self.root / "repo"
+        for modulepath in ("", "/somewhere/else"):
+            with self.subTest(MODULEPATH=modulepath):
+                run = self.run_tool(["doctor"], MODULEPATH=modulepath, EESSI_CVMFS_REPO=str(repo))
+                self.assertEqual(run.returncode, 1, run.stdout)
+                self.assertIn("FAIL no directory on MODULEPATH in this shell holds stack.module, EESSI/2026.06 [default], "
+                              "so builds, env and dev cannot load it; "
+                              f"module use {repo}/init/modules adds EESSI's module directory\n", run.stdout)
+                self.assertTrue(run.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
+        # A Tcl module file has no extension; a name without a version is a directory.
+        tcl = self.root / "tcl"
+        (tcl / "EESSI").mkdir(parents=True)
+        (tcl / "EESSI" / "2026.06").write_text("#%Module\n")
+        for extra in ({}, {"EB_LOCAL_STACK_MODULE": "EESSI"}):
+            with self.subTest(**extra):
+                run = self.run_tool(["doctor"], MODULEPATH=f"/somewhere/else:{tcl}", **extra)
+                self.assertEqual(run.returncode, 0, run.stdout)
+                self.assertNotIn("holds stack.module", run.stdout)
+        run = self.run_tool(["doctor"], EB_LOCAL_STACK_MODULE="site/eessi")
+        self.assertIn("holds stack.module, site/eessi [environment EB_LOCAL_STACK_MODULE], so", run.stdout)
+        # With no module command, a build sources an init, which sets MODULEPATH.
+        run = self.run_tool(["doctor"], LMOD_CMD="", MODULESHOME="", MODULEPATH="")
+        self.assertNotIn("holds stack.module", run.stdout)
+        run = self.without_a_site_file(MODULEPATH="")
+        self.assertIn("warn no directory on MODULEPATH in this shell holds stack.module", run.stdout)
 
     def test_doctor_fails_on_a_secret_every_build_would_stop_on(self):
         secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC")

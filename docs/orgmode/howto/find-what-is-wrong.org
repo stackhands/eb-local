@@ -90,6 +90,17 @@ These steps run them and read what they say.
 
    Here =EB_LOCAL_STACK_MODULE= named an EESSI version this host does not have; =eb-local config= shows each setting and where it was set.
 
+   Where the shell has Lmod's =module= command but no directory on =MODULEPATH= holds the EESSI module, a build cannot load =EESSI/2026.06= either; with nothing on =MODULEPATH=, Lmod's reason starts =Lmod Warning: MODULEPATH is undefined.=
+   =eb-local doctor= names the directory to add:
+
+   #+begin_src bash
+   eb-local doctor
+   #+end_src
+
+   #+begin_example
+   FAIL no directory on MODULEPATH in this shell holds stack.module, EESSI/2026.06 [default], so builds, env and dev cannot load it; module use /cvmfs/software.eessi.io/init/modules adds EESSI's module directory
+   #+end_example
+
 4. For a build that stops before it starts, read its refusal: the first line says what was refused and why, and the next what to change, with the setting and where it was set.
    [[file:../reference/refusals.org][Refusals]] lists each one.
    =eb-local --explain RECIPE= prints the checks a build makes, and the script it runs.

@@ -1681,6 +1681,19 @@ fn lmodInits(a: Allocator, env: *const std.process.Environ.Map) [3][]const u8 {
     };
 }
 
+/// Whether a directory on `modulepath` holds the module `name`: a Lua file,
+/// a Tcl file, or for a name without a version, a directory of versions.
+fn onModulePath(a: Allocator, modulepath: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, modulepath, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const file = std.fs.path.join(a, &.{ dir, name }) catch oom();
+        const lua = std.fmt.allocPrint(a, "{s}.lua", .{file}) catch oom();
+        for ([_][]const u8{ lua, file }) |path| if (fsx.statAt(fsx.cwd, path, true)) |_| return true else |_| {};
+    }
+    return false;
+}
+
 fn readable(path: []const u8) bool {
     var zb: [sys.path_max:0]u8 = undefined;
     const zp = sys.z(&zb, path) catch return false;
@@ -2381,6 +2394,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
             note(a, &out, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} can be read; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
             if (site) failed = true;
         }
+    } else if (!onModulePath(a, c.env.get("MODULEPATH") orelse "", s.stack_module.value)) {
+        // A build keeps the shell's module command, and with it MODULEPATH,
+        // and sources no init that would put EESSI's modules there.
+        const repo = nonEmpty(c.env.get("EESSI_CVMFS_REPO")) orelse "/cvmfs/software.eessi.io";
+        note(a, &out, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
+        if (site) failed = true;
     }
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});

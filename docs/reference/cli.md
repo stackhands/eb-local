@@ -287,6 +287,7 @@ A `NAME` keeps the modules of that name, and a `NAME/VERSION` that module.
 
 Print one line for each check of what would stop a build, `eb-local eb` or a module load, each starting `ok`, `info`, `warn` or `FAIL`, then a line that says whether anything stops a build.
 It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and `LD_LIBRARY_PATH` left in the shell, the EESSI init `eb-local eb` sources, the allocation's node-local mount, whether EESSI is loaded and your modules are on `MODULEPATH`, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
+Where the shell has a module command, a build keeps it and its `MODULEPATH`, so doctor checks that a directory on `MODULEPATH` holds `stack.module`.
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on `PATH`, as a build asks it, and shows the target it selects; a guard that cannot select one is a `warn`, since a build's own run of it decides.
 With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
 It changes nothing, and exits 1 when a line says `FAIL`.
