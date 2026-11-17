@@ -2926,6 +2926,11 @@ pub fn main(init: std.process.Init) u8 {
     }.get;
     while (i < args.len) : (i += 1) {
         const x: []const u8 = args[i];
+        if (command == .eb and std.mem.eql(u8, x, "--")) {
+            // eb's own --help, and any option eb-local also knows, is eb's.
+            for (args[i..]) |arg| rest.append(a, arg) catch oom();
+            break;
+        }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
             cli.put(1, usage_text);
             return 0;

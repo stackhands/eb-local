@@ -1,0 +1,1 @@
+`eb-local eb -- --help` runs `eb --help`: every argument after `--` goes to EasyBuild, as the help says. `--help` and `-h` printed eb-local's help instead, and `--project`, `--profile` and `--config` stopped the command, wherever they came. Before `--`, `eb-local eb --help` still prints eb-local's help.

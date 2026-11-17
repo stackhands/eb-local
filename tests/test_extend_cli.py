@@ -118,6 +118,18 @@ class ExtendCli(unittest.TestCase):
                                                     "EASYBUILD_PREFIX=/tmp/alice/easybuild",
                                                     f"EESSI_USER_INSTALL={mine}"])
 
+    def test_every_argument_after_the_separator_is_ebs(self):
+        # Before the separator, --help is eb-local's, as for every command.
+        self.assertIn("eb-local eb [--] [eb options]", self.run_tool(["eb", "--help"]).stdout)
+        self.assertFalse((self.root / "eb-ran").exists())
+        explained = self.run_tool(["--explain", "eb", "--", "--help"])
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        self.assertIn("\nset -- 077 user --help\n", explained.stdout)
+        args = ["--help", "-h", "--config", "x", "--profile", "y", "--project", "z", "--explain"]
+        run = self.run_tool(["eb", "--"] + args)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stdout.splitlines()[1:len(args) + 1], args)
+
     def test_explain_eb_refuses_two_install_variables_as_eb_does(self):
         run = self.run_tool(["--explain", "eb", "x.eb"], EESSI_USER_INSTALL="/x", EESSI_PROJECT_INSTALL="/y")
         self.assertEqual(run.returncode, 3, run.stdout)
