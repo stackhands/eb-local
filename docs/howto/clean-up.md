@@ -26,7 +26,7 @@ With rtrash on `PATH`, files go to the trash, not away for good.
 
     By default `clean` takes the build logs in `.eb-local/logs` more than `clean.logs_older_than_days` whole days old, 30 unless your configuration sets another number; `--logs-older-than DAYS` sets it for one run.
     EasyBuild removes the log of a build that succeeds from there and keeps a copy in the installation, so these are the logs of builds that failed.
-    A directory among them, such as the `reprod_*` copy of a failed build's easyconfig, easyblocks and hooks, goes whole once nothing in it is newer than that.
+    A directory among them, such as the `reprod_*` copy of a failed build's easyconfig, easyblocks and hooks, goes whole once neither it nor anything in it is newer than that.
 
 2.  Add the source archives builds downloaded:
 

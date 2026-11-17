@@ -304,7 +304,7 @@ Remove what eb-local left in the prefix, or the project directory: by default th
 | =--delete=                | Delete for good when =clean.trash= does not move files to the trash.                                        |
 
 Files go to the trash with =rtrash= as =clean.trash= says; workspaces are deleted.
-A directory among the logs, such as the =reprod_*= copies of a failed build's easyconfig, easyblocks and hooks, goes whole once nothing in it is newer than the cutoff: the copies keep their originals' older times.
+A directory among the logs, such as the =reprod_*= copies of a failed build's easyconfig, easyblocks and hooks, goes whole once neither it nor anything in it is newer than the cutoff: the copies keep their originals' older times, and a file added to a directory makes the directory new.
 =clean= never follows a symbolic link out of the installation directory.
 With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
 

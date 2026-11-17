@@ -53,7 +53,9 @@ echo "== clean of old logs without rtrash"
 mkdir -p "$EB_LOCAL_PREFIX/.eb-local/logs/probe"
 log=$EB_LOCAL_PREFIX/.eb-local/logs/probe/old.log
 echo old > "$log"
-touch -d '40 days ago' "$log"
+# clean takes a directory among the logs whole, once neither it nor anything
+# in it is newer than the cutoff.
+touch -d '40 days ago' "$log" "${log%/*}"
 check "$EL" clean --dry-run
 rc=0; EB_LOCAL_TRASH=none "$EL" clean || rc=$?
 check test "$rc" -eq 1
