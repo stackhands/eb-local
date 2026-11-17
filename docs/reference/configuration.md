@@ -113,8 +113,9 @@ It may not be `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `MODULEPATH`, `PYTHONPA
 | `file:PATH` | The file PATH, an absolute path or one starting `~/`: a regular file, not a symbolic link, that you own, with no access for group or others and one link. |
 | `nimvault:ENTRY` | What `nimvault get ENTRY` prints, with `--vault` when `nimvault.vault` is set, within 30 seconds. An ENTRY starting with `-` is refused. |
 
-A value is read only for a build, or by `eb-local config --check`.
+A build reads the value of each secret it gets, and of no other; `eb-local config --check` and `eb-local doctor` read every secret, and never show a value.
 No value may be empty or hold a NUL byte; one from a file or from nimvault may be at most 64 KiB, and loses one newline at its end.
+A build that does not get a secret from `env:VARIABLE` runs `eb` without VARIABLE too, unless VARIABLE is a name a secret may not set, such as `PATH`.
 
 ## See also
 
