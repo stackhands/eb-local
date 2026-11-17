@@ -32,6 +32,11 @@ esac
 
 @unittest.skipUnless(binary.BIN, "list and doctor are features of the Zig build")
 class ListAndDoctor(StorageFixture):
+    def setUp(self):
+        super().setUp()
+        # The module double stands in for Lmod's, whose init sets LMOD_CMD.
+        self.env["LMOD_CMD"] = "/usr/share/lmod/lmod/libexec/lmod"
+
     def run_tool(self, args, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
         return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)

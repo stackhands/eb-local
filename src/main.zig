@@ -188,6 +188,7 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place) []const u8 {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
+    add(a, &out, lmod_init);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
     add(a, &out,
         \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
@@ -1618,6 +1619,36 @@ const test_prelude =
     \\
 ;
 
+/// What a shell without a module command sources for one, in this order:
+/// the host's Lmod, then EESSI's own, from the init `eb-local eb` sources,
+/// for a host whose only Lmod is EESSI's. `lmodInits` names the same files.
+const lmod_init =
+    \\if ! type module >/dev/null 2>&1; then
+    \\    for eb_local_init in "${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash" /etc/profile.d/lmod.sh \
+    \\        "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash"; do
+    \\        [ -r "$eb_local_init" ] && { . "$eb_local_init" >/dev/null; break; }
+    \\    done
+    \\    unset eb_local_init
+    \\fi
+    \\
+;
+
+/// The files `lmod_init` tries, in its order.
+fn lmodInits(a: Allocator, env: *const std.process.Environ.Map) [3][]const u8 {
+    const pkg = nonEmpty(env.get("LMOD_PKG")) orelse "/usr/share/lmod/lmod";
+    return .{
+        std.fs.path.join(a, &.{ pkg, "init", "bash" }) catch oom(),
+        "/etc/profile.d/lmod.sh",
+        extend.initPath(a, env) catch oom(),
+    };
+}
+
+fn readable(path: []const u8) bool {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const zp = sys.z(&zb, path) catch return false;
+    return linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.R_OK, 0)) == .SUCCESS;
+}
+
 const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
     \\stack=$1 extend=$2 install_var=$3 prefix=$4 mode=$5
     \\shift 5
@@ -1625,12 +1656,12 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\declare -A saved
     \\for v in "${keep[@]}"; do saved[$v]=${!v}; done
     \\restore() { for v in "${keep[@]}"; do export "$v=${saved[$v]}"; done; }
-    \\if ! type module >/dev/null 2>&1; then
-    \\    for init in "${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash" /etc/profile.d/lmod.sh; do
-    \\        [ -r "$init" ] && { source "$init"; break; }
-    \\    done
-    \\fi
-    \\type module >/dev/null 2>&1 || { echo "eb-local: no module command found" >&2; exit 1; }
+    \\
+++ lmod_init ++
+    \\type module >/dev/null 2>&1 || {
+    \\    echo "eb-local: no module command found; none of ${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash, /etc/profile.d/lmod.sh or ${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash defined one" >&2
+    \\    exit 1
+    \\}
     \\# EESSI-extend reads the variables when it loads, so it is loaded fresh.
     \\module unload "$extend" >/dev/null 2>&1 || true
     \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
@@ -2279,8 +2310,18 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
         };
         if (seen) note(a, &out, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
     } else |_| {}
-    if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null)
-        note(a, &out, "info", "no module command in this shell; builds source Lmod's init themselves", .{});
+    if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
+        const inits = lmodInits(a, c.env);
+        for (inits) |file| {
+            if (readable(file)) {
+                note(a, &out, "info", "no module command in this shell; builds, env and dev source {s}", .{file});
+                break;
+            }
+        } else {
+            note(a, &out, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} can be read; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
+            if (site) failed = true;
+        }
+    }
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
     } else note(a, &out, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});

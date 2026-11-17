@@ -139,6 +139,7 @@ A project build runs with the umask EESSI-extend sets for a project install, 002
 
 A successful build removes its workspace, unless `EB_LOCAL_KEEP_WORK=1` is set; a failed one keeps it for inspection until the allocation ends.
 The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
+In a shell or job without a module command, a build, `env` and `dev` source the first Lmod init they can read: `$LMOD_PKG/init/bash` (`/usr/share/lmod/lmod/init/bash` with `LMOD_PKG` unset), `/etc/profile.d/lmod.sh`, then EESSI's own, the init `eb-local eb` sources, for a host whose only Lmod is EESSI's. `eb-local doctor` names the one a build would source. The 1.x Bash script tries only the first two, in a build.
 
 ## EESSI-extend, without a site file
 
@@ -314,7 +315,7 @@ Build them in an allocation on this node type; each target needs its own build.
 
 `eb-local list GSL` or `eb-local list GSL/2.8-GCC-15.2.0` narrows it.
 
-`eb-local doctor` checks, one line each, what would stop a build, `eb-local eb` or a module load: the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and `LD_LIBRARY_PATH` left in the shell, the EESSI init `eb-local eb` sources, the allocation's node-local mount, whether EESSI is loaded and your modules are on `MODULEPATH`, eessi-arch-guard, and rtrash.
+`eb-local doctor` checks, one line each, what would stop a build, `eb-local eb` or a module load: the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and `LD_LIBRARY_PATH` left in the shell, the EESSI init `eb-local eb` sources, the allocation's node-local mount, whether EESSI is loaded and your modules are on `MODULEPATH`, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on `PATH`, as a build asks it, and shows the target it selects; a guard that cannot select one is a `warn`, since a build's own run of it decides.
 Each line says `ok`, `info`, `warn` or `FAIL`; it exits 1 when one says `FAIL`, and changes nothing.
 With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`.
