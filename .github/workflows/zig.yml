@@ -36,3 +36,9 @@ jobs:
           ! grep -aq EB_LOCAL_TEST_SELF_OWNER out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_PRELUDE out/bin/eb-local
           out/bin/eb-local --version
+      - name: completion and manpage generation is reproducible
+        run: python3 tools/cli_assets.py --check-repro --tool "eb-local::./out/bin/eb-local"
+      - name: generate completion and manpage assets
+        run: |
+          python3 tools/cli_assets.py --out out/share --tool "eb-local::./out/bin/eb-local"
+          test -s out/share/man/eb-local.1
