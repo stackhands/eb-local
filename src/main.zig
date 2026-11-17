@@ -49,8 +49,10 @@ const usage_text =
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
     \\  eb-local env                         lines that make your installed modules visible
-    \\  eb-local dev [MODULE...]             the same, plus MODULEs and a build environment,
-    \\                                       so gcc, make, cmake and meson just work
+    \\  eb-local dev [--buildenv MODULE] [MODULE...]
+    \\                                       the same, plus MODULEs and a build environment,
+    \\                                       so gcc, make, cmake and meson just work;
+    \\                                       --buildenv names the build environment to load
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -70,8 +72,10 @@ const usage_text =
     \\                                       what this node's target lacks
     \\  eb-local doctor                      what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing
-    \\  eb-local clean [--logs-older-than DAYS] [--sources] [--workspaces] [--dry-run] [--delete]
-    \\                                       remove what eb-local left behind
+    \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
+    \\                 [--dry-run] [--delete]
+    \\                                       remove what eb-local left behind; --no-logs
+    \\                                       leaves the logs
     \\  eb-local config [--check | --env]    the settings in force and where each came from;
     \\                                       --check also reads every secret (values not shown);
     \\                                       --env prints them as EB_LOCAL_* lines for export
@@ -87,8 +91,8 @@ const usage_text =
     \\                                       writes config.toml beside this program, mode 644
     \\  eb-local help | --version
     \\
-    \\Every command takes --profile NAME, --project DIR (a shared project directory
-    \\instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
+    \\Every command but eb takes --profile NAME, --project DIR (a shared project
+    \\directory instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
