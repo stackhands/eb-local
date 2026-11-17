@@ -27,6 +27,8 @@ pub const elfcheck = @import("elfcheck.zig");
 pub const extend = @import("extend.zig");
 /// `eb-local lmod-cache`: the spider cache Lmod trusts.
 pub const lmodcache = @import("lmodcache.zig");
+/// `eb-local modulerc`: operator-selected Lmod defaults, aliases and hides.
+pub const modulerc = @import("modulerc.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -84,6 +86,11 @@ const usage_text =
     \\                                       that fails leaves both files unchanged.
     \\                                       --spider names the spider program;
     \\                                       default: spider. Does not read the site file
+    \\  eb-local modulerc --module-tree DIR [--default MODULE]...
+    \\                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
+    \\                                       write DIR/.modulerc.lua with the
+    \\                                       defaults, aliases and hidden versions named;
+    \\                                       preserve other lines. --dry-run prints the file
     \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
     \\                 [--dry-run] [--delete]
     \\                                       remove what eb-local left behind; --no-logs
@@ -2947,7 +2954,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", submit };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -3009,6 +3016,11 @@ pub fn main(init: std.process.Init) u8 {
     var family: []const u8 = "";
     var only_unwrapped = false;
     var cache: lmodcache.Options = .{};
+    var module_tree: []const u8 = "";
+    var module_defaults: std.ArrayList([]const u8) = .empty;
+    var module_aliases: std.ArrayList(modulerc.Alias) = .empty;
+    var module_hidden: std.ArrayList([]const u8) = .empty;
+    var modulerc_dry_run = false;
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -3089,6 +3101,28 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (joined(x, "--spider")) |v| {
                     cache.spider = v;
                 } else die("lmod-cache does not know '{s}'", .{x});
+            },
+            .modulerc => {
+                if (std.mem.eql(u8, x, "--module-tree")) {
+                    module_tree = value(args, &i, "--module-tree");
+                } else if (joined(x, "--module-tree")) |v| {
+                    module_tree = v;
+                } else if (std.mem.eql(u8, x, "--default")) {
+                    module_defaults.append(a, value(args, &i, "--default")) catch oom();
+                } else if (joined(x, "--default")) |v| {
+                    module_defaults.append(a, v) catch oom();
+                } else if (std.mem.eql(u8, x, "--alias") or joined(x, "--alias") != null) {
+                    const spec = if (joined(x, "--alias")) |v| v else value(args, &i, "--alias");
+                    const equal = std.mem.indexOfScalar(u8, spec, '=') orelse die("--alias needs NAME=MODULE", .{});
+                    if (equal == 0 or equal + 1 == spec.len) die("--alias needs NAME=MODULE", .{});
+                    module_aliases.append(a, .{ .name = spec[0..equal], .target = spec[equal + 1 ..] }) catch oom();
+                } else if (std.mem.eql(u8, x, "--hide")) {
+                    module_hidden.append(a, value(args, &i, "--hide")) catch oom();
+                } else if (joined(x, "--hide")) |v| {
+                    module_hidden.append(a, v) catch oom();
+                } else if (std.mem.eql(u8, x, "--dry-run")) {
+                    modulerc_dry_run = true;
+                } else die("modulerc does not know '{s}'", .{x});
             },
             .submit => {
                 if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
@@ -3177,6 +3211,14 @@ pub fn main(init: std.process.Init) u8 {
         die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
     // The cache is a pair of files. It does not read the site file.
     if (command == .@"lmod-cache") return lmodcache.run(init.io, a, cache);
+    // A module tree's control file does not depend on eb-local configuration.
+    if (command == .modulerc) return modulerc.run(init.io, a, .{
+        .tree = module_tree,
+        .defaults = module_defaults.items,
+        .aliases = module_aliases.items,
+        .hidden = module_hidden.items,
+        .dry_run = modulerc_dry_run,
+    });
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
     if (command == .site) return cmdSite(c, site);
@@ -3203,7 +3245,7 @@ pub fn main(init: std.process.Init) u8 {
         .list => cmdList(c, s, rest.items),
         .doctor => cmdDoctor(c, s, g),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache" => unreachable,
+        .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc => unreachable,
     };
 }
 
@@ -3217,6 +3259,7 @@ test {
     _ = elfcheck;
     _ = extend;
     _ = lmodcache;
+    _ = modulerc;
 }
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
