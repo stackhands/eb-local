@@ -20,6 +20,7 @@ eb-local check FILE...
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [NAME[/VERSION]...]
 eb-local [OPTION]... doctor
+eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                            [--dry-run] [--delete]
 eb-local [OPTION]... config [--check | --env]
@@ -75,6 +76,14 @@ directory you own.
                                        what this node's target lacks
   eb-local doctor                      what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing
+  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
+                      --timestamp FILE [--spider CMD]
+                                       write Lmod's spiderT.lua for those module
+                                       directories, and a timestamp one second
+                                       older, so Lmod trusts the cache. A spider
+                                       that fails leaves both files unchanged.
+                                       --spider names the spider program;
+                                       default: spider. Does not read the site file
   eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                  [--dry-run] [--delete]
                                        remove what eb-local left behind; --no-logs
@@ -291,6 +300,22 @@ Where the shell has a module command, a build keeps it and its `MODULEPATH`, so 
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on `PATH`, as a build asks it, and shows the target it selects; a guard that cannot select one is a `warn`, since a build's own run of it decides.
 With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
 It changes nothing, and exits 1 when a line says `FAIL`.
+
+### lmod-cache
+
+Write `spiderT.lua` in `--cache-dir` from Lmod's `spider -o spiderT`, for every directory in `--modulepath`, then set `--timestamp` one second older than that file.
+Lmod treats a newer timestamp as a stale cache and does not show the modules the cache names.
+A `spider` that cannot start, exits non-zero, or writes nothing leaves the cache and the timestamp as they were.
+It does not read the site file. `--profile`, `--project` and `--config` are accepted and ignored.
+
+| Option | Meaning |
+|---|---|
+| `--modulepath DIR[:DIR]` | The module directories, separated by colons. Absolute. Required. |
+| `--cache-dir DIR` | The directory that receives `spiderT.lua`. Absolute. Required. Created if it is missing. |
+| `--timestamp FILE` | The timestamp file Lmod compares with the cache. Absolute. Required. |
+| `--spider CMD` | The `spider` program. Default: `spider` on `PATH`. |
+
+Exit 0 means both files were written. Exit 2 is a missing or relative path. Exit 127 means `spider` could not be started. Any other exit is `spider`'s, and the files are unchanged.
 
 ### clean
 

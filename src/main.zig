@@ -25,6 +25,8 @@ pub const rpath = @import("rpath.zig");
 pub const elfcheck = @import("elfcheck.zig");
 /// `eb-local eb`: EasyBuild through EESSI-extend, without a site file.
 pub const extend = @import("extend.zig");
+/// `eb-local lmod-cache`: the spider cache Lmod trusts.
+pub const lmodcache = @import("lmodcache.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -72,6 +74,14 @@ const usage_text =
     \\                                       what this node's target lacks
     \\  eb-local doctor                      what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing
+    \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
+    \\                      --timestamp FILE [--spider CMD]
+    \\                                       write Lmod's spiderT.lua for those module
+    \\                                       directories, and a timestamp one second
+    \\                                       older, so Lmod trusts the cache. A spider
+    \\                                       that fails leaves both files unchanged.
+    \\                                       --spider names the spider program;
+    \\                                       default: spider. Does not read the site file
     \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
     \\                 [--dry-run] [--delete]
     \\                                       remove what eb-local left behind; --no-logs
@@ -2914,7 +2924,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, submit };
+const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -2975,6 +2985,7 @@ pub fn main(init: std.process.Init) u8 {
     var site: SiteOpts = .{};
     var family: []const u8 = "";
     var only_unwrapped = false;
+    var cache: lmodcache.Options = .{};
     var i: usize = 0;
     const value = struct {
         fn get(xs: []const [:0]const u8, idx: *usize, opt: []const u8) []const u8 {
@@ -3032,6 +3043,25 @@ pub fn main(init: std.process.Init) u8 {
             },
             .check => rest.append(a, x) catch oom(),
             .env, .profiles, .doctor => die("{s} takes only --project, --profile and --config; got '{s}'", .{ @tagName(command), x }),
+            .@"lmod-cache" => {
+                if (std.mem.eql(u8, x, "--modulepath")) {
+                    cache.modulepath = value(args, &i, "--modulepath");
+                } else if (joined(x, "--modulepath")) |v| {
+                    cache.modulepath = v;
+                } else if (std.mem.eql(u8, x, "--cache-dir")) {
+                    cache.cache_dir = value(args, &i, "--cache-dir");
+                } else if (joined(x, "--cache-dir")) |v| {
+                    cache.cache_dir = v;
+                } else if (std.mem.eql(u8, x, "--timestamp")) {
+                    cache.timestamp = value(args, &i, "--timestamp");
+                } else if (joined(x, "--timestamp")) |v| {
+                    cache.timestamp = v;
+                } else if (std.mem.eql(u8, x, "--spider")) {
+                    cache.spider = value(args, &i, "--spider");
+                } else if (joined(x, "--spider")) |v| {
+                    cache.spider = v;
+                } else die("lmod-cache does not know '{s}'", .{x});
+            },
             .submit => {
                 if (rest.items.len == 0 and std.mem.eql(u8, x, "--on")) {
                     submit.on = value(args, &i, "--on");
@@ -3117,6 +3147,8 @@ pub fn main(init: std.process.Init) u8 {
     // would run as if it were not there.
     if (g.explain and command != .build and command != .eb)
         die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
+    // The cache is a pair of files. It does not read the site file.
+    if (command == .@"lmod-cache") return lmodcache.run(init.io, a, cache);
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
     if (command == .site) return cmdSite(c, site);
@@ -3143,7 +3175,7 @@ pub fn main(init: std.process.Init) u8 {
         .list => cmdList(c, s, rest.items),
         .doctor => cmdDoctor(c, s, g),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .profiles, .site, .@"rpath-wrappers", .check => unreachable,
+        .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache" => unreachable,
     };
 }
 
@@ -3156,6 +3188,7 @@ test {
     _ = rpath;
     _ = elfcheck;
     _ = extend;
+    _ = lmodcache;
 }
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {

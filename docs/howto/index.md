@@ -18,6 +18,7 @@ eb-without-a-site-file
 build-for-every-node-type
 install-what-eessi-lacks
 find-what-is-wrong
+refresh-the-module-cache
 clean-up
 scope-secrets
 ```
