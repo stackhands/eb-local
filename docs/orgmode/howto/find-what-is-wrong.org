@@ -136,6 +136,26 @@ The probe exits 1 when the repository is missing, no local module directory is o
 It warns but exits 0 for another filesystem because a site may deliberately expose CVMFS through a bind mount.
 Use =--mountinfo FILE= to check a saved node mount table or a container's view.
 
+* A path from outside the prefix
+
+A value left in the shell can point a build at the host's Perl, Python, R, CMake or pkg-config tree, or at a compiler wrapper that is not EESSI's.
+=eb-local doctor= names each entry of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =CMAKE_PREFIX_PATH= and =PKG_CONFIG_PATH=, and each compiler-wrapper variable, that resolves outside the EESSI repository, your prefix and =doctor.approved_prefixes=.
+It also names the timezone =/etc/localtime= resolves to, a bind mount of that file, and a host library directory a container runtime injected.
+
+#+begin_src bash
+eb-local doctor
+#+end_src
+
+#+begin_example
+warn PERL5LIB entry /opt/host/perl5 is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set
+info timezone target /usr/share/zoneinfo/UTC
+info no runtime-injected host library directory was found
+#+end_example
+
+The build keeps the entry.
+Set =build.clear_foreign_prefixes = true= in the configuration, or =EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES=true= for one build, and doctor then says the build drops it.
+Neither is set unless you set it.
+
 * Check that it worked
 
 =eb-local doctor= in the same shell ends with this line, and exits 0:

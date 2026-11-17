@@ -29,6 +29,8 @@ pub const extend = @import("extend.zig");
 pub const lmodcache = @import("lmodcache.zig");
 /// `eb-local modulerc`: operator-selected Lmod defaults, aliases and hides.
 pub const modulerc = @import("modulerc.zig");
+/// Foreign prefixes and container binds `doctor` reports.
+pub const foreign = @import("foreign.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -1141,6 +1143,9 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     if (s.build_secrets.value) |names| {
         row("build.secrets", if (names.len == 0) "(none)" else std.mem.join(a, " ", names) catch oom(), s.build_secrets.from);
     } else row("build.secrets", "(every secret)", s.build_secrets.from);
+    row("build.clear_foreign_prefixes", if (s.clear_foreign_prefixes.value) "true" else "false", s.clear_foreign_prefixes.from);
+    const approved = std.mem.join(a, " ", s.approved_prefixes.value) catch oom();
+    row("doctor.approved_prefixes", if (approved.len == 0) "(none)" else approved, s.approved_prefixes.from);
     row("clean.trash", @tagName(s.trash.value), s.trash.from);
     row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
@@ -1221,6 +1226,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     line(a, &out, "EB_LOCAL_NIMVAULT_VAULT", s.nimvault_vault.value);
     for (s.secrets.items) |sec| line(a, &out, str(a, "{s}{s}", .{ config.secret_env_prefix, sec.name }), sec.source);
     if (s.build_secrets.value) |names| line(a, &out, "EB_LOCAL_BUILD_SECRETS", std.mem.join(a, " ", names) catch oom());
+    line(a, &out, "EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", if (s.clear_foreign_prefixes.value) "true" else "false");
     // [eessi] settings are environment for EESSI already; they travel as
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
@@ -2080,6 +2086,8 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     }
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
+    if (s.clear_foreign_prefixes.value)
+        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper variable that resolves outside them") catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
     for (buildVariables(a, "$W", d)) |kv| {
         if (std.mem.startsWith(u8, kv[1], "$W/")) {
@@ -2200,6 +2208,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     if (dropped_loader) {
         warn("LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT was set; a build does not pass them to eb,", .{});
         cli.err("  because they mix host libraries into the toolchain.\n", .{});
+    }
+    if (s.clear_foreign_prefixes.value) {
+        const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, p.prefix) catch oom();
+        foreign.scrub(a, &env, prefs) catch oom();
     }
     if (s.site_toolchains.value.len > 0)
         env.put("EB_LOCAL_SITE_TOOLCHAINS", config.toolchainsJson(a, s.site_toolchains.value) catch oom()) catch oom();
@@ -2428,6 +2440,33 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
 
 // ---- doctor ---------------------------------------------------------------
 
+fn mountinfoSoft(c: Ctx) []const u8 {
+    var path: []const u8 = "/proc/self/mountinfo";
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_MOUNTINFO"))) |p| path = p;
+    }
+    const fd = sys.openat(fsx.cwd, path, .{}, 0) catch return "";
+    defer sys.close(fd);
+    return fsx.readAll(c.a, fd, 8 << 20) catch "";
+}
+
+fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.ArrayList(u8)) void {
+    const a = c.a;
+    const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, prefix) catch oom();
+    const found = foreign.scan(a, c.env, prefs, s.clear_foreign_prefixes.value, mountinfoSoft(c)) catch oom();
+    for (found) |f| switch (f.code) {
+        .none => note(a, out, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
+        .list_keep => note(a, out, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .list_drop => note(a, out, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .wrap_keep => note(a, out, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .wrap_drop => note(a, out, "warn", "{s} resolves to {s}, outside the approved prefixes; a build unsets it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .timezone => note(a, out, "info", "timezone target {s}", .{f.path}),
+        .timezone_bind => note(a, out, "warn", "/etc/localtime is a bind mount of {s}; the runtime injected the host timezone", .{f.path}),
+        .host_lib => note(a, out, "warn", "runtime-injected host library directory {s}", .{f.path}),
+        .host_none => note(a, out, "info", "no runtime-injected host library directory was found", .{}),
+    };
+}
+
 fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: []const u8, args: anytype) void {
     out.appendSlice(a, kind) catch oom();
     out.appendSlice(a, " ") catch oom();
@@ -2553,6 +2592,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global) u8 {
     }
     for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
         note(a, &out, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    reportForeign(c, s, p.prefix, &out);
 
     // The allocation.
     if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
@@ -3516,6 +3556,7 @@ test {
     _ = extend;
     _ = lmodcache;
     _ = modulerc;
+    _ = foreign;
 }
 
 fn cmdExtend(c: Ctx, args: []const []const u8) u8 {

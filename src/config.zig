@@ -118,6 +118,12 @@ pub const Settings = struct {
     /// The secrets a build gets, by name. Null, when nothing sets
     /// build.secrets, is every secret.
     build_secrets: Setting(?[]const []const u8) = .{ .value = null },
+    /// Drop path entries and compiler wrappers that resolve outside the
+    /// approved prefixes. Off unless a file or EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES sets it.
+    clear_foreign_prefixes: Setting(bool) = .{ .value = false },
+    /// Absolute prefixes, besides EESSI and the install prefix, that doctor
+    /// and a clearing build treat as approved. Site file only.
+    approved_prefixes: Setting([]const []const u8) = .{ .value = &.{} },
     eessi: std.ArrayList(EessiVar) = .empty,
 };
 
@@ -386,6 +392,13 @@ const Loader = struct {
         return v;
     }
 
+    fn boolean(l: *Loader, src: Source, e: *const toml.Entry, name: []const u8) Error!bool {
+        return switch (e.value) {
+            .boolean => |b| b,
+            else => l.fail("{s}:{d}: {s} must be true or false", .{ src.path, e.line, name }),
+        };
+    }
+
     fn stringList(l: *Loader, src: Source, e: *const toml.Entry, name: []const u8) Error![]const []const u8 {
         const items = switch (e.value) {
             .array => |v| v,
@@ -484,7 +497,21 @@ const Loader = struct {
                         for (v) |name| if (!validSecretName(name))
                             return l.fail("{s}:{d}: build.secrets: {s} is not a variable name a secret may set", .{ src.path, f.line, name });
                         l.s.build_secrets = .{ .value = v, .from = try l.where(src, f.line, profile) };
+                    } else if (std.mem.eql(u8, f.key, "clear_foreign_prefixes")) {
+                        l.s.clear_foreign_prefixes = .{ .value = try l.boolean(src, f, "build.clear_foreign_prefixes"), .from = try l.where(src, f.line, profile) };
                     } else return l.fail("{s}:{d}: unknown key build.{s}", .{ src.path, f.line, f.key });
+                }
+            } else if (std.mem.eql(u8, k, "doctor")) {
+                const sub = try l.table(src, e, "doctor");
+                for (sub.entries.items) |*f| {
+                    if (std.mem.eql(u8, f.key, "approved_prefixes")) {
+                        if (src.layer != .site or profile != null)
+                            return l.fail("{s}:{d}: doctor.approved_prefixes is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
+                        const v = try l.stringList(src, f, "doctor.approved_prefixes");
+                        for (v) |p| if (!validAbsolute(p))
+                            return l.fail("{s}:{d}: doctor.approved_prefixes takes absolute paths without a trailing slash", .{ src.path, f.line });
+                        l.s.approved_prefixes = .{ .value = v, .from = try l.where(src, f.line, null) };
+                    } else return l.fail("{s}:{d}: unknown key doctor.{s}", .{ src.path, f.line, f.key });
                 }
             } else if (std.mem.eql(u8, k, "clean")) {
                 const sub = try l.table(src, e, "clean");
@@ -770,6 +797,12 @@ pub fn load(
         }
         s.build_secrets = .{ .value = names.items, .from = "environment EB_LOCAL_BUILD_SECRETS" };
     }
+    if (env.get("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES")) |v| if (v.len > 0) {
+        const on = std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
+        const off = std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "false");
+        if (!on and !off) return l.fail("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES is true or false", .{});
+        s.clear_foreign_prefixes = .{ .value = on, .from = "environment EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES" };
+    };
     if (s.build_secrets.value) |names| for (names) |name| {
         for (s.secrets.items) |sec| {
             if (std.mem.eql(u8, sec.name, name)) break;
@@ -1220,6 +1253,36 @@ test "[eessi] settings layer like secrets and refuse the ones eb-local owns" {
     try r.one(&t, "[eessi]\nEESSI_ = \"x\"\n", "install and target");
     try r.one(&t, "[eessi]\nEESSI_X = 1\n", "must be a string");
     try r.one(&t, "[eessi]\nEESSI_X = \"a\\nb\"\n", "one line");
+}
+
+test "clear_foreign_prefixes is off unless set, and approved prefixes are site-only" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const none = [_]Source{};
+    const bare = try t.load(&none, .{});
+    try std.testing.expect(!bare.clear_foreign_prefixes.value);
+    try std.testing.expectEqual(@as(usize, 0), bare.approved_prefixes.value.len);
+
+    const site =
+        \\[build]
+        \\clear_foreign_prefixes = true
+        \\[doctor]
+        \\approved_prefixes = ["/site/software"]
+    ;
+    var s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expect(s.clear_foreign_prefixes.value);
+    try std.testing.expectEqualStrings("/site/software", s.approved_prefixes.value[0]);
+    try std.testing.expectEqualStrings("site site.toml:4", s.approved_prefixes.from);
+
+    try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "false");
+    s = try t.load(&.{.{ .path = "site.toml", .text = site, .layer = .site }}, .{});
+    try std.testing.expect(!s.clear_foreign_prefixes.value);
+    try std.testing.expectEqualStrings("environment EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", s.clear_foreign_prefixes.from);
+
+    try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host\"]\n", .layer = .user }}, "site setting");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/\"]\n", .layer = .site }}, "trailing slash");
+    try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "maybe");
+    try t.refuse(&none, "true or false");
 }
 
 test "module names" {
