@@ -290,6 +290,16 @@ pub fn buildSecrets(a: Allocator, s: Settings) Allocator.Error![]Secret {
     return out.toOwnedSlice(a);
 }
 
+/// The variable whose value would bring a secret the build does not get
+/// into its environment under another name: the one an `env:` source
+/// names. Null for a secret the build gets, another kind of source, or a
+/// variable a secret may not set, such as PATH, which the build needs.
+pub fn withheldSource(s: Settings, sec: Secret) ?[]const u8 {
+    if (buildGets(s, sec.name) or !std.mem.startsWith(u8, sec.source, "env:")) return null;
+    const name = sec.source["env:".len..];
+    return if (validSecretName(name)) name else null;
+}
+
 fn validEnvName(name: []const u8) bool {
     if (name.len == 0 or !(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
     for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
@@ -1074,6 +1084,34 @@ test "build.secrets names the secrets a build gets" {
         "is defined: add it to [secrets], or set EB_LOCAL_SECRET_LM_LICENSE_FILE=SOURCE");
     try t.env.put("EB_LOCAL_BUILD_SECRETS", "SOURCE_TOKEN LD_PRELOAD");
     try t.refuse(&sources, "EB_LOCAL_BUILD_SECRETS: LD_PRELOAD is not a variable name a secret may set");
+}
+
+test "a build without a secret goes without the variable its env: source names" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const text =
+        \\[build]
+        \\secrets = ["SOURCE_TOKEN"]
+        \\[secrets]
+        \\SOURCE_TOKEN = "env:MY_TOKEN"
+        \\MIRROR_PASSWORD = "env:MY_MIRROR"
+        \\LM_LICENSE_FILE = "nimvault:licences/flexlm"
+        \\SEARCH_PATH = "env:PATH"
+    ;
+    const sources = [_]Source{.{ .path = "u.toml", .text = text, .layer = .user }};
+    const withheld = struct {
+        fn all(tt: *Fixture, from: []const Source) ![]const u8 {
+            const s = try tt.load(from, .{});
+            var out: std.ArrayList(u8) = .empty;
+            for (s.secrets.items) |sec| if (withheldSource(s, sec)) |name| try out.print(tt.arena.allocator(), "{s} ", .{name});
+            return out.items;
+        }
+    };
+    try std.testing.expectEqualStrings("MY_MIRROR ", try withheld.all(&t, &sources));
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "MIRROR_PASSWORD");
+    try std.testing.expectEqualStrings("MY_TOKEN ", try withheld.all(&t, &sources));
+    try t.env.put("EB_LOCAL_BUILD_SECRETS", "");
+    try std.testing.expectEqualStrings("MY_TOKEN MY_MIRROR ", try withheld.all(&t, &sources));
 }
 
 test "storage.node_local_mount" {

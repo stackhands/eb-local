@@ -59,7 +59,7 @@ root = os.environ["CONTROL_ROOT"]
 names = ["SOURCE_TOKEN", "OTHER_TOKEN", "LM_LICENSE_FILE"]
 seen = {n: os.environ.get(n) for n in names}
 site = {n: v for n, v in os.environ.items() if "TOP_LEVEL_TOOLCHAINS" in n or n == "EB_LOCAL_SITE_TOOLCHAINS"}
-open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site, "eessi": os.environ.get("EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220")}))
+open(os.path.join(root, "eb.json"), "w").write(json.dumps({"argv": sys.argv[1:], "secrets": seen, "site": site, "eessi": os.environ.get("EESSI_IGNORE_LMOD_ERROR_ZEN4_GCC1220"), "MY_OTHER": os.environ.get("MY_OTHER")}))
 log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-test.log")
 open(log, "w").write("".join(f"{n}={v}\n" for n, v in seen.items()))
 PY
@@ -309,9 +309,12 @@ class ConfigCli(StorageFixture):
 
         run = self.run_tool(["--config", str(self.site), "recipe.eb"], EB_LOCAL_BUILD_SECRETS="")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        seen = json.loads((self.root / "eb.json").read_text())["secrets"]
-        self.assertEqual(seen, {"SOURCE_TOKEN": None, "OTHER_TOKEN": None, "LM_LICENSE_FILE": None})
+        received = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(received["secrets"], {"SOURCE_TOKEN": None, "OTHER_TOKEN": None, "LM_LICENSE_FILE": None})
         self.assertNotIn("removed secret values", run.stdout)
+        # Nor does OTHER_TOKEN's value arrive as MY_OTHER, its env: source,
+        # where the logs would not be cleaned of it.
+        self.assertIsNone(received["MY_OTHER"])
 
         run = self.run_tool(["--config", str(self.site), "recipe.eb"], EB_LOCAL_BUILD_SECRETS="LM_LICENSE_FILE")
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
@@ -344,7 +347,7 @@ class ConfigCli(StorageFixture):
         self.assertIn(f"# SOURCE_TOKEN reaches eb's environment from file:{self.token}; logs are cleaned of it afterwards.\n",
                       run.stdout)
         self.assertIn(f"# OTHER_TOKEN stays out of eb's environment and is not read: build.secrets [user {self.user}:{top}] "
-                      "does not name it.\n", run.stdout)
+                      "does not name it. MY_OTHER, the variable it comes from, stays out too.\n", run.stdout)
 
     def test_site_toolchains_reach_the_eessi_hooks(self):
         text = self.site.read_text()

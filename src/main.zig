@@ -1855,7 +1855,11 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     for (s.secrets.items) |sec| {
         if (config.buildGets(s, sec.name)) {
             out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
-        } else out.print(a, "# {s} stays out of eb's environment and is not read: build.secrets [{s}] does not name it.\n", .{ sec.name, s.build_secrets.from }) catch oom();
+        } else {
+            out.print(a, "# {s} stays out of eb's environment and is not read: build.secrets [{s}] does not name it.", .{ sec.name, s.build_secrets.from }) catch oom();
+            if (config.withheldSource(s, sec)) |name| out.print(a, " {s}, the variable it comes from, stays out too.", .{name}) catch oom();
+            out.append(a, '\n') catch oom();
+        }
     }
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
@@ -1969,6 +1973,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
     for (shell_startup) |name| _ = env.swapRemove(name);
+    for (s.secrets.items) |sec| if (config.withheldSource(s, sec)) |name| {
+        _ = env.swapRemove(name);
+    };
     var dropped_loader = false;
     for (host_loader) |name| {
         if (env.swapRemove(name)) dropped_loader = true;
