@@ -325,17 +325,7 @@ eb-local carries one site file template, `slurm`, for any Slurm cluster whose jo
 
 ### The configuration as variables
 
-`eb-local config --env` prints the settings in force as `export EB_LOCAL_...` lines, secrets as `EB_LOCAL_SECRET_<NAME>=<source>`, so a job script, a container or CI carries the same configuration without the files. `EB_LOCAL_PREFIX` and `EB_LOCAL_PROJECT` are the absolute path `env` uses, with `~/` expanded and symbolic links resolved:
-
-```sh
-eb-local --profile gpu config --env > eb-local.env   # sources only, never values
-. ./eb-local.env && eb-local config                  # each setting now says [environment ...]
-```
-
-Empty settings are printed too, and `EB_LOCAL_PROFILE` is printed empty, which selects no profile, not even `default_profile`: the lines already hold every setting of the profile in force, and they work where that profile is not defined.
-An empty `EB_LOCAL_DEV_MODULES`, `EB_LOCAL_BUILD_ALLOCATION_HINT`, `EB_LOCAL_BUILD_SECRETS`, `EB_LOCAL_NIMVAULT_PROGRAM` or `EB_LOCAL_NIMVAULT_VAULT` empties its setting; any other empty `EB_LOCAL_*` variable is ignored.
-`EB_LOCAL_BUILD_SECRETS` is printed only when `build.secrets` is set, since without it a build gets every secret.
-`EB_LOCAL_SECRET_<NAME>` is checked as a `[secrets]` entry is. `[eessi]` settings come out as the `EESSI_*` variables themselves, which reach EESSI as they are. The storage settings and `build.site_toolchains` have no variable: only the site file sets them.
+`eb-local config --env` prints the settings in force as `export EB_LOCAL_...` lines, secrets as `EB_LOCAL_SECRET_<NAME>=<source>`, so a job script, a container or CI carries the same configuration without the files; [Load EESSI and the software you installed](docs/howto/load-eessi.md) shows how, and [The environment variables](docs/reference/environment.md) lists them.
 
 A configuration file is used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root or the program's owner (a site file) or by you (your file); otherwise eb-local stops.
 A site file you own is refused unless you own the program too, since only the site file sets the storage settings and `build.site_toolchains`.

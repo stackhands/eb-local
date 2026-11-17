@@ -9,6 +9,7 @@ The title names the task.
 
 install
 write-a-site-file
+load-eessi
 compile
 scope-secrets
 ```

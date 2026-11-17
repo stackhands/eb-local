@@ -1,0 +1,112 @@
+#+title: Load EESSI and the software you installed
+
+=eb-local env= prints the shell lines that load EESSI, and then EESSI-extend for your install prefix, which puts the modules you installed on =MODULEPATH= ahead of EESSI's.
+These steps load them in a shell and in a job script, and carry your eb-local settings into a job or a container that does not have your configuration files.
+
+* Before you start
+
+- eb-local on =PATH=, as [[file:install.org][Install eb-local]] describes, and EESSI 2026.06 under =/cvmfs/software.eessi.io=.
+  =env= needs no site file.
+- A shell on the node type that runs the software, such as one in a Slurm job there: EESSI chooses the binaries for the CPU it finds when it loads.
+
+* Load EESSI in a shell
+
+1. Run the lines that =env= prints:
+
+   #+begin_src bash
+   eval "$(eb-local env)"
+   #+end_src
+
+   The EESSI and EESSI-extend modules print lines of their own as they load.
+   Without =eval=, the lines change nothing.
+
+2. Load a module you installed, as you load one of EESSI's:
+
+   #+begin_src bash
+   module load pigz/2.8-GCCcore-15.2.0
+   #+end_src
+
+   =module avail= lists your modules first, under =<install prefix>/versions/2026.06/software/linux/<CPU target>/modules/all=.
+
+For the modules of a project, name its directory, as the builds for it do:
+
+#+begin_src bash
+eval "$(eb-local --project /path/to/project/eessi env)"
+#+end_src
+
+The lines then set =EESSI_PROJECT_INSTALL= in place of =EESSI_USER_INSTALL=.
+=--profile NAME= selects a profile that sets =prefix= or =project=, as for a build.
+
+* Load EESSI in a job script
+
+#+begin_src bash
+#!/bin/bash
+#SBATCH -p cpu -n 4 -t 01:00:00
+eval "$(eb-local env)"
+set -u
+module load pigz/2.8-GCCcore-15.2.0
+pigz -p 4 results.tar
+#+end_src
+
+=set -u= comes after the =eval= line: where the shell has no module command, the lines source EESSI's Lmod init, which reads variables that are not set.
+
+* Carry the configuration into a job or a container
+
+=config --env= prints the settings in force as variables, so a job script, a container or a continuous integration job has them without your files:
+
+#+begin_src bash
+eb-local config --env > eb-local.env
+#+end_src
+
+#+begin_example
+# eb-local configuration; storage and build.site_toolchains come only from the site file
+# every setting of the profile in force is below, so no profile is selected beneath them
+export EB_LOCAL_PROFILE=''
+export EB_LOCAL_PREFIX=/home/alice/eessi
+export EB_LOCAL_STACK_MODULE=EESSI/2026.06
+export EB_LOCAL_STACK_EXTEND=EESSI-extend/2026.06-easybuild
+export EB_LOCAL_DEV_MODULES=''
+export EB_LOCAL_BUILD_ALLOCATION_HINT='salloc -p cpu -n 16 -t 02:00:00'
+export EB_LOCAL_CLEAN_TRASH=auto
+export EB_LOCAL_CLEAN_LOGS_OLDER_THAN_DAYS=30
+export EB_LOCAL_NIMVAULT_PROGRAM=''
+export EB_LOCAL_NIMVAULT_VAULT=''
+#+end_example
+
+Source the file where the settings are needed:
+
+#+begin_src bash
+. ./eb-local.env && eb-local config
+#+end_src
+
+Each setting then says =[environment EB_LOCAL_...]= where it was set.
+A secret comes out as =EB_LOCAL_SECRET_<NAME>= with where its value is read from, never the value.
+The storage settings and =build.site_toolchains= have no variable: only the site file sets them.
+[[file:../reference/environment.org][The environment variables]] lists every variable.
+
+* Check that it worked
+
+#+begin_src bash
+eb-local doctor
+#+end_src
+
+Among its lines:
+
+#+begin_example
+ok   EESSI 2026.06 is loaded for x86_64/intel/sapphirerapids
+ok   your modules are on MODULEPATH
+#+end_example
+
+* If it fails
+
+| Message                                                                                       | Cause                                                                                                   | What to do                                                                                          |
+|-----------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------+-----------------------------------------------------------------------------------------------------|
+| =warn your modules are not on MODULEPATH in this shell; eval "$(eb-local env)"= from =eb-local doctor= | The shell has not run the lines, or ran them for another prefix or project.                      | Run =eval "$(eb-local env)"= with the options the builds had.                                       |
+| =.../init/lmod/bash: line 89: EESSI_NO_MODULE_PURGE_ON_INIT: unbound variable=                 | The script set =-u= before the =eval= line.                                                             | Set it after.                                                                                       |
+| =Lmod has detected the following error: The following module(s) are unknown:= and the module   | The module is not built for this node's CPU target, or not under this prefix.                           | =eb-local list= shows each module's CPU targets; build it on this node type, or load EESSI for the prefix it is under. |
+
+* Related
+
+- [[file:compile.org][Compile your code against EESSI]]
+- [[file:../reference/cli.org][The eb-local command]]: =env= and =config=
+- [[file:../reference/environment.org][The environment variables]]

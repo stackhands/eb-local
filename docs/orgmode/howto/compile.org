@@ -135,6 +135,7 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin "$EB_LOCAL_DEV_PREFIX/bin/prog"
 
 * Related
 
+- [[file:load-eessi.org][Load EESSI and the software you installed]]
 - [[file:../explanation/run-paths.org][Run paths, and one build per CPU target]]
 - [[file:../reference/cli.org][The eb-local command]]: =dev=, =check= and =rpath-wrappers=
 - [[file:../reference/configuration.org][The configuration files]]: =dev.modules=, =dev.buildenv= and =dev.buildenv_for=

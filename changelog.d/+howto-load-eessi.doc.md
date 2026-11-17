@@ -1,0 +1,1 @@
+The how-to "Load EESSI and the software you installed" loads EESSI and EESSI-extend with `eb-local env` in a shell and in a job script, for a user prefix or a project, carries the settings into a job or a container with `eb-local config --env`, and checks the result with `eb-local doctor`. The README's section on the configuration as variables points to it.
