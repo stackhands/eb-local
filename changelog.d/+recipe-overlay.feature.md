@@ -1,0 +1,1 @@
+Adds `eb-local overlay materialize`, plus `overlay bump` and `overlay plan` that forward to `eb-stack package` by subprocess only. Overlays pin an upstream easyconfig digest and apply only declarative parameter, patch, and dependency edits.
