@@ -44,7 +44,7 @@ class OrgPages(unittest.TestCase):
             entries = [entry for entry in toctree_entries(pending.pop()) if not entry.startswith(API)]
             listed += entries
             pending += [entry + ".md" for entry in entries]
-        self.assertEqual(sorted(listed), [str(rel.with_suffix("")) for rel in sources() if rel != Path("index.org")])
+        self.assertEqual(sorted(listed), sorted(str(rel.with_suffix("")) for rel in sources() if rel != Path("index.org")))
         for rel in sources():
             page = DOCS / rel.with_suffix(".md")
             self.assertTrue(page.read_text().startswith(f"{GENERATED}{rel} by docs/export.el; edit that file. -->\n"), page)
