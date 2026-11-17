@@ -126,7 +126,17 @@ eb-local: build workspace kept at /local/alice.23/eb-local.bGSoHPgR; it goes whe
    EasyBuild leaves an installation read-only, so =rm -rf= fails on it; =uninstall= makes its directories writable first.
    When another module you installed loads the one you name, =uninstall= lists that module and removes nothing, as it would then fail to load; name both in one command to remove both.
 
-3. To bring it back:
+3. To leave it in place when a usage log names this prefix:
+
+   #+begin_src bash
+   eb-local uninstall pigz/2.8-GCCcore-15.2.0 --usage-log usage.json
+   #+end_src
+
+   This runs =eb-keep-logs used --prefix PREFIX --require-none usage.json=, where PREFIX is the install prefix, and removes nothing when that command exits 2.
+   eb-local does not read the log.
+   Without =--usage-log=, uninstall does not ask.
+
+4. To bring it back:
 
    #+begin_src bash
    eb-local restore pigz/2.8-GCCcore-15.2.0
@@ -167,6 +177,9 @@ After =restore=, it shows the module again.
 | =clean.trash is none [environment EB_LOCAL_CLEAN_TRASH]; nothing removed.=                                       | =clean.trash= is =none= where the brackets say.                           | Pass =--delete= to delete for good, or set =clean.trash= to =auto=.                                                                   |
 | =clean --workspaces works only inside the Slurm job that made the workspaces, and SLURM_JOB_ID is unset or empty; nothing was removed.= | You ran it outside that job.                    | Run it in the allocation, or with =srun --jobid=JOBID --overlap=; once the job ends, its node-local mount is gone.                     |
 | =these installed modules load what you named; uninstall them in the same command, or keep it:=                    | Another module you installed loads the one you named.                     | Name it in the same command too, or keep both.                                                                                        |
+| =eb-keep-logs used --prefix PREFIX --require-none exited 2; nothing was removed.=                                 | =eb-keep-logs used --require-none= exited 2 for this prefix and the log.   | Keep the installation, or run uninstall without =--usage-log= when that log should not gate it.                                       |
+| =eb-keep-logs is not on PATH, so the usage log cannot be read; nothing was removed.=                              | =--usage-log= was given and =eb-keep-logs= is not on =PATH=.               | Install =eb-keep-logs=, or run uninstall without =--usage-log=.                                                                        |
+| =eb-keep-logs used exited N; nothing was removed.=                                                                | =eb-keep-logs used= exited with a status other than 0 or 2.                | Read the lines =eb-keep-logs= printed, then run it again or drop =--usage-log=.                                                        |
 | =pigz/2.8-GCCcore-15.2.0 is not in the trash for /home/alice/eessi=                                              | Nothing of that module is in the trash for this prefix.                   | Check =rtrash list=, and the prefix with =eb-local config=; for a project's modules, add =--project DIR=.                              |
 | =PATH is in the trash more than once; restore the one you want with: rtrash restore PATH=                        | You uninstalled the module twice, as after building it again.             | Run =rtrash restore= on the installation and on each module file =rtrash list= shows, choosing the same time each time, then =chmod -R a-w= the installation. |
 | =PATH exists; restore replaces nothing, so nothing was restored=                                                 | The module is installed again.                                            | Keep it, or uninstall it first.                                                                                                       |

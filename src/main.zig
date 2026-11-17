@@ -103,9 +103,11 @@ const usage_text =
     \\                                       --check also reads every secret (values not shown);
     \\                                       --env prints them as EB_LOCAL_* lines for export
     \\  eb-local profiles                    the profiles the configuration defines
-    \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete]
+    \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
     \\                                       remove an installation and its module file, for
-    \\                                       every CPU target, to the trash with rtrash
+    \\                                       every CPU target, to the trash with rtrash.
+    \\                                       --usage-log asks eb-keep-logs whether the prefix
+    \\                                       is in FILE, and removes nothing when that exits 2
     \\  eb-local restore NAME/VERSION... [--dry-run]
     \\                                       bring them back from the trash, read-only again
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -2750,6 +2752,8 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
 const UninstallOpts = struct {
     dry_run: bool = false,
     delete: bool = false,
+    /// A usage log `eb-keep-logs used` reads. Null leaves uninstall as it was.
+    usage_log: ?[]const u8 = null,
 };
 
 const Found = struct {
@@ -2968,6 +2972,11 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         for (dependents.items) |f| warn("  {s}", .{f});
         return 2;
     }
+    // The usage log is eb-keep-logs' to read. Exit 2 from
+    // `used --require-none` means the prefix is named there, or the log
+    // could not be read; either way nothing is removed. Without the
+    // option this is not consulted.
+    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return 2;
     for (found.installs.items) |d| {
         if (!storage.under(d, versions)) die("{s} is outside {s}", .{ d, versions });
         say("  {s}/", .{d});
@@ -3015,6 +3024,40 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         sys.unlinkat(fsx.cwd, parent, linux.AT.REMOVEDIR) catch {};
     };
     return 0;
+}
+
+/// Relay lines `eb-keep-logs` wrote, without interpreting them.
+fn relayChild(text: []const u8) void {
+    var lines = std.mem.splitScalar(u8, std.mem.trim(u8, text, "\n"), '\n');
+    while (lines.next()) |line| if (line.len > 0) cli.err("  {s}\n", .{line});
+}
+
+/// True when uninstall must stop: `eb-keep-logs used --prefix PREFIX
+/// --require-none FILE` is missing, cannot be run, or exits non-zero.
+/// Exit 2 is the refusal that command documents.
+fn usageRefuses(c: Ctx, prefix: []const u8, log: []const u8) bool {
+    const bin = (proc.which(c.a, "eb-keep-logs", c.env.get("PATH") orelse "") catch oom()) orelse {
+        warn("eb-keep-logs is not on PATH, so the usage log cannot be read; nothing was removed.", .{});
+        return true;
+    };
+    const r = proc.run(c.a, bin, &.{ bin, "used", "--prefix", prefix, "--require-none", log }, c.envp, .{
+        .stdout_limit = 1 << 20,
+        .stderr_limit = 64 << 10,
+        .timeout_ms = 120_000,
+    }) catch |e| {
+        warn("cannot run eb-keep-logs ({s}); nothing was removed.", .{@errorName(e)});
+        return true;
+    };
+    defer r.deinit(c.a);
+    if (r.term.code() == 0) return false;
+    if (r.term.code() == 2) {
+        warn("eb-keep-logs used --prefix {s} --require-none exited 2; nothing was removed.", .{prefix});
+    } else {
+        warn("eb-keep-logs used exited {d}; nothing was removed.", .{r.term.code()});
+    }
+    relayChild(r.stderr);
+    relayChild(r.stdout);
+    return true;
 }
 
 // ---- restore --------------------------------------------------------------
@@ -3373,6 +3416,12 @@ pub fn main(init: std.process.Init) u8 {
                     uninstall.dry_run = true;
                 } else if (command == .uninstall and std.mem.eql(u8, x, "--delete")) {
                     uninstall.delete = true;
+                } else if (command == .uninstall and std.mem.eql(u8, x, "--usage-log")) {
+                    if (uninstall.usage_log != null) die("uninstall takes one --usage-log", .{});
+                    uninstall.usage_log = value(args, &i, "--usage-log");
+                } else if (command == .uninstall and joined(x, "--usage-log") != null) {
+                    if (uninstall.usage_log != null) die("uninstall takes one --usage-log", .{});
+                    uninstall.usage_log = joined(x, "--usage-log").?;
                 } else if (x.len > 0 and x[0] == '-') {
                     die("{s} does not know '{s}'", .{ @tagName(command), x });
                 } else if (!config.validModule(x)) {

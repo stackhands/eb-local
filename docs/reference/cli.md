@@ -28,7 +28,7 @@ eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--w
                            [--dry-run] [--delete]
 eb-local [OPTION]... config [--check | --env]
 eb-local [OPTION]... profiles
-eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete]
+eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
 eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
 eb-local help | -h | --help | --version
@@ -106,9 +106,11 @@ directory you own.
                                        --check also reads every secret (values not shown);
                                        --env prints them as EB_LOCAL_* lines for export
   eb-local profiles                    the profiles the configuration defines
-  eb-local uninstall NAME/VERSION... [--dry-run] [--delete]
+  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
                                        remove an installation and its module file, for
-                                       every CPU target, to the trash with rtrash
+                                       every CPU target, to the trash with rtrash.
+                                       --usage-log asks eb-keep-logs whether the prefix
+                                       is in FILE, and removes nothing when that exits 2
   eb-local restore NAME/VERSION... [--dry-run]
                                        bring them back from the trash, read-only again
   eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -407,9 +409,18 @@ EasyBuild leaves an installation read-only; `uninstall` makes its directories wr
 |---|---|
 | `--dry-run` | Print what would be removed, and remove nothing. |
 | `--delete` | Delete for good when `clean.trash` does not move files to the trash. |
+| `--usage-log FILE` | Ask `eb-keep-logs` whether the install prefix is named in FILE, and remove nothing when that command exits 2. |
 
 It removes nothing, and exits 2, when another module installed in the prefix loads one named and is not named too.
 With `clean.trash` `none`, or `auto` and no rtrash on `PATH`, it removes nothing without `--delete`, and exits 1.
+
+`--usage-log FILE` runs `eb-keep-logs used --prefix PREFIX --require-none FILE` after that dependents check and before anything is listed or removed.
+PREFIX is the install prefix.
+eb-local does not read FILE.
+When that command exits 0, uninstall goes on as it would without the option, including a dry run.
+When it exits 2, or any other status, or `eb-keep-logs` is not on `PATH` or cannot be run, uninstall removes nothing, exits 2, and prints what `eb-keep-logs` wrote.
+Without `--usage-log`, uninstall does not run `eb-keep-logs`.
+`restore` does not take the option, and uninstall takes it once.
 
 ### restore
 

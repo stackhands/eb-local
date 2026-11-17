@@ -6,6 +6,7 @@ rm -rf cannot remove it; uninstall makes it writable and removes it, for
 every CPU target, with rtrash or, asked, for good. restore brings back what
 went to the trash, read-only again.
 """
+import json
 import os
 from pathlib import Path
 import shlex
@@ -366,6 +367,95 @@ class Uninstall(StorageFixture):
         run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
         self.assertEqual(run.returncode, 2, run.stdout)
         self.assertTrue((self.root / "real-versions").exists())
+
+    def keep_logs(self):
+        """An eb-keep-logs that records its argv and exits CONTROL_USED_STATUS."""
+        (self.bin / "eb-keep-logs").write_text("#!" + sys.executable + "\n" + r'''
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ["CONTROL_ROOT"])
+(root / "used.json").write_text(json.dumps(sys.argv))
+note = os.environ.get("CONTROL_USED_NOTE", "")
+if note:
+    sys.stderr.write(note + "\n")
+    sys.stdout.write("hits\n")
+sys.exit(int(os.environ["CONTROL_USED_STATUS"]))
+''')
+        (self.bin / "eb-keep-logs").chmod(0o755)
+
+    def on_path(self, **extra):
+        extra.setdefault("CONTROL_USED_STATUS", "0")
+        return dict(PATH=f"{self.bin}:/usr/bin:/bin", **extra)
+
+    def used_argv(self):
+        return json.loads((self.root / "used.json").read_text())
+
+    def test_without_usage_log_uninstall_does_not_ask(self):
+        self.keep_logs()
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"], **self.on_path())
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse((self.root / "used.json").exists())
+        self.assertFalse(any(p.exists() for p in self.installs + self.modules))
+
+    def test_usage_log_clear_lets_uninstall_continue(self):
+        self.keep_logs()
+        log = self.root / "usage.json"
+        log.write_text("{}\n")
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--usage-log", str(log), "--dry-run"],
+                            **self.on_path())
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("dry run", run.stdout)
+        self.assertEqual(self.used_argv()[1:], ["used", "--prefix", str(self.prefix), "--require-none", str(log)])
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", f"--usage-log={log}", "--delete"],
+                            **self.on_path())
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertFalse(any(p.exists() for p in self.installs + self.modules))
+
+    def test_usage_log_exit_2_removes_nothing(self):
+        self.keep_logs()
+        log = self.root / "usage.json"
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--usage-log", str(log), "--dry-run", "--delete"],
+                            **self.on_path(CONTROL_USED_STATUS="2", CONTROL_USED_NOTE="named in the log"))
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn(f"eb-keep-logs used --prefix {self.prefix} --require-none exited 2; nothing was removed.", run.stderr)
+        self.assertIn("  named in the log", run.stderr)
+        self.assertIn("  hits", run.stderr)
+        self.assertNotIn("dry run", run.stdout)
+        self.assertNotIn(str(self.installs[0]), run.stdout)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+
+    def test_a_missing_eb_keep_logs_or_another_status_removes_nothing(self):
+        log = self.root / "usage.json"
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--usage-log", str(log), "--delete"])
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("eb-keep-logs is not on PATH, so the usage log cannot be read; nothing was removed.", run.stderr)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+        self.keep_logs()
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--usage-log", str(log), "--delete"],
+                            **self.on_path(CONTROL_USED_STATUS="7"))
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("eb-keep-logs used exited 7; nothing was removed.", run.stderr)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+
+    def test_a_dependent_is_refused_before_the_usage_log(self):
+        self.keep_logs()
+        self.dependent('depends_on("pigz/2.8-GCCcore-15.2.0")\n')
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--usage-log", str(self.root / "usage.json"), "--delete"],
+                            **self.on_path(CONTROL_USED_STATUS="0"))
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("same command", run.stderr)
+        self.assertFalse((self.root / "used.json").exists())
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+
+    def test_usage_log_is_one_option_of_uninstall(self):
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--usage-log", "a", "--usage-log", "b"])
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("uninstall takes one --usage-log", run.stderr)
+        run = self.run_tool(["restore", "pigz/2.8-GCCcore-15.2.0", "--usage-log", "a"])
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("restore does not know '--usage-log'", run.stderr)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
 
 
 if __name__ == "__main__":
