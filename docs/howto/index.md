@@ -12,5 +12,6 @@ install
 write-a-site-file
 load-eessi
 compile
+install-software
 scope-secrets
 ```

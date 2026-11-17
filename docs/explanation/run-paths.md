@@ -40,6 +40,10 @@ So a program is built once per node type, in an allocation on that node type, an
 A job script that loads EESSI first then finds the build for the node it lands on.
 Software built with EasyBuild is the same: each CPU target has a tree of its own below the install prefix.
 
+Where the site runs [eessi-arch-guard](https://github.com/stackhands/eessi-arch-guard) and `eessi-arch-guard` is on `PATH`, a build, `env` and `dev` load EESSI for the CPU target the guard selects, which is the target Slurm tasks get.
+On a CPU without a flag that GCC enables for the target EESSI detects, such as a Sapphire Rapids without `waitpkg`, that is the next target down, `x86_64/intel/icelake`.
+A build stops when the guard cannot select a target; `EESSI_ARCH_GUARD=0` turns the guard off.
+
 ## Related
 
 -   [Compile your code against EESSI](../howto/compile.md)

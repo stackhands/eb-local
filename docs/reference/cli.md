@@ -168,6 +168,7 @@ eb-local: done. To use the modules in a new shell or job:
 
 A failed build keeps its workspace until the job ends.
 A build exits with `eb`'s status.
+In a shell without a module command, a build, `env` and `dev` source the first Lmod init they can read: `$LMOD_PKG/init/bash`, or `/usr/share/lmod/lmod/init/bash` with `LMOD_PKG` unset, then `/etc/profile.d/lmod.sh`, then EESSI's own, the one `eb-local eb` sources; `eb-local doctor` names the one a build would source.
 Stopped by a signal, it removes the secret values from the logs and then stops with the same signal.
 
 ### `--explain`

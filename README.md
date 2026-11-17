@@ -24,39 +24,12 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 
 ## Install software with EasyBuild
 
-Build inside a Slurm allocation on the node type that will run the software, because EasyBuild targets the CPU of the node it runs on:
-
 ```sh
 salloc -p <partition> -n 16 -t 02:00:00   # on nodes with a node-local disk
 eb-local GSL-2.8-GCC-15.2.0.eb --robot
 ```
 
-To use what you installed in a new shell or job:
-
-```sh
-eval "$(eb-local env)"
-module avail
-```
-
-Where the site runs [eessi-arch-guard](https://github.com/stackhands/eessi-arch-guard) and `eessi-arch-guard` is on `PATH`, a build, `env` and `dev` load EESSI for the CPU target the guard selects, which is the target Slurm tasks get.
-On a CPU without a flag GCC enables for the target EESSI detects, such as a Sapphire Rapids without `waitpkg`, that is the next target down (`x86_64/intel/icelake`).
-A build stops when the guard cannot select a target; `EESSI_ARCH_GUARD=0` turns the guard off.
-
-For a group install, the project owner creates the directory once with the project group and the setgid bit:
-
-```sh
-mkdir -p /path/to/project/eessi && chgrp myproj /path/to/project/eessi && chmod 2770 /path/to/project/eessi
-eb-local --project /path/to/project/eessi GSL-2.8-GCC-15.2.0.eb --robot
-```
-
-eb-local refuses a project directory that others can write to, since anyone could then add module files the group loads, and warns when the setgid bit is missing, since each member's installs would then keep that member's own group.
-`eb-local config` still prints every setting when the project directory is missing or refused, and warns; `config --check` then exits 1.
-
-A project build runs with the umask EESSI-extend sets for a project install, 002, so that each member can write the directories the others' builds made: `software/`, `modules/`, EasyBuild's locks and `.eb-local/`. EasyBuild still leaves each installation read-only. A user build runs with the umask EESSI-extend sets for a user install, 077, and EasyBuild adds the sticky bit the module asks for, so an install is yours alone, as one `eb-local eb` makes. Installs made before eb-local 3.2 keep their modes. To share installs, use `--project`; where others must read a user install, as Lmod running as uid 0 in a user-namespace build must, pass `--umask=022` among eb's options.
-
-A successful build removes its workspace, unless `EB_LOCAL_KEEP_WORK=1` is set; a failed one keeps it for inspection until the allocation ends.
-The build does not pass `LD_LIBRARY_PATH`, `LD_PRELOAD` or `LD_AUDIT` through to `eb`, and it does not run `BASH_ENV` or honour `SHELLOPTS`, so a startup file or a trace cannot see the build or its secrets.
-In a shell or job without a module command, a build, `env` and `dev` source the first Lmod init they can read: `$LMOD_PKG/init/bash` (`/usr/share/lmod/lmod/init/bash` with `LMOD_PKG` unset), `/etc/profile.d/lmod.sh`, then EESSI's own, the init `eb-local eb` sources, for a host whose only Lmod is EESSI's. `eb-local doctor` names the one a build would source. The 1.x Bash script tries only the first two, in a build.
+[Install software on top of EESSI with EasyBuild](docs/howto/install-software.md) has the steps, a build for a group, and what each failure means; [Load EESSI and the software you installed](docs/howto/load-eessi.md) loads the modules in a new shell or job.
 
 ## EESSI-extend, without a site file
 
