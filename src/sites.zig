@@ -86,6 +86,29 @@ pub fn render(a: Allocator, t: Template, sets: []const Set, d: *Diagnostic) Erro
             if (std.mem.eql(u8, n, s.name)) break;
         } else return fail(a, d, "template {s} has no placeholder {s} (it has: {s})", .{ t.name, s.name, if (names.len == 0) "none" else try std.mem.join(a, ", ", names) });
     }
+    var missing: std.ArrayList([]const u8) = .empty;
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, t.text, scan, "{{")) |open| {
+        const close = std.mem.indexOfPos(u8, t.text, open, "}}") orelse break;
+        const inner = t.text[open + 2 .. close];
+        const colon = std.mem.indexOfScalar(u8, inner, ':');
+        const name = inner[0 .. colon orelse inner.len];
+        var value: ?[]const u8 = if (colon) |c| inner[c + 1 ..] else null;
+        for (sets) |s| if (std.mem.eql(u8, s.name, name)) {
+            value = s.value;
+        };
+        if (value == null) {
+            for (missing.items) |seen| {
+                if (std.mem.eql(u8, seen, name)) break;
+            } else try missing.append(a, name);
+        }
+        scan = close + 2;
+    }
+    if (missing.items.len > 0) {
+        var parts: std.ArrayList([]const u8) = .empty;
+        for (missing.items) |name| try parts.append(a, try std.fmt.allocPrint(a, "--set {s}=VALUE", .{name}));
+        return fail(a, d, "template {s} needs {s}", .{ t.name, try std.mem.join(a, " and ", parts.items) });
+    }
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, t.text, i, "{{")) |open| {
@@ -114,6 +137,7 @@ test "every template renders with its required placeholders set" {
     var d: Diagnostic = .{};
     try testing.expectError(error.Invalid, render(a, find("slurm").?, &.{}, &d));
     try testing.expect(std.mem.indexOf(u8, d.message, "--set node_local_root=VALUE") != null);
+    try testing.expect(std.mem.indexOf(u8, d.message, "--set shared_scratch=VALUE") != null);
     const paths = [_]Set{
         .{ .name = "node_local_root", .value = "/local" },
         .{ .name = "shared_scratch", .value = "/scratch" },
