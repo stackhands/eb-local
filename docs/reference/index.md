@@ -8,6 +8,7 @@ Each page states facts in the order the thing itself has them.
 ```{toctree}
 :maxdepth: 1
 
+cli
 refusals
 api
 ```

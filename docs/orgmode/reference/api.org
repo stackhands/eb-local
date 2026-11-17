@@ -26,3 +26,5 @@ The program is one Zig module, =src/main.zig=, which imports each component as a
 | =rpath=    | the RPATH wrappers =dev= writes for compilers without a build environment        |
 | =elfcheck= | =eb-local check=: what a program needs and where it finds it                      |
 | =extend=   | =eb-local eb=: EasyBuild through EESSI-extend, without a site file               |
+
+The commands themselves are in =src/main.zig=; [[file:cli.org][The eb-local command]] describes them.

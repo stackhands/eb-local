@@ -1,0 +1,1 @@
+The reference describes the `eb-local` command: its synopsis, the usage `eb-local --help` prints, its options, each command with its own options, and the exit statuses. A test fails when the page's copy of the usage differs from what the program prints, or when the page leaves out an option or a command.
