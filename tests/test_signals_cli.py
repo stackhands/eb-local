@@ -50,6 +50,8 @@ KEY = "licence-key-6f1c2e9a"
 class Signals(StorageFixture):
     def setUp(self):
         super().setUp()
+        for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
+            self.env.pop(name, None)
         (self.root / "slow-eb.py").write_text(SLOW_EB)
         programs = self.root / "slow-bin"
         programs.mkdir()
