@@ -394,6 +394,41 @@ class OverlayMaterialize(unittest.TestCase):
                 "description = \"('zlib', '0.9')\"\ndependencies = [('zlib', '1.2')]\n",
             )
 
+    def test_materialize_replace_and_append_ignore_triple_quoted_docstrings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = (
+                b'""" header\n'
+                b"name = 'docstring'\n"
+                b"patches = [\n"
+                b'"""\n'
+                b"name = 'real'\n"
+                b"patches = ['real.patch']\n"
+            )
+            (root / "base.eb").write_bytes(base)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base)}"\n'
+                '[replace]\nname = "\'custom\'"\n'
+                '[patches]\nsite = "site.patch"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            out_text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            self.assertEqual(
+                out_text,
+                '""" header\n'
+                "name = 'docstring'\n"
+                "patches = [\n"
+                '"""\n'
+                "name = 'custom'\n"
+                "patches = ['real.patch',\n"
+                "    ('site', 'site.patch')]\n",
+            )
+
     def test_materialize_appends_to_trailing_comma_list_as_valid_python(self):
         import ast
 

@@ -1,0 +1,1 @@
+Track triple-quoted strings and bracket depth in `eb-local overlay materialize` so `[replace]`, `[patches]`, and `[dependencies]` only match top-level easyconfig assignments rather than lines inside docstrings or nested expressions.

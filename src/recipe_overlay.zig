@@ -158,19 +158,78 @@ fn lineSetsParameter(line: []const u8, name: []const u8) bool {
     return std.mem.startsWith(u8, rest, "=");
 }
 
+const PyLineState = struct {
+    triple_quote: ?u8 = null,
+    depth: usize = 0,
+
+    fn isTopLevel(self: PyLineState) bool {
+        return self.triple_quote == null and self.depth == 0;
+    }
+
+    fn advanceLine(self: *PyLineState, line: []const u8) void {
+        var i: usize = 0;
+        while (i < line.len) {
+            if (self.triple_quote) |tq| {
+                if (line[i] == '\\') {
+                    i += @min(2, line.len - i);
+                    continue;
+                }
+                if (i + 2 < line.len and line[i] == tq and line[i + 1] == tq and line[i + 2] == tq) {
+                    self.triple_quote = null;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            const ch = line[i];
+            if (ch == '#') break;
+            if (ch == '\'' or ch == '"') {
+                if (i + 2 < line.len and line[i + 1] == ch and line[i + 2] == ch) {
+                    self.triple_quote = ch;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                while (i < line.len) {
+                    if (line[i] == '\\') {
+                        i += @min(2, line.len - i);
+                        continue;
+                    }
+                    if (line[i] == ch) {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if (ch == '(' or ch == '[' or ch == '{') {
+                self.depth += 1;
+            } else if ((ch == ')' or ch == ']' or ch == '}') and self.depth > 0) {
+                self.depth -= 1;
+            }
+            i += 1;
+        }
+    }
+};
+
 fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var replaced = false;
+    var state: PyLineState = .{};
     while (lines.next()) |line| {
-        if (!replaced and lineSetsParameter(line, param.name)) {
+        if (!replaced and state.isTopLevel() and lineSetsParameter(line, param.name)) {
             const leading = std.mem.trimStart(u8, line, " \t");
             const indent_len = line.len - leading.len;
             const nl = try std.fmt.allocPrint(a, "{s}{s} = {s}", .{ line[0..indent_len], param.name, param.value });
             try out.appendSlice(a, nl);
             replaced = true;
+            state.advanceLine(nl);
         } else {
             try out.appendSlice(a, line);
+            state.advanceLine(line);
         }
         if (lines.peek() != null) try out.append(a, '\n');
     }
@@ -180,18 +239,21 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
 
 fn findArrayStart(text: []const u8, key: []const u8) ?usize {
     var pos: usize = 0;
+    var state: PyLineState = .{};
     while (pos < text.len) {
         const rest = text[pos..];
         const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
         const line = rest[0..line_end];
-        if (lineSetsParameter(line, key)) {
+        if (state.isTopLevel() and lineSetsParameter(line, key)) {
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+                state.advanceLine(line);
                 pos += line_end + 1;
                 continue;
             };
             const after = std.mem.trimStart(u8, line[eq + 1 ..], " \t");
             if (std.mem.startsWith(u8, after, "[")) return pos + eq + 1 + (line[eq + 1 ..].len - after.len);
         }
+        state.advanceLine(line);
         pos += line_end + 1;
     }
     return null;
