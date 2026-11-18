@@ -129,8 +129,12 @@ pub fn parse(a: Allocator, fd: sys.fd_t) ParseError!Elf {
     const sv = strtab_vaddr orelse return elf;
     if (strsz == 0 or strsz > max_strtab) return error.Damaged;
     // DT_STRTAB is an address; the PT_LOAD segment holding it gives the offset.
+    const str_end = std.math.add(u64, sv, strsz) catch return error.Damaged;
     const file_off = for (phdrs.items) |p| {
-        if (p.type == pt_load and sv >= p.vaddr and sv +| strsz <= p.vaddr +| p.filesz) break p.offset +| (sv - p.vaddr);
+        const load_end = std.math.add(u64, p.vaddr, p.filesz) catch continue;
+        if (p.type == pt_load and sv >= p.vaddr and str_end <= load_end) {
+            break std.math.add(u64, p.offset, sv - p.vaddr) catch return error.Damaged;
+        }
     } else return error.Damaged;
     const strtab = try a.alloc(u8, strsz);
     defer a.free(strtab);
@@ -285,4 +289,49 @@ test "parse reads this test binary" {
     defer sys.close(fd);
     const elf = try parse(arena.allocator(), fd);
     try std.testing.expectEqual(hostMachine(), elf.machine);
+}
+
+test "parse rejects wrapping DT_STRTAB bounds instead of saturating" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf = std.mem.zeroes([256]u8);
+    @memcpy(buf[0..4], "\x7fELF");
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // ELFDATA2LSB
+    std.mem.writeInt(u16, buf[18..20], 62, .little); // x86_64
+    std.mem.writeInt(u64, buf[32..40], 64, .little); // phoff
+    std.mem.writeInt(u16, buf[54..56], 56, .little); // phentsize
+    std.mem.writeInt(u16, buf[56..58], 2, .little); // phnum
+
+    // PHDR 0: PT_LOAD covering [max-8, max], file offset 0, filesz 8
+    std.mem.writeInt(u32, buf[64..68], pt_load, .little);
+    std.mem.writeInt(u64, buf[64 + 8 ..][0..8], 0, .little);
+    std.mem.writeInt(u64, buf[64 + 16 ..][0..8], std.math.maxInt(u64) - 8, .little);
+    std.mem.writeInt(u64, buf[64 + 32 ..][0..8], 8, .little);
+
+    // PHDR 1: PT_DYNAMIC at offset 176, filesz 48
+    std.mem.writeInt(u32, buf[120..124], pt_dynamic, .little);
+    std.mem.writeInt(u64, buf[120 + 8 ..][0..8], 176, .little);
+    std.mem.writeInt(u64, buf[120 + 32 ..][0..8], 48, .little);
+
+    // Dynamic entries: DT_STRTAB = max-4, DT_STRSZ = 16 (overflows u64!), DT_NULL
+    std.mem.writeInt(i64, buf[176..184], dt_strtab, .little);
+    std.mem.writeInt(u64, buf[184..192], std.math.maxInt(u64) - 4, .little);
+    std.mem.writeInt(i64, buf[192..200], dt_strsz, .little);
+    std.mem.writeInt(u64, buf[200..208], 16, .little);
+    std.mem.writeInt(i64, buf[208..216], dt_null, .little);
+
+    const tmp_path = try std.fmt.allocPrint(a, ".zig-cache/elf-wrap-{d}.bin", .{linux.getpid()});
+    {
+        const wfd = try sys.openat(fsx.cwd, tmp_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+        defer sys.close(wfd);
+        try sys.writeAll(wfd, &buf);
+    }
+    var zb: [sys.path_max:0]u8 = undefined;
+    const ztmp = try sys.z(&zb, tmp_path);
+    defer _ = linux.unlinkat(linux.AT.FDCWD, ztmp.ptr, 0);
+    const fd = try sys.openat(fsx.cwd, tmp_path, .{}, 0);
+    defer sys.close(fd);
+    try std.testing.expectError(error.Damaged, parse(a, fd));
 }
