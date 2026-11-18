@@ -661,8 +661,15 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
 /// A build environment of the GCC toolchains, as EasyBuild names them.
 fn gccBuildenv(module: []const u8) bool {
     if (llvmToolchain(module) != null) return false;
-    for ([_][]const u8{ "-foss-", "-gompi-", "-gfbf-", "-GCC-", "-GCCcore-" }) |tc| {
-        if (std.mem.indexOf(u8, module, tc) != null or std.mem.endsWith(u8, module, tc[0 .. tc.len - 1])) return true;
+    for ([_][]const u8{ "foss", "gompi", "gfbf", "GCC", "GCCcore" }) |tc| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, module, from, tc)) |at| {
+            const end = at + tc.len;
+            const before_ok = at == 0 or module[at - 1] == '/' or module[at - 1] == '-';
+            const after_ok = end == module.len or module[end] == '/' or module[end] == '-';
+            if (before_ok and after_ok) return true;
+            from = at + 1;
+        }
     }
     return false;
 }
@@ -707,6 +714,10 @@ test "gccBuildenv names the GCC build environments only" {
     try std.testing.expect(gccBuildenv("buildenv/default-foss-2026.1"));
     try std.testing.expect(gccBuildenv("buildenv/default-foss-2026.1-CUDA-13.3.0"));
     try std.testing.expect(gccBuildenv("buildenv/default-GCC-15.2.0"));
+    try std.testing.expect(gccBuildenv("buildenv/foss-2026.1"));
+    try std.testing.expect(gccBuildenv("foss/2026.1"));
+    try std.testing.expect(gccBuildenv("GCCcore/15.2.0"));
+    try std.testing.expect(!gccBuildenv("mygcc/1.0"));
     try std.testing.expect(!gccBuildenv("buildenv/default-lfoss-2026.1"));
     try std.testing.expect(!gccBuildenv("buildenv/site-llvm"));
     try std.testing.expect(!gccBuildenv("buildenv/default-intel-2026.1"));
