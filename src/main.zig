@@ -4323,6 +4323,8 @@ pub fn main(init: std.process.Init) u8 {
                     overlay_eb_stack = v;
                 } else if (overlay_action.len == 0 and x.len > 0 and x[0] != '-') {
                     overlay_action = x;
+                } else if (overlay_action.len == 0 and x.len > 0 and x[0] == '-') {
+                    die("overlay does not know '{s}'", .{x});
                 } else if (std.mem.eql(u8, x, "materialize") or std.mem.eql(u8, x, "bump") or std.mem.eql(u8, x, "plan")) {
                     die("overlay action must come first: eb-local overlay materialize|bump|plan ...", .{});
                 } else {
@@ -4452,9 +4454,18 @@ pub fn main(init: std.process.Init) u8 {
     if (command == .@"lmod-cache") return lmodcache.run(init.io, a, c.env, cache);
     if (command == .overlay) {
         if (overlay_action.len == 0) die("overlay takes materialize, bump or plan", .{});
-        if (std.mem.eql(u8, overlay_action, "materialize")) return recipe_overlay.runMaterialize(init.io, a, overlay_materialize);
-        if (std.mem.eql(u8, overlay_action, "bump") or std.mem.eql(u8, overlay_action, "plan"))
+        if (std.mem.eql(u8, overlay_action, "materialize")) {
+            if (overlay_forward.items.len > 0) die("overlay materialize does not know '{s}'", .{overlay_forward.items[0]});
+            if (overlay_passthrough) die("overlay materialize does not take --", .{});
+            if (overlay_eb_stack.len > 0) die("overlay materialize does not take --eb-stack", .{});
+            return recipe_overlay.runMaterialize(init.io, a, overlay_materialize);
+        }
+        if (std.mem.eql(u8, overlay_action, "bump") or std.mem.eql(u8, overlay_action, "plan")) {
+            if (overlay_materialize.overlay_path.len > 0 or overlay_materialize.base_path.len > 0 or
+                overlay_materialize.out_dir.len > 0 or overlay_materialize.dry_run or overlay_materialize.check)
+                die("overlay {s} does not take materialize options", .{overlay_action});
             return cmdOverlayEbStack(c, overlay_action, overlay_eb_stack, overlay_forward.items);
+        }
         die("overlay takes materialize, bump or plan; got '{s}'", .{overlay_action});
     }
     // A module tree's control file does not depend on eb-local configuration.
