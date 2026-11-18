@@ -437,6 +437,87 @@ class ConfigCli(StorageFixture):
         self.assertEqual(run.returncode, 2)
         self.assertIn("writable by group or others", run.stderr)
 
+    def test_default_config_bytes_unchanged(self):
+        argv, env = binary.command(self.script, ["config", "--config", str(self.site)], dict(self.env))
+        raw = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        self.assertEqual(raw.stderr, b"")
+        self.assertIn(b"profile                      mine\n", raw.stdout)
+        self.assertIn(b"storage.node_local_fstype    xfs", raw.stdout)
+        self.assertNotIn(b"file-secret-value", raw.stdout)
+
+        argv_env, env_env = binary.command(self.script, ["config", "--env", "--config", str(self.site)], dict(self.env))
+        raw_env = subprocess.run(argv_env, env=env_env, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(raw_env.returncode, 0, raw_env.stderr)
+        self.assertEqual(raw_env.stderr, b"")
+        self.assertTrue(raw_env.stdout.startswith(b"# eb-local configuration;"))
+        self.assertIn(b"export EB_LOCAL_PROFILE=''\n", raw_env.stdout)
+
+    def test_config_get_prints_resolved_keys_and_enforces_modes(self):
+        base_site = SITE.format(nodes=self.nodes).replace(
+            'allocation_hint = "salloc -p cpu -n 16"\n',
+            'allocation_hint = "salloc -p cpu -n 16"\n'
+            'site_toolchains = ["intel/2026.1", "nvidia-compilers/26.3"]\n',
+        )
+        self.site.write_text(
+            base_site
+            + '[build.node_types]\ncpu = "-p cpu -n 16"\n'
+            + '[dev.buildenv_for]\nllvm = "buildenv/site-llvm"\n'
+            + '[doctor]\napproved_prefixes = ["/opt/site"]\nmpi_transports = ["ofi", "ucx"]\n'
+            + '[eessi]\nEESSI_CVMFS_REPO = "/cvmfs/custom"\n'
+        )
+
+        def get(key, *extra_args, **extra_env):
+            return self.run_tool(["config", "--config", str(self.site), *extra_args, "--get", key], **extra_env)
+
+        self.assertEqual((get("profile").returncode, get("profile").stdout), (0, "mine\n"))
+        self.assertEqual((get("prefix").returncode, get("prefix").stdout), (0, f"{self.prefix}\n"))
+        self.assertEqual((get("project").returncode, get("project").stdout), (1, ""))
+        proj = self.root / "proj"
+        proj.mkdir()
+        self.assertEqual((get("project", "--project", str(proj)).returncode, get("project", "--project", str(proj)).stdout), (0, f"{proj}\n"))
+        self.assertEqual((get("prefix", "--project", str(proj)).returncode, get("prefix", "--project", str(proj)).stdout), (1, ""))
+
+        self.assertEqual((get("storage.node_local_root").returncode, get("storage.node_local_root").stdout), (0, f"{self.nodes}\n"))
+        self.assertEqual((get("storage.node_local_mount").returncode, get("storage.node_local_mount").stdout), (0, "%u.%j\n"))
+        self.assertEqual((get("storage.node_local_fstype").returncode, get("storage.node_local_fstype").stdout), (0, "xfs\n"))
+        self.assertEqual((get("storage.shared_scratch").returncode, get("storage.shared_scratch").stdout), (0, "/scratch\n"))
+        self.assertEqual((get("build.allocation_hint").returncode, get("build.allocation_hint").stdout), (0, "salloc -p cpu -n 16\n"))
+        self.assertEqual((get("build.node_types.cpu").returncode, get("build.node_types.cpu").stdout), (0, "-p cpu -n 16\n"))
+        self.assertEqual((get("build.node_types.gpu").returncode, get("build.node_types.gpu").stdout), (1, ""))
+        self.assertEqual((get("build.clear_foreign_prefixes").returncode, get("build.clear_foreign_prefixes").stdout), (0, "false\n"))
+        self.assertEqual((get("dev.buildenv_for.llvm").returncode, get("dev.buildenv_for.llvm").stdout), (0, "buildenv/site-llvm\n"))
+        self.assertEqual((get("dev.buildenv_for.cuda").returncode, get("dev.buildenv_for.cuda").stdout), (0, "buildenv/default-foss-2026.1-CUDA-13.3.0\n"))
+        self.assertEqual((get("dev.buildenv_for.intel").returncode, get("dev.buildenv_for.intel").stdout), (0, "buildenv/default-intel-2026.1\n"))
+        self.assertEqual((get("dev.buildenv_for.nvhpc").returncode, get("dev.buildenv_for.nvhpc").stdout), (1, ""))
+        self.assertEqual((get("doctor.cvmfs_parallel").returncode, get("doctor.cvmfs_parallel").stdout), (0, "0\n"))
+        self.assertEqual((get("clean.trash").returncode, get("clean.trash").stdout), (0, "auto\n"))
+        self.assertEqual((get("clean.logs_older_than_days").returncode, get("clean.logs_older_than_days").stdout), (0, "30\n"))
+        self.assertEqual((get("eessi.EESSI_CVMFS_REPO").returncode, get("eessi.EESSI_CVMFS_REPO").stdout), (0, "/cvmfs/custom\n"))
+        self.assertEqual((get("eessi.OTHER").returncode, get("eessi.OTHER").stdout), (1, ""))
+
+        self.assertEqual((get("dev.modules").returncode, get("dev.modules").stdout), (0, "FFTW/3.3.10-GCC-15.2.0\n"))
+        self.assertEqual((get("dev.modules", "--profile", "gpu").returncode, get("dev.modules", "--profile", "gpu").stdout), (0, "CUDA/13.3.0\n"))
+        self.assertEqual((get("build.site_toolchains").returncode, get("build.site_toolchains").stdout), (0, "intel/2026.1\nnvidia-compilers/26.3\n"))
+        self.assertEqual((get("doctor.approved_prefixes").returncode, get("doctor.approved_prefixes").stdout), (0, "/opt/site\n"))
+        self.assertEqual((get("doctor.mpi_transports").returncode, get("doctor.mpi_transports").stdout), (0, "ofi\nucx\n"))
+        self.assertEqual((get("build.secrets").returncode, get("build.secrets").stdout), (0, "SOURCE_TOKEN\nOTHER_TOKEN\n"))
+
+        sec = self.run_tool(["config", "--config", str(self.site), "--get=secrets.SOURCE_TOKEN"])
+        self.assertEqual(sec.returncode, 0, sec.stderr)
+        self.assertEqual(sec.stdout, f"file:{self.token}\n")
+        self.assertNotIn("file-secret-value", sec.stdout + sec.stderr)
+        self.assertEqual((get("secrets.NO_SUCH").returncode, get("secrets.NO_SUCH").stdout), (1, ""))
+
+        unknown = get("not.a.key")
+        self.assertEqual(unknown.returncode, 2)
+        self.assertIn("unknown configuration key 'not.a.key'", unknown.stderr)
+
+        for conflict in (["--check"], ["--env"], ["--json"]):
+            bad = self.run_tool(["config", "--config", str(self.site), *conflict, "--get", "prefix"])
+            self.assertEqual(bad.returncode, 2, bad.stdout + bad.stderr)
+            self.assertEqual(bad.stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()

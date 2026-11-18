@@ -3,7 +3,7 @@
 # The configuration files
 
 eb-local reads its settings from up to two TOML files, from `EB_LOCAL_*` variables, and from options.
-`eb-local config` prints each setting in force and where its value came from, and `eb-local profiles` prints the profiles the files define.
+`eb-local config` prints each setting in force and where its value came from, `eb-local config --get KEY` prints one resolved value, and `eb-local profiles` prints the profiles the files define.
 
 ## Files
 
