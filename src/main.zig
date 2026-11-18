@@ -2636,10 +2636,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
-        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check the logs for secrets ({s})", .{@errorName(e)});
+        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
         // EasyBuild keeps a copy of its log in each installation's easybuild/.
         const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check the installation logs for secrets ({s})", .{@errorName(e)});
+        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ versions, storage.describeError(e) });
         for (report.too_deep.items) |f| warn("{s} is too deep to check for secret values; inspect it before sharing", .{f});
         if (report.files > 0) say("eb-local: removed secret values from {d} log file(s)", .{report.files});
         for (report.too_large.items) |f| warn("{s} is too large to check for secret values; inspect it before sharing", .{f});
