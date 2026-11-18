@@ -67,6 +67,29 @@ class ReadinessProbeTests(unittest.TestCase):
         self.assertIn("warn EESSI repository", run.stdout)
         self.assertIn("site bind mount", run.stdout)
 
+    def test_empty_prefix_or_repo_is_refused(self):
+        for flag in ("--prefix", "--repo"):
+            self.mountinfo.write_text(
+                "81 1 0:81 / {} rw,relatime - cvmfs source rw\n".format(self.repo)
+            )
+            run = subprocess.run(
+                [
+                    str(PROBE),
+                    "--repo",
+                    str(self.repo),
+                    "--mountinfo",
+                    str(self.mountinfo),
+                    flag,
+                    "",
+                ],
+                env=dict(os.environ, MODULEPATH=str(self.upstream_modules)),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertIn("must not be empty", run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
