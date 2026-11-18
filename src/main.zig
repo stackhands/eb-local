@@ -1889,9 +1889,9 @@ fn mountinfoText(c: Ctx) []const u8 {
     if (comptime build_options.test_ops) {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_MOUNTINFO"))) |p| path = p;
     }
-    const fd = sys.openat(fsx.cwd, path, .{}, 0) catch die("cannot read {s}", .{path});
+    const fd = sys.openat(fsx.cwd, path, .{}, 0) catch |e| die("cannot read {s} ({s})", .{ path, storage.describeError(e) });
     defer sys.close(fd);
-    return fsx.readAll(c.a, fd, 8 << 20) catch die("cannot read {s}", .{path});
+    return fsx.readAll(c.a, fd, 8 << 20) catch |e| die("cannot read {s} ({s})", .{ path, storage.describeError(e) });
 }
 
 /// The caller's uid. Only the test artifact lets EB_LOCAL_TEST_UID stand in,
@@ -2526,14 +2526,15 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const refused = refusedTrees(c, s, true);
     for (refused) |t| if (storage.under(p.prefix, t.path))
         die("the install prefix {s} [{s}] is under {s}, {s}; nothing was built.\n  " ++ outlive ++ "; " ++ prefix_fix ++ ".", .{ p.prefix, prefixFrom(s, p), t.path, t.what });
-    common.atomic.makedirs(p.prefix) catch die("installation prefix is not writable.", .{});
+    common.atomic.makedirs(p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
     {
         var zb: [sys.path_max:0]u8 = undefined;
-        const zp = sys.z(&zb, p.prefix) catch die("installation prefix is not writable.", .{});
-        if (linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0)) != .SUCCESS)
-            die("installation prefix is not writable.", .{});
+        const zp = sys.z(&zb, p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, @errorName(e) });
+        const acc_err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+        if (acc_err != .SUCCESS)
+            die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
         var buf: [sys.path_max]u8 = undefined;
-        p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch die("cannot resolve installation prefix.", .{})) catch oom();
+        p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch |e| die("cannot resolve installation prefix {s} ({s})", .{ p.prefix, storage.describeError(e) })) catch oom();
     }
     const d = durableDirs(c, p.prefix, "nothing was built");
     // The trees a build writes below the prefix must not lead onto refused
@@ -2566,14 +2567,15 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
         common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
-    common.atomic.makedirs(d.sources) catch die("cannot create {s}", .{d.sources});
-    common.atomic.makedirs(d.logs) catch die("cannot create {s}", .{d.logs});
+    common.atomic.makedirs(d.sources) catch |e| die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
+    common.atomic.makedirs(d.logs) catch |e| die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
     if (values.len > 0) {
         // Logs may hold a secret until they are cleaned after the build.
         var zb: [sys.path_max:0]u8 = undefined;
-        const zl = sys.z(&zb, d.logs) catch die("cannot use {s}", .{d.logs});
-        if (linux.errno(linux.fchmodat(linux.AT.FDCWD, zl.ptr, 0o700)) != .SUCCESS)
-            die("cannot make {s} private before a build with secrets", .{d.logs});
+        const zl = sys.z(&zb, d.logs) catch |e| die("cannot use {s} ({s})", .{ d.logs, @errorName(e) });
+        const ch_err = linux.errno(linux.fchmodat(linux.AT.FDCWD, zl.ptr, 0o700));
+        if (ch_err != .SUCCESS)
+            die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, sys.describeErrno(ch_err) });
     }
     const started: i64 = nowSecs();
 
@@ -3576,7 +3578,8 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         }
         var why: common.atomic.Why = .{};
         defer why.deinit(a);
-        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch die("cannot write {s}", .{path});
+        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
+            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
         say("eb-local: {s}:", .{t.name});
         switch (runAttached(a, argv.items, c.envp)) {
             .exit => |code| if (code != 0) {
