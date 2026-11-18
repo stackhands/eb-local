@@ -59,6 +59,26 @@ class Sbom(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("cannot name", run.stderr)
 
+    def test_handles_reordered_fields_and_two_space_indentation(self):
+        zon = (
+            '.{\n'
+            '  .name = .eb_local,\n'
+            f'  .version = "{self.version}",\n'
+            '  .dependencies = .{\n'
+            '    .zig_common = .{\n'
+            '      .hash = "zig_common-0.10.0-abc",\n'
+            '      .url = "git+https://github.com/stackhands/zig-common#v0.10.0",\n'
+            '      .lazy = true,\n'
+            '    },\n'
+            '  },\n'
+            '}\n'
+        )
+        run = self.generate(zon)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        bom = json.loads(run.stdout)
+        names = {c["name"] for c in bom["components"]}
+        self.assertIn("zig-common", names)
+
 
 if __name__ == "__main__":
     unittest.main()

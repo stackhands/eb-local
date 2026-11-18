@@ -18,9 +18,35 @@ import sys
 import uuid
 
 REPO = "stackhands/eb-local"
-# One dependency entry: .name = .{ .url = "...", .hash = "..." }
-DEP = re.compile(r'\.(\w+)\s*=\s*\.\{\s*\.url\s*=\s*"([^"]+)",\s*\.hash\s*=\s*"([^"]+)",?\s*\}')
 GITHUB = re.compile(r'^git\+https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?#(.+)$')
+DEP_HEAD = re.compile(r'\.(\w+)\s*=\s*\.\{')
+URL_RE = re.compile(r'\.url\s*=\s*"([^"]+)"')
+HASH_RE = re.compile(r'\.hash\s*=\s*"([^"]+)"')
+
+
+def _brace_block(text, open_brace_idx):
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(open_brace_idx, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[open_brace_idx + 1 : i], i + 1
+    return None, len(text)
 
 
 def zon_field(text, field):
@@ -31,15 +57,31 @@ def zon_field(text, field):
 
 
 def dependencies(text):
-    block = re.search(r'\.dependencies\s*=\s*\.\{(.*?)\n    \},', text, re.S)
-    if not block:
+    start = re.search(r'\.dependencies\s*=\s*\.\{', text)
+    if not start:
+        return []
+    body, _ = _brace_block(text, start.end() - 1)
+    if body is None:
         return []
     deps = []
-    for name, url, zhash in DEP.findall(block.group(1)):
-        m = GITHUB.match(url)
+    pos = 0
+    while pos < len(body):
+        m = DEP_HEAD.search(body, pos)
         if not m:
+            break
+        name = m.group(1)
+        entry, pos = _brace_block(body, m.end() - 1)
+        if entry is None:
+            break
+        um = URL_RE.search(entry)
+        hm = HASH_RE.search(entry)
+        if not um or not hm:
+            continue
+        url, zhash = um.group(1), hm.group(1)
+        gm = GITHUB.match(url)
+        if not gm:
             raise SystemExit(f"dependency {name}: cannot name {url} as a package URL")
-        repo, ref = m.groups()
+        repo, ref = gm.groups()
         version = ref[1:] if re.fullmatch(r'v\d.*', ref) else ref
         deps.append({
             "type": "library",
