@@ -78,7 +78,6 @@ class ProfilesCli(unittest.TestCase):
         self.assertIn(f"gpu                  site {self.site}\n", text.stdout)
         self.assertIn(f"mine                 user {self.user}\n", text.stdout)
 
-    @unittest.skip("known bug: cmdProfiles prints 'no profiles are defined' in text mode even when profiles exist (see REPORT.md)")
     def test_non_empty_profiles_text_does_not_claim_none_defined(self):
         self.site.write_text('[storage]\nnode_local_root = "/local"\n[profile.gpu]\ndev.modules = ["CUDA/13.3.0"]\n', encoding="utf-8")
         self.site.chmod(0o600)
