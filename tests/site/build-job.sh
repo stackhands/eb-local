@@ -22,7 +22,7 @@ HERE=$(dirname "$(readlink -f "${SLURM_SUBMIT_DIR:-.}/tests/site/build-job.sh" 2
 EL=${EB_LOCAL_BIN:-$HERE/../../eb-local}
 export EB_LOCAL_CONFIG=$T/eb-local.conf EB_LOCAL_PREFIX=$T/eessi
 # The allocation's mount, as the site file names it.
-setting() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p" "$EB_LOCAL_CONFIG" | tail -n 1; }
+setting() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p" "$EB_LOCAL_CONFIG" | tail -n 1 | sed "s/^[\"']//; s/[\"']$//"; }
 mount=$(setting node_local_mount)
 mount=${mount:-%u.%j}
 mount=${mount//%u/$(id -un)}
