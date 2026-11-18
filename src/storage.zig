@@ -3,6 +3,7 @@
 //! scratch. Mounts are read from /proc/self/mountinfo.
 const std = @import("std");
 const linux = std.os.linux;
+const build_options = @import("build_options");
 const common = @import("zig_common");
 const sys = common.sys;
 const fsx = common.fsx;
@@ -560,10 +561,21 @@ pub fn lockTimeoutMs(env: ?*const std.process.Environ.Map, err_msg: *[]const u8)
     return ms;
 }
 
+/// Set in `main` from `EB_LOCAL_TEST_FLOCK_ERRNO`, only in the test artifact,
+/// so a test can emulate `ENOLCK` or `EOPNOTSUPP` from `flock`.
+pub var test_flock_errno: ?linux.E = null;
+
+/// True when `e` represents an unsupported `flock` operation on this filesystem.
+pub fn flockUnsupported(e: sys.Error) bool {
+    return e == error.Unsupported or sys.last_errno == .NOLCK or sys.last_errno == .OPNOTSUPP or sys.last_errno == .NOSYS;
+}
+
 /// Open `lock_path` without following symlinks and hold an exclusive lock
 /// via `common.state.lockExclusive` with a bounded timeout. When `notify` is
 /// true and another process holds the lock, prints one waiting line on
-/// stderr before waiting.
+/// stderr before waiting. When `flock` is unsupported (`ENOLCK`, `ENOTSUP`,
+/// `EOPNOTSUPP`, `ENOSYS`), prints one warning on stderr when `notify` is
+/// true and returns `.unlocked`.
 pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, notify: bool, err_msg: *[]const u8) LockResult {
     const fd = sys.openat(fsx.cwd, lock_path, .{
         .ACCMODE = .RDWR,
@@ -574,6 +586,13 @@ pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, 
         err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
         return .failed;
     };
+    if (comptime build_options.test_ops) {
+        if (test_flock_errno) |te| {
+            if (notify) common.cli.err("eb-local: warning: cannot lock {s} ({s}); continuing unlocked\n", .{ lock_path, sys.describeErrno(te) });
+            sys.close(fd);
+            return .unlocked;
+        }
+    }
     if (common.state.lockExclusive(fd, 0)) |_| {
         return .{ .held = fd };
     } else |err| switch (err) {
@@ -586,6 +605,11 @@ pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, 
                     return .failed;
                 },
                 else => |se| {
+                    if (flockUnsupported(se)) {
+                        if (notify) common.cli.err("eb-local: warning: cannot lock {s} ({s}); continuing unlocked\n", .{ lock_path, sys.describe(se) });
+                        sys.close(fd);
+                        return .unlocked;
+                    }
                     const msg = sys.describe(se);
                     sys.close(fd);
                     err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, msg }) catch "cannot lock file";
@@ -595,6 +619,11 @@ pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, 
             return .{ .held = fd };
         },
         else => |se| {
+            if (flockUnsupported(se)) {
+                if (notify) common.cli.err("eb-local: warning: cannot lock {s} ({s}); continuing unlocked\n", .{ lock_path, sys.describe(se) });
+                sys.close(fd);
+                return .unlocked;
+            }
             const msg = sys.describe(se);
             sys.close(fd);
             err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, msg }) catch "cannot lock file";
@@ -659,6 +688,11 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
         else => return error.TestUnexpectedResult,
     };
     releaseLock(&again);
+
+    sys.last_errno = .NOLCK;
+    try testing.expect(flockUnsupported(error.Unexpected));
+    sys.last_errno = .OPNOTSUPP;
+    try testing.expect(flockUnsupported(error.Unsupported));
 }
 
 test "the mount a path lies on" {

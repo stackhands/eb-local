@@ -158,6 +158,21 @@ export -f eb
         after_term = subprocess.run(argv2, env=env2, cwd=self.root, capture_output=True, text=True, timeout=5)
         self.assertEqual(after_term.returncode, 0, after_term.stdout + after_term.stderr)
 
+    def test_unsupported_flock_warns_and_continues_unlocked(self):
+        for code, msg in (
+            ("ENOLCK", "No locks available"),
+            ("ENOTSUP", "Operation not supported"),
+            ("EOPNOTSUPP", "Operation not supported"),
+        ):
+            argv_u, env_u = binary.command(self.script, ["recipe.eb"], dict(self.env))
+            env_u["EB_LOCAL_TEST_FLOCK_ERRNO"] = code
+            run = subprocess.run(argv_u, env=env_u, cwd=self.root, capture_output=True, text=True, timeout=5)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn(msg, run.stderr)
+            self.assertIn("continuing unlocked", run.stderr)
+            self.assertEqual(run.stderr.count("continuing unlocked"), 1)
+            self.assertIn("eb-local: done.", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
