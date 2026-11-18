@@ -15,8 +15,8 @@ def unescape_mount(value):
 
 def under(path, root):
     """Whether PATH is ROOT or below it, without requiring either to exist."""
-    path = os.path.abspath(path)
-    root = os.path.abspath(root)
+    path = os.path.realpath(path)
+    root = os.path.realpath(root)
     try:
         return os.path.commonpath((path, root)) == root
     except ValueError:
