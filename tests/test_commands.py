@@ -425,6 +425,13 @@ class Commands(StorageFixture):
         run = self.run_wrapper(["clean", "--workspaces"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 2)
 
+    def test_empty_equals_value_options_are_refused(self):
+        for args in (["--project=", "env"], ["dev", "--buildenv="]):
+            with self.subTest(args=args):
+                run = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual((run.returncode, run.stdout), (2, ""), run.stdout + run.stderr)
+                self.assertIn("needs a", run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

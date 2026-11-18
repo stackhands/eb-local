@@ -64,7 +64,10 @@ while [ $# -gt 0 ]; do
         --project)
             [ -n "${2:-}" ] || die "--project needs a directory"
             prefix="$2"; mode=project; shift 2 ;;
-        --project=*) prefix="${1#--project=}"; mode=project; shift ;;
+        --project=*)
+            prefix="${1#--project=}"
+            [ -n "$prefix" ] || die "--project needs a directory"
+            mode=project; shift ;;
         --env)
             if [ "$command" = build ] && [ ${#args[@]} -eq 0 ]; then command="env"; else args+=("$1"); fi
             shift ;;
@@ -75,7 +78,10 @@ while [ $# -gt 0 ]; do
                 dev)
                     case "$1" in
                         --buildenv) [ -n "${2:-}" ] || die "--buildenv needs a module"; buildenv_override="$2"; shift 2 ;;
-                        --buildenv=*) buildenv_override="${1#--buildenv=}"; shift ;;
+                        --buildenv=*)
+                            buildenv_override="${1#--buildenv=}"
+                            [ -n "$buildenv_override" ] || die "--buildenv needs a module"
+                            shift ;;
                         -*) die "dev does not know the option '$1'" ;;
                         *) valid_module "$1" || die "'$1' is not a module name"; dev_modules+=("$1"); shift ;;
                     esac ;;
