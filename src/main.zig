@@ -1244,7 +1244,11 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
                 findInstalls(c, versions, name, ver, null, &found, 0);
                 if (found.installs.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
             }
-            roots.appendSlice(a, found.installs.items) catch oom();
+            for (found.installs.items) |dir| {
+                for (roots.items) |seen| {
+                    if (std.mem.eql(u8, seen, dir)) break;
+                } else roots.append(a, dir) catch oom();
+            }
         },
     }
     var k: Check = .{ .json = json, .recursive = recursive };

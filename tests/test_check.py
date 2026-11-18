@@ -197,6 +197,29 @@ class Check(unittest.TestCase):
         self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
         self.assertIn("is not installed", missing.stderr)
 
+    def test_duplicate_module_arguments_are_checked_once(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--enable-new-dtags")
+        prefix = self.root / "eessi-dup"
+        install = prefix / "versions/2026.06/software/linux/x86_64/amd/zen4/software/demo/1.0"
+        (install / "bin").mkdir(parents=True)
+        (install.parent.parent.parent / "modules").mkdir(parents=True)
+        (install / "bin" / "demo").write_bytes(prog.read_bytes())
+        run = self.check(
+            "--module",
+            "demo/1.0",
+            "demo/1.0",
+            "--quiet",
+            "--json",
+            EB_LOCAL_PREFIX=str(prefix),
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+        )
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        doc = json.loads(run.stdout.splitlines()[-1])
+        self.assertEqual(doc["elf_count"], 1, doc)
+        self.assertEqual(len(doc["files"]), 1, doc)
+        self.assertEqual(doc["problem_count"], 1, doc)
+
     def test_dev_uses_the_dev_prefix_or_the_eessi_target(self):
         lib = self.tree("x86_64/amd/zen4")
         prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
