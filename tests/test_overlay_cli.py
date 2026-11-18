@@ -239,6 +239,37 @@ class OverlayMaterialize(unittest.TestCase):
         self.assertIn("site MPI", prov)
         self.assertIn(digest_of(content), prov)
 
+    def test_replace_multiline_parameter_consumes_all_continuation_lines(self):
+        base_bytes = (
+            b"easyblock = 'ConfigureMake'\n"
+            b"configopts = (\n"
+            b"    '--with-foo '\n"
+            b"    '--with-bar'\n"
+            b")\n"
+            b"name = 'demo'\n"
+        )
+        overlay_text = (
+            f'overlay_version = 1\n'
+            f'base_digest = "{digest_of(base_bytes)}"\n'
+            f"\n[replace]\n"
+            f'configopts = "\'--with-baz\'"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            self.assertEqual(
+                recipe,
+                "easyblock = 'ConfigureMake'\nconfigopts = '--with-baz'\nname = 'demo'\n",
+            )
+            compile(recipe, "materialized-base.eb", "exec")
+
     def test_refuses_when_base_digest_changed(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.eb"

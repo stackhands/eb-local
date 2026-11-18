@@ -234,6 +234,14 @@ const PyLineState = struct {
     }
 };
 
+fn endsWithBackslash(line: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, line, "\r");
+    var bs: usize = 0;
+    var i = trimmed.len;
+    while (i > 0 and trimmed[i - 1] == '\\') : (i -= 1) bs += 1;
+    return bs % 2 == 1;
+}
+
 fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -241,6 +249,14 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
     var state: PyLineState = .{};
     while (lines.next()) |line| {
         if (!replaced and state.isTopLevel() and lineSetsParameter(line, param.name)) {
+            var orig_state: PyLineState = .{};
+            orig_state.advanceLine(line);
+            var continued = orig_state.isTopLevel() and endsWithBackslash(line);
+            while (!orig_state.isTopLevel() or continued) {
+                const cont = lines.next() orelse break;
+                orig_state.advanceLine(cont);
+                continued = orig_state.isTopLevel() and endsWithBackslash(cont);
+            }
             const leading = std.mem.trimStart(u8, line, " \t");
             const indent_len = line.len - leading.len;
             const nl = try std.fmt.allocPrint(a, "{s}{s} = {s}", .{ line[0..indent_len], param.name, param.value });
