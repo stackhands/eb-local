@@ -90,6 +90,33 @@ class ReadinessProbeTests(unittest.TestCase):
             self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
             self.assertIn("must not be empty", run.stderr)
 
+    def test_stacked_cvmfs_mount_over_autofs_at_same_path(self):
+        self.mountinfo.write_text(
+            "80 1 0:80 / {repo} rw,relatime - autofs systemd-1 rw\n"
+            "81 80 0:81 / {repo} rw,relatime - cvmfs cvmfs2 rw\n".format(repo=self.repo)
+        )
+        run = subprocess.run(
+            [
+                str(PROBE),
+                "--repo",
+                str(self.repo),
+                "--prefix",
+                str(self.local),
+                "--mountinfo",
+                str(self.mountinfo),
+            ],
+            env=dict(
+                os.environ,
+                MODULEPATH="{}:{}".format(self.local_modules, self.upstream_modules),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("mounted with cvmfs", run.stdout)
+        self.assertNotIn("autofs", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
