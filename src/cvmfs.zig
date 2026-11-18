@@ -95,7 +95,9 @@ pub fn readProxy(a: Allocator, env: *const std.process.Environ.Map, config_root:
     var found: ?Proxy = null;
     for (files) |path| {
         const text = readFile(a, path) orelse continue;
-        if (proxyLine(text)) |value| found = try proxyFrom(a, value, path, false);
+        if (proxyLine(text)) |value| {
+            found = if (value.len == 0) null else try proxyFrom(a, value, path, false);
+        }
     }
     return found orelse .{};
 }
@@ -146,11 +148,14 @@ fn proxyLine(text: []const u8) ?[]const u8 {
         var rest = std.mem.trim(u8, line[key.len..], " \t");
         if (rest.len == 0 or rest[0] != '=') continue;
         var value = std.mem.trim(u8, rest[1..], " \t");
-        if (value.len >= 2) {
+        if (value.len > 0 and (value[0] == '"' or value[0] == '\'')) {
             const q = value[0];
-            if ((q == '"' or q == '\'') and value[value.len - 1] == q) value = value[1 .. value.len - 1];
+            if (std.mem.indexOfScalarPos(u8, value, 1, q)) |end| {
+                value = value[1..end];
+            } else continue;
+        } else {
+            if (std.mem.indexOfScalar(u8, value, '#')) |hash| value = std.mem.trimEnd(u8, value[0..hash], " \t");
         }
-        if (value.len == 0) continue;
         found = value;
     }
     return found;
@@ -310,6 +315,28 @@ test "the environment proxy wins, and a later client file wins over an earlier o
     try testing.expect(from_env.host_injected);
     try testing.expectEqualStrings("http://host:3128", from_env.value);
     try testing.expectEqualStrings("environment CVMFS_HTTP_PROXY", from_env.from);
+}
+
+test "an empty CVMFS_HTTP_PROXY clears an earlier file assignment" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try scratch(a);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(try std.fs.path.join(a, &.{ root, "config.d" }));
+    try writeAt(try std.fs.path.join(a, &.{ root, "default.conf" }), "CVMFS_HTTP_PROXY=\"http://old:3128\"\n");
+    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "CVMFS_HTTP_PROXY=\"\"\n");
+
+    var env = std.process.Environ.Map.init(a);
+    const cleared_by_later_file = try readProxy(a, &env, root, "software.eessi.io");
+    try testing.expectEqual(ProxyMode.unset, cleared_by_later_file.mode);
+
+    try writeAt(
+        try std.fs.path.join(a, &.{ root, "config.d", "software.eessi.io.local" }),
+        "CVMFS_HTTP_PROXY=\"http://first:3128\"\nCVMFS_HTTP_PROXY=\n",
+    );
+    const cleared_in_same_file = try readProxy(a, &env, root, "software.eessi.io");
+    try testing.expectEqual(ProxyMode.unset, cleared_in_same_file.mode);
 }
 
 test "a parallel read uses srun when it is on PATH, and forks when it is not" {

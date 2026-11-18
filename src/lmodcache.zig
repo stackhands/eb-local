@@ -148,6 +148,11 @@ fn lessThanStr(_: void, x: []const u8, y: []const u8) bool {
     return std.mem.lessThan(u8, x, y);
 }
 
+fn validEessiVersion(v: []const u8) bool {
+    if (v.len == 0 or std.mem.eql(u8, v, ".") or std.mem.eql(u8, v, "..")) return false;
+    return std.mem.indexOfAny(u8, v, "/\\\x00") == null;
+}
+
 fn softwareRoots(a: std.mem.Allocator, prefix: []const u8, version: []const u8) ![]const []const u8 {
     const versions = try std.fs.path.join(a, &.{ prefix, "versions" });
     defer a.free(versions);
@@ -297,6 +302,10 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         fail("{s} does not point to an existing directory", .{opts.prefix});
         return 2;
     }
+    if (opts.eessi_version.len > 0 and !validEessiVersion(opts.eessi_version)) {
+        fail("--eessi-version '{s}' must be a single version directory name", .{opts.eessi_version});
+        return 2;
+    }
     const targets = discoverTargets(a, opts) catch |err| {
         fail("cannot walk {s}: {s}", .{ opts.prefix, @errorName(err) });
         return 1;
@@ -420,6 +429,7 @@ fn readInventory(
 ) VerifyInventoryError![]const []const u8 {
     var child_env = try env.clone(a);
     defer child_env.deinit();
+    for ([_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" }) |name| _ = child_env.swapRemove(name);
     try child_env.put("LMOD_RC", rc_path);
     try child_env.put("MODULEPATH", modulepath);
     if (ignore_cache) {
@@ -539,8 +549,10 @@ fn installVerified(
         fail("candidate and uncached module inventories differ; the cache was not changed", .{});
         return 1;
     }
-    std.Io.Dir.renameAbsolute(candidate_path, cache_path, io) catch |err| {
-        fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    common.atomic.atomicWrite(a, cache_path, candidate, .{ .mode = 0o644 }, &why) catch |err| {
+        fail("cannot write {s}: {s}", .{ cache_path, if (why.msg.len > 0) why.msg else @errorName(err) });
         return 1;
     };
     return 0;
@@ -611,6 +623,8 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         return 1;
     }
     const cwd = std.Io.Dir.cwd();
+    const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
+    const prev_cache: ?[]const u8 = cwd.readFileAlloc(io, cache_path, a, .limited(64 * 1024 * 1024)) catch null;
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = opts.cache_dir;
@@ -619,42 +633,72 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
-    cwd.createDirPath(io, opts.cache_dir) catch |err| {
+    common.atomic.makedirs(opts.cache_dir) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.cache_dir, @errorName(err) });
         return 1;
     };
-    const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
-    const tmp_path = std.fmt.allocPrint(a, "{s}.new", .{cache_path}) catch return 1;
+    const cleanup = struct {
+        fn rollback(alloc: std.mem.Allocator, missing: ?[]const u8, path: []const u8, prev: ?[]const u8, wrote: bool) void {
+            if (wrote) {
+                if (prev) |data| {
+                    var why: common.atomic.Why = .{};
+                    defer why.deinit(alloc);
+                    common.atomic.atomicWrite(alloc, path, data, .{ .mode = 0o644 }, &why) catch {};
+                } else {
+                    sys.unlinkat(fsx.cwd, path, 0) catch {};
+                }
+            }
+            if (missing) |dir| fsx.deleteTree(alloc, fsx.cwd, dir) catch {};
+        }
+    }.rollback;
+    var cache_written = false;
     if (opts.verify) {
         const code = installVerified(io, a, env, opts, cache_path, ran.stdout);
         if (code != 0) {
             if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
             return code;
         }
+        cache_written = true;
     } else {
-        cwd.writeFile(io, .{ .sub_path = tmp_path, .data = ran.stdout }) catch |err| {
-            fail("cannot write {s}: {s}", .{ tmp_path, @errorName(err) });
+        var why: common.atomic.Why = .{};
+        defer why.deinit(a);
+        common.atomic.atomicWrite(a, cache_path, ran.stdout, .{ .mode = 0o644 }, &why) catch |err| {
+            fail("cannot write {s}: {s}", .{ cache_path, if (why.msg.len > 0) why.msg else @errorName(err) });
+            cleanup(a, first_missing, cache_path, prev_cache, false);
             return 1;
         };
-        std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch |err| {
-            fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
-            return 1;
-        };
+        cache_written = true;
     }
     const stat = cwd.statFile(io, cache_path, .{}) catch |err| {
         fail("cannot stat {s}: {s}", .{ cache_path, @errorName(err) });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
-    const stamp = std.Io.Dir.createFileAbsolute(io, opts.timestamp, .{}) catch |err| {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const zp = sys.z(&zb, opts.timestamp) catch |err| {
         fail("cannot write {s}: {s}", .{ opts.timestamp, @errorName(err) });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
+    const stamp_fd: sys.fd_t = @intCast(sys.call(linux.openat, .{
+        linux.AT.FDCWD,
+        zp.ptr,
+        linux.O{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true },
+        @as(linux.mode_t, 0o644),
+    }) catch |err| {
+        const detail = if (err == error.SymLink or err == error.SymLinkLoop) "symlink is not followed" else @errorName(err);
+        fail("cannot write {s}: {s}", .{ opts.timestamp, detail });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
+        return 1;
+    });
+    const stamp: std.Io.File = .{ .handle = stamp_fd, .flags = .{ .nonblocking = false } };
     defer stamp.close(io);
     stamp.setTimestamps(io, .{
         .access_timestamp = .{ .new = olderThan(stat.mtime) },
         .modify_timestamp = .{ .new = olderThan(stat.mtime) },
     }) catch |err| {
         fail("cannot set the time of {s}: {s}", .{ opts.timestamp, @errorName(err) });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
     var line: std.ArrayList(u8) = .empty;

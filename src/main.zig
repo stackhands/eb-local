@@ -793,9 +793,9 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
     }
     const dir = rpath.directory(a, c.env, found) catch |e| switch (e) {
         error.NoCacheDir => die("rpath-wrappers needs an absolute XDG_CACHE_HOME or HOME", .{}),
-        else => die("cannot work out the wrapper directory ({s})", .{@errorName(e)}),
+        else => die("cannot work out the wrapper directory ({s})", .{storage.describeError(e)}),
     };
-    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, @errorName(e) });
+    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, storage.describeError(e) });
     const names = std.mem.join(a, " ", found) catch oom();
     if (only_unwrapped) {
         warn("the build environment does not wrap {s};", .{names});
@@ -846,11 +846,10 @@ const Check = struct {
     }
 
     fn isAudited(k: *Check, a: Allocator, path: []const u8) bool {
-        return k.recursive and k.audited.contains(canonicalKey(a, path));
+        return k.audited.contains(canonicalKey(a, path));
     }
 
     fn markAudited(k: *Check, a: Allocator, path: []const u8) void {
-        if (!k.recursive) return;
         k.audited.put(a, canonicalKey(a, path), {}) catch oom();
     }
 
@@ -915,6 +914,11 @@ fn isDir(path: []const u8) bool {
     return st.isDir();
 }
 
+fn resolveRootPath(a: Allocator, root: []const u8, path: []const u8) []const u8 {
+    if (std.mem.eql(u8, root, "/") or storage.under(path, root)) return path;
+    return std.fs.path.join(a, &.{ root, path }) catch oom();
+}
+
 /// The directories the loader under `root` searches last: those its
 /// ld.so.conf names, one level of `include DIR/*.conf` deep, then its
 /// built-in ones. The loader reads a cache built from the same list.
@@ -924,11 +928,17 @@ fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
     const conf = std.fs.path.join(a, &.{ root, "etc/ld.so.conf" }) catch oom();
     if (readSmall(a, conf)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &includes) catch oom();
     for (includes.items) |pat| {
-        // Only the DIR/*.SUFFIX form; anything else is skipped.
-        const slash = std.mem.lastIndexOfScalar(u8, pat, '/') orelse continue;
-        const base = pat[slash + 1 ..];
+        // Only the DIR/*.SUFFIX (or *.SUFFIX under etc/) form; anything else is skipped.
+        const slash = std.mem.lastIndexOfScalar(u8, pat, '/');
+        const base = if (slash) |s| pat[s + 1 ..] else pat;
         if (!std.mem.startsWith(u8, base, "*") or std.mem.indexOfAny(u8, base[1..], "*?[") != null) continue;
-        const dir = if (slash == 0) "/" else pat[0..slash];
+        const dir = if (slash) |s| blk: {
+            const raw_dir = if (s == 0) "/" else pat[0..s];
+            break :blk if (raw_dir[0] == '/')
+                resolveRootPath(a, root, raw_dir)
+            else
+                std.fs.path.join(a, &.{ root, "etc", raw_dir }) catch oom();
+        } else std.fs.path.join(a, &.{ root, "etc" }) catch oom();
         const fd = fsx.openDir(fsx.cwd, dir, true) catch continue;
         defer sys.close(fd);
         var names: std.ArrayList([]const u8) = .empty;
@@ -942,6 +952,7 @@ fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
             if (readSmall(a, p)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &none) catch oom();
         }
     }
+    for (dirs.items) |*d| d.* = resolveRootPath(a, root, d.*);
     for ([_][]const u8{ "lib64", "usr/lib64", "lib", "usr/lib" }) |sub|
         dirs.append(a, std.fs.path.join(a, &.{ root, sub }) catch oom()) catch oom();
     return dirs.items;
@@ -994,7 +1005,11 @@ fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
 /// either way.
 fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool) void {
     const a = c.a;
-    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const target = if (raw_target) |rt| blk: {
+        const trimmed = std.mem.trimEnd(u8, rt, "/");
+        break :blk if (trimmed.len > 0) trimmed else rt;
+    } else null;
     const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
     const machine = elfcheck.machineName(elf.machine);
     if (k.json) k.beginFile(a, path, machine);
@@ -1054,11 +1069,17 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
 
     for (elf.needed) |n| {
         if (std.mem.indexOfScalar(u8, n, '/') != null) {
-            if (!quiet) say("  needs    {s}", .{n});
-            if (!isFile(n)) {
+            const needed_path = elfcheck.expandOrigin(a, n, origin) catch oom();
+            if (!quiet) {
+                if (std.mem.eql(u8, needed_path, n))
+                    say("  needs    {s}", .{n})
+                else
+                    say("  needs    {s} => {s}", .{ n, needed_path });
+            }
+            if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{n});
-            } else k.enqueue(a, n);
+                k.problem(a, "{s} does not exist", .{needed_path});
+            } else k.enqueue(a, needed_path);
             continue;
         }
         // The job may run without this shell's LD_LIBRARY_PATH, so the
@@ -1126,6 +1147,7 @@ fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursiv
     var unreadable = false;
     var elfs: usize = 0;
     for (files) |f| {
+        if (k.isAudited(c.a, f)) continue;
         if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
     }
     drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
@@ -1232,7 +1254,11 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
                 findInstalls(c, versions, name, ver, null, &found, 0);
                 if (found.installs.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
             }
-            roots.appendSlice(a, found.installs.items) catch oom();
+            for (found.installs.items) |dir| {
+                for (roots.items) |seen| {
+                    if (std.mem.eql(u8, seen, dir)) break;
+                } else roots.append(a, dir) catch oom();
+            }
         },
     }
     var k: Check = .{ .json = json, .recursive = recursive };
@@ -1603,6 +1629,12 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         cli.put(1, text);
         return 0;
     }
+    if (fsx.statAt(fsx.cwd, target, false)) |st| {
+        if (st.isDir()) {
+            const clean = std.mem.trimEnd(u8, target, "/");
+            die("{s} is a directory; pass a file path such as {s}/config.toml", .{ target, if (clean.len > 0) clean else "" });
+        }
+    } else |_| {}
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
@@ -1981,6 +2013,20 @@ fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     return d;
 }
 
+fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
+    const a = c.a;
+    var err_msg: []const u8 = "";
+    const timeout_ms = storage.lockTimeoutMs(c.env, &err_msg) orelse die("{s}", .{err_msg});
+    const dir = std.fs.path.join(a, &.{ prefix, ".eb-local" }) catch oom();
+    common.atomic.makedirs(dir) catch |e| die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
+    const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+    return switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &err_msg)) {
+        .held => |fd| fd,
+        .unlocked => null,
+        .failed => die("{s}", .{err_msg}),
+    };
+}
+
 /// The stop when the checked node-local mount takes no workspace.
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
@@ -2140,6 +2186,14 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
         .none => {},
     }
+    var prefix_lock: ?sys.fd_t = null;
+    defer storage.releaseLock(&prefix_lock);
+    if (!o.dry_run and (o.logs or o.sources)) {
+        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
+            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
+        } else |_| {}
+    }
     // find -mtime +N: more than N whole days old.
     const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
     const now: i64 = nowSecs();
@@ -2153,7 +2207,10 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
         while (it.next() catch null) |e| {
             const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
-            if (storage.ownWorkspace(jr, full, callerUid(c))) spaces.append(a, full) catch oom();
+            if (storage.ownWorkspace(jr, full, callerUid(c))) {
+                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
+                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
+            }
         }
     }
     const targets = collect.out.items;
@@ -2580,15 +2637,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
         common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
-    common.atomic.makedirs(d.sources) catch |e| die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
-    common.atomic.makedirs(d.logs) catch |e| die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
-    if (values.len > 0) {
-        // Logs may hold a secret until they are cleaned after the build.
+    common.atomic.makedirs(d.sources) catch |e| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
+    };
+    common.atomic.makedirs(d.logs) catch |e| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
+    };
+    {
         var zb: [sys.path_max:0]u8 = undefined;
-        const zl = sys.z(&zb, d.logs) catch |e| die("cannot use {s} ({s})", .{ d.logs, @errorName(e) });
-        const ch_err = linux.errno(linux.fchmodat(linux.AT.FDCWD, zl.ptr, 0o700));
-        if (ch_err != .SUCCESS)
-            die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, sys.describeErrno(ch_err) });
+        const zl = sys.z(&zb, d.logs) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
+        };
+        _ = sys.call(linux.faccessat, .{ linux.AT.FDCWD, zl.ptr, linux.W_OK | linux.X_OK, 0 }) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
+        };
+        if (values.len > 0) {
+            // Logs may hold a secret until they are cleaned after the build.
+            _ = sys.call(linux.fchmodat, .{ linux.AT.FDCWD, zl.ptr, @as(linux.mode_t, 0o700) }) catch |e| {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, storage.describeError(e) });
+            };
+        }
     }
     const started: i64 = nowSecs();
 
@@ -2596,6 +2669,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         if (ownInstallVar(c, s, p, v, val) == null)
             warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
     };
+    var prefix_lock: ?sys.fd_t = blk: {
+        var lock_err: []const u8 = "";
+        const timeout_ms = storage.lockTimeoutMs(c.env, &lock_err) orelse {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("{s}", .{lock_err});
+        };
+        const dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        common.atomic.makedirs(dir) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
+        };
+        const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+        break :blk switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &lock_err)) {
+            .held => |fd| fd,
+            .unlocked => null,
+            .failed => {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("{s}", .{lock_err});
+            },
+        };
+    };
+    defer storage.releaseLock(&prefix_lock);
+    const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
+    var ws_lock: ?sys.fd_t = storage.acquireOptionalLock(ws_lock_path);
+    defer storage.releaseLock(&ws_lock);
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -2638,10 +2736,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
-        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check the logs for secrets ({s})", .{@errorName(e)});
+        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
         // EasyBuild keeps a copy of its log in each installation's easybuild/.
         const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check the installation logs for secrets ({s})", .{@errorName(e)});
+        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ versions, storage.describeError(e) });
         for (report.too_deep.items) |f| warn("{s} is too deep to check for secret values; inspect it before sharing", .{f});
         if (report.files > 0) say("eb-local: removed secret values from {d} log file(s)", .{report.files});
         for (report.too_large.items) |f| warn("{s} is too large to check for secret values; inspect it before sharing", .{f});
@@ -2664,6 +2762,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
     guard.release();
+    storage.releaseLock(&ws_lock);
+    storage.releaseLock(&prefix_lock);
     return stop(ended);
 }
 
@@ -2735,9 +2835,21 @@ fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
     if (filters.len == 0) return true;
     for (filters) |f| {
         if (std.mem.eql(u8, module, f)) return true;
-        if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') return true;
+        if (std.mem.endsWith(u8, f, "/")) {
+            if (f.len > 1 and std.mem.startsWith(u8, module, f)) return true;
+        } else if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') {
+            return true;
+        }
     }
     return false;
+}
+
+test "matchesFilter matches NAME, NAME/, and NAME/VERSION" {
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo"}));
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo/"}));
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo/1.0"}));
+    try std.testing.expect(!matchesFilter("demo2/1.0", &.{"demo/"}));
+    try std.testing.expect(!matchesFilter("demo/1.0", &.{"/"}));
 }
 
 const ListTargetJson = struct { label: []const u8, here: bool };
@@ -2801,7 +2913,11 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     std.mem.sort(Listed, rows.items, {}, listedLess);
 
     // This node's target, when EESSI is loaded.
-    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_here = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const here_target = if (raw_here) |ht| blk: {
+        const trimmed = std.mem.trimEnd(u8, ht, "/");
+        break :blk if (trimmed.len > 0) trimmed else ht;
+    } else null;
     const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
     var here: ?usize = null;
     if (here_target) |ht| for (trees.items, 0..) |t, ti| {
@@ -3191,11 +3307,10 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
         return;
     }
-    var cwd_buf: [sys.path_max]u8 = undefined;
-    const cwd = fsx.realpath(fsx.cwd, ".", &cwd_buf) catch ".";
-    const work = std.fmt.allocPrint(a, "{s}/.zig-cache/mpi-hello-{d}", .{ cwd, linux.getpid() }) catch oom();
-    common.atomic.makedirs(work) catch {
-        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
+    const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
+    const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
+    const work = storage.makeWorkspace(a, base) catch {
+        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{base});
         return;
     };
     defer fsx.deleteTree(a, fsx.cwd, work) catch {};
@@ -3215,6 +3330,10 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         }
         const hello = mpi.runHello(a, transport, mpicc, mpirun, work, c.env, c.envp) catch oom();
         const label = @tagName(transport);
+        if (hello.source_error) |msg| {
+            note(a, out, json_lines, "warn", "MPI hello could not be written ({s})", .{msg});
+            return;
+        }
         if (hello.missing_compiler) {
             note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
             return;
@@ -3418,9 +3537,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         const mp = c.env.get("MODULEPATH") orelse "";
         var seen = false;
         var it = std.mem.splitScalar(u8, mp, ':');
-        while (it.next()) |d| if (storage.under(d, p.prefix)) {
-            seen = true;
-        };
+        while (it.next()) |d| {
+            if (d.len == 0) continue;
+            const resolved = storage.canonical(a, d, c.cwd) catch d;
+            if (storage.under(resolved, p.prefix)) {
+                seen = true;
+                break;
+            }
+        }
         if (seen) note(a, &out, lines_ptr, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, lines_ptr, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
     } else |_| {}
     if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
@@ -3560,7 +3684,9 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
                 for (all) |k| known.append(a, k.name) catch oom();
                 die("--on {s}: no such node type; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
             };
-            chosen.append(a, t) catch oom();
+            for (chosen.items) |already| {
+                if (std.mem.eql(u8, already.name, t.name)) break;
+            } else chosen.append(a, t) catch oom();
         }
     }
     const p = place(c, s);
@@ -3603,12 +3729,13 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
             die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
         say("eb-local: {s}:", .{t.name});
-        switch (runAttached(a, argv.items, c.envp)) {
+        const run = runAttached(a, argv.items, c.envp);
+        switch (run) {
             .exit => |code| if (code != 0) {
                 warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
                 failed = true;
             },
-            .signal => failed = true,
+            .signal => return stop(run),
         }
     }
     if (o.print) return 0;
@@ -3771,10 +3898,13 @@ fn loadsAny(text: []const u8, wanted: []const []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        for ([_][]const u8{ "depends_on(\"", "load(\"" }) |call| {
+        for ([_][]const u8{ "depends_on(", "load(" }) |call| {
             if (!std.mem.startsWith(u8, line, call)) continue;
-            const rest = line[call.len..];
-            const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+            const after = line[call.len..];
+            if (after.len < 2 or (after[0] != '"' and after[0] != '\'')) continue;
+            const quote = after[0];
+            const rest = after[1..];
+            const end = std.mem.indexOfScalar(u8, rest, quote) orelse continue;
             if (listed(wanted, rest[0..end])) return true;
         }
     }
@@ -3846,6 +3976,8 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
     } else |_| die("nothing is installed in {s}", .{p.prefix});
+    var prefix_lock: ?sys.fd_t = if (o.dry_run) null else acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
     if (o.target) |raw_target| {
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -3924,7 +4056,10 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
             const run = runAttached(a, argv.items, c.envp);
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc}),
-                .signal => return stop(run),
+                .signal => {
+                    storage.releaseLock(&prefix_lock);
+                    return stop(run);
+                },
             }
         }
         say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
@@ -4008,6 +4143,8 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
     } else |_| die("nothing was installed in {s}", .{p.prefix});
+    var prefix_lock: ?sys.fd_t = if (dry_run) null else acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
     const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
         die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
@@ -4057,7 +4194,10 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
         const run = runAttached(a, &.{ rtrash, "restore", str(a, "--trash-dir={s}", .{e.trash_dir}), e.original }, c.envp);
         switch (run) {
             .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
-            .signal => return stop(run),
+            .signal => {
+                storage.releaseLock(&prefix_lock);
+                return stop(run);
+            },
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
@@ -4086,6 +4226,15 @@ pub fn main(init: std.process.Init) u8 {
     const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FLOCK_ERRNO"))) |v| {
+            if (std.mem.eql(u8, v, "ENOLCK")) {
+                storage.test_flock_errno = .NOLCK;
+            } else if (std.mem.eql(u8, v, "ENOTSUP") or std.mem.eql(u8, v, "EOPNOTSUPP")) {
+                storage.test_flock_errno = .OPNOTSUPP;
+            } else if (std.mem.eql(u8, v, "ENOSYS")) {
+                storage.test_flock_errno = .NOSYS;
+            }
+        }
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
@@ -4366,6 +4515,8 @@ pub fn main(init: std.process.Init) u8 {
                     submit.on = joined(x, "--on").?;
                 } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
                     submit.print = true;
+                } else if (rest.items.len == 0 and x.len > 0 and x[0] == '-') {
+                    die("submit does not know '{s}'", .{x});
                 } else rest.append(a, x) catch oom();
             },
             .list => {
@@ -4606,6 +4757,7 @@ fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     var env = c.env.clone(c.a) catch oom();
     defer env.deinit();
     extend.apply(&env);
+    for (shell_startup) |name| _ = env.swapRemove(name);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
     return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
 }

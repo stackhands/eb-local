@@ -67,7 +67,8 @@ fn checked(a: Allocator, f: *Failure, s: config.Secret, v: []const u8) Error![]c
 
 fn fromFile(a: Allocator, f: *Failure, s: config.Secret, raw_path: []const u8, home: ?[]const u8) Error![]const u8 {
     const path = if (std.mem.startsWith(u8, raw_path, "~/")) blk: {
-        const h = home orelse return fail(a, f, "secret {s}: {s} needs HOME", .{ s.name, s.source });
+        const h = home orelse return fail(a, f, "secret {s}: {s} needs an absolute HOME", .{ s.name, s.source });
+        if (h.len == 0 or h[0] != '/') return fail(a, f, "secret {s}: {s} needs an absolute HOME", .{ s.name, s.source });
         break :blk try std.fs.path.join(a, &.{ h, raw_path[2..] });
     } else raw_path;
     const opened = fsx.openRegular(fsx.cwd, path, false) catch |e|
@@ -92,7 +93,8 @@ fn fromNimvault(a: Allocator, f: *Failure, s: config.Secret, entry: []const u8, 
     try argv.appendSlice(a, &.{ exe, "get", entry });
     if (nv.vault.len > 0) {
         const vault = if (std.mem.startsWith(u8, nv.vault, "~/")) blk: {
-            const h = env.get("HOME") orelse return fail(a, f, "secret {s}: nimvault.vault {s} needs HOME", .{ s.name, nv.vault });
+            const h = env.get("HOME") orelse return fail(a, f, "secret {s}: nimvault.vault {s} needs an absolute HOME", .{ s.name, nv.vault });
+            if (h.len == 0 or h[0] != '/') return fail(a, f, "secret {s}: nimvault.vault {s} needs an absolute HOME", .{ s.name, nv.vault });
             break :blk try std.fs.path.join(a, &.{ h, nv.vault[2..] });
         } else nv.vault;
         try argv.appendSlice(a, &.{ "--vault", vault });
@@ -388,6 +390,10 @@ fn replace(a: Allocator, dir: sys.fd_t, name: []const u8, bytes: []const u8) (fs
     const lend = st.mode & 0o200 == 0 and st.uid == linux.getuid();
     if (lend) try sys.fchmod(dir, st.perm() | 0o200);
     defer if (lend) sys.fchmod(dir, st.perm()) catch {};
+    const ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+    var prev: linux.Sigaction = undefined;
+    _ = linux.sigaction(.XFSZ, &ign, &prev);
+    defer _ = linux.sigaction(.XFSZ, &prev, null);
     try fsx.replaceContents(a, dir, name, bytes);
 }
 
@@ -548,6 +554,21 @@ test "env and file sources, and why a file is refused" {
     try s.env.put("MY_TOKEN", "from-the-environment");
     try testing.expectEqualStrings("from-the-environment", (try resolveOne(&s, "env:MY_TOKEN")).value.?);
     try testing.expect(std.mem.indexOf(u8, (try resolveOne(&s, "env:ABSENT")).message, "ABSENT is not set") != null);
+
+    // Empty or relative HOME must never resolve file:~/ or nimvault.vault ~/ relative to cwd.
+    for ([_][]const u8{ "", "relative/home" }) |bad_home| {
+        try s.env.put("HOME", bad_home);
+        const file_res = try resolveOne(&s, "file:~/.secrets/token");
+        try testing.expect(file_res.value == null);
+        try testing.expect(std.mem.indexOf(u8, file_res.message, "absolute HOME") != null);
+
+        s.nv = .{ .program = "/bin/echo", .vault = "~/vault" };
+        const nv_res = try resolveOne(&s, "nimvault:entry");
+        try testing.expect(nv_res.value == null);
+        try testing.expect(std.mem.indexOf(u8, nv_res.message, "absolute HOME") != null);
+        s.nv = .{};
+    }
+    _ = s.env.swapRemove("HOME");
 
     const good = try s.write("good", "s3cret-value\n", 0o600);
     const good_src = try std.fmt.allocPrint(s.arena.allocator(), "file:{s}", .{good});
@@ -770,4 +791,77 @@ test "unreadable subdirectories and full writes are reported while sibling logs 
     const orig_fd = try fsx.openRegular(fsx.cwd, eb_log, false);
     defer sys.close(orig_fd.fd);
     try testing.expectEqualStrings("x s3cret-value\n", try fsx.readAll(a, orig_fd.fd, 4096));
+}
+
+test "replace restores previous SIGXFSZ disposition on every path and reports EFBIG" {
+    const H = struct {
+        var hits: usize = 0;
+        fn sentinel(_: linux.SIG) callconv(.c) void {
+            hits += 1;
+        }
+    };
+    H.hits = 0;
+
+    var s = try Scratch.init();
+    defer s.deinit();
+    const a = s.arena.allocator();
+    const logs = try std.fs.path.join(a, &.{ s.root, "logs" });
+    try common.atomic.makedirs(logs);
+    _ = try s.write("logs/ok.log", "x s3cret-value\n", 0o644);
+    const big = try s.write("logs/big.log", "xxxxx s3cret-value\n", 0o644);
+    const small = try s.write("logs/small.log", "z\n", 0o644);
+    const lfd = try fsx.openDir(fsx.cwd, logs, false);
+    defer sys.close(lfd);
+
+    const custom: linux.Sigaction = .{ .handler = .{ .handler = H.sentinel }, .mask = linux.sigemptyset(), .flags = 0 };
+    var orig: linux.Sigaction = undefined;
+    _ = linux.sigaction(.XFSZ, &custom, &orig);
+    defer _ = linux.sigaction(.XFSZ, &orig, null);
+
+    var after: linux.Sigaction = undefined;
+    // Normal return path restores previous disposition.
+    try replace(a, lfd, "ok.log", "x <redacted>\n");
+    _ = linux.sigaction(.XFSZ, null, &after);
+    try testing.expectEqual(H.sentinel, after.handler.handler.?);
+
+    // Non-EFBIG error return path restores previous disposition.
+    try testing.expectError(error.NotFound, replace(a, lfd, "missing.log", "x\n"));
+    _ = linux.sigaction(.XFSZ, null, &after);
+    try testing.expectEqual(H.sentinel, after.handler.handler.?);
+
+    // EFBIG error return path suppresses SIGXFSZ delivery and restores previous disposition.
+    var old_lim: linux.rlimit = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.prlimit(0, .FSIZE, null, &old_lim)));
+    const lim: linux.rlimit = .{ .cur = 4, .max = old_lim.max };
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.prlimit(0, .FSIZE, &lim, null)));
+    {
+        defer _ = linux.prlimit(0, .FSIZE, &old_lim, null);
+        try testing.expectError(error.Unexpected, replace(a, lfd, "big.log", "x <secret TOKEN removed by eb-local>\n"));
+        try testing.expectEqual(@as(usize, 0), H.hits);
+        _ = linux.sigaction(.XFSZ, null, &after);
+        try testing.expectEqual(H.sentinel, after.handler.handler.?);
+    }
+
+    // With SIG_DFL active, redactTree reports EFBIG on big.log, redacts small.log,
+    // and leaves SIG_DFL intact.
+    _ = try s.write("logs/small.log", "s s3cret-value\n", 0o644);
+    const dfl: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.DFL }, .mask = linux.sigemptyset(), .flags = 0 };
+    _ = linux.sigaction(.XFSZ, &dfl, null);
+    const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
+    const lim2: linux.rlimit = .{ .cur = 38, .max = old_lim.max };
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.prlimit(0, .FSIZE, &lim2, null)));
+    var report: RedactReport = .{};
+    {
+        defer _ = linux.prlimit(0, .FSIZE, &old_lim, null);
+        try redactTree(a, logs, 0, &values, .all, .{ .path = "", .envp = no_env }, &report);
+    }
+    _ = linux.sigaction(.XFSZ, null, &after);
+    try testing.expectEqual(linux.SIG.DFL, after.handler.handler);
+    try testing.expectEqual(@as(usize, 1), report.files);
+    try testing.expectEqual(@as(usize, 1), report.unchanged.items.len);
+    try testing.expectEqualStrings(big, report.unchanged.items[0].path);
+    try testing.expectEqualStrings("[Errno 27] File too large", report.unchanged.items[0].why);
+    const small_fd = try fsx.openRegular(fsx.cwd, small, false);
+    defer sys.close(small_fd.fd);
+    try testing.expectEqualStrings("s <secret TOKEN removed by eb-local>\n", try fsx.readAll(a, small_fd.fd, 4096));
 }

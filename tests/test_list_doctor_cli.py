@@ -169,6 +169,26 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(conflict.returncode, 2)
         self.assertIn("--missing or --json", conflict.stderr)
 
+    def test_list_matches_software_subdir_with_trailing_slash(self):
+        self.two_targets()
+        missing = self.run_tool(
+            ["list", "--missing"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertEqual(missing.stdout, "pigz/2.8-GCCcore-15.2.0\n")
+
+        listing = self.run_tool(
+            ["list"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertEqual(listing.stdout.splitlines()[1].split(), ["MODULE", "zen2", "zen4*"])
+
     def test_list_of_an_empty_prefix_and_a_symlinked_tree(self):
         run = self.run_tool(["list"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -637,6 +657,24 @@ class ListAndDoctor(StorageFixture):
         fail_strict = self.run_tool(["doctor", "--strict"], **dict(clean, SLURM_JOB_ID="bogus", LD_LIBRARY_PATH="/host/lib"))
         self.assertEqual(fail_strict.returncode, 1, fail_strict.stdout + fail_strict.stderr)
         self.assertTrue(fail_strict.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
+
+    def test_doctor_recognizes_symlinked_modulepath_under_prefix(self):
+        real_prefix = self.root / "real-prefix"
+        mod_dir = real_prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4" / "modules" / "all"
+        mod_dir.mkdir(parents=True)
+        sym_prefix = self.root / "sym-prefix"
+        sym_prefix.symlink_to(real_prefix)
+        sym_mod_dir = sym_prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4" / "modules" / "all"
+
+        run = self.run_tool(
+            ["doctor"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_PREFIX=str(real_prefix),
+            MODULEPATH=f"{self.eessi_modules}:{sym_mod_dir}",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
+        self.assertNotIn("your modules are not on MODULEPATH", run.stdout)
 
 
 if __name__ == "__main__":

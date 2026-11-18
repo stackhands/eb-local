@@ -131,3 +131,20 @@ class CvmfsDoctor(StorageFixture):
         self.assertRegex(shown.stdout, r"doctor\.cvmfs_parallel\s+0\s+\[default\]")
         exported = self.run_tool(["config", "--env"])
         self.assertIn("export EB_LOCAL_DOCTOR_CVMFS_PARALLEL=0\n", exported.stdout)
+
+    def test_proxy_line_ignores_inline_comments(self):
+        (self.cvmfs_etc / "default.local").write_text('CVMFS_HTTP_PROXY="http://proxy:3128" # site proxy\n')
+        quoted = self.run_tool(["doctor", "--cvmfs"])
+        self.assertEqual(quoted.returncode, 0, quoted.stdout + quoted.stderr)
+        self.assertIn(
+            f"info CernVM-FS HTTP proxy http://proxy:3128, from {self.cvmfs_etc}/default.local\n",
+            quoted.stdout,
+        )
+
+        (self.cvmfs_etc / "config.d" / f"{self.repo.name}.local").write_text("CVMFS_HTTP_PROXY=DIRECT # fallback\n")
+        direct = self.run_tool(["doctor", "--cvmfs"])
+        self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
+        self.assertIn(
+            f"info CernVM-FS HTTP proxy mode is direct, from {self.cvmfs_etc}/config.d/{self.repo.name}.local\n",
+            direct.stdout,
+        )

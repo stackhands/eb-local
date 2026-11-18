@@ -1,0 +1,1 @@
+`rpath.write` now writes compiler wrappers before writing the `.eb-local-rpath` marker and removes any newly created wrapper directory on failure, so failed runs leave no poisoned marker directory behind.
