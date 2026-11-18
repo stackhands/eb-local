@@ -336,6 +336,18 @@ class SitesCli(StorageFixture):
         expected_install = f"wrote {target} from template slurm; eb-local config shows what it sets\n".encode()
         self.assertEqual((installed.returncode, installed.stdout, installed.stderr), (0, expected_install, b""))
 
+        ro_parent = self.root / "ro-parent"
+        ro_parent.mkdir()
+        ro_parent.chmod(0o555)
+        try:
+            ro_target = ro_parent / "site.toml"
+            ro_err = self.run_tool(["site", "install", "slurm", "--to", str(ro_target)] + PATHS)
+            self.assertEqual(ro_err.returncode, 2, ro_err.stdout + ro_err.stderr)
+            self.assertIn(str(ro_target), ro_err.stderr)
+            self.assertIn("[Errno 13] Permission denied", ro_err.stderr)
+        finally:
+            ro_parent.chmod(0o755)
+
     def test_site_check_validates_toml_and_conf_files_as_site_layer(self):
         staged = self.root / "staged-site.toml"
         staged.write_text(
