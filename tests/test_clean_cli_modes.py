@@ -105,6 +105,21 @@ class CleanCliModes(unittest.TestCase):
         self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
         self.assertIn("not to a directory inside the install prefix", refused.stderr)
 
+    def test_rtrash_put_failure_reports_exit_code_and_preserves_target(self):
+        src = self.prefix / ".eb-local" / "sources" / "p" / "pkg.tar.gz"
+        src.parent.mkdir(parents=True)
+        src.write_text("keep\n", encoding="utf-8")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        rtrash = bin_dir / "rtrash"
+        rtrash.write_text("#!/bin/sh\necho 'trash unavailable' >&2\nexit 7\n", encoding="utf-8")
+        rtrash.chmod(0o755)
+
+        got = self.run_clean(["clean", "--no-logs", "--sources"], PATH=f"{bin_dir}:/usr/bin:/bin")
+        self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+        self.assertIn("rtrash put exited 7", got.stderr)
+        self.assertTrue(src.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
