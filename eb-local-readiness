@@ -35,8 +35,9 @@ def mount_for(path, mountinfo):
         if len(fields) < 6 or not after:
             continue
         target = unescape_mount(fields[4])
-        if under(path, target) and (best is None or len(target) >= len(best[0])):
-            best = (target, after[0])
+        real_target = os.path.realpath(target)
+        if under(path, target) and (best is None or len(real_target) >= len(best[0])):
+            best = (real_target, after[0])
     return best
 
 

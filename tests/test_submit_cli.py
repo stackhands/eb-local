@@ -159,6 +159,22 @@ class Submit(StorageFixture):
         self.assertEqual(job.returncode, 0, job.stdout + job.stderr)
         self.assertEqual(json.loads((self.root / "eb.json").read_text())["argv"], ["my recipe.eb", "--robot"])
 
+    def test_explain_keeps_sbatch_comments_single_line_when_paths_have_newlines(self):
+        nl_dir = self.root / "dir\nwith_cmd"
+        nl_dir.mkdir()
+        argv, env = binary.command(self.script, ["--explain", "my\nrecipe.eb", "--robot"], dict(self.env, SLURM_JOB_ID=""))
+        explained = subprocess.run(argv, env=env, cwd=nl_dir, capture_output=True, text=True)
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        # Every line of the explain output must remain valid shell syntax and
+        # not leak an uncommented line from the embedded newline in cwd/arg.
+        for line in explained.stdout.splitlines():
+            self.assertFalse(line.startswith("with_cmd"), explained.stdout)
+            self.assertFalse(line.startswith("recipe.eb"), explained.stdout)
+        replay = subprocess.run(["bash", "-n"], input=explained.stdout, capture_output=True, text=True)
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        sbatch_lines = [l for l in explained.stdout.splitlines() if l.startswith("#   sbatch ")]
+        self.assertEqual(len(sbatch_lines), 2, explained.stdout)
+
     def test_submit_says_it_is_deprecated_and_still_submits(self):
         run = self.run_tool(["submit", "recipe.eb"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
