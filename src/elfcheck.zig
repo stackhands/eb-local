@@ -181,6 +181,10 @@ pub fn machineName(m: u16) []const u8 {
     };
 }
 
+fn isOriginWordChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
 /// `dir` with $ORIGIN and ${ORIGIN} replaced by `origin`.
 pub fn expandOrigin(a: Allocator, dir: []const u8, origin: []const u8) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -190,7 +194,9 @@ pub fn expandOrigin(a: Allocator, dir: []const u8, origin: []const u8) Allocator
         if (std.mem.startsWith(u8, dir[i..], "${ORIGIN}")) {
             try out.appendSlice(a, origin);
             i += "${ORIGIN}".len;
-        } else if (std.mem.startsWith(u8, dir[i..], "$ORIGIN")) {
+        } else if (std.mem.startsWith(u8, dir[i..], "$ORIGIN") and
+            (i + "$ORIGIN".len == dir.len or !isOriginWordChar(dir[i + "$ORIGIN".len])))
+        {
             try out.appendSlice(a, origin);
             i += "$ORIGIN".len;
         } else {
@@ -273,6 +279,10 @@ test "expandOrigin" {
     const x = try expandOrigin(a, "$ORIGIN/../lib:${ORIGIN}", "/opt/p/bin");
     defer a.free(x);
     try std.testing.expectEqualStrings("/opt/p/bin/../lib:/opt/p/bin", x);
+
+    const suffix = try expandOrigin(a, "$ORIGIN_extra/lib:$ORIGIN2:$ORIGIN-extra/lib:${ORIGIN}_extra/lib", "/opt/p/bin");
+    defer a.free(suffix);
+    try std.testing.expectEqualStrings("$ORIGIN_extra/lib:$ORIGIN2:/opt/p/bin-extra/lib:/opt/p/bin_extra/lib", suffix);
 }
 
 test "host paths" {
