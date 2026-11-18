@@ -3449,9 +3449,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         const mp = c.env.get("MODULEPATH") orelse "";
         var seen = false;
         var it = std.mem.splitScalar(u8, mp, ':');
-        while (it.next()) |d| if (storage.under(d, p.prefix)) {
-            seen = true;
-        };
+        while (it.next()) |d| {
+            if (d.len == 0) continue;
+            const resolved = storage.canonical(a, d, c.cwd) catch d;
+            if (storage.under(resolved, p.prefix)) {
+                seen = true;
+                break;
+            }
+        }
         if (seen) note(a, &out, lines_ptr, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, lines_ptr, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
     } else |_| {}
     if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
