@@ -91,7 +91,7 @@ pub fn mountOf(a: Allocator, mountinfo: []const u8, path: []const u8) Allocator.
     return best;
 }
 
-const Seen = struct { dev: u64, ino: u64 };
+const Seen = struct { dev: u64, ino: u64, end_idx: usize };
 
 fn pathOf(a: Allocator, parts: []const []const u8) Allocator.Error![]const u8 {
     if (parts.len == 0) return "/";
@@ -129,9 +129,11 @@ pub fn canonical(a: Allocator, path: []const u8, cwd: []const u8) Allocator.Erro
     while (it.next()) |part| try pending.append(a, part);
     var out: std.ArrayList([]const u8) = .empty;
     var seen: std.ArrayList(Seen) = .empty;
+    var links: usize = 0;
     var missing = false;
     var idx: usize = 0;
     while (idx < pending.items.len) {
+        while (seen.items.len > 0 and seen.items[seen.items.len - 1].end_idx <= idx) _ = seen.pop();
         const part = pending.items[idx];
         if (part.len == 0 or std.mem.eql(u8, part, ".")) {
             idx += 1;
@@ -165,15 +167,15 @@ pub fn canonical(a: Allocator, path: []const u8, cwd: []const u8) Allocator.Erro
             loop = true;
             break;
         };
-        if (loop or seen.items.len >= 40) {
-            // The same link again, or more links than Linux will follow:
-            // readlink -m stops and keeps the name.
+        if (loop or links >= 40) {
+            // The same link again in its own expansion, or more links than
+            // Linux will follow: readlink -m stops and keeps the name.
             missing = true;
             try out.append(a, part);
             idx += 1;
             continue;
         }
-        try seen.append(a, .{ .dev = st.dev, .ino = st.ino });
+        links += 1;
         const target = (try readLink(a, next)) orelse {
             missing = true;
             try out.append(a, part);
@@ -187,6 +189,11 @@ pub fn canonical(a: Allocator, path: []const u8, cwd: []const u8) Allocator.Erro
         }
         var ti = std.mem.tokenizeScalar(u8, target, '/');
         while (ti.next()) |c| try extra.append(a, c);
+        const delta: isize = @as(isize, @intCast(extra.items.len)) - 1;
+        for (seen.items) |*s| {
+            s.end_idx = @intCast(@as(isize, @intCast(s.end_idx)) + delta);
+        }
+        try seen.append(a, .{ .dev = st.dev, .ino = st.ino, .end_idx = idx + extra.items.len });
         // The link component is replaced by its target; idx stays so the
         // target is what the next iteration reads.
         var neu: std.ArrayList([]const u8) = .empty;
@@ -815,6 +822,7 @@ test "canonical matches readlink -m, including a link whose target is missing" {
         .{ "no/such/./x/../place", "no/such/place" },
         .{ "toscratch/sources", "scratch/not-yet/sources" },
         .{ "deep/target/../../scratch/real", "scratch/real" },
+        .{ "lnk/../../lnk/sub", "deep/target/sub" },
     };
     for (cases) |case| {
         const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ root, case[0] });
