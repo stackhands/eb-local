@@ -138,6 +138,27 @@ class OverlayMaterialize(unittest.TestCase):
             self.assertEqual(stale_base.returncode, 2)
             self.assertIn("base digest", stale_base.stderr)
 
+    def test_check_refuses_symlinked_outputs(self):
+        base_bytes = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+        overlay_text = f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+        for name in ("materialized-base.eb", "provenance.toml"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+                outside = root / "outside.txt"
+                outside.write_text("external\n", encoding="utf-8")
+                out_dir = root / "out"
+                out_dir.mkdir()
+                (out_dir / name).symlink_to(outside)
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out", "--check"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn("symlink", got.stderr)
+
     def test_dry_run_validates_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

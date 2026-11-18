@@ -631,6 +631,14 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     defer a.free(provenance);
     var stdout = std.Io.File.stdout();
     if (opts.check) {
+        for ([_][]const u8{ recipe_path, provenance_path }) |p| {
+            if (common.fsx.statAt(common.fsx.cwd, p, false)) |st| {
+                if (st.isLink()) {
+                    failMsg("cannot read {s}: symlink is not followed", .{p});
+                    return 2;
+                }
+            } else |_| {}
+        }
         const existing_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => {
