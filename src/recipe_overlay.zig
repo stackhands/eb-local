@@ -175,7 +175,7 @@ fn lineSetsParameter(line: []const u8, name: []const u8) bool {
     if (t.len <= name.len) return false;
     if (!std.mem.startsWith(u8, t, name)) return false;
     const rest = std.mem.trimStart(u8, t[name.len..], " \t");
-    return std.mem.startsWith(u8, rest, "=");
+    return rest.len > 0 and rest[0] == '=' and (rest.len == 1 or rest[1] != '=');
 }
 
 const PyLineState = struct {

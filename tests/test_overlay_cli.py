@@ -685,6 +685,38 @@ class OverlayCheckUnreadableOutputs(unittest.TestCase):
             parsed = tomllib.loads(prov_text)
             self.assertEqual(parsed["rationale"].rstrip("\n"), rationale)
 
+    def test_equality_comparison_does_not_mask_parameter_or_array_assignment(self):
+        base_bytes = (
+            b"configopts == '--ignore'\n"
+            b"configopts = '--old'\n"
+            b"dependencies == []\n"
+            b"dependencies = [\n"
+            b"    ('zlib', '1.3'),\n"
+            b"]\n"
+        )
+        overlay_text = (
+            f'overlay_version = 1\n'
+            f'base_digest = "{digest_of(base_bytes)}"\n'
+            '\n[replace]\n'
+            'configopts = "\'--new\'"\n'
+            '\n[dependencies.add]\n'
+            'pkg = "(\'pkg\', \'1.0\')"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            self.assertIn("configopts == '--ignore'\n", recipe)
+            self.assertIn("configopts = '--new'\n", recipe)
+            self.assertIn("dependencies == []\n", recipe)
+            self.assertIn("('pkg', '1.0')", recipe)
+
 
 if __name__ == "__main__":
     unittest.main()
