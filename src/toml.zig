@@ -40,6 +40,8 @@ pub const Table = struct {
     entries: std.ArrayList(Entry) = .empty,
     /// Defined by a `[header]` (not only implied by a dotted name).
     explicit: bool = false,
+    /// Defined via dotted keys (cannot be reopened by `[header]`).
+    dotted: bool = false,
     line: usize = 0,
 
     /// The entry for `key`, or null when the table has none.
@@ -298,18 +300,24 @@ const Parser = struct {
     }
 
     /// The table a dotted path names below `root`, made when missing. A path
-    /// through a value that is not a table is refused.
-    fn descend(p: *Parser, root: *Table, path: []const []const u8) Error!*Table {
+    /// through a value that is not a table, or adding dotted keys to a table
+    /// already defined by `[header]`, is refused.
+    fn descend(p: *Parser, root: *Table, path: []const []const u8, via_dotted: bool) Error!*Table {
         var t = root;
         for (path) |part| {
             if (t.getMut(part)) |e| {
                 switch (e.value) {
-                    .table => |sub| t = sub,
+                    .table => |sub| {
+                        if (via_dotted and sub.explicit)
+                            return p.fail("'{s}' is already a table (line {d})", .{ part, sub.line });
+                        if (via_dotted) sub.dotted = true;
+                        t = sub;
+                    },
                     else => return p.fail("'{s}' is already {s} (line {d}), not a table", .{ part, e.value.kindName(), e.line }),
                 }
             } else {
                 const sub = try p.a.create(Table);
-                sub.* = .{ .line = p.line };
+                sub.* = .{ .dotted = via_dotted, .line = p.line };
                 try t.entries.append(p.a, .{ .key = part, .value = .{ .table = sub }, .line = p.line });
                 t = sub;
             }
@@ -325,13 +333,13 @@ const Parser = struct {
         p.skipSpace();
         if (p.peek() != ']') return p.fail("a table header is not closed with ']'", .{});
         p.pos += 1;
-        const parent = try p.descend(root, path[0 .. path.len - 1]);
+        const parent = try p.descend(root, path[0 .. path.len - 1], false);
         const last = path[path.len - 1];
         const t: *Table = blk: {
             if (parent.getMut(last)) |e| {
                 switch (e.value) {
                     .table => |t| {
-                        if (t.explicit) return p.fail("table [{s}] is defined twice (first on line {d})", .{ joined(p.a, path), t.line });
+                        if (t.explicit or t.dotted) return p.fail("table [{s}] is defined twice (first on line {d})", .{ joined(p.a, path), t.line });
                         t.explicit = true;
                         t.line = line;
                         break :blk t;
@@ -360,7 +368,7 @@ const Parser = struct {
         // dotted path implies and any error about the key.
         const after = p.line;
         p.line = line;
-        const parent = try p.descend(current, path[0 .. path.len - 1]);
+        const parent = try p.descend(current, path[0 .. path.len - 1], true);
         const last = path[path.len - 1];
         if (parent.get(last)) |e|
             return p.fail("'{s}' is set twice (first on line {d})", .{ joined(p.a, path), e.line });
@@ -481,6 +489,9 @@ test "every refusal names its line" {
     try expectInvalid("x = 'a\x7f'\n", 1, "control character");
     try expectInvalid("x = 1\x00\n", 1, "NUL");
     try expectInvalid("x = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n", 1, "nested");
+    try expectInvalid("a.b = 1\n[a]\nc = 2\n", 2, "defined twice");
+    try expectInvalid("[a]\nb.c = 1\n[a.b]\nd = 2\n", 3, "defined twice");
+    try expectInvalid("[a.b]\nx = 1\n[a]\nb.y = 2\n", 4, "already a table");
 }
 
 test "an empty file and a file of comments are empty tables" {
