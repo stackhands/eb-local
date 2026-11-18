@@ -469,6 +469,28 @@ class Check(unittest.TestCase):
         self.assertIn(f"libdemo.so => {custom_rel}/libdemo.so   [the loader's directories]", run.stdout)
         self.assertIn(f"libextra.so => {custom_abs}/libextra.so   [the loader's directories]", run.stdout)
 
+    def test_duplicate_file_arguments_are_checked_once(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--enable-new-dtags")
+        link = self.root / "prog-link"
+        link.symlink_to(prog)
+
+        plain = self.check(prog, prog, "--quiet", "--json", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(plain.returncode, 1, plain.stdout + plain.stderr)
+        doc_plain = json.loads(plain.stdout.splitlines()[-1])
+        self.assertEqual(doc_plain["elf_count"], 1, doc_plain)
+        self.assertEqual(len(doc_plain["files"]), 1, doc_plain)
+        self.assertEqual(doc_plain["problem_count"], 1, doc_plain)
+
+        rec = self.check("--recursive", prog, link, "--quiet", "--json", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(rec.returncode, 1, rec.stdout + rec.stderr)
+        doc_rec = json.loads(rec.stdout.splitlines()[-1])
+        paths = [f["path"] for f in doc_rec["files"]]
+        self.assertEqual(len(paths), len(set(paths)), doc_rec)
+        self.assertNotIn(str(link), paths)
+        self.assertEqual(doc_rec["elf_count"], len(paths), doc_rec)
+        self.assertEqual(doc_rec["problem_count"], 1, doc_rec)
+
 
 if __name__ == "__main__":
     unittest.main()
