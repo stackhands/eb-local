@@ -80,6 +80,16 @@ pub fn placeholders(a: Allocator, text: []const u8) Allocator.Error![]const []co
 /// The template with every placeholder filled. A --set naming no
 /// placeholder, or a required placeholder left unset, is an error.
 pub fn render(a: Allocator, t: Template, sets: []const Set, d: *Diagnostic) Error![]const u8 {
+    var check_i: usize = 0;
+    while (std.mem.indexOfPos(u8, t.text, check_i, "{{")) |open| {
+        const close = std.mem.indexOfPos(u8, t.text, open + 2, "}}") orelse
+            return fail(a, d, "template {s}: unclosed placeholder", .{t.name});
+        const inner = t.text[open + 2 .. close];
+        const colon = std.mem.indexOfScalar(u8, inner, ':');
+        const name = inner[0 .. colon orelse inner.len];
+        if (!validName(name)) return fail(a, d, "template {s}: invalid placeholder '{s}'", .{ t.name, name });
+        check_i = close + 2;
+    }
     const names = try placeholders(a, t.text);
     for (sets) |s| {
         for (names) |n| {
