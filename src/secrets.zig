@@ -67,7 +67,8 @@ fn checked(a: Allocator, f: *Failure, s: config.Secret, v: []const u8) Error![]c
 
 fn fromFile(a: Allocator, f: *Failure, s: config.Secret, raw_path: []const u8, home: ?[]const u8) Error![]const u8 {
     const path = if (std.mem.startsWith(u8, raw_path, "~/")) blk: {
-        const h = home orelse return fail(a, f, "secret {s}: {s} needs HOME", .{ s.name, s.source });
+        const h = home orelse return fail(a, f, "secret {s}: {s} needs an absolute HOME", .{ s.name, s.source });
+        if (h.len == 0 or h[0] != '/') return fail(a, f, "secret {s}: {s} needs an absolute HOME", .{ s.name, s.source });
         break :blk try std.fs.path.join(a, &.{ h, raw_path[2..] });
     } else raw_path;
     const opened = fsx.openRegular(fsx.cwd, path, false) catch |e|
@@ -92,7 +93,8 @@ fn fromNimvault(a: Allocator, f: *Failure, s: config.Secret, entry: []const u8, 
     try argv.appendSlice(a, &.{ exe, "get", entry });
     if (nv.vault.len > 0) {
         const vault = if (std.mem.startsWith(u8, nv.vault, "~/")) blk: {
-            const h = env.get("HOME") orelse return fail(a, f, "secret {s}: nimvault.vault {s} needs HOME", .{ s.name, nv.vault });
+            const h = env.get("HOME") orelse return fail(a, f, "secret {s}: nimvault.vault {s} needs an absolute HOME", .{ s.name, nv.vault });
+            if (h.len == 0 or h[0] != '/') return fail(a, f, "secret {s}: nimvault.vault {s} needs an absolute HOME", .{ s.name, nv.vault });
             break :blk try std.fs.path.join(a, &.{ h, nv.vault[2..] });
         } else nv.vault;
         try argv.appendSlice(a, &.{ "--vault", vault });
@@ -548,6 +550,21 @@ test "env and file sources, and why a file is refused" {
     try s.env.put("MY_TOKEN", "from-the-environment");
     try testing.expectEqualStrings("from-the-environment", (try resolveOne(&s, "env:MY_TOKEN")).value.?);
     try testing.expect(std.mem.indexOf(u8, (try resolveOne(&s, "env:ABSENT")).message, "ABSENT is not set") != null);
+
+    // Empty or relative HOME must never resolve file:~/ or nimvault.vault ~/ relative to cwd.
+    for ([_][]const u8{ "", "relative/home" }) |bad_home| {
+        try s.env.put("HOME", bad_home);
+        const file_res = try resolveOne(&s, "file:~/.secrets/token");
+        try testing.expect(file_res.value == null);
+        try testing.expect(std.mem.indexOf(u8, file_res.message, "absolute HOME") != null);
+
+        s.nv = .{ .program = "/bin/echo", .vault = "~/vault" };
+        const nv_res = try resolveOne(&s, "nimvault:entry");
+        try testing.expect(nv_res.value == null);
+        try testing.expect(std.mem.indexOf(u8, nv_res.message, "absolute HOME") != null);
+        s.nv = .{};
+    }
+    _ = s.env.swapRemove("HOME");
 
     const good = try s.write("good", "s3cret-value\n", 0o600);
     const good_src = try std.fmt.allocPrint(s.arena.allocator(), "file:{s}", .{good});
