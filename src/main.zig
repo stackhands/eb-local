@@ -2570,6 +2570,23 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     return 0;
 }
 
+fn prefixCapacityOverride(c: Ctx) ?storage.Capacity {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| {
+            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+            return .{
+                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
+                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
+            };
+        }
+    }
+    return null;
+}
+
+fn prefixCapacity(c: Ctx, path: []const u8) ?storage.Capacity {
+    return prefixCapacityOverride(c) orelse (storage.capacity(path) catch null);
+}
+
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     if (args.len == 0) {
@@ -2606,6 +2623,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
         var buf: [sys.path_max]u8 = undefined;
         p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch |e| die("cannot resolve installation prefix {s} ({s})", .{ p.prefix, storage.describeError(e) })) catch oom();
+    }
+    if (prefixCapacity(c, p.prefix)) |cap| {
+        if (cap.bytes == 0 or cap.inodes == 0)
+            die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
     const d = durableDirs(c, p.prefix, "nothing was built");
     // The trees a build writes below the prefix must not lead onto refused
@@ -3445,16 +3466,21 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     };
     if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| {
         var zb: [sys.path_max:0]u8 = undefined;
-        const writable = if (sys.z(&zb, p.prefix)) |zp|
-            linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0)) == .SUCCESS
-        else |_|
-            false;
+        const acc_err: ?linux.E = if (sys.z(&zb, p.prefix)) |zp| blk: {
+            const err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+            break :blk if (err == .SUCCESS) null else err;
+        } else |_| .NAMETOOLONG;
         if (!st.isDir()) {
             note(a, &out, lines_ptr, "FAIL", "{s} is not a directory", .{p.prefix});
             failed = true;
-        } else if (!writable) {
-            note(a, &out, lines_ptr, "FAIL", "you cannot write to {s}", .{p.prefix});
+        } else if (acc_err) |ae| {
+            note(a, &out, lines_ptr, "FAIL", "you cannot write to {s} ({s})", .{ p.prefix, sys.describeErrno(ae) });
             failed = true;
+        } else if (prefixCapacity(c, p.prefix)) |cap| {
+            if (cap.bytes == 0 or cap.inodes == 0) {
+                note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
+                failed = true;
+            }
         }
         if (p.project and st.isDir()) {
             if (st.mode & 0o002 != 0) {
@@ -3467,7 +3493,27 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         if (p.project) {
             note(a, &out, lines_ptr, "FAIL", "project directory {s} does not exist; the project owner creates it with the project group and chmod 2770", .{p.prefix});
             failed = true;
-        } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+        } else {
+            var ancestor: []const u8 = p.prefix;
+            while (ancestor.len > 1) {
+                if (fsx.statAt(fsx.cwd, ancestor, true)) |_| break else |_| {}
+                ancestor = std.fs.path.dirname(ancestor) orelse "/";
+            }
+            var zb: [sys.path_max:0]u8 = undefined;
+            const acc_err: ?linux.E = if (sys.z(&zb, ancestor)) |zp| blk: {
+                const err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+                break :blk if (err == .SUCCESS) null else err;
+            } else |_| .NAMETOOLONG;
+            if (acc_err) |ae| {
+                note(a, &out, lines_ptr, "FAIL", "installation prefix {s} cannot be created under {s} ({s})", .{ p.prefix, ancestor, sys.describeErrno(ae) });
+                failed = true;
+            } else if (prefixCapacity(c, ancestor)) |cap| {
+                if (cap.bytes == 0 or cap.inodes == 0) {
+                    note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
+                    failed = true;
+                } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+            } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+        }
     }
 
     // What this shell carries.
