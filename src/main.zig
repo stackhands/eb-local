@@ -1665,10 +1665,12 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
         error.OutOfMemory => oom(),
     };
     var rows: std.ArrayList(ProfileRow) = .empty;
+    var count: usize = 0;
     for (sources) |src| {
         var td: toml.Diagnostic = .{};
         const t = toml.parse(a, src.text, &td) catch continue;
         for (config.profileNames(a, t) catch oom()) |name| {
+            count += 1;
             if (g.json_out)
                 rows.append(a, .{ .name = name, .layer = @tagName(src.layer), .path = src.path }) catch oom()
             else
@@ -1679,7 +1681,7 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
         jsonout.emit(a, ProfilesReport{ .profiles = rows.items });
         return 0;
     }
-    if (rows.items.len == 0) say("no profiles are defined", .{});
+    if (count == 0) say("no profiles are defined", .{});
     return 0;
 }
 
