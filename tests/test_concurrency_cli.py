@@ -270,6 +270,94 @@ export -f eb
         self.assertEqual(pc.returncode, 0, out_c + err_c)
         self.assertFalse((self.prefix / ".eb-local" / "sources" / "pkg.tar.gz").exists())
 
+    def test_uninstall_waits_for_running_build_and_releases_lock_on_early_exit(self):
+        tree = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+        inst = tree / "software" / "demo" / "1.0"
+        mod = tree / "modules" / "all" / "demo" / "1.0.lua"
+        inst.mkdir(parents=True)
+        mod.parent.mkdir(parents=True)
+        mod.write_text("-- demo\n")
+
+        gate = self.root / "gate-un"
+        eb_un = rf'''
+eb() {{
+    python3 - "{gate}" "{self.root}" "{inst}" <<'PY'
+import pathlib, sys, time
+gate, root, inst = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+(root / "started-un").write_text("1")
+deadline = time.monotonic() + 10.0
+while not gate.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+if not gate.exists() or not inst.exists():
+    sys.exit(8)
+PY
+}}
+export -f eb
+'''
+        doubles = self.root / "doubles-un.sh"
+        doubles.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_un)
+        argv_b, env_b = binary.command(self.script, ["recipe.eb"], dict(self.env, BASH_ENV=str(doubles)))
+        argv_u, env_u = binary.command(
+            self.script,
+            ["uninstall", "demo/1.0", "--delete"],
+            dict(self.env, SLURM_JOB_ID="", PATH="/usr/bin:/bin"),
+        )
+
+        with subprocess.Popen(argv_b, env=env_b, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as pb:
+            try:
+                self.assertTrue(_wait_for(self.root / "started-un"))
+                with subprocess.Popen(argv_u, env=env_u, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as pu:
+                    try:
+                        time.sleep(0.35)
+                        self.assertIsNone(pu.poll(), "uninstall ran while build held prefix lock")
+                        self.assertTrue(inst.exists())
+                        gate.write_text("go\n")
+                        out_b, err_b = pb.communicate(timeout=10)
+                        out_u, err_u = pu.communicate(timeout=10)
+                    finally:
+                        if pu.poll() is None:
+                            pu.kill()
+                            pu.wait()
+            finally:
+                if pb.poll() is None:
+                    pb.kill()
+                    pb.wait()
+
+        self.assertEqual(pb.returncode, 0, out_b + err_b)
+        self.assertEqual(pu.returncode, 0, out_u + err_u)
+        self.assertFalse(inst.exists())
+
+        dep_inst = tree / "software" / "app" / "1.0"
+        dep_mod = tree / "modules" / "all" / "app" / "1.0.lua"
+        base_inst = tree / "software" / "base" / "1.0"
+        base_mod = tree / "modules" / "all" / "base" / "1.0.lua"
+        dep_inst.mkdir(parents=True)
+        base_inst.mkdir(parents=True)
+        dep_mod.parent.mkdir(parents=True)
+        base_mod.parent.mkdir(parents=True)
+        dep_mod.write_text('load("base/1.0")\n')
+        base_mod.write_text("-- base\n")
+
+        argv_dep, env_dep = binary.command(
+            self.script,
+            ["uninstall", "base/1.0", "--delete"],
+            dict(self.env, SLURM_JOB_ID="", PATH="/usr/bin:/bin"),
+        )
+        r_dep = subprocess.run(argv_dep, env=env_dep, cwd=self.root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(r_dep.returncode, 2, r_dep.stdout + r_dep.stderr)
+
+        argv_nodel, env_nodel = binary.command(
+            self.script,
+            ["uninstall", "app/1.0"],
+            dict(self.env, SLURM_JOB_ID="", PATH="/usr/bin:/bin"),
+        )
+        r_nodel = subprocess.run(argv_nodel, env=env_nodel, cwd=self.root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(r_nodel.returncode, 1, r_nodel.stdout + r_nodel.stderr)
+
+        argv_b2, env_b2 = binary.command(self.script, ["recipe.eb"], dict(self.env))
+        r_b2 = subprocess.run(argv_b2, env=env_b2, cwd=self.root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(r_b2.returncode, 0, r_b2.stdout + r_b2.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
