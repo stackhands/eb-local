@@ -2166,6 +2166,14 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
         .none => {},
     }
+    var prefix_lock: ?sys.fd_t = null;
+    defer storage.releaseLock(&prefix_lock);
+    if (!o.dry_run and (o.logs or o.sources)) {
+        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
+            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
+        } else |_| {}
+    }
     // find -mtime +N: more than N whole days old.
     const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
     const now: i64 = nowSecs();
@@ -2179,7 +2187,10 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
         while (it.next() catch null) |e| {
             const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
-            if (storage.ownWorkspace(jr, full, callerUid(c))) spaces.append(a, full) catch oom();
+            if (storage.ownWorkspace(jr, full, callerUid(c))) {
+                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
+                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
+            }
         }
     }
     const targets = collect.out.items;
