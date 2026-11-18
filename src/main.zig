@@ -4594,6 +4594,7 @@ pub fn main(init: std.process.Init) u8 {
             },
             .clean => {
                 if (std.mem.eql(u8, x, "--logs-older-than") or joined(x, "--logs-older-than") != null) {
+                    if (clean.logs_days != null) die("clean takes one --logs-older-than", .{});
                     const v = if (joined(x, "--logs-older-than")) |got| got else value(args, &i, "--logs-older-than");
                     const n = std.fmt.parseInt(u32, v, 10) catch die("--logs-older-than needs a number of days", .{});
                     if (n > 99999) die("--logs-older-than needs a number of days", .{});
@@ -4710,7 +4711,10 @@ pub fn main(init: std.process.Init) u8 {
             if (config_get) |key| break :blk cmdConfigGet(c, s, key);
             break :blk if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check, g.json_out);
         },
-        .clean => cmdClean(c, s, clean, g.json_out),
+        .clean => blk: {
+            if (!clean.logs and clean.logs_days != null) die("clean takes --no-logs or --logs-older-than, not both", .{});
+            break :blk cmdClean(c, s, clean, g.json_out);
+        },
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
