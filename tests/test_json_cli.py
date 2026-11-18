@@ -254,6 +254,67 @@ class JsonCli(StorageFixture):
         self.assertFalse(clean["changed"])
         self.assertIsNone(clean["content"])
 
+    def test_clean_and_modulerc_json_encode_non_utf8_bytes_as_strings(self):
+        import os
+        import time
+
+        logs = self.prefix / ".eb-local" / "logs"
+        logs.mkdir(parents=True)
+        bad_log = os.fsencode(logs) + b"/bad-\xff-0.log"
+        with open(bad_log, "wb") as f:
+            f.write(b"log\n")
+        t = time.time() - 40 * 86400
+        os.utime(bad_log, (t, t))
+
+        argv, env = binary.command(
+            self.script, ["clean", "--dry-run", "--json"], dict(self.env, SLURM_JOB_ID="")
+        )
+        clean_proc = subprocess.run(argv, env=env, cwd=self.root, capture_output=True)
+        self.assertEqual(clean_proc.returncode, 0, clean_proc.stderr)
+        clean_doc = json.loads(clean_proc.stdout.decode("utf-8"))
+        validate(clean_doc, load_schema("clean.schema.json"))
+        self.assertEqual(len(clean_doc["items"]), 1)
+        self.assertIsInstance(clean_doc["items"][0]["path"], str)
+        self.assertIn("\ufffd", clean_doc["items"][0]["path"])
+
+        bad_tree = os.fsencode(self.root) + b"/modulerc-\xff"
+        argv, env = binary.command(
+            self.script,
+            ["modulerc", "--module-tree", bad_tree, "--default", b"Example/2.0", "--check", "--json"],
+            dict(self.env, SLURM_JOB_ID=""),
+        )
+        mrc_proc = subprocess.run(argv, env=env, cwd=self.root, capture_output=True)
+        self.assertEqual(mrc_proc.returncode, 1, mrc_proc.stderr)
+        mrc_doc = json.loads(mrc_proc.stdout.decode("utf-8"))
+        validate(mrc_doc, load_schema("modulerc.schema.json"))
+        self.assertIsInstance(mrc_doc["module_tree"], str)
+        self.assertIsInstance(mrc_doc["file"], str)
+        self.assertIn("\ufffd", mrc_doc["module_tree"])
+        self.assertIn("\ufffd", mrc_doc["file"])
+
+        raw_tree = self.root / "modulerc-raw-content"
+        raw_tree.mkdir()
+        (raw_tree / ".modulerc.lua").write_bytes(b"-- comment \xff\n")
+        argv, env = binary.command(
+            self.script,
+            [
+                "modulerc",
+                "--module-tree",
+                str(raw_tree),
+                "--default",
+                "Example/2.0",
+                "--dry-run",
+                "--json",
+            ],
+            dict(self.env, SLURM_JOB_ID=""),
+        )
+        dry_proc = subprocess.run(argv, env=env, cwd=self.root, capture_output=True)
+        self.assertEqual(dry_proc.returncode, 0, dry_proc.stderr)
+        dry_doc = json.loads(dry_proc.stdout.decode("utf-8"))
+        validate(dry_doc, load_schema("modulerc.schema.json"))
+        self.assertIsInstance(dry_doc["content"], str)
+        self.assertIn("\ufffd", dry_doc["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

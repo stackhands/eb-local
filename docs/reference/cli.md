@@ -470,6 +470,7 @@ Existing lines are preserved, and a line already present is not duplicated.
 At least one directive option is required.
 `--dry-run` and `--check` cannot be used together.
 `--json` works with write, `--dry-run` (including `content` in the JSON) and `--check` (keeping exit 1 on drift).
+Any invalid UTF-8 byte in a path, directive, or `content` is replaced with the Unicode replacement character `U+FFFD`, so non-UTF-8 paths or contents do not round-trip.
 Running the same command again produces identical file contents.
 This command does not read the site file; `--profile`, `--project` and `--config` are accepted and ignored.
 
@@ -506,6 +507,7 @@ A directory among the logs, such as the `reprod_*` copies of a failed build's ea
 `clean` never follows a symbolic link out of the installation directory.
 With `clean.trash` `none`, or `auto` and no rtrash on `PATH`, it removes nothing without `--delete`, and exits 1.
 With `--json`, stdout holds one line of JSON with `schema_version` 1, `kind` `clean`, `prefix`, `dry_run`, `action` (`nothing`, `dry-run`, `trashed`, `deleted`, `workspaces-only` or `refused`), `items` (`path` and `kind`), `workspaces`, `removed_items` and `removed_workspaces`; see [clean.schema.json](json/clean.schema.json).
+Any invalid UTF-8 byte in a path is replaced with the Unicode replacement character `U+FFFD`, so non-UTF-8 paths do not round-trip.
 
 ### config
 
@@ -596,6 +598,7 @@ A value with a quote, a backslash or a control character is refused.
 
 Commands that take `--json` use the same exit codes as their text output.
 Refusals and usage errors still print on stderr; only the report on stdout becomes one JSON line.
+Any invalid UTF-8 byte in a path or string field is replaced with `U+FFFD`, so non-UTF-8 strings do not round-trip.
 With `--json`, `check` still exits 1 for problems and 2 when a file cannot be read; `doctor` still exits 1 when `failed` is true in the document; `config --check --json` still exits 1 when `check_failed` is true.
 
 ## The 1.x Bash script
