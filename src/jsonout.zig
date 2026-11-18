@@ -22,8 +22,13 @@ fn utf8Safe(a: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!@TypeO
         .optional => |opt| if (value) |inner| @as(?opt.child, try utf8Safe(a, inner)) else null,
         .pointer => |ptr| switch (ptr.size) {
             .slice => blk: {
-                if (ptr.child == u8 and ptr.is_const) {
-                    break :blk try lossyUtf8(a, value);
+                if (ptr.child == u8) {
+                    const clean = try lossyUtf8(a, value);
+                    if (comptime ptr.sentinel() != null) {
+                        const z = try a.dupeZ(u8, clean);
+                        break :blk @as(T, z);
+                    }
+                    break :blk if (ptr.attrs.@"const") clean else try a.dupe(u8, clean);
                 }
                 const items = try a.alloc(ptr.child, value.len);
                 for (value, 0..) |item, idx| items[idx] = try utf8Safe(a, item);
@@ -92,4 +97,12 @@ test "renderLine replaces truncated multi-byte UTF-8 sequences with one U+FFFD p
     const line = try renderLine(std.testing.allocator, Doc{ .path = "a\xe2\x82b\xff\xf0\x9f\x98" });
     defer std.testing.allocator.free(line);
     try std.testing.expectEqualStrings("{\"path\":\"a\u{FFFD}b\u{FFFD}\u{FFFD}\"}\n", line);
+}
+
+test "renderLine encodes mutable u8 slices as JSON strings rather than byte arrays" {
+    var mut_buf = [_]u8{ '/', 't', 'm', 'p', '/', 0xff };
+    const Doc = struct { path: []u8 };
+    const line = try renderLine(std.testing.allocator, Doc{ .path = &mut_buf });
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings("{\"path\":\"/tmp/\u{FFFD}\"}\n", line);
 }
