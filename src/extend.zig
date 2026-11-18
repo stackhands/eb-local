@@ -141,8 +141,11 @@ pub fn apply(env: *std.process.Environ.Map) void {
 pub fn initPath(a: Allocator, env: *const std.process.Environ.Map) Allocator.Error![]const u8 {
     const repo = env.get("EESSI_CVMFS_REPO") orelse "";
     const ver = env.get("EESSI_VERSION") orelse "";
+    var base_repo = if (repo.len > 0) repo else "/cvmfs/software.eessi.io";
+    while (base_repo.len > 1 and base_repo[base_repo.len - 1] == '/') base_repo = base_repo[0 .. base_repo.len - 1];
+    const prefix = if (std.mem.eql(u8, base_repo, "/")) "" else base_repo;
     return std.fmt.allocPrint(a, "{s}/versions/{s}/init/lmod/bash", .{
-        if (repo.len > 0) repo else "/cvmfs/software.eessi.io",
+        prefix,
         if (ver.len > 0) ver else "2026.06",
     });
 }
@@ -783,6 +786,11 @@ test "the init path has the script's defaults" {
     const init = try initPath(testing.allocator, &env);
     defer testing.allocator.free(init);
     try testing.expectEqualStrings("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash", init);
+
+    try env.put("EESSI_CVMFS_REPO", "/cvmfs/software.eessi.io///");
+    const trimmed = try initPath(testing.allocator, &env);
+    defer testing.allocator.free(trimmed);
+    try testing.expectEqualStrings("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash", trimmed);
     try testing.expect(std.mem.indexOf(u8, script, "repo=${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}\n") != null);
     try testing.expect(std.mem.indexOf(u8, script, "ver=${EESSI_VERSION:-2026.06}\n") != null);
 }
