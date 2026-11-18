@@ -63,6 +63,27 @@ class CliAssets(unittest.TestCase):
         )
         self.assertEqual(repro.returncode, 0, repro.stderr)
 
+    def test_manpage_escapes_leading_dot_and_apostrophe_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "fake.sh"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "printf 'fake: demo\\n\\n.modulerc.lua\\n\\047quoted\\n'\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            out = Path(tmp) / "share"
+            cp = subprocess.run(
+                ["python3", str(TOOL), "--out", str(out), "--tool", f"fake::{fake}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            man = (out / "man" / "fake.1").read_text(encoding="utf-8")
+            self.assertIn(r"\&.modulerc.lua", man)
+            self.assertIn(r"\&'quoted", man)
+
 
 if __name__ == "__main__":
     unittest.main()

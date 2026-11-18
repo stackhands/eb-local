@@ -78,7 +78,10 @@ def gather_words(tool: Tool) -> list[str]:
 
 
 def esc_roff(text: str) -> str:
-    return text.replace('\\', r'\\').replace('-', r'\-')
+    out = text.replace('\\', r'\\').replace('-', r'\-')
+    if out.startswith(('.', "'")):
+        out = r'\&' + out
+    return out
 
 
 def write_tool_assets(tool: Tool, out_dir: pathlib.Path) -> None:
