@@ -3840,7 +3840,8 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         }
     }
     var found: Found = .{};
-    for (modules) |m| {
+    for (modules, 0..) |m, idx| {
+        if (listed(modules[0..idx], m)) continue;
         var parts = std.mem.splitScalar(u8, m, '/');
         const name = parts.next().?;
         const ver = parts.next() orelse die("uninstall needs NAME/VERSION; '{s}' has no version", .{m});
