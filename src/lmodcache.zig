@@ -148,6 +148,11 @@ fn lessThanStr(_: void, x: []const u8, y: []const u8) bool {
     return std.mem.lessThan(u8, x, y);
 }
 
+fn validEessiVersion(v: []const u8) bool {
+    if (v.len == 0 or std.mem.eql(u8, v, ".") or std.mem.eql(u8, v, "..")) return false;
+    return std.mem.indexOfAny(u8, v, "/\\\x00") == null;
+}
+
 fn softwareRoots(a: std.mem.Allocator, prefix: []const u8, version: []const u8) ![]const []const u8 {
     const versions = try std.fs.path.join(a, &.{ prefix, "versions" });
     defer a.free(versions);
@@ -293,6 +298,10 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         fail("{s} does not point to an existing directory", .{opts.prefix});
         return 2;
     }
+    if (opts.eessi_version.len > 0 and !validEessiVersion(opts.eessi_version)) {
+        fail("--eessi-version '{s}' must be a single version directory name", .{opts.eessi_version});
+        return 2;
+    }
     const targets = discoverTargets(a, opts) catch |err| {
         fail("cannot walk {s}: {s}", .{ opts.prefix, @errorName(err) });
         return 1;
@@ -416,6 +425,7 @@ fn readInventory(
 ) VerifyInventoryError![]const []const u8 {
     var child_env = try env.clone(a);
     defer child_env.deinit();
+    for ([_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" }) |name| _ = child_env.swapRemove(name);
     try child_env.put("LMOD_RC", rc_path);
     try child_env.put("MODULEPATH", modulepath);
     if (ignore_cache) {
@@ -656,11 +666,24 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
-    const stamp = std.Io.Dir.createFileAbsolute(io, opts.timestamp, .{}) catch |err| {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const zp = sys.z(&zb, opts.timestamp) catch |err| {
         fail("cannot write {s}: {s}", .{ opts.timestamp, @errorName(err) });
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
+    const stamp_fd: sys.fd_t = @intCast(sys.call(linux.openat, .{
+        linux.AT.FDCWD,
+        zp.ptr,
+        linux.O{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true },
+        @as(linux.mode_t, 0o644),
+    }) catch |err| {
+        const detail = if (err == error.SymLink or err == error.SymLinkLoop) "symlink is not followed" else @errorName(err);
+        fail("cannot write {s}: {s}", .{ opts.timestamp, detail });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
+        return 1;
+    });
+    const stamp: std.Io.File = .{ .handle = stamp_fd, .flags = .{ .nonblocking = false } };
     defer stamp.close(io);
     stamp.setTimestamps(io, .{
         .access_timestamp = .{ .new = olderThan(stat.mtime) },

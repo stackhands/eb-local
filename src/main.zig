@@ -793,9 +793,9 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
     }
     const dir = rpath.directory(a, c.env, found) catch |e| switch (e) {
         error.NoCacheDir => die("rpath-wrappers needs an absolute XDG_CACHE_HOME or HOME", .{}),
-        else => die("cannot work out the wrapper directory ({s})", .{@errorName(e)}),
+        else => die("cannot work out the wrapper directory ({s})", .{storage.describeError(e)}),
     };
-    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, @errorName(e) });
+    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, storage.describeError(e) });
     const names = std.mem.join(a, " ", found) catch oom();
     if (only_unwrapped) {
         warn("the build environment does not wrap {s};", .{names});
@@ -846,11 +846,10 @@ const Check = struct {
     }
 
     fn isAudited(k: *Check, a: Allocator, path: []const u8) bool {
-        return k.recursive and k.audited.contains(canonicalKey(a, path));
+        return k.audited.contains(canonicalKey(a, path));
     }
 
     fn markAudited(k: *Check, a: Allocator, path: []const u8) void {
-        if (!k.recursive) return;
         k.audited.put(a, canonicalKey(a, path), {}) catch oom();
     }
 
@@ -1006,7 +1005,11 @@ fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
 /// either way.
 fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool) void {
     const a = c.a;
-    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const target = if (raw_target) |rt| blk: {
+        const trimmed = std.mem.trimEnd(u8, rt, "/");
+        break :blk if (trimmed.len > 0) trimmed else rt;
+    } else null;
     const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
     const machine = elfcheck.machineName(elf.machine);
     if (k.json) k.beginFile(a, path, machine);
@@ -1066,11 +1069,17 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
 
     for (elf.needed) |n| {
         if (std.mem.indexOfScalar(u8, n, '/') != null) {
-            if (!quiet) say("  needs    {s}", .{n});
-            if (!isFile(n)) {
+            const needed_path = elfcheck.expandOrigin(a, n, origin) catch oom();
+            if (!quiet) {
+                if (std.mem.eql(u8, needed_path, n))
+                    say("  needs    {s}", .{n})
+                else
+                    say("  needs    {s} => {s}", .{ n, needed_path });
+            }
+            if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{n});
-            } else k.enqueue(a, n);
+                k.problem(a, "{s} does not exist", .{needed_path});
+            } else k.enqueue(a, needed_path);
             continue;
         }
         // The job may run without this shell's LD_LIBRARY_PATH, so the
@@ -1138,6 +1147,7 @@ fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursiv
     var unreadable = false;
     var elfs: usize = 0;
     for (files) |f| {
+        if (k.isAudited(c.a, f)) continue;
         if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
     }
     drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
@@ -1244,7 +1254,11 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
                 findInstalls(c, versions, name, ver, null, &found, 0);
                 if (found.installs.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
             }
-            roots.appendSlice(a, found.installs.items) catch oom();
+            for (found.installs.items) |dir| {
+                for (roots.items) |seen| {
+                    if (std.mem.eql(u8, seen, dir)) break;
+                } else roots.append(a, dir) catch oom();
+            }
         },
     }
     var k: Check = .{ .json = json, .recursive = recursive };
@@ -1615,6 +1629,12 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         cli.put(1, text);
         return 0;
     }
+    if (fsx.statAt(fsx.cwd, target, false)) |st| {
+        if (st.isDir()) {
+            const clean = std.mem.trimEnd(u8, target, "/");
+            die("{s} is a directory; pass a file path such as {s}/config.toml", .{ target, if (clean.len > 0) clean else "" });
+        }
+    } else |_| {}
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
@@ -2617,15 +2637,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
         common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
-    common.atomic.makedirs(d.sources) catch |e| die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
-    common.atomic.makedirs(d.logs) catch |e| die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
-    if (values.len > 0) {
-        // Logs may hold a secret until they are cleaned after the build.
+    common.atomic.makedirs(d.sources) catch |e| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
+    };
+    common.atomic.makedirs(d.logs) catch |e| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
+    };
+    {
         var zb: [sys.path_max:0]u8 = undefined;
-        const zl = sys.z(&zb, d.logs) catch |e| die("cannot use {s} ({s})", .{ d.logs, @errorName(e) });
-        const ch_err = linux.errno(linux.fchmodat(linux.AT.FDCWD, zl.ptr, 0o700));
-        if (ch_err != .SUCCESS)
-            die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, sys.describeErrno(ch_err) });
+        const zl = sys.z(&zb, d.logs) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
+        };
+        _ = sys.call(linux.faccessat, .{ linux.AT.FDCWD, zl.ptr, linux.W_OK | linux.X_OK, 0 }) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
+        };
+        if (values.len > 0) {
+            // Logs may hold a secret until they are cleaned after the build.
+            _ = sys.call(linux.fchmodat, .{ linux.AT.FDCWD, zl.ptr, @as(linux.mode_t, 0o700) }) catch |e| {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, storage.describeError(e) });
+            };
+        }
     }
     const started: i64 = nowSecs();
 
@@ -2700,10 +2736,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
-        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check the logs for secrets ({s})", .{@errorName(e)});
+        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
         // EasyBuild keeps a copy of its log in each installation's easybuild/.
         const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check the installation logs for secrets ({s})", .{@errorName(e)});
+        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ versions, storage.describeError(e) });
         for (report.too_deep.items) |f| warn("{s} is too deep to check for secret values; inspect it before sharing", .{f});
         if (report.files > 0) say("eb-local: removed secret values from {d} log file(s)", .{report.files});
         for (report.too_large.items) |f| warn("{s} is too large to check for secret values; inspect it before sharing", .{f});
@@ -2877,7 +2913,11 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     std.mem.sort(Listed, rows.items, {}, listedLess);
 
     // This node's target, when EESSI is loaded.
-    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_here = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const here_target = if (raw_here) |ht| blk: {
+        const trimmed = std.mem.trimEnd(u8, ht, "/");
+        break :blk if (trimmed.len > 0) trimmed else ht;
+    } else null;
     const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
     var here: ?usize = null;
     if (here_target) |ht| for (trees.items, 0..) |t, ti| {
@@ -3497,9 +3537,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         const mp = c.env.get("MODULEPATH") orelse "";
         var seen = false;
         var it = std.mem.splitScalar(u8, mp, ':');
-        while (it.next()) |d| if (storage.under(d, p.prefix)) {
-            seen = true;
-        };
+        while (it.next()) |d| {
+            if (d.len == 0) continue;
+            const resolved = storage.canonical(a, d, c.cwd) catch d;
+            if (storage.under(resolved, p.prefix)) {
+                seen = true;
+                break;
+            }
+        }
         if (seen) note(a, &out, lines_ptr, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, lines_ptr, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
     } else |_| {}
     if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
@@ -3639,7 +3684,9 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
                 for (all) |k| known.append(a, k.name) catch oom();
                 die("--on {s}: no such node type; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
             };
-            chosen.append(a, t) catch oom();
+            for (chosen.items) |already| {
+                if (std.mem.eql(u8, already.name, t.name)) break;
+            } else chosen.append(a, t) catch oom();
         }
     }
     const p = place(c, s);
@@ -3851,10 +3898,13 @@ fn loadsAny(text: []const u8, wanted: []const []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        for ([_][]const u8{ "depends_on(\"", "load(\"" }) |call| {
+        for ([_][]const u8{ "depends_on(", "load(" }) |call| {
             if (!std.mem.startsWith(u8, line, call)) continue;
-            const rest = line[call.len..];
-            const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+            const after = line[call.len..];
+            if (after.len < 2 or (after[0] != '"' and after[0] != '\'')) continue;
+            const quote = after[0];
+            const rest = after[1..];
+            const end = std.mem.indexOfScalar(u8, rest, quote) orelse continue;
             if (listed(wanted, rest[0..end])) return true;
         }
     }
@@ -4465,6 +4515,8 @@ pub fn main(init: std.process.Init) u8 {
                     submit.on = joined(x, "--on").?;
                 } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
                     submit.print = true;
+                } else if (rest.items.len == 0 and x.len > 0 and x[0] == '-') {
+                    die("submit does not know '{s}'", .{x});
                 } else rest.append(a, x) catch oom();
             },
             .list => {

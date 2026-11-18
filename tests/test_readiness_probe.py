@@ -117,6 +117,36 @@ class ReadinessProbeTests(unittest.TestCase):
         self.assertIn("mounted with cvmfs", run.stdout)
         self.assertNotIn("autofs", run.stdout)
 
+    def test_symlinked_prefix_and_repo_match_real_modulepath(self):
+        sym_local = self.root / "local-link"
+        sym_repo = self.root / "eessi-link"
+        sym_local.symlink_to(self.local)
+        sym_repo.symlink_to(self.repo)
+        self.mountinfo.write_text(
+            "81 1 0:81 / {} rw,relatime - cvmfs source rw\n".format(self.repo)
+        )
+        run = subprocess.run(
+            [
+                str(PROBE),
+                "--repo",
+                str(sym_repo),
+                "--prefix",
+                str(sym_local),
+                "--mountinfo",
+                str(self.mountinfo),
+            ],
+            env=dict(
+                os.environ,
+                MODULEPATH="{}:{}".format(self.local_modules, self.upstream_modules),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("mounted with cvmfs", run.stdout)
+        self.assertIn("ok   local modules precede EESSI", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -553,10 +553,27 @@ fn quoted(a: Allocator, value: []const u8) ![]const u8 {
         '"' => try out.appendSlice(a, "\\\""),
         '\\' => try out.appendSlice(a, "\\\\"),
         '\n' => try out.appendSlice(a, "\\n"),
+        '\r' => try out.appendSlice(a, "\\r"),
+        '\t' => try out.appendSlice(a, "\\t"),
+        0...8, 11...12, 14...31, 127 => try out.print(a, "\\u{x:0>4}", .{ch}),
         else => try out.append(a, ch),
     };
     try out.append(a, '"');
     return out.toOwnedSlice(a);
+}
+
+fn appendMultilineBody(a: Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
+    for (value, 0..) |ch, idx| switch (ch) {
+        '\\' => try out.appendSlice(a, "\\\\"),
+        '\r' => try out.appendSlice(a, "\\r"),
+        0...8, 11...12, 14...31, 127 => try out.print(a, "\\u{x:0>4}", .{ch}),
+        '"' => {
+            const adj = (idx > 0 and value[idx - 1] == '"') or (idx + 1 < value.len and value[idx + 1] == '"') or idx + 1 == value.len;
+            if (adj) try out.append(a, '\\');
+            try out.append(a, '"');
+        },
+        else => try out.append(a, ch),
+    };
 }
 
 fn writeProvenance(a: Allocator, opts: MaterializeOptions, spec: Spec, base_digest: []const u8, overlay_digest: []const u8, recipe_name: []const u8) ![]u8 {
@@ -569,8 +586,8 @@ fn writeProvenance(a: Allocator, opts: MaterializeOptions, spec: Spec, base_dige
     try out.print(a, "materialized_easyconfig = {s}\n", .{try quoted(a, recipe_name)});
     if (spec.rationale.len > 0) {
         try out.appendSlice(a, "rationale = \"\"\"\n");
-        try out.appendSlice(a, spec.rationale);
-        if (spec.rationale.len == 0 or spec.rationale[spec.rationale.len - 1] != '\n') try out.append(a, '\n');
+        try appendMultilineBody(a, &out, spec.rationale);
+        if (spec.rationale[spec.rationale.len - 1] != '\n') try out.append(a, '\n');
         try out.appendSlice(a, "\"\"\"\n");
     }
     return out.toOwnedSlice(a);

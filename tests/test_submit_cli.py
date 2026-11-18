@@ -243,6 +243,14 @@ class Submit(StorageFixture):
         self.assertEqual(run.returncode, -signal.SIGTERM, run.stdout + run.stderr)
         self.assertEqual(len(self.calls()), 1)
 
+    def test_duplicate_on_node_types_submit_once(self):
+        run = self.run_tool(["submit", "--on", "cpu,cpu,gpu,cpu", "recipe.eb"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[0].startswith("-p cpu "), calls[0])
+        self.assertTrue(calls[1].startswith("-p gpu "), calls[1])
+
 
 if __name__ == "__main__":
     unittest.main()

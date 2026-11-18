@@ -208,6 +208,7 @@ fn joined(a: Allocator, parts: []const []const u8, last: []const u8) Allocator.E
 /// Whether `path` is `root` or below it, compared by whole components; both
 /// are already canonical.
 pub fn under(path: []const u8, root: []const u8) bool {
+    if (std.mem.eql(u8, root, "/")) return path.len > 0 and path[0] == '/';
     if (std.mem.eql(u8, path, root)) return true;
     return std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
 }
@@ -760,6 +761,9 @@ test "canonical paths" {
     try testing.expect(under("/a/b", "/a"));
     try testing.expect(under("/a", "/a"));
     try testing.expect(!under("/ab", "/a"));
+    try testing.expect(under("/a/b", "/"));
+    try testing.expect(under("/", "/"));
+    try testing.expect(!under("", "/"));
 }
 
 test "canonical matches readlink -m, including a link whose target is missing" {

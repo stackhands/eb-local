@@ -209,7 +209,7 @@ const Parser = struct {
                     }
                 },
                 else => {
-                    if (c < 0x20 and c != '\t') return p.fail("a control character is in a string", .{});
+                    if ((c < 0x20 and c != '\t') or c == 0x7f) return p.fail("a control character is in a string", .{});
                     try out.append(p.a, c);
                 },
             }
@@ -228,7 +228,7 @@ const Parser = struct {
                 return p.src[start .. p.pos - 1];
             }
             if (c == '\n') return p.fail("a string is not closed on its line", .{});
-            if (c < 0x20 and c != '\t') return p.fail("a control character is in a string", .{});
+            if ((c < 0x20 and c != '\t') or c == 0x7f) return p.fail("a control character is in a string", .{});
             p.pos += 1;
         }
     }
@@ -473,6 +473,8 @@ test "every refusal names its line" {
     try expectInvalid("= 1\n", 1, "cannot start a key");
     try expectInvalid("x = \"\"\"a\"\"\"\n", 1, "multi-line");
     try expectInvalid("x = \"a\x01\"\n", 1, "control character");
+    try expectInvalid("x = \"a\x7f\"\n", 1, "control character");
+    try expectInvalid("x = 'a\x7f'\n", 1, "control character");
     try expectInvalid("x = 1\x00\n", 1, "NUL");
     try expectInvalid("x = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n", 1, "nested");
 }

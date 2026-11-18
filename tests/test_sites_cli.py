@@ -383,6 +383,30 @@ class SitesCli(StorageFixture):
         self.assertEqual(flag_err.returncode, 2)
         self.assertIn("site check takes only a configuration file", flag_err.stderr)
 
+    def test_site_install_refuses_directory_target_with_helpful_message(self):
+        target_dir = self.root / "site-dir"
+        target_dir.mkdir()
+        for extra in ([], ["--force"]):
+            with self.subTest(extra=extra):
+                got = self.run_tool(
+                    [
+                        "site",
+                        "install",
+                        "slurm",
+                        "--set",
+                        "node_local_root=/local",
+                        "--set",
+                        "shared_scratch=/scratch",
+                        "--to",
+                        str(target_dir),
+                        *extra,
+                    ]
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertIn("is a directory", got.stderr)
+                self.assertIn(f"{target_dir}/config.toml", got.stderr)
+                self.assertTrue(target_dir.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

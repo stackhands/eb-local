@@ -255,6 +255,20 @@ class LmodCache(unittest.TestCase):
         self.assertEqual(got.returncode, 2, got.stderr)
         self.assertIn("not an absolute path", got.stderr)
 
+    def test_verify_ignores_caller_shell_startup_variables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache_dir, stamp = self.single_target(root)
+            env = self.verify_env(root, "GSL/2.8\n", "GSL/2.8\n")
+            startup = root / "bash_env.sh"
+            startup.write_text("echo 'injected noise on stdout'\n", encoding="utf-8")
+            env["BASH_ENV"] = str(startup)
+            env["SHELLOPTS"] = "xtrace"
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            self.assertTrue((cache_dir / "spiderT.lua").exists())
+            self.assertTrue(stamp.exists())
+
     def test_prefix_cannot_be_combined_with_single_target_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -456,6 +470,52 @@ class LmodCache(unittest.TestCase):
             self.assertIn("symlink", got_sym.stderr)
             self.assertTrue(link.is_symlink())
             self.assertEqual(target.read_text(), "outside\n")
+
+    def test_eessi_version_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            (prefix / "versions").mkdir(parents=True)
+            escaped = root / "escape" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+            (escaped / "modules" / "all").mkdir(parents=True)
+            log = root / "calls.log"
+            updater = root / "update_lmod_system_cache_files"
+            updater.write_text(UPDATE)
+            updater.chmod(updater.stat().st_mode | stat.S_IEXEC)
+            env = {**os.environ, "EB_LOCAL_UPDATE_LOG": str(log)}
+
+            for bad in ("../../escape", "2026.06/extra", ".", ".."):
+                with self.subTest(eessi_version=bad):
+                    got = run(
+                        [
+                            "--prefix",
+                            str(prefix),
+                            "--eessi-version",
+                            bad,
+                            "--update-cmd",
+                            str(updater),
+                        ],
+                        env=env,
+                    )
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertIn("--eessi-version", got.stderr)
+                    self.assertFalse(log.exists())
+
+    def test_timestamp_symlink_is_refused_without_clobbering_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache_dir, stamp = self.single_target(root)
+            outside = root / "outside-stamp"
+            outside.write_text("keep-me\n", encoding="utf-8")
+            stamp.symlink_to(outside)
+
+            got = run(args)
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertIn("symlink", got.stderr)
+            self.assertTrue(stamp.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep-me\n")
+            self.assertFalse((cache_dir / "spiderT.lua").exists())
 
 
 if __name__ == "__main__":
