@@ -173,6 +173,103 @@ export -f eb
             self.assertEqual(run.stderr.count("continuing unlocked"), 1)
             self.assertIn("eb-local: done.", run.stdout)
 
+    def test_clean_workspaces_skips_active_build_and_removes_killed_workspace(self):
+        import json
+
+        gate = self.root / "gate-ws"
+        d_hold = self._gated_doubles("ws", gate)
+        argv1, env1 = binary.command(self.script, ["recipe.eb"], dict(self.env, BASH_ENV=str(d_hold)))
+        other_prefix = self.root / "durable" / "other-prefix"
+        other_prefix.mkdir(parents=True)
+
+        with subprocess.Popen(argv1, env=env1, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p1:
+            try:
+                self.assertTrue(_wait_for(self.root / "started-ws"), "build did not enter eb")
+                work_dirs = list(self.job.iterdir())
+                self.assertEqual(len(work_dirs), 1)
+                active_ws = work_dirs[0]
+
+                argv_c, env_c = binary.command(
+                    self.script,
+                    ["clean", "--workspaces", "--no-logs", "--json"],
+                    dict(self.env, EB_LOCAL_PREFIX=str(other_prefix)),
+                )
+                clean_live = subprocess.run(argv_c, env=env_c, cwd=self.root, capture_output=True, text=True, timeout=5)
+                self.assertEqual(clean_live.returncode, 0, clean_live.stdout + clean_live.stderr)
+                doc_live = json.loads(clean_live.stdout)
+                self.assertEqual(doc_live["removed_workspaces"], 0, doc_live)
+                self.assertTrue(active_ws.is_dir(), "clean deleted an active build workspace")
+
+                p1.kill()
+                p1.wait(timeout=5)
+            finally:
+                if p1.poll() is None:
+                    p1.kill()
+                    p1.wait()
+
+        argv_c2, env_c2 = binary.command(
+            self.script,
+            ["clean", "--workspaces", "--no-logs", "--json"],
+            dict(self.env),
+        )
+        clean_dead = subprocess.run(argv_c2, env=env_c2, cwd=self.root, capture_output=True, text=True, timeout=5)
+        self.assertEqual(clean_dead.returncode, 0, clean_dead.stdout + clean_dead.stderr)
+        doc_dead = json.loads(clean_dead.stdout)
+        self.assertEqual(doc_dead["removed_workspaces"], 1, doc_dead)
+        self.assertEqual(list(self.job.iterdir()), [])
+
+    def test_clean_sources_waits_for_running_build_on_same_prefix(self):
+        gate = self.root / "gate-src"
+        eb_src = rf'''
+eb() {{
+    python3 - "{gate}" "{self.root}" <<'PY'
+import os, pathlib, sys, time
+gate, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+src = pathlib.Path(os.environ["EASYBUILD_SOURCEPATH"]) / "pkg.tar.gz"
+src.write_text("tarball\n")
+(root / "started-src").write_text("1")
+deadline = time.monotonic() + 10.0
+while not gate.exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+if not gate.exists() or not src.exists():
+    sys.exit(7)
+PY
+}}
+export -f eb
+'''
+        doubles = self.root / "doubles-src.sh"
+        doubles.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_src)
+        argv_b, env_b = binary.command(self.script, ["recipe.eb"], dict(self.env, BASH_ENV=str(doubles)))
+        argv_c, env_c = binary.command(
+            self.script,
+            ["clean", "--sources", "--no-logs", "--delete"],
+            dict(self.env, SLURM_JOB_ID=""),
+        )
+
+        with subprocess.Popen(argv_b, env=env_b, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as pb:
+            try:
+                self.assertTrue(_wait_for(self.root / "started-src"))
+                with subprocess.Popen(argv_c, env=env_c, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as pc:
+                    try:
+                        time.sleep(0.35)
+                        self.assertIsNone(pc.poll(), "clean --sources ran while build held prefix lock")
+                        self.assertTrue((self.prefix / ".eb-local" / "sources" / "pkg.tar.gz").exists())
+                        gate.write_text("go\n")
+                        out_b, err_b = pb.communicate(timeout=10)
+                        out_c, err_c = pc.communicate(timeout=10)
+                    finally:
+                        if pc.poll() is None:
+                            pc.kill()
+                            pc.wait()
+            finally:
+                if pb.poll() is None:
+                    pb.kill()
+                    pb.wait()
+
+        self.assertEqual(pb.returncode, 0, out_b + err_b)
+        self.assertEqual(pc.returncode, 0, out_c + err_c)
+        self.assertFalse((self.prefix / ".eb-local" / "sources" / "pkg.tar.gz").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

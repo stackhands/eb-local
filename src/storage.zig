@@ -650,6 +650,25 @@ pub fn releaseLock(lock: *?sys.fd_t) void {
     sys.close(fd);
 }
 
+/// True when `path` is absent, unlocked, or on a filesystem without `flock`.
+pub fn tryLockFree(path: []const u8) bool {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .RDWR,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0) catch |e| switch (e) {
+        error.NotFound => return true,
+        else => return false,
+    };
+    defer sys.close(fd);
+    common.state.lockExclusive(fd, 0) catch |e| switch (e) {
+        error.TimedOut => return false,
+        else => |se| return flockUnsupported(se),
+    };
+    _ = linux.flock(fd, std.posix.LOCK.UN);
+    return true;
+}
+
 // ---- tests ----------------------------------------------------------------
 
 const testing = std.testing;
