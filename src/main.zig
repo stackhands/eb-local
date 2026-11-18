@@ -2735,9 +2735,21 @@ fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
     if (filters.len == 0) return true;
     for (filters) |f| {
         if (std.mem.eql(u8, module, f)) return true;
-        if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') return true;
+        if (std.mem.endsWith(u8, f, "/")) {
+            if (f.len > 1 and std.mem.startsWith(u8, module, f)) return true;
+        } else if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') {
+            return true;
+        }
     }
     return false;
+}
+
+test "matchesFilter matches NAME, NAME/, and NAME/VERSION" {
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo"}));
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo/"}));
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo/1.0"}));
+    try std.testing.expect(!matchesFilter("demo2/1.0", &.{"demo/"}));
+    try std.testing.expect(!matchesFilter("demo/1.0", &.{"/"}));
 }
 
 const ListTargetJson = struct { label: []const u8, here: bool };

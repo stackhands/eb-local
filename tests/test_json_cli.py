@@ -74,6 +74,12 @@ class JsonCli(StorageFixture):
         self.assertFalse(filtered["empty"])
         self.assertEqual([m["name"] for m in filtered["modules"]], ["demo/1.0"])
 
+        slash_filtered = self.run_json(["list", "--json", "demo/"], SLURM_JOB_ID="")
+        validate(slash_filtered, load_schema("list.schema.json"))
+        self.assertEqual(slash_filtered["filters"], ["demo/"])
+        self.assertFalse(slash_filtered["empty"])
+        self.assertEqual([m["name"] for m in slash_filtered["modules"]], ["demo/1.0"])
+
     def test_doctor_json_matches_schema(self):
         doc = self.run_json(["doctor", "--json"], allow_fail=True, SLURM_JOB_ID="")
         validate(doc, load_schema("doctor.schema.json"))
