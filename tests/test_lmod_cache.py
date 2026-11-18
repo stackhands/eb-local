@@ -334,6 +334,54 @@ class LmodCache(unittest.TestCase):
             self.assertIn("accel/nvidia/cc90/modules/all", lines[0])
             self.assertIn(f"-d {cpu}/.lmod/cache", lines[0])
 
+    def test_timestamp_failure_restores_previous_cache_and_removes_created_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spider = root / "spider"
+            spider.write_text(SPIDER)
+            spider.chmod(spider.stat().st_mode | stat.S_IEXEC)
+            modules = root / "modules"
+            modules.mkdir()
+
+            new_cache = root / "missing" / "cache"
+            bad_stamp = root / "no-such-dir" / "timestamp"
+            got_new = run(
+                [
+                    "--modulepath",
+                    str(modules),
+                    "--cache-dir",
+                    str(new_cache),
+                    "--timestamp",
+                    str(bad_stamp),
+                    "--spider",
+                    str(spider),
+                ]
+            )
+            self.assertEqual(got_new.returncode, 1, got_new.stdout + got_new.stderr)
+            self.assertFalse(new_cache.parent.exists())
+
+            existing_cache = root / "existing-cache"
+            existing_cache.mkdir()
+            previous = existing_cache / "spiderT.lua"
+            previous.write_text("previous\n")
+            stamp_dir = root / "stamp-is-dir"
+            stamp_dir.mkdir()
+            got_existing = run(
+                [
+                    "--modulepath",
+                    str(modules),
+                    "--cache-dir",
+                    str(existing_cache),
+                    "--timestamp",
+                    str(stamp_dir),
+                    "--spider",
+                    str(spider),
+                ]
+            )
+            self.assertEqual(got_existing.returncode, 1, got_existing.stdout + got_existing.stderr)
+            self.assertEqual(previous.read_text(), "previous\n")
+            self.assertEqual(sorted(p.name for p in existing_cache.iterdir()), ["spiderT.lua"])
+
 
 if __name__ == "__main__":
     unittest.main()
