@@ -197,6 +197,65 @@ class Hardening(StorageFixture):
         self.assertIn("tok-3141-secret", bz2.decompress(path.read_bytes()).decode())
         self.assertIn("removed secret values from 2 log file(s)", run.stdout)
 
+    def test_unreadable_log_subdir_is_reported_while_sibling_logs_still_redact(self):
+        for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
+            self.env.pop(name, None)
+        token = self.root / "token"
+        token.write_text("tok-3141-secret\n")
+        token.chmod(0o600)
+        site = self.root / "site.toml"
+        site.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\n'
+            f'[secrets]\nSOURCE_TOKEN = "file:{token}"\n'
+        )
+        site.chmod(0o600)
+
+        # Raw-byte default lock on a clean build with secrets.
+        with open(self.root / "doubles.sh", "a") as handle:
+            handle.write(EB_ECHO)
+        clean_argv, clean_env = binary.command(self.script, ["--config", str(site), "recipe.eb"], dict(self.env))
+        clean_raw = subprocess.run(clean_argv, env=clean_env, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(clean_raw.returncode, 0, clean_raw.stderr)
+        self.assertEqual(clean_raw.stderr, b"")
+        self.assertIn(b"eb-local: removed secret values from 2 log file(s)\n", clean_raw.stdout)
+
+        # Build where one subdirectory inside logs is unreadable (0o000) while sibling logs are writable.
+        locked_eb = r'''
+eb() {
+    python3 - "$@" <<'PY'
+import os
+v = os.environ["SOURCE_TOKEN"]
+logs = os.environ["EASYBUILD_TMP_LOGDIR"]
+locked = os.path.join(logs, "locked-sub")
+os.makedirs(locked, exist_ok=True)
+open(os.path.join(locked, "hidden.log"), "w").write(f"hidden {v}\n")
+os.chmod(locked, 0o000)
+open(os.path.join(logs, "sibling.log"), "w").write(f"sibling {v}\n")
+PY
+}
+export -f eb
+'''
+        doubles_locked = self.root / "doubles-locked.sh"
+        doubles_locked.write_text((self.root / "doubles.sh").read_text() + "\n" + locked_eb)
+        argv, env = binary.command(
+            self.script,
+            ["--config", str(site), "recipe.eb"],
+            dict(self.env, BASH_ENV=str(doubles_locked)),
+        )
+        locked_dir = self.prefix / ".eb-local" / "logs" / "locked-sub"
+        try:
+            run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        finally:
+            if locked_dir.exists():
+                locked_dir.chmod(0o700)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"cannot check {locked_dir} for secret values", run.stderr)
+        self.assertIn("Permission denied", run.stderr)
+        self.assertIn("inspect it before sharing", run.stderr)
+        sibling = (self.prefix / ".eb-local" / "logs" / "sibling.log").read_text()
+        self.assertNotIn("tok-3141-secret", sibling)
+        self.assertIn("<secret SOURCE_TOKEN removed by eb-local>", sibling)
+
 
 if __name__ == "__main__":
     unittest.main()
