@@ -1,6 +1,7 @@
 //! Declarative site overlays for upstream easyconfigs: parameter replacements,
 //! patch additions, dependency variants, keyed by the base file digest.
 const std = @import("std");
+const common = @import("zig_common");
 const toml = @import("toml.zig");
 const Allocator = std.mem.Allocator;
 
@@ -93,6 +94,19 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
         d.message = std.fmt.allocPrint(a, "{s}", .{td.message}) catch return error.OutOfMemory;
         return error.Invalid;
     };
+    for (root.entries.items) |*e| {
+        if (!std.mem.eql(u8, e.key, "overlay_version") and
+            !std.mem.eql(u8, e.key, "base_easyconfig") and
+            !std.mem.eql(u8, e.key, "base_digest") and
+            !std.mem.eql(u8, e.key, "rationale") and
+            !std.mem.eql(u8, e.key, "replace") and
+            !std.mem.eql(u8, e.key, "patches") and
+            !std.mem.eql(u8, e.key, "dependencies"))
+        {
+            d.line = e.line;
+            return fail(a, d, "unknown key {s}", .{e.key});
+        }
+    }
     const digest = (try tableString(a, root, "base_digest", d)) orelse return fail(a, d, "base_digest is required", .{});
     if (digest.len != 64) return fail(a, d, "base_digest must be a SHA-256 hex digest (64 characters)", .{});
     for (digest) |ch| if (!std.ascii.isHex(ch)) return fail(a, d, "base_digest must be a SHA-256 hex digest", .{});
@@ -121,6 +135,12 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     };
     if (root.get("dependencies")) |e| switch (e.value) {
         .table => |deps| {
+            for (deps.entries.items) |*de| {
+                if (!std.mem.eql(u8, de.key, "add") and !std.mem.eql(u8, de.key, "replace")) {
+                    d.line = de.line;
+                    return fail(a, d, "unknown key dependencies.{s}", .{de.key});
+                }
+            }
             if (deps.get("add")) |add| switch (add.value) {
                 .table => |t| try walkDependencies(a, t, "add", d, &dependencies),
                 else => return fail(a, d, "[dependencies.add] must be a table", .{}),
@@ -158,19 +178,94 @@ fn lineSetsParameter(line: []const u8, name: []const u8) bool {
     return std.mem.startsWith(u8, rest, "=");
 }
 
+const PyLineState = struct {
+    triple_quote: ?u8 = null,
+    depth: usize = 0,
+
+    fn isTopLevel(self: PyLineState) bool {
+        return self.triple_quote == null and self.depth == 0;
+    }
+
+    fn advanceLine(self: *PyLineState, line: []const u8) void {
+        var i: usize = 0;
+        while (i < line.len) {
+            if (self.triple_quote) |tq| {
+                if (line[i] == '\\') {
+                    i += @min(2, line.len - i);
+                    continue;
+                }
+                if (i + 2 < line.len and line[i] == tq and line[i + 1] == tq and line[i + 2] == tq) {
+                    self.triple_quote = null;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            const ch = line[i];
+            if (ch == '#') break;
+            if (ch == '\'' or ch == '"') {
+                if (i + 2 < line.len and line[i + 1] == ch and line[i + 2] == ch) {
+                    self.triple_quote = ch;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                while (i < line.len) {
+                    if (line[i] == '\\') {
+                        i += @min(2, line.len - i);
+                        continue;
+                    }
+                    if (line[i] == ch) {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if (ch == '(' or ch == '[' or ch == '{') {
+                self.depth += 1;
+            } else if ((ch == ')' or ch == ']' or ch == '}') and self.depth > 0) {
+                self.depth -= 1;
+            }
+            i += 1;
+        }
+    }
+};
+
+fn endsWithBackslash(line: []const u8) bool {
+    const trimmed = std.mem.trimEnd(u8, line, "\r");
+    var bs: usize = 0;
+    var i = trimmed.len;
+    while (i > 0 and trimmed[i - 1] == '\\') : (i -= 1) bs += 1;
+    return bs % 2 == 1;
+}
+
 fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var replaced = false;
+    var state: PyLineState = .{};
     while (lines.next()) |line| {
-        if (!replaced and lineSetsParameter(line, param.name)) {
-            const trimmed = trimLine(line);
-            const indent_len = line.len - trimmed.len;
+        if (!replaced and state.isTopLevel() and lineSetsParameter(line, param.name)) {
+            var orig_state: PyLineState = .{};
+            orig_state.advanceLine(line);
+            var continued = orig_state.isTopLevel() and endsWithBackslash(line);
+            while (!orig_state.isTopLevel() or continued) {
+                const cont = lines.next() orelse break;
+                orig_state.advanceLine(cont);
+                continued = orig_state.isTopLevel() and endsWithBackslash(cont);
+            }
+            const leading = std.mem.trimStart(u8, line, " \t");
+            const indent_len = line.len - leading.len;
             const nl = try std.fmt.allocPrint(a, "{s}{s} = {s}", .{ line[0..indent_len], param.name, param.value });
             try out.appendSlice(a, nl);
             replaced = true;
+            state.advanceLine(nl);
         } else {
             try out.appendSlice(a, line);
+            state.advanceLine(line);
         }
         if (lines.peek() != null) try out.append(a, '\n');
     }
@@ -180,18 +275,21 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
 
 fn findArrayStart(text: []const u8, key: []const u8) ?usize {
     var pos: usize = 0;
+    var state: PyLineState = .{};
     while (pos < text.len) {
         const rest = text[pos..];
         const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
         const line = rest[0..line_end];
-        if (lineSetsParameter(line, key)) {
+        if (state.isTopLevel() and lineSetsParameter(line, key)) {
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+                state.advanceLine(line);
                 pos += line_end + 1;
                 continue;
             };
             const after = std.mem.trimStart(u8, line[eq + 1 ..], " \t");
             if (std.mem.startsWith(u8, after, "[")) return pos + eq + 1 + (line[eq + 1 ..].len - after.len);
         }
+        state.advanceLine(line);
         pos += line_end + 1;
     }
     return null;
@@ -200,15 +298,52 @@ fn findArrayStart(text: []const u8, key: []const u8) ?usize {
 fn findMatchingBracket(text: []const u8, open: usize) ?usize {
     var depth: i32 = 0;
     var i = open;
-    while (i < text.len) : (i += 1) {
-        switch (text[i]) {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if (depth == 0) return i;
-            },
-            else => {},
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == '#') {
+            i += 1;
+            while (i < text.len and text[i] != '\n') : (i += 1) {}
+            continue;
         }
+        if (ch == '\'' or ch == '"') {
+            if (i + 2 < text.len and text[i + 1] == ch and text[i + 2] == ch) {
+                const quote = ch;
+                i += 3;
+                while (i < text.len) {
+                    if (text[i] == '\\') {
+                        i += @min(2, text.len - i);
+                        continue;
+                    }
+                    if (i + 2 < text.len and text[i] == quote and text[i + 1] == quote and text[i + 2] == quote) {
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            const quote = ch;
+            i += 1;
+            while (i < text.len) {
+                if (text[i] == '\\') {
+                    i += @min(2, text.len - i);
+                    continue;
+                }
+                if (text[i] == quote or text[i] == '\n') {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if (ch == '[') {
+            depth += 1;
+        } else if (ch == ']') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+        i += 1;
     }
     return null;
 }
@@ -220,7 +355,20 @@ fn appendToArray(a: Allocator, text: []const u8, key: []const u8, entry: []const
         var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(a, text[0..close]);
         const inner = std.mem.trim(u8, text[start + 1 .. close], " \t\n\r");
-        if (inner.len > 0) try out.appendSlice(a, ",\n    ");
+        if (inner.len > 0) {
+            if (inner[inner.len - 1] == ',') {
+                if (close > 0 and text[close - 1] == '\n') {
+                    try out.appendSlice(a, "    ");
+                } else {
+                    try out.appendSlice(a, "\n    ");
+                }
+                try out.appendSlice(a, entry);
+                try out.appendSlice(a, ",\n");
+                try out.appendSlice(a, text[close..]);
+                return out.toOwnedSlice(a);
+            }
+            try out.appendSlice(a, ",\n    ");
+        }
         try out.appendSlice(a, entry);
         try out.appendSlice(a, text[close..]);
         return out.toOwnedSlice(a);
@@ -237,18 +385,140 @@ fn patchEntry(a: Allocator, p: Patch) ![]const u8 {
     return std.fmt.allocPrint(a, "('{s}', '{s}')", .{ p.name, p.file });
 }
 
+fn skipPyString(text: []const u8, start: usize) usize {
+    const quote = text[start];
+    if (start + 2 < text.len and text[start + 1] == quote and text[start + 2] == quote) {
+        var i = start + 3;
+        while (i < text.len) {
+            if (text[i] == '\\') {
+                i += @min(2, text.len - i);
+                continue;
+            }
+            if (i + 2 < text.len and text[i] == quote and text[i + 1] == quote and text[i + 2] == quote) {
+                return i + 3;
+            }
+            i += 1;
+        }
+        return text.len;
+    }
+    var i = start + 1;
+    while (i < text.len) {
+        if (text[i] == '\\') {
+            i += @min(2, text.len - i);
+            continue;
+        }
+        if (text[i] == quote or text[i] == '\n') return i + 1;
+        i += 1;
+    }
+    return text.len;
+}
+
+fn skipWsAndComments(text: []const u8, start: usize, limit: usize) usize {
+    var i = start;
+    while (i < limit) {
+        const ch = text[i];
+        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+            i += 1;
+        } else if (ch == '#') {
+            i += 1;
+            while (i < limit and text[i] != '\n') : (i += 1) {}
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+fn tupleStartsWithDepName(text: []const u8, open_paren: usize, limit: usize, name: []const u8) bool {
+    var i = skipWsAndComments(text, open_paren + 1, limit);
+    if (i >= limit) return false;
+    const quote = text[i];
+    if (quote != '\'' and quote != '"') return false;
+    if (i + 2 < limit and text[i + 1] == quote and text[i + 2] == quote) return false;
+    i += 1;
+    if (i + name.len >= limit) return false;
+    if (!std.mem.eql(u8, text[i .. i + name.len], name)) return false;
+    if (text[i + name.len] != quote) return false;
+    const after = skipWsAndComments(text, i + name.len + 1, limit);
+    return after < limit and text[after] == ',';
+}
+
+fn findMatchingParen(text: []const u8, open: usize, limit: usize) ?usize {
+    var depth: i32 = 0;
+    var i = open;
+    while (i < limit) {
+        const ch = text[i];
+        if (ch == '#') {
+            i += 1;
+            while (i < limit and text[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (ch == '\'' or ch == '"') {
+            i = @min(limit, skipPyString(text, i));
+            continue;
+        }
+        if (ch == '(') {
+            depth += 1;
+        } else if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+        i += 1;
+    }
+    return null;
+}
+
 fn replaceDependency(a: Allocator, text: []const u8, dep: Dependency, d: *Diagnostic) Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    const needle = try std.fmt.allocPrint(a, "('{s}',", .{dep.name});
-    const idx = std.mem.indexOf(u8, text, needle) orelse
+    const list_start = findArrayStart(text, "dependencies") orelse
         return fail(a, d, "easyconfig has no dependency '{s}' to replace", .{dep.name});
-    const start = idx;
-    const end = std.mem.indexOfPos(u8, text, start, ")") orelse
-        return fail(a, d, "easyconfig dependency '{s}' has no closing parenthesis", .{dep.name});
-    try out.appendSlice(a, text[0..start]);
-    try out.appendSlice(a, dep.spec);
-    try out.appendSlice(a, text[end + 1 ..]);
-    return out.toOwnedSlice(a);
+    const list_close = findMatchingBracket(text, list_start);
+    const limit = list_close orelse text.len;
+
+    var i = list_start + 1;
+    var paren_depth: i32 = 0;
+    var bracket_depth: i32 = 0;
+    var brace_depth: i32 = 0;
+    while (i < limit) {
+        const ch = text[i];
+        if (ch == '#') {
+            i += 1;
+            while (i < limit and text[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (ch == '\'' or ch == '"') {
+            i = @min(limit, skipPyString(text, i));
+            continue;
+        }
+        if (ch == '(') {
+            if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and
+                tupleStartsWithDepName(text, i, limit, dep.name))
+            {
+                const end = findMatchingParen(text, i, limit) orelse
+                    return fail(a, d, "easyconfig dependency '{s}' has no closing parenthesis", .{dep.name});
+                var out: std.ArrayList(u8) = .empty;
+                try out.appendSlice(a, text[0..i]);
+                try out.appendSlice(a, dep.spec);
+                try out.appendSlice(a, text[end + 1 ..]);
+                return out.toOwnedSlice(a);
+            }
+            paren_depth += 1;
+        } else if (ch == ')') {
+            if (paren_depth > 0) paren_depth -= 1;
+        } else if (ch == '[') {
+            bracket_depth += 1;
+        } else if (ch == ']') {
+            if (bracket_depth > 0) bracket_depth -= 1;
+        } else if (ch == '{') {
+            brace_depth += 1;
+        } else if (ch == '}') {
+            if (brace_depth > 0) brace_depth -= 1;
+        }
+        i += 1;
+    }
+    if (list_close == null) {
+        return fail(a, d, "easyconfig dependencies list has no closing bracket", .{});
+    }
+    return fail(a, d, "easyconfig has no dependency '{s}' to replace", .{dep.name});
 }
 
 /// Apply `spec` to `base_text`. Refuses when the digest of `base_text` differs
@@ -299,10 +569,27 @@ fn quoted(a: Allocator, value: []const u8) ![]const u8 {
         '"' => try out.appendSlice(a, "\\\""),
         '\\' => try out.appendSlice(a, "\\\\"),
         '\n' => try out.appendSlice(a, "\\n"),
+        '\r' => try out.appendSlice(a, "\\r"),
+        '\t' => try out.appendSlice(a, "\\t"),
+        0...8, 11...12, 14...31, 127 => try out.print(a, "\\u{x:0>4}", .{ch}),
         else => try out.append(a, ch),
     };
     try out.append(a, '"');
     return out.toOwnedSlice(a);
+}
+
+fn appendMultilineBody(a: Allocator, out: *std.ArrayList(u8), value: []const u8) !void {
+    for (value, 0..) |ch, idx| switch (ch) {
+        '\\' => try out.appendSlice(a, "\\\\"),
+        '\r' => try out.appendSlice(a, "\\r"),
+        0...8, 11...12, 14...31, 127 => try out.print(a, "\\u{x:0>4}", .{ch}),
+        '"' => {
+            const adj = (idx > 0 and value[idx - 1] == '"') or (idx + 1 < value.len and value[idx + 1] == '"') or idx + 1 == value.len;
+            if (adj) try out.append(a, '\\');
+            try out.append(a, '"');
+        },
+        else => try out.append(a, ch),
+    };
 }
 
 fn writeProvenance(a: Allocator, opts: MaterializeOptions, spec: Spec, base_digest: []const u8, overlay_digest: []const u8, recipe_name: []const u8) ![]u8 {
@@ -315,8 +602,8 @@ fn writeProvenance(a: Allocator, opts: MaterializeOptions, spec: Spec, base_dige
     try out.print(a, "materialized_easyconfig = {s}\n", .{try quoted(a, recipe_name)});
     if (spec.rationale.len > 0) {
         try out.appendSlice(a, "rationale = \"\"\"\n");
-        try out.appendSlice(a, spec.rationale);
-        if (spec.rationale.len == 0 or spec.rationale[spec.rationale.len - 1] != '\n') try out.append(a, '\n');
+        try appendMultilineBody(a, &out, spec.rationale);
+        if (spec.rationale[spec.rationale.len - 1] != '\n') try out.append(a, '\n');
         try out.appendSlice(a, "\"\"\"\n");
     }
     return out.toOwnedSlice(a);
@@ -344,7 +631,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     var od: Diagnostic = .{};
     const overlay_text = cwd.readFileAlloc(io, opts.overlay_path, a, .limited(4 * 1024 * 1024)) catch |err| {
         failMsg("cannot read {s}: {s}", .{ opts.overlay_path, @errorName(err) });
-        return 1;
+        return 2;
     };
     const spec = parseSpec(a, overlay_text, &od) catch |e| switch (e) {
         error.Invalid => {
@@ -356,7 +643,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     };
     const base_text = cwd.readFileAlloc(io, opts.base_path, a, .limited(16 * 1024 * 1024)) catch |err| {
         failMsg("cannot read {s}: {s}", .{ opts.base_path, @errorName(err) });
-        return 1;
+        return 2;
     };
     const recipe = materialize(a, base_text, spec, &od) catch |e| switch (e) {
         error.DigestMismatch, error.Invalid => {
@@ -381,7 +668,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
             error.FileNotFound => null,
             else => {
                 failMsg("cannot read {s}: {s}", .{ recipe_path, @errorName(err) });
-                return 1;
+                return 2;
             },
         };
         defer if (existing_recipe) |buf| a.free(buf);
@@ -389,7 +676,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
             error.FileNotFound => null,
             else => {
                 failMsg("cannot read {s}: {s}", .{ provenance_path, @errorName(err) });
-                return 1;
+                return 2;
             },
         };
         defer if (existing_prov) |buf| a.free(buf);
@@ -413,16 +700,43 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         stdout.writeStreamingAll(io, message) catch return 1;
         return 0;
     }
-    cwd.createDirPath(io, out_dir) catch |err| {
+    const prev_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch null;
+    defer if (prev_recipe) |buf| a.free(buf);
+    var first_missing: ?[]const u8 = null;
+    {
+        var probe: []const u8 = out_dir;
+        while (probe.len > 0 and !std.mem.eql(u8, probe, ".") and !std.mem.eql(u8, probe, "/")) {
+            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
+                if (st.isDir()) break;
+                break;
+            } else |_| {}
+            first_missing = probe;
+            probe = std.fs.path.dirname(probe) orelse break;
+        }
+    }
+    common.atomic.makedirs(out_dir) catch |err| {
         failMsg("cannot create {s}: {s}", .{ out_dir, @errorName(err) });
         return 1;
     };
-    cwd.writeFile(io, .{ .sub_path = recipe_path, .data = recipe }) catch |err| {
-        failMsg("cannot write {s}: {s}", .{ recipe_path, @errorName(err) });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    common.atomic.atomicWrite(a, recipe_path, recipe, .{ .mode = 0o644 }, &why) catch |err| {
+        failMsg("cannot write {s}: {s}", .{ recipe_path, if (why.msg.len > 0) why.msg else @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
-    cwd.writeFile(io, .{ .sub_path = provenance_path, .data = provenance }) catch |err| {
-        failMsg("cannot write {s}: {s}", .{ provenance_path, @errorName(err) });
+    var why_prov: common.atomic.Why = .{};
+    defer why_prov.deinit(a);
+    common.atomic.atomicWrite(a, provenance_path, provenance, .{ .mode = 0o644 }, &why_prov) catch |err| {
+        failMsg("cannot write {s}: {s}", .{ provenance_path, if (why_prov.msg.len > 0) why_prov.msg else @errorName(err) });
+        if (prev_recipe) |data| {
+            var why_rb: common.atomic.Why = .{};
+            defer why_rb.deinit(a);
+            common.atomic.atomicWrite(a, recipe_path, data, .{ .mode = 0o644 }, &why_rb) catch {};
+        } else {
+            common.sys.unlinkat(common.fsx.cwd, recipe_path, 0) catch {};
+        }
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     const message = std.fmt.allocPrint(a, "wrote {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
@@ -540,4 +854,58 @@ test "materialize populates diagnostic on failing edits" {
         .dependencies = &.{.{ .action = "replace", .name = "zlib", .spec = "('zlib', '1.3')" }},
     }, &d4));
     try std.testing.expectEqualStrings("easyconfig dependency 'zlib' has no closing parenthesis", d4.message);
+}
+
+test "parameter replacement preserves leading indent when line has trailing spaces or CR" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "  name = 'demo'   \nversion = '1.0'\r\n";
+    const digest = try sha256Hex(a, base);
+    const spec: Spec = .{
+        .base_digest = digest,
+        .parameters = &.{
+            .{ .name = "name", .value = "'custom'" },
+            .{ .name = "version", .value = "'2.0'" },
+        },
+    };
+    var d: Diagnostic = .{};
+    const out = try materialize(a, base, spec, &d);
+    try std.testing.expectEqualStrings("  name = 'custom'\nversion = '2.0'\n", out);
+}
+
+test "appendToArray handles trailing commas without producing double commas" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "dependencies = [\n    ('zlib', '1.3'),\n]\n";
+    const digest = try sha256Hex(a, base);
+    const deps = [_]Dependency{.{ .action = "add", .name = "pkg", .spec = "('pkg', '1.0')" }};
+    const spec: Spec = .{
+        .base_digest = digest,
+        .dependencies = &deps,
+    };
+    var d: Diagnostic = .{};
+    const out = try materialize(a, base, spec, &d);
+    try std.testing.expect(std.mem.indexOf(u8, out, ",,") == null);
+    try std.testing.expectEqualStrings("dependencies = [\n    ('zlib', '1.3'),\n    ('pkg', '1.0'),\n]\n", out);
+}
+
+test "findMatchingBracket ignores brackets inside string literals and comments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n]\n";
+    const digest = try sha256Hex(a, base);
+    const patches = [_]Patch{.{ .name = "site", .file = "site.patch" }};
+    const spec: Spec = .{
+        .base_digest = digest,
+        .patches = &patches,
+    };
+    var d: Diagnostic = .{};
+    const out = try materialize(a, base, spec, &d);
+    try std.testing.expectEqualStrings(
+        "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n    ('site', 'site.patch'),\n]\n",
+        out,
+    );
 }

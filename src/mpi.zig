@@ -23,6 +23,7 @@ pub const Rank = struct {
 
 /// The compiler and the two-rank run for one transport.
 pub const Hello = struct {
+    source_error: ?[]const u8 = null,
     missing_compiler: bool = false,
     missing_launcher: bool = false,
     compile_code: u32 = 0,
@@ -141,7 +142,15 @@ pub fn runHello(
     const compiler = mpicc orelse return .{ .missing_compiler = true, .override_text = text };
     const src = try std.fs.path.join(a, &.{ work, "hello.c" });
     const bin = try std.fs.path.join(a, &.{ work, "hello" });
-    try writeFile(src, hello_source);
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    common.atomic.atomicWrite(a, src, hello_source, .{ .mode = 0o644 }, &why) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            const msg = if (why.msg.len > 0) try a.dupe(u8, why.msg) else try a.dupe(u8, common.atomic.describe(err));
+            return .{ .source_error = msg, .override_text = text };
+        },
+    };
     const compiled = run(a, compiler, &.{ compiler, "-o", bin, src }, base_envp);
     if (compiled.timed_out) return .{ .compile_timeout = true, .compile_code = compiled.code, .override_text = text };
     if (compiled.code != 0) return .{ .compile_code = compiled.code, .override_text = text };
@@ -169,12 +178,6 @@ fn envpWith(a: Allocator, base: *const std.process.Environ.Map, values: Pair) Al
     }
     try list.append(a, null);
     return @ptrCast(list.items.ptr);
-}
-
-fn writeFile(path: []const u8, text: []const u8) !void {
-    const fd = sys.openat(fsx.cwd, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch return error.OutOfMemory;
-    defer sys.close(fd);
-    sys.writeAll(fd, text) catch return error.OutOfMemory;
 }
 
 /// Ranks from lines `hello rank=R size=S cpu=C cpus=N`.
@@ -310,4 +313,39 @@ fn readAll(a: Allocator, path: []const u8) ?[]const u8 {
     const fd = sys.openat(fsx.cwd, path, .{}, 0) catch return null;
     defer sys.close(fd);
     return fsx.readAll(a, fd, 1 << 20) catch null;
+}
+
+test "an unwritable work directory or symlink at hello.c does not report OutOfMemory" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try scratch(a);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const target = try std.fs.path.join(a, &.{ root, "outside.c" });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    try common.atomic.atomicWrite(a, target, "keep\n", .{ .mode = 0o644 }, &why);
+    const src = try std.fs.path.join(a, &.{ root, "hello.c" });
+    var z_target: [sys.path_max:0]u8 = undefined;
+    var z_src: [sys.path_max:0]u8 = undefined;
+    try testing.expectEqual(
+        std.os.linux.E.SUCCESS,
+        std.os.linux.errno(std.os.linux.symlinkat((try sys.z(&z_target, target)).ptr, std.os.linux.AT.FDCWD, (try sys.z(&z_src, src)).ptr)),
+    );
+    var env = std.process.Environ.Map.init(a);
+    const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
+    const hello = try runHello(a, .ofi, "/bin/true", "/bin/true", root, &env, no_env);
+    try testing.expect(hello.source_error != null);
+    try testing.expect(!hello.ran);
+    try testing.expectEqualStrings("keep\n", readAll(a, target).?);
+
+    const ro_dir = try std.fs.path.join(a, &.{ root, "ro" });
+    try common.atomic.makedirs(ro_dir);
+    var z_ro: [sys.path_max:0]u8 = undefined;
+    const z_ro_p = try sys.z(&z_ro, ro_dir);
+    try testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z_ro_p.ptr, 0o555)));
+    defer _ = std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z_ro_p.ptr, 0o755);
+    const ro_hello = try runHello(a, .ofi, "/bin/true", "/bin/true", ro_dir, &env, no_env);
+    try testing.expect(ro_hello.source_error != null);
+    try testing.expect(!ro_hello.ran);
 }

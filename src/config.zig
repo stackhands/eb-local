@@ -431,9 +431,13 @@ const Loader = struct {
             const k = e.key;
             const from = try l.where(src, e.line, profile);
             if (std.mem.eql(u8, k, "prefix")) {
-                l.s.prefix = .{ .value = try l.string(src, e, "prefix"), .from = from };
+                const v = try l.string(src, e, "prefix");
+                if (v.len == 0) return l.fail("{s}:{d}: prefix cannot be empty", .{ src.path, e.line });
+                l.s.prefix = .{ .value = v, .from = from };
             } else if (std.mem.eql(u8, k, "project")) {
-                l.s.project = .{ .value = try l.string(src, e, "project"), .from = from };
+                const v = try l.string(src, e, "project");
+                if (v.len == 0) return l.fail("{s}:{d}: project cannot be empty", .{ src.path, e.line });
+                l.s.project = .{ .value = v, .from = from };
             } else if (std.mem.eql(u8, k, "stack")) {
                 const sub = try l.table(src, e, "stack");
                 for (sub.entries.items) |*f| {
@@ -1069,6 +1073,8 @@ test "refusals" {
     try r.one(&t, "[build]\nsecrets = \"TOKEN\"\n", .user, "build.secrets must be an array of strings");
     try r.one(&t, "[build]\nsecrets = [\"PATH\"]\n", .user, "c.toml:2: build.secrets: PATH is not a variable name a secret may set");
     try r.one(&t, "[build]\nsecrets = [\"TOKEN\"]\n", .user, "build.secrets [user c.toml:2] names TOKEN, but no secret TOKEN is defined");
+    try r.one(&t, "prefix = \"\"\n", .user, "c.toml:1: prefix cannot be empty");
+    try r.one(&t, "project = \"\"\n", .user, "c.toml:1: project cannot be empty");
     t.env.put("EB_LOCAL_STACK_MODULE", "a b") catch unreachable;
     try r.one(&t, "", .user, "EB_LOCAL_STACK_MODULE");
 }

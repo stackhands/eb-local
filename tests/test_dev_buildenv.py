@@ -229,6 +229,21 @@ class DevBuildenv(StorageFixture):
         self.assertIn(f"Library rpath: [{lib}]", dyn)
         self.assertNotIn("RUNPATH", dyn)
 
+        compat = self.root / "compat"
+        (compat / "lib").mkdir(parents=True)
+        env["EESSI_EPREFIX"] = f"{compat}/"
+        build2 = subprocess.run(
+            ["bash", "-c", run.stdout + f'gcc main.c -L{lib}// -L{compat}/lib -lfoo -o prog2 && ./prog2'],
+            env=env,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(build2.returncode, 0, build2.stdout + build2.stderr)
+        dyn2 = subprocess.run(["readelf", "-d", str(self.root / "prog2")], capture_output=True, text=True).stdout
+        self.assertIn(f"Library rpath: [{lib}]", dyn2)
+        self.assertNotIn(str(compat), dyn2)
+
 
     def test_config_env_keeps_the_choice_by_family(self):
         run = self.run_wrapper(["config", "--env"])

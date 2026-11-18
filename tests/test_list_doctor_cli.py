@@ -169,6 +169,26 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(conflict.returncode, 2)
         self.assertIn("--missing or --json", conflict.stderr)
 
+    def test_list_matches_software_subdir_with_trailing_slash(self):
+        self.two_targets()
+        missing = self.run_tool(
+            ["list", "--missing"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertEqual(missing.stdout, "pigz/2.8-GCCcore-15.2.0\n")
+
+        listing = self.run_tool(
+            ["list"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertEqual(listing.stdout.splitlines()[1].split(), ["MODULE", "zen2", "zen4*"])
+
     def test_list_of_an_empty_prefix_and_a_symlinked_tree(self):
         run = self.run_tool(["list"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -292,6 +312,16 @@ class ListAndDoctor(StorageFixture):
             self.assertIn("probe create=ok, write=ok, rename=ok, execute=failed, remove=ok", run.stdout, run.stdout + run.stderr)
             self.assertIn(f"FAIL workspace {mountpoint}: mount {mountpoint} has noexec\n", run.stdout)
             self.assertEqual(list(mountpoint.iterdir()), [])
+
+    def test_doctor_reports_an_xalt_only_preload_as_info(self):
+        xalt = "/opt/xalt/current/lib64/libxalt_init.so:"
+        run = self.run_tool(["doctor"], LD_PRELOAD=xalt)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("info LD_PRELOAD loads only XALT's libxalt_init.so", run.stdout)
+        self.assertNotIn("warn LD_PRELOAD is set", run.stdout)
+        run = self.run_tool(["doctor"], LD_PRELOAD=xalt + "/home/u/other.so")
+        self.assertIn("warn LD_PRELOAD is set", run.stdout)
+        self.assertNotIn("XALT", run.stdout)
 
     def test_doctor_names_variables_left_in_the_shell(self):
         run = self.run_tool(["doctor"], EASYBUILD_INSTALLPATH="/elsewhere", LD_LIBRARY_PATH="/host/lib",
@@ -627,6 +657,24 @@ class ListAndDoctor(StorageFixture):
         fail_strict = self.run_tool(["doctor", "--strict"], **dict(clean, SLURM_JOB_ID="bogus", LD_LIBRARY_PATH="/host/lib"))
         self.assertEqual(fail_strict.returncode, 1, fail_strict.stdout + fail_strict.stderr)
         self.assertTrue(fail_strict.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
+
+    def test_doctor_recognizes_symlinked_modulepath_under_prefix(self):
+        real_prefix = self.root / "real-prefix"
+        mod_dir = real_prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4" / "modules" / "all"
+        mod_dir.mkdir(parents=True)
+        sym_prefix = self.root / "sym-prefix"
+        sym_prefix.symlink_to(real_prefix)
+        sym_mod_dir = sym_prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4" / "modules" / "all"
+
+        run = self.run_tool(
+            ["doctor"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_PREFIX=str(real_prefix),
+            MODULEPATH=f"{self.eessi_modules}:{sym_mod_dir}",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
+        self.assertNotIn("your modules are not on MODULEPATH", run.stdout)
 
 
 if __name__ == "__main__":

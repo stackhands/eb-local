@@ -40,6 +40,7 @@ These steps run them and read what they say.
    =doctor= changes nothing, and exits 1 when a line says =FAIL= (or =warn= with =--strict=).
    With a site file, what stops a build is a =FAIL=, and what stops only =eb-local eb= is a =warn=; without one, builds cannot run, so what stops =eb-local eb= is the =FAIL=.
    Here =EESSI_PROJECT_INSTALL= would send EESSI-extend, loaded by hand or by =eb-local eb=, to a project directory that is not there; =unset EESSI_PROJECT_INSTALL LD_LIBRARY_PATH= clears both warnings.
+   A site that preloads XALT's =libxalt_init.so= for every login gets an =info= line for =LD_PRELOAD= instead of a =warn=: builds leave it out, and =--strict= does not fail on it.
 
 2. With EESSI loaded, see which CPU targets the module is built for:
 
@@ -130,11 +131,13 @@ eb-local-readiness --prefix /opt/site/eessi
 
 The repository defaults to =EESSI_CVMFS_REPO=, or =/cvmfs/software.eessi.io=.
 The prefix defaults to =EB_LOCAL_PREFIX=, =EESSI_SITE_SOFTWARE_PREFIX=, =EESSI_PROJECT_INSTALL= or =EESSI_USER_INSTALL=, in that order.
+When none of these is set and =--prefix= is omitted, the probe prints an =info= line and skips the =MODULEPATH= precedence check (exit 0 unless the repository itself is missing).
 A ready shell reports that the repository is mounted with CVMFS and that local modules precede EESSI on =MODULEPATH=.
 
-The probe exits 1 when the repository is missing, no local module directory is on =MODULEPATH=, or upstream EESSI modules occur first.
+The probe exits 1 when the repository is missing, or (with a prefix selected) no local module directory is on =MODULEPATH= or upstream EESSI modules occur first.
 It warns but exits 0 for another filesystem because a site may deliberately expose CVMFS through a bind mount.
 Use =--mountinfo FILE= to check a saved node mount table or a container's view.
+See [[file:../reference/readiness.org][Readiness probe]] for every option and exit status.
 
 * A path from outside the prefix
 

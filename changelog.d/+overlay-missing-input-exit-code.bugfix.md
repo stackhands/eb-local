@@ -1,0 +1,1 @@
+Return exit status `2` instead of `1` when `eb-local overlay materialize` cannot read `--overlay` or `--base`, avoiding collision with `--check` drift status `1` and matching `check` and `site check`.

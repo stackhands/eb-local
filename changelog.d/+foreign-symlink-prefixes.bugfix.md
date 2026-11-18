@@ -1,0 +1,1 @@
+`eb-local doctor` and `build.clear_foreign_prefixes` now resolve both paths and approved prefixes through symbolic links, keeping entries inside symlinked approved prefixes while flagging and scrubbing symlinks that point outside them.

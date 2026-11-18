@@ -196,6 +196,16 @@ class ExtendCli(unittest.TestCase):
                 self.assertIn(f"--explain goes with a recipe or with eb, not with {args[0]}", run.stderr)
         self.assertTrue(old.exists())
 
+    def test_eb_accepts_trailing_slash_in_install_variable(self):
+        mine = self.root / "mine"
+        run = self.run_tool(
+            ["eb", "x.eb"],
+            EESSI_USER_INSTALL=f"{mine}/",
+            CONTROL_INSTALLPATH=f"{mine}/versions/2026.06/software/linux/x86_64/amd/zen4",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue((self.root / "eb-ran").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
