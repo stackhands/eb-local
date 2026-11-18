@@ -2567,15 +2567,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
         common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
-    common.atomic.makedirs(d.sources) catch |e| die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
-    common.atomic.makedirs(d.logs) catch |e| die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
-    if (values.len > 0) {
-        // Logs may hold a secret until they are cleaned after the build.
+    common.atomic.makedirs(d.sources) catch |e| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
+    };
+    common.atomic.makedirs(d.logs) catch |e| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("cannot create {s} ({s})", .{ d.logs, storage.describeError(e) });
+    };
+    {
         var zb: [sys.path_max:0]u8 = undefined;
-        const zl = sys.z(&zb, d.logs) catch |e| die("cannot use {s} ({s})", .{ d.logs, @errorName(e) });
-        const ch_err = linux.errno(linux.fchmodat(linux.AT.FDCWD, zl.ptr, 0o700));
-        if (ch_err != .SUCCESS)
-            die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, sys.describeErrno(ch_err) });
+        const zl = sys.z(&zb, d.logs) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
+        };
+        _ = sys.call(linux.faccessat, .{ linux.AT.FDCWD, zl.ptr, linux.W_OK | linux.X_OK, 0 }) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
+        };
+        if (values.len > 0) {
+            // Logs may hold a secret until they are cleaned after the build.
+            _ = sys.call(linux.fchmodat, .{ linux.AT.FDCWD, zl.ptr, @as(linux.mode_t, 0o700) }) catch |e| {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("cannot make {s} private before a build with secrets ({s})", .{ d.logs, storage.describeError(e) });
+            };
+        }
     }
     const started: i64 = nowSecs();
 
