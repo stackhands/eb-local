@@ -443,6 +443,33 @@ class SitesCli(StorageFixture):
         self.assertFalse(p1.exists())
         self.assertFalse(p2.exists())
 
+    def test_site_install_refuses_live_and_dangling_symlink_targets(self):
+        real_target = self.root / "real.toml"
+        real_target.write_text("keep\n", encoding="utf-8")
+        live_link = self.root / "live-site.toml"
+        live_link.symlink_to(real_target)
+        dangling_link = self.root / "dangling-site.toml"
+        dangling_link.symlink_to(self.root / "absent.toml")
+
+        for link in (live_link, dangling_link):
+            with self.subTest(link=link):
+                got = self.run_tool(
+                    [
+                        "site",
+                        "install",
+                        "slurm",
+                        "--set",
+                        "node_local_root=/local",
+                        "--set",
+                        "shared_scratch=/scratch",
+                        "--to",
+                        str(link),
+                    ]
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertIn("is a symbolic link", got.stderr)
+                self.assertEqual(real_target.read_text(encoding="utf-8"), "keep\n")
+
 
 if __name__ == "__main__":
     unittest.main()

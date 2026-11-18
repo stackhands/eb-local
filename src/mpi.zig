@@ -185,11 +185,12 @@ pub fn parseRanks(a: Allocator, text: []const u8) Allocator.Error![]const Rank {
     var list: std.ArrayList(Rank) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
-        if (std.mem.indexOf(u8, line, "hello rank=") == null) continue;
-        const rank = field(line, "rank=") orelse continue;
-        const size = field(line, "size=") orelse continue;
-        const cpus = field(line, "cpus=") orelse continue;
-        const cpu = field(line, " cpu=") orelse continue;
+        const start = std.mem.indexOf(u8, line, "hello rank=") orelse continue;
+        const hello = line[start..];
+        const rank = field(hello, "rank=") orelse continue;
+        const size = field(hello, " size=") orelse continue;
+        const cpus = field(hello, " cpus=") orelse continue;
+        const cpu = field(hello, " cpu=") orelse continue;
         try list.append(a, .{
             .rank = std.math.cast(u32, rank) orelse continue,
             .size = std.math.cast(u32, size) orelse continue,
@@ -252,6 +253,18 @@ test "two ranks on one CPU are a shared binding" {
         .{ .rank = 1, .size = 2, .cpu = 1, .cpus = 8 },
     };
     try testing.expect(!sharedCpu(&split));
+}
+
+test "parseRanks ignores rank, size, and cpus prefixes before hello rank=" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ranks = try parseRanks(a, "[rank=9 mysize=99 ncpus=64] hello rank=0 size=2 cpu=3 cpus=8\n");
+    try testing.expectEqual(@as(usize, 1), ranks.len);
+    try testing.expectEqual(@as(u32, 0), ranks[0].rank);
+    try testing.expectEqual(@as(u32, 2), ranks[0].size);
+    try testing.expectEqual(@as(i64, 3), ranks[0].cpu);
+    try testing.expectEqual(@as(i64, 8), ranks[0].cpus);
 }
 
 test "the hello sees the transport override and the caller environment does not" {
