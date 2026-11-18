@@ -177,6 +177,14 @@ class Modulerc(unittest.TestCase):
             self.assertEqual(text, 'hide_version("Example/1.0")\n')
             self.assertNotIn("module_version", text)
 
+    def test_unreadable_existing_modulerc_exits_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".modulerc.lua").mkdir()
+            got = run(["--module-tree", tmp, "--default", "Example/2.0", "--check"])
+            self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+            self.assertEqual(got.stdout, "")
+            self.assertIn("eb-local: cannot read ", got.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

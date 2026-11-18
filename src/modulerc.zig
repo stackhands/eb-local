@@ -107,7 +107,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         error.FileNotFound => "",
         else => {
             fail("cannot read {s}: {s}", .{ path, @errorName(err) });
-            return 1;
+            return 2;
         },
     };
     const text = render(a, previous, opts) catch return 1;

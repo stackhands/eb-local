@@ -428,5 +428,25 @@ class OverlayDefaultOutput(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+class OverlayCheckUnreadableOutputs(unittest.TestCase):
+    def test_unreadable_existing_outputs_exit_two(self):
+        base_bytes = b"name = 'demo'\n"
+        overlay_text = f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+        for bad_name in ("materialized-base.eb", "provenance.toml"):
+            with self.subTest(bad_name=bad_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+                (root / bad_name).mkdir()
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", ".", "--check"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(f"eb-local: cannot read ./{bad_name}:", got.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

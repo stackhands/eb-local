@@ -431,7 +431,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
             error.FileNotFound => null,
             else => {
                 failMsg("cannot read {s}: {s}", .{ recipe_path, @errorName(err) });
-                return 1;
+                return 2;
             },
         };
         defer if (existing_recipe) |buf| a.free(buf);
@@ -439,7 +439,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
             error.FileNotFound => null,
             else => {
                 failMsg("cannot read {s}: {s}", .{ provenance_path, @errorName(err) });
-                return 1;
+                return 2;
             },
         };
         defer if (existing_prov) |buf| a.free(buf);
