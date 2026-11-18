@@ -63,9 +63,11 @@ pub fn approvedPrefixes(a: Allocator, env: *const std.process.Environ.Map, extra
     for (install_vars) |name| if (env.get(name)) |p| try addPrefix(a, &list, p);
     for (extra) |p| try addPrefix(a, &list, p);
     if (env.get("EB_LOCAL_RPATH_WRAPPERS")) |p| try addPrefix(a, &list, p);
-    if (env.get("HOME")) |home| if (home.len > 1 and home[0] == '/') {
-        const base = if (env.get("XDG_CACHE_HOME")) |c| if (c.len > 1 and c[0] == '/') c else null else null;
-        const cache = base orelse try std.fs.path.join(a, &.{ home, ".cache" });
+    const xdg = if (env.get("XDG_CACHE_HOME")) |c| if (c.len > 1 and c[0] == '/') c else null else null;
+    if (xdg) |cache| {
+        try addPrefix(a, &list, try std.fs.path.join(a, &.{ cache, "eb-local" }));
+    } else if (env.get("HOME")) |home| if (home.len > 1 and home[0] == '/') {
+        const cache = try std.fs.path.join(a, &.{ home, ".cache" });
         try addPrefix(a, &list, try std.fs.path.join(a, &.{ cache, "eb-local" }));
     };
     return list.items;
@@ -501,4 +503,17 @@ test "an empty shell has nothing foreign and no injected library directory" {
     };
     try testing.expect(none and host);
     try testing.expect(!bind);
+}
+
+test "XDG_CACHE_HOME eb-local cache is approved even when HOME is unset" {
+    var s = try Scratch.init(&.{
+        .{ "XDG_CACHE_HOME", "/xdg/cache" },
+        .{ "CC", "/xdg/cache/eb-local/rpath-1234/gcc" },
+    });
+    defer s.deinit();
+    const a = s.allocator();
+    const prefixes = try approvedPrefixes(a, &s.env, &.{}, "/home/u/eessi");
+    try testing.expect(inside(a, "/xdg/cache/eb-local/rpath-1234/gcc", prefixes));
+    try scrub(a, &s.env, prefixes);
+    try testing.expectEqualStrings("/xdg/cache/eb-local/rpath-1234/gcc", s.env.get("CC").?);
 }

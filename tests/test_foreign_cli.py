@@ -111,6 +111,21 @@ class ForeignPrefixes(StorageFixture):
         self.assertEqual(refused.returncode, 2, refused.stderr)
         self.assertIn("doctor.approved_prefixes is a site setting", refused.stderr)
 
+    def test_xdg_cache_home_wrapper_is_approved_without_home(self):
+        cache = self.root / "xdg-cache"
+        wrapper = cache / "eb-local" / "rpath-0123456789abcdef" / "gcc"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\nexit 0\n")
+        wrapper.chmod(0o755)
+        self.env.pop("HOME", None)
+        run = self.run_tool(
+            ["doctor"],
+            XDG_CACHE_HOME=str(cache),
+            CC=str(wrapper),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("warn CC resolves", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
