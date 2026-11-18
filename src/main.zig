@@ -1629,6 +1629,12 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         cli.put(1, text);
         return 0;
     }
+    if (fsx.statAt(fsx.cwd, target, false)) |st| {
+        if (st.isDir()) {
+            const clean = std.mem.trimEnd(u8, target, "/");
+            die("{s} is a directory; pass a file path such as {s}/config.toml", .{ target, if (clean.len > 0) clean else "" });
+        }
+    } else |_| {}
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
