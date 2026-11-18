@@ -164,8 +164,8 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
     var replaced = false;
     while (lines.next()) |line| {
         if (!replaced and lineSetsParameter(line, param.name)) {
-            const trimmed = trimLine(line);
-            const indent_len = line.len - trimmed.len;
+            const leading = std.mem.trimStart(u8, line, " \t");
+            const indent_len = line.len - leading.len;
             const nl = try std.fmt.allocPrint(a, "{s}{s} = {s}", .{ line[0..indent_len], param.name, param.value });
             try out.appendSlice(a, nl);
             replaced = true;
@@ -540,4 +540,22 @@ test "materialize populates diagnostic on failing edits" {
         .dependencies = &.{.{ .action = "replace", .name = "zlib", .spec = "('zlib', '1.3')" }},
     }, &d4));
     try std.testing.expectEqualStrings("easyconfig dependency 'zlib' has no closing parenthesis", d4.message);
+}
+
+test "parameter replacement preserves leading indent when line has trailing spaces or CR" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "  name = 'demo'   \nversion = '1.0'\r\n";
+    const digest = try sha256Hex(a, base);
+    const spec: Spec = .{
+        .base_digest = digest,
+        .parameters = &.{
+            .{ .name = "name", .value = "'custom'" },
+            .{ .name = "version", .value = "'2.0'" },
+        },
+    };
+    var d: Diagnostic = .{};
+    const out = try materialize(a, base, spec, &d);
+    try std.testing.expectEqualStrings("  name = 'custom'\nversion = '2.0'\n", out);
 }
