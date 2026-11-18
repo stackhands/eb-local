@@ -213,6 +213,8 @@ pub const script =
     \\  site) root=${EESSI_SITE_SOFTWARE_PATH:-} from=EESSI_SITE_SOFTWARE_PATH ;;
     \\  *) root=${EESSI_SOFTWARE_PATH:-} from=EESSI_SOFTWARE_PATH ;;
     \\esac
+    \\while [[ $root == *//* ]]; do root=${root//\/\//\/}; done
+    \\[[ $root == / ]] || root=${root%/}
     \\see='See "Where EESSI-extend installs": https://stackhands.github.io/eb-local/explanation/install-variables.html'
     \\for v in EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES; do
     \\  if [[ -n ${!v+set} ]]; then
@@ -246,7 +248,10 @@ pub const script =
     \\  exit 2
     \\fi
     \\installpath=${EASYBUILD_INSTALLPATH-}
-    \\if [[ /$installpath/ == */../* || ( $installpath != "$root" && $installpath != "$root"/* ) ]]; then
+    \\while [[ $installpath == *//* ]]; do installpath=${installpath//\/\//\/}; done
+    \\[[ $installpath == / ]] || installpath=${installpath%/}
+    \\root_prefix=${root%/}
+    \\if [[ /$installpath/ == */../* || ( $installpath != "$root" && $installpath != "${root_prefix}"/* ) ]]; then
     \\  echo "eb-local: EESSI-extend set the install path to ${installpath:-nothing}, outside ${root}, where a ${mode} install goes; nothing was built." >&2
     \\  echo "  The install variable did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. ${see}" >&2
     \\  exit 2
@@ -829,4 +834,21 @@ test "without rustc the compat linker is still on PATH" {
     try testing.expect(envVar(out.stdout, "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER") == null);
     const path = envVar(out.stdout, "PATH").?;
     try testing.expect(std.mem.indexOf(u8, path, "/compat/linux/") != null);
+}
+
+test "a trailing or repeated slash in an install variable matches Lmod's normalized path" {
+    var r = try Run.init();
+    defer r.deinit();
+    try r.fake("2026.06", null);
+    const a = r.arena.allocator();
+    const mine = try std.fs.path.join(a, &.{ r.root, "home/mine" });
+    try r.env.put("EESSI_USER_INSTALL", try std.fmt.allocPrint(a, "{s}/", .{mine}));
+    try r.env.put("FAKE_INSTALLPATH", try std.fmt.allocPrint(a, "{s}/versions/2026.06/software/linux/x86_64/amd/zen4", .{mine}));
+    try ok(try r.launch(&.{}));
+
+    _ = r.env.swapRemove("EESSI_USER_INSTALL");
+    const proj = try std.fs.path.join(a, &.{ r.root, "project" });
+    try r.env.put("EESSI_PROJECT_INSTALL", try std.fmt.allocPrint(a, "{s}//", .{proj}));
+    try r.env.put("FAKE_INSTALLPATH", try std.fmt.allocPrint(a, "{s}/versions/2026.06/software/linux/x86_64/amd/zen4/", .{proj}));
+    try ok(try r.launch(&.{}));
 }
