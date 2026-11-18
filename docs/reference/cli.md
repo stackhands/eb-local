@@ -449,7 +449,7 @@ It does not read the site file. `--profile`, `--project` and `--config` are acce
 | `--update-cmd CMD` | Lmod's `update_lmod_system_cache_files` program. Default: `DIR/compat/linux/$(uname -m)/usr/share/Lmod/libexec/update_lmod_system_cache_files`. |
 | `--dry-run` | With `--prefix`, list targets only. |
 
-Exit 0 means both files were written or every prefix target was updated. Exit 2 is a missing or relative path. Exit 127 means `spider`, the cache updater, or `module` with `--verify` could not be started. Any other exit is the child program's, and caches are left as they were on failure.
+Exit 0 means both files were written or every prefix target was updated. Exit 2 is a missing, relative, or conflicting option. Exit 127 means `spider`, the cache updater, or `module` with `--verify` could not be started. With `--verify`, any inventory parsing or comparison failure exits 1; otherwise any other exit is `spider`'s or the cache updater's, and caches are left as they were on failure.
 
 ### modulerc
 

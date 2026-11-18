@@ -547,8 +547,10 @@ fn installVerified(
 /// both files as they were. Returns the process exit status.
 pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, opts: Options) u8 {
     if (opts.prefix.len != 0) {
-        if (opts.modulepath.len != 0 or opts.cache_dir.len != 0 or opts.timestamp.len != 0)
+        if (opts.modulepath.len != 0 or opts.cache_dir.len != 0 or opts.timestamp.len != 0) {
             fail("lmod-cache takes either --prefix or --modulepath, --cache-dir and --timestamp", .{});
+            return 2;
+        }
         return runPrefix(io, a, opts);
     }
     if (opts.dry_run) {
