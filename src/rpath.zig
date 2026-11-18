@@ -176,6 +176,11 @@ pub fn unwrapped(a: Allocator, path: []const u8, among: []const []const u8) Allo
 /// Write the wrappers for `found` into `dir`, a directory the caller owns
 /// and no one else can write; existing wrappers with the same bytes stay.
 pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!void {
+    if (std.fs.path.dirname(dir)) |parent| {
+        if (fsx.statAt(fsx.cwd, parent, false)) |pst| {
+            if (!pst.isDir() or pst.uid != linux.getuid()) return error.Unsafe;
+        } else |_| {}
+    }
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = dir;
@@ -189,6 +194,10 @@ pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!voi
     errdefer if (first_missing) |missing| fsx.deleteTree(a, fsx.cwd, missing) catch {};
     const st = try fsx.statAt(fsx.cwd, dir, false);
     if (!st.isDir() or st.uid != linux.getuid()) return error.Unsafe;
+    if (std.fs.path.dirname(dir)) |parent| {
+        const pst = try fsx.statAt(fsx.cwd, parent, false);
+        if (!pst.isDir() or pst.uid != linux.getuid()) return error.Unsafe;
+    }
     {
         var zb: [sys.path_max:0]u8 = undefined;
         const zp = try sys.z(&zb, dir);
@@ -267,6 +276,13 @@ test "failed wrapper write leaves no marker or newly created directory" {
     try std.testing.expectError(error.Unsafe, write(a, bad_dir, &.{"clang"}));
     const m = try std.fs.path.join(a, &.{ bad_dir, marker });
     try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, m, false));
+
+    const real_base = try std.fs.path.join(a, &.{ root, "real-base" });
+    try common.atomic.makedirs(real_base);
+    const link_base = try std.fs.path.join(a, &.{ root, "eb-local" });
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlink((try sys.z(&tb, real_base)).ptr, (try sys.z(&lb, link_base)).ptr)));
+    const nested_dir = try std.fs.path.join(a, &.{ link_base, "rpath-link" });
+    try std.testing.expectError(error.Unsafe, write(a, nested_dir, &.{"clang"}));
 }
 
 test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's comes first" {
