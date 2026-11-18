@@ -630,6 +630,30 @@ class OverlayCheckUnreadableOutputs(unittest.TestCase):
                 self.assertEqual(got.stdout, "")
                 self.assertIn(f"eb-local: cannot read ./{bad_name}:", got.stderr)
 
+    def test_provenance_toml_escapes_rationale_triple_quotes_and_backslashes(self):
+        import tomllib
+
+        base_bytes = b"name = 'demo'\n"
+        rationale = 'keep \\ and """ and trailing "'
+        toml_escaped = rationale.replace("\\", "\\\\").replace('"', '\\"')
+        overlay_text = (
+            f'overlay_version = 1\n'
+            f'base_digest = "{digest_of(base_bytes)}"\n'
+            f'rationale = "{toml_escaped}"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            prov_text = (root / "out" / "provenance.toml").read_text(encoding="utf-8")
+            parsed = tomllib.loads(prov_text)
+            self.assertEqual(parsed["rationale"].rstrip("\n"), rationale)
+
 
 if __name__ == "__main__":
     unittest.main()
