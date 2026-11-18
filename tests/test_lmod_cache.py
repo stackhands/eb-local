@@ -488,6 +488,21 @@ class LmodCache(unittest.TestCase):
                     self.assertIn("--eessi-version", got.stderr)
                     self.assertFalse(log.exists())
 
+    def test_timestamp_symlink_is_refused_without_clobbering_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache_dir, stamp = self.single_target(root)
+            outside = root / "outside-stamp"
+            outside.write_text("keep-me\n", encoding="utf-8")
+            stamp.symlink_to(outside)
+
+            got = run(args)
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertIn("symlink", got.stderr)
+            self.assertTrue(stamp.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep-me\n")
+            self.assertFalse((cache_dir / "spiderT.lua").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
