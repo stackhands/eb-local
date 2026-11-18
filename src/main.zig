@@ -135,11 +135,12 @@ const usage_text =
     \\                 [--dry-run] [--delete] [--json]
     \\                                       remove what eb-local left behind; --no-logs
     \\                                       leaves the logs; --json prints one line of JSON
-    \\  eb-local config [--check | --env] [--json]
+    \\  eb-local config [--check | --env | --get KEY] [--json]
     \\                                       the settings in force and where each came from;
     \\                                       --check also reads every secret (values not shown);
     \\                                       --env prints them as EB_LOCAL_* lines for export;
-    \\                                       --json is for the default output or --check, not --env
+    \\                                       --get prints one resolved key's value (secret sources only);
+    \\                                       --json is for the default output or --check, not --env or --get
     \\  eb-local profiles [--json]           the profiles the configuration defines; --json
     \\                                       prints one line of JSON with schema_version 1
     \\  eb-local uninstall NAME/VERSION... [--target TARGET] [--dry-run] [--delete]
@@ -1409,6 +1410,108 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     for (s.eessi.items) |e| line(a, &out, e.name, e.value);
     cli.put(1, out.items);
     return 0;
+}
+
+/// Print the resolved value(s) of one configuration key for scripts and
+/// hooks; secrets print only their source, never their value. Exits 1 when
+/// an optional or list key has no value, and 2 when `key` is unknown.
+fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
+    const a = c.a;
+    const p = locate(c, s);
+    const scalar = struct {
+        fn put(v: []const u8) u8 {
+            if (v.len == 0) return 1;
+            say("{s}", .{v});
+            return 0;
+        }
+    }.put;
+    const list = struct {
+        fn put(items: []const []const u8) u8 {
+            if (items.len == 0) return 1;
+            for (items) |item| say("{s}", .{item});
+            return 0;
+        }
+    }.put;
+
+    if (std.mem.eql(u8, key, "profile")) {
+        return if (s.profile) |pr| scalar(pr) else 1;
+    } else if (std.mem.eql(u8, key, "project")) {
+        return if (p.project) scalar(p.prefix) else 1;
+    } else if (std.mem.eql(u8, key, "prefix")) {
+        return if (!p.project) scalar(p.prefix) else 1;
+    } else if (std.mem.eql(u8, key, "stack.module")) {
+        return scalar(s.stack_module.value);
+    } else if (std.mem.eql(u8, key, "stack.extend")) {
+        return scalar(s.extend_module.value);
+    } else if (std.mem.eql(u8, key, "dev.buildenv")) {
+        return scalar(s.dev_buildenv.value);
+    } else if (std.mem.startsWith(u8, key, "dev.buildenv_for.")) {
+        const fam = key["dev.buildenv_for.".len..];
+        for (config.families, s.buildenv_for) |f, b| {
+            if (std.mem.eql(u8, f.name, fam)) return scalar(b.value);
+        }
+        die("unknown configuration key '{s}'", .{key});
+    } else if (std.mem.eql(u8, key, "dev.modules")) {
+        return list(s.dev_modules.value);
+    } else if (std.mem.eql(u8, key, "build.allocation_hint")) {
+        return scalar(s.allocation_hint.value);
+    } else if (std.mem.eql(u8, key, "build.site_toolchains")) {
+        return list(s.site_toolchains.value);
+    } else if (std.mem.startsWith(u8, key, "build.node_types.")) {
+        const name = key["build.node_types.".len..];
+        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        for (nodeTypes(s)) |t| {
+            if (std.mem.eql(u8, t.name, name)) return scalar(t.sbatch);
+        }
+        return 1;
+    } else if (std.mem.eql(u8, key, "build.secrets")) {
+        if (s.build_secrets.value) |names| return list(names);
+        if (s.secrets.items.len == 0) return 1;
+        for (s.secrets.items) |sec| say("{s}", .{sec.name});
+        return 0;
+    } else if (std.mem.eql(u8, key, "build.clear_foreign_prefixes")) {
+        return scalar(if (s.clear_foreign_prefixes.value) "true" else "false");
+    } else if (std.mem.eql(u8, key, "doctor.approved_prefixes")) {
+        return list(s.approved_prefixes.value);
+    } else if (std.mem.eql(u8, key, "doctor.cvmfs_parallel")) {
+        return scalar(str(a, "{d}", .{s.cvmfs_parallel.value}));
+    } else if (std.mem.eql(u8, key, "doctor.mpi_transports")) {
+        return list(s.mpi_transports.value);
+    } else if (std.mem.eql(u8, key, "clean.trash")) {
+        return scalar(@tagName(s.trash.value));
+    } else if (std.mem.eql(u8, key, "clean.logs_older_than_days")) {
+        return scalar(str(a, "{d}", .{s.logs_older_than_days.value}));
+    } else if (std.mem.eql(u8, key, "nimvault.program")) {
+        return scalar(s.nimvault_program.value);
+    } else if (std.mem.eql(u8, key, "nimvault.vault")) {
+        return scalar(s.nimvault_vault.value);
+    } else if (std.mem.eql(u8, key, "storage.node_local_root")) {
+        return scalar(s.node_local_root.value);
+    } else if (std.mem.eql(u8, key, "storage.node_local_mount")) {
+        return scalar(s.node_local_mount.value);
+    } else if (std.mem.eql(u8, key, "storage.node_local_fstype")) {
+        return scalar(s.node_local_fstype.value);
+    } else if (std.mem.eql(u8, key, "storage.shared_scratch")) {
+        return list(s.shared_scratch.value);
+    } else if (std.mem.startsWith(u8, key, "eessi.")) {
+        const name = key["eessi.".len..];
+        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        for (s.eessi.items) |v| {
+            if (std.mem.eql(u8, v.name, name)) {
+                say("{s}", .{v.value});
+                return 0;
+            }
+        }
+        return 1;
+    } else if (std.mem.startsWith(u8, key, "secrets.")) {
+        const name = key["secrets.".len..];
+        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        for (s.secrets.items) |sec| {
+            if (std.mem.eql(u8, sec.name, name)) return scalar(sec.source);
+        }
+        return 1;
+    }
+    die("unknown configuration key '{s}'", .{key});
 }
 
 const SiteTemplateJson = struct { name: []const u8, placeholders: []const []const u8 };
@@ -3958,6 +4061,7 @@ pub fn main(init: std.process.Init) u8 {
     var check_prefix: ?[]const u8 = null;
     var check_modules: std.ArrayList([]const u8) = .empty;
     var as_env = false;
+    var config_get: ?[]const u8 = null;
     var site: SiteOpts = .{};
     var family: []const u8 = "";
     var only_unwrapped = false;
@@ -4204,10 +4308,15 @@ pub fn main(init: std.process.Init) u8 {
                     check = true;
                 } else if (std.mem.eql(u8, x, "--env")) {
                     as_env = true;
+                } else if (std.mem.eql(u8, x, "--get")) {
+                    config_get = value(args, &i, "--get");
+                } else if (joined(x, "--get")) |v| {
+                    config_get = v;
                 } else if (std.mem.eql(u8, x, "--json")) {
                     g.json_out = true;
                 } else die("config does not know '{s}'", .{x});
-                if (check and as_env) die("config takes --check or --env, not both", .{});
+                if (@as(usize, @intFromBool(check)) + @intFromBool(as_env) + @intFromBool(config_get != null) > 1)
+                    die("config takes --check, --env or --get", .{});
             },
             .site => {
                 if (std.mem.eql(u8, x, "--json")) {
@@ -4345,6 +4454,8 @@ pub fn main(init: std.process.Init) u8 {
         .dev => cmdDev(c, s, g, rest.items),
         .config => blk: {
             if (as_env and g.json_out) die("config --json does not go with --env", .{});
+            if (config_get != null and g.json_out) die("config --json does not go with --get", .{});
+            if (config_get) |key| break :blk cmdConfigGet(c, s, key);
             break :blk if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check, g.json_out);
         },
         .clean => cmdClean(c, s, clean, g.json_out),
