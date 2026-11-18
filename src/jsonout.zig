@@ -36,6 +36,11 @@ fn utf8Safe(a: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!@TypeO
             },
             else => value,
         },
+        .array => blk: {
+            var copy = value;
+            for (value, 0..) |item, idx| copy[idx] = try utf8Safe(a, item);
+            break :blk copy;
+        },
         .@"struct" => |st| blk: {
             var copy = value;
             inline for (st.field_names) |name| {
@@ -105,4 +110,12 @@ test "renderLine encodes mutable u8 slices as JSON strings rather than byte arra
     const line = try renderLine(std.testing.allocator, Doc{ .path = &mut_buf });
     defer std.testing.allocator.free(line);
     try std.testing.expectEqualStrings("{\"path\":\"/tmp/\u{FFFD}\"}\n", line);
+}
+
+test "renderLine replaces non-UTF-8 bytes in fixed-size arrays" {
+    const Doc = struct { tags: [2][]const u8 };
+    const line = try renderLine(std.testing.allocator, Doc{ .tags = .{ "ok", "bad-\xff" } });
+    defer std.testing.allocator.free(line);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(line));
+    try std.testing.expectEqualStrings("{\"tags\":[\"ok\",\"bad-\u{FFFD}\"]}\n", line);
 }
