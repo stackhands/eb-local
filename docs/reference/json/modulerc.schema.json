@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "eb-local modulerc --json",
+  "description": "Invalid UTF-8 bytes in module_tree, file, directives, or content are replaced with U+FFFD, so non-UTF-8 strings do not round-trip.",
   "type": "object",
   "required": [
     "schema_version",

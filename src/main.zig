@@ -4552,6 +4552,7 @@ test {
     _ = extend;
     _ = lmodcache;
     _ = modulerc;
+    _ = jsonout;
     _ = foreign;
     _ = cvmfs;
     _ = mpi;
