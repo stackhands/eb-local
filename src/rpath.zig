@@ -83,8 +83,10 @@ pub const script =
     \\extra=()
     \\seen=:
     \\eprefix=${EESSI_EPREFIX-}
+    \\while [[ $eprefix == *//* ]]; do eprefix=${eprefix//\/\//\/}; done
     \\while [ "${eprefix%/}" != "$eprefix" ] && [ "$eprefix" != / ]; do eprefix=${eprefix%/}; done
     \\for d in "${dirs[@]}"; do
+    \\    while [[ $d == *//* ]]; do d=${d//\/\//\/}; done
     \\    while [ "${d%/}" != "$d" ] && [ "$d" != / ]; do d=${d%/}; done
     \\    case $d in /?*) ;; *) continue ;; esac
     \\    case $d in *,* | *:*) continue ;; esac

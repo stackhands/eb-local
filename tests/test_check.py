@@ -561,6 +561,21 @@ class Check(unittest.TestCase):
         self.assertEqual(doc_rec["elf_count"], len(paths), doc_rec)
         self.assertEqual(doc_rec["problem_count"], 1, doc_rec)
 
+    def test_eprefix_trailing_slash_accepts_compat_loader(self):
+        compat = self.root / "compat"
+        (compat / "lib64").mkdir(parents=True)
+        interp = compat / "lib64" / "ld-linux-x86-64.so.2"
+        (self.root / "compat_only.c").write_text("void _start(void) {}\n")
+        prog = self.root / "compat_only"
+        subprocess.run(
+            [GCC, "-nostdlib", "-e", "_start", "-o", str(prog), str(self.root / "compat_only.c"), f"-Wl,--dynamic-linker={interp}"],
+            check=True,
+        )
+        run = self.check(prog, EESSI_EPREFIX=f"{compat}/")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("eb-local check: no problems", run.stdout)
+        self.assertNotIn("the loader is the host's", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

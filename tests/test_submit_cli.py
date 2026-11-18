@@ -267,6 +267,20 @@ class Submit(StorageFixture):
         self.assertTrue(calls[0].startswith("-p cpu "), calls[0])
         self.assertTrue(calls[1].startswith("-p gpu "), calls[1])
 
+    def test_sbatch_directives_quote_paths_containing_spaces(self):
+        spaced_cwd = self.root / "work dir"
+        spaced_cwd.mkdir()
+        run = subprocess.run(
+            [binary.BIN, "submit", "--on", "cpu", "--print", "recipe.eb"],
+            cwd=spaced_cwd,
+            env=dict(self.env, SLURM_JOB_ID=""),
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f'#SBATCH --output="{self.prefix}/.eb-local/logs/submit-cpu-%j.out"\n', run.stdout)
+        self.assertIn(f'#SBATCH --chdir="{os.path.realpath(spaced_cwd)}"\n', run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
