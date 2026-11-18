@@ -227,6 +227,22 @@ class Submit(StorageFixture):
         self.assertEqual(run.returncode, 2, run.stdout)
         self.assertIn("build.targets is the old name of build.node_types, which line 5 sets; keep one", run.stderr)
 
+    def test_submit_stops_with_signal_and_skips_remaining_targets(self):
+        import signal
+
+        sbatch = self.root / "bin" / "sbatch"
+        sbatch.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{self.root / "sbatch-calls"}"\n'
+            "kill -TERM $$\n",
+            encoding="utf-8",
+        )
+        sbatch.chmod(0o755)
+
+        run = self.run_tool(["submit", "recipe.eb"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, -signal.SIGTERM, run.stdout + run.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
