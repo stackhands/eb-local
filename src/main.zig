@@ -3591,7 +3591,9 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
                 for (all) |k| known.append(a, k.name) catch oom();
                 die("--on {s}: no such node type; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
             };
-            chosen.append(a, t) catch oom();
+            for (chosen.items) |already| {
+                if (std.mem.eql(u8, already.name, t.name)) break;
+            } else chosen.append(a, t) catch oom();
         }
     }
     const p = place(c, s);
