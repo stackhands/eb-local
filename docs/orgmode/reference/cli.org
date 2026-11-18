@@ -14,8 +14,8 @@ eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict]
 eb-local [OPTION]... dev [--strict] [--buildenv MODULE] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
-eb-local check [--json] FILE...
-eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
+eb-local check [--recursive] [--quiet] [--json] FILE...
+eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
 eb-local [OPTION]... doctor [--json] [--workspace PATH]
@@ -73,9 +73,11 @@ directory you own.
                                        --unwrapped: only clang, clang++, flang,
                                        flang-new and ld.lld, where no wrapper comes
                                        first; dev adds them after a build environment
-  eb-local check [--json] FILE...      whether a program or library built here runs here:
-                                       its architecture, loader, run paths and libraries
-  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
+  eb-local check [--recursive] [--quiet] [--json] FILE...
+                                       whether a program or library built here runs here:
+                                       its architecture, loader, run paths and libraries;
+                                       --recursive audits resolved DT_NEEDED libraries too
+  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
                                        the same for every ELF file in those installations,
                                        the dev tree, or DIR; a file that is not ELF is skipped.
                                        --quiet prints a file only when it has a problem
@@ -331,7 +333,7 @@ A problem is a line of its own, after =problem:=, below the line it concerns:
 | =LIBRARY is found only through LD_LIBRARY_PATH=                                                                  | The same, but a directory in =LD_LIBRARY_PATH= holds it.                                    |
 | =LIBRARY comes from the host, not from EESSI=                                                                    | EESSI is loaded, and the library resolves outside it.                                       |
 
-=check= follows the libraries the file names, not theirs; run it on a library to check that one's.
+By default, =check= follows only the libraries the file names directly; =--recursive= follows resolved =DT_NEEDED= shared libraries transitively and audits each unique resolved library once.
 
 =--module NAME/VERSION=, =--dev= and =--prefix DIR= audit every ELF file in place of the files named on the line.
 A file that is not ELF is skipped, and a symbolic link is not followed, so a link cannot point the audit outside the tree.

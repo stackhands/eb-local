@@ -69,6 +69,7 @@ These steps build a C program that uses FFTW and OpenMP for one node type, check
     ```
 
     `--quiet` prints a file only when it has a problem. A file that is not ELF is skipped.
+    Add `--recursive` to audit resolved transitive shared libraries as well.
 
 5.  Repeat steps 1 to 4 on each other node type that will run the program.
     Each build goes into the directory for its own CPU target.

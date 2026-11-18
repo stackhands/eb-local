@@ -78,9 +78,11 @@ const usage_text =
     \\                                       --unwrapped: only clang, clang++, flang,
     \\                                       flang-new and ld.lld, where no wrapper comes
     \\                                       first; dev adds them after a build environment
-    \\  eb-local check [--json] FILE...      whether a program or library built here runs here:
-    \\                                       its architecture, loader, run paths and libraries
-    \\  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
+    \\  eb-local check [--recursive] [--quiet] [--json] FILE...
+    \\                                       whether a program or library built here runs here:
+    \\                                       its architecture, loader, run paths and libraries;
+    \\                                       --recursive audits resolved DT_NEEDED libraries too
+    \\  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
     \\                                       the same for every ELF file in those installations,
     \\                                       the dev tree, or DIR; a file that is not ELF is skipped.
     \\                                       --quiet prints a file only when it has a problem
@@ -838,7 +840,33 @@ const CheckReport = struct {
 const Check = struct {
     problems: usize = 0,
     json: bool = false,
+    recursive: bool = false,
     files: std.ArrayList(CheckFileJson) = .empty,
+    audited: std.StringHashMapUnmanaged(void) = .empty,
+    queued: std.StringHashMapUnmanaged(void) = .empty,
+    queue: std.ArrayList([]const u8) = .empty,
+
+    fn canonicalKey(a: Allocator, path: []const u8) []const u8 {
+        var buf: [sys.path_max]u8 = undefined;
+        return a.dupe(u8, fsx.realpath(fsx.cwd, path, &buf) catch path) catch oom();
+    }
+
+    fn isAudited(k: *Check, a: Allocator, path: []const u8) bool {
+        return k.recursive and k.audited.contains(canonicalKey(a, path));
+    }
+
+    fn markAudited(k: *Check, a: Allocator, path: []const u8) void {
+        if (!k.recursive) return;
+        k.audited.put(a, canonicalKey(a, path), {}) catch oom();
+    }
+
+    fn enqueue(k: *Check, a: Allocator, path: []const u8) void {
+        if (!k.recursive) return;
+        const key = canonicalKey(a, path);
+        if (k.audited.contains(key) or k.queued.contains(key)) return;
+        k.queued.put(a, key, {}) catch oom();
+        k.queue.append(a, a.dupe(u8, path) catch oom()) catch oom();
+    }
 
     fn beginFile(k: *Check, a: Allocator, path: []const u8, machine: []const u8) void {
         if (!k.json) return;
@@ -1036,7 +1064,7 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             if (!isFile(n)) {
                 showHeader(&shown, path, machine);
                 k.problem(a, "{s} does not exist", .{n});
-            }
+            } else k.enqueue(a, n);
             continue;
         }
         // The job may run without this shell's LD_LIBRARY_PATH, so the
@@ -1061,6 +1089,7 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             showHeader(&shown, path, machine);
             k.problem(a, "{s} comes from the host, not from EESSI", .{n});
         }
+        k.enqueue(a, h.path);
     }
 }
 
@@ -1083,18 +1112,29 @@ fn auditFile(c: Ctx, k: *Check, path: []const u8, quiet: bool, skip_non_elf: boo
         unreadable.* = true;
         return false;
     };
+    k.markAudited(c.a, path);
     reportElf(c, k, path, elf, quiet);
     return true;
 }
 
-fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool) u8 {
+fn drainCheckQueue(c: Ctx, k: *Check, quiet: bool, unreadable: *bool, elfs: *usize) void {
+    var idx: usize = 0;
+    while (idx < k.queue.items.len) : (idx += 1) {
+        const path = k.queue.items[idx];
+        if (k.isAudited(c.a, path)) continue;
+        if (auditFile(c, k, path, quiet, false, unreadable)) elfs.* += 1;
+    }
+}
+
+fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursive: bool) u8 {
     if (files.len == 0) die("check needs one or more programs or libraries", .{});
-    var k: Check = .{ .json = json };
+    var k: Check = .{ .json = json, .recursive = recursive };
     var unreadable = false;
     var elfs: usize = 0;
     for (files) |f| {
         if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
     }
+    drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
     return checkStatus(c, &k, unreadable, elfs);
 }
 
@@ -1166,7 +1206,7 @@ const CheckMode = enum { module, dev, prefix };
 
 /// Audit every ELF file in the installations `--module` names, in the dev
 /// tree, or under `--prefix`. `s` is set for a module or the dev tree.
-fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const []const u8, prefix_dir: []const u8, quiet: bool, json: bool) u8 {
+fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const []const u8, prefix_dir: []const u8, quiet: bool, json: bool, recursive: bool) u8 {
     const a = c.a;
     var roots: std.ArrayList([]const u8) = .empty;
     switch (mode) {
@@ -1201,10 +1241,11 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
             roots.appendSlice(a, found.installs.items) catch oom();
         },
     }
-    var k: Check = .{ .json = json };
+    var k: Check = .{ .json = json, .recursive = recursive };
     var unreadable = false;
     var elfs: usize = 0;
     for (roots.items) |root| walkElfs(c, root, quiet, &k, &unreadable, &elfs, 0);
+    drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
     if (elfs == 0 and !quiet and !unreadable and !json) say("eb-local check: no ELF files", .{});
     return checkStatus(c, &k, unreadable, elfs);
 }
@@ -3912,6 +3953,7 @@ pub fn main(init: std.process.Init) u8 {
     var submit: SubmitOpts = .{};
     var check = false;
     var check_quiet = false;
+    var check_recursive = false;
     var check_dev = false;
     var check_prefix: ?[]const u8 = null;
     var check_modules: std.ArrayList([]const u8) = .empty;
@@ -3996,6 +4038,8 @@ pub fn main(init: std.process.Init) u8 {
                     g.json_out = true;
                 } else if (std.mem.eql(u8, x, "--quiet")) {
                     check_quiet = true;
+                } else if (std.mem.eql(u8, x, "--recursive")) {
+                    check_recursive = true;
                 } else if (std.mem.eql(u8, x, "--dev")) {
                     check_dev = true;
                 } else if (std.mem.eql(u8, x, "--prefix")) {
@@ -4283,11 +4327,11 @@ pub fn main(init: std.process.Init) u8 {
         const modes: usize = @as(usize, @intFromBool(check_dev)) + @intFromBool(check_prefix != null) + @intFromBool(check_modules.items.len > 0);
         if (modes > 1 or (modes == 1 and rest.items.len > 0))
             die("check takes files, or one of --module, --dev and --prefix", .{});
-        if (modes == 0) return cmdCheck(c, rest.items, check_quiet, g.json_out);
-        if (check_prefix) |dir| return cmdCheckTree(c, null, .prefix, &.{}, dir, check_quiet, g.json_out);
+        if (modes == 0) return cmdCheck(c, rest.items, check_quiet, g.json_out, check_recursive);
+        if (check_prefix) |dir| return cmdCheckTree(c, null, .prefix, &.{}, dir, check_quiet, g.json_out, check_recursive);
         const s = loadSettings(c, g);
-        if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet, g.json_out);
-        return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet, g.json_out);
+        if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet, g.json_out, check_recursive);
+        return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet, g.json_out, check_recursive);
     }
     // The install mode is the four EESSI variables, not the site file.
     if (command == .eb) {
