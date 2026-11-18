@@ -915,6 +915,11 @@ fn isDir(path: []const u8) bool {
     return st.isDir();
 }
 
+fn resolveRootPath(a: Allocator, root: []const u8, path: []const u8) []const u8 {
+    if (std.mem.eql(u8, root, "/") or storage.under(path, root)) return path;
+    return std.fs.path.join(a, &.{ root, path }) catch oom();
+}
+
 /// The directories the loader under `root` searches last: those its
 /// ld.so.conf names, one level of `include DIR/*.conf` deep, then its
 /// built-in ones. The loader reads a cache built from the same list.
@@ -924,11 +929,17 @@ fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
     const conf = std.fs.path.join(a, &.{ root, "etc/ld.so.conf" }) catch oom();
     if (readSmall(a, conf)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &includes) catch oom();
     for (includes.items) |pat| {
-        // Only the DIR/*.SUFFIX form; anything else is skipped.
-        const slash = std.mem.lastIndexOfScalar(u8, pat, '/') orelse continue;
-        const base = pat[slash + 1 ..];
+        // Only the DIR/*.SUFFIX (or *.SUFFIX under etc/) form; anything else is skipped.
+        const slash = std.mem.lastIndexOfScalar(u8, pat, '/');
+        const base = if (slash) |s| pat[s + 1 ..] else pat;
         if (!std.mem.startsWith(u8, base, "*") or std.mem.indexOfAny(u8, base[1..], "*?[") != null) continue;
-        const dir = if (slash == 0) "/" else pat[0..slash];
+        const dir = if (slash) |s| blk: {
+            const raw_dir = if (s == 0) "/" else pat[0..s];
+            break :blk if (raw_dir[0] == '/')
+                resolveRootPath(a, root, raw_dir)
+            else
+                std.fs.path.join(a, &.{ root, "etc", raw_dir }) catch oom();
+        } else std.fs.path.join(a, &.{ root, "etc" }) catch oom();
         const fd = fsx.openDir(fsx.cwd, dir, true) catch continue;
         defer sys.close(fd);
         var names: std.ArrayList([]const u8) = .empty;
@@ -942,6 +953,7 @@ fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
             if (readSmall(a, p)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &none) catch oom();
         }
     }
+    for (dirs.items) |*d| d.* = resolveRootPath(a, root, d.*);
     for ([_][]const u8{ "lib64", "usr/lib64", "lib", "usr/lib" }) |sub|
         dirs.append(a, std.fs.path.join(a, &.{ root, sub }) catch oom()) catch oom();
     return dirs.items;
