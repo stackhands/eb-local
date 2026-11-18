@@ -43,6 +43,31 @@ class CliReference(unittest.TestCase):
         missing = [o for o in parsed_options() if not re.search(rf"(?<![\w-]){re.escape(o)}(?![\w-])", page)]
         self.assertEqual(missing, [])
 
+    def test_each_subcommand_section_names_its_synopsis_flags(self):
+        page = PAGE.read_text()
+        synopsis = page.split("\n* Synopsis\n", 1)[1].split("\n#+end_example\n", 1)[0]
+        synopsis = synopsis.split("#+begin_example\n", 1)[1]
+        entries = []
+        for line in synopsis.splitlines():
+            if line.startswith(" ") and entries:
+                entries[-1] += " " + line.strip()
+            elif line.strip():
+                entries.append(line.strip())
+        parts = re.split(r"(?m)^\*\* (.+)$", page)
+        sections = {parts[i].strip(): parts[i + 1] for i in range(1, len(parts), 2)}
+        for entry in entries:
+            m = re.match(r"^eb-local (?:\[OPTION\]\.\.\. )?([a-z][a-z0-9-]*)", entry)
+            if not m or m.group(1) == "help":
+                continue
+            cmd = m.group(1)
+            sec = sections.get(cmd, "")
+            for flag in re.findall(r"--[a-z][a-z0-9-]*", entry):
+                self.assertRegex(
+                    sec,
+                    rf"(?<![\w-]){re.escape(flag)}(?![\w-])",
+                    f"{PAGE} section '** {cmd}' omits Synopsis flag {flag}",
+                )
+
     def test_each_command_has_its_section(self):
         names = commands()
         self.assertIn("rpath-wrappers", names)
