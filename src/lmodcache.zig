@@ -488,6 +488,10 @@ fn luaQuote(a: std.mem.Allocator, value: []const u8) ![]const u8 {
     return out.toOwnedSlice(a);
 }
 
+fn makeVerifyDir(a: std.mem.Allocator, cache_dir: []const u8) ![]u8 {
+    return fsx.mkdtemp(a, cache_dir, ".eb-local-verify-");
+}
+
 fn installVerified(
     io: std.Io,
     a: std.mem.Allocator,
@@ -496,18 +500,12 @@ fn installVerified(
     cache_path: []const u8,
     candidate: []const u8,
 ) u8 {
-    var random: [8]u8 = undefined;
-    if (linux.getrandom(&random, random.len, 0) != random.len) {
-        fail("cannot name a temporary cache; the cache was not changed", .{});
-        return 1;
-    }
-    const tmp_dir = std.fmt.allocPrint(a, "{s}/.eb-local-verify-{x}", .{
-        opts.cache_dir,
-        std.mem.readInt(u64, &random, .little),
-    }) catch return 1;
-    common.atomic.makedirs(tmp_dir) catch |err| {
-        fail("cannot create {s}: {s}", .{ tmp_dir, @errorName(err) });
-        return 1;
+    const tmp_dir = makeVerifyDir(a, opts.cache_dir) catch |err| switch (err) {
+        error.OutOfMemory => return 1,
+        else => {
+            fail("cannot create a temporary directory in {s}: {s}", .{ opts.cache_dir, @errorName(err) });
+            return 1;
+        },
     };
     defer fsx.deleteTree(a, fsx.cwd, tmp_dir) catch {};
     const candidate_path = std.fs.path.join(a, &.{ tmp_dir, "spiderT.lua" }) catch return 1;
@@ -828,4 +826,28 @@ test "normalizeInventory skips directory headers and accepts loaded and alias li
     try std.testing.expectEqualStrings("pigz/2.8", items[3]);
     try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "Lmod has detected the following error:\n"));
     try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "GSL/default ->\n"));
+}
+
+test "makeVerifyDir creates a private verification directory under cache_dir" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path[0..]});
+    defer a.free(base);
+
+    const created = try makeVerifyDir(a, base);
+    defer a.free(created);
+    defer fsx.deleteTree(a, fsx.cwd, created) catch {};
+
+    const expected_prefix = try std.fmt.allocPrint(a, "{s}/.eb-local-verify-", .{base});
+    defer a.free(expected_prefix);
+    try std.testing.expect(std.mem.startsWith(u8, created, expected_prefix));
+    try std.testing.expectEqual(expected_prefix.len + 8, created.len);
+    const st = try fsx.statAt(fsx.cwd, created, false);
+    try std.testing.expect(st.isDir());
+    try std.testing.expectEqual(@as(u32, 0), st.perm() & 0o077);
+
+    const missing = try std.fmt.allocPrint(a, "{s}/missing", .{base});
+    defer a.free(missing);
+    try std.testing.expectError(error.NotFound, makeVerifyDir(a, missing));
 }
