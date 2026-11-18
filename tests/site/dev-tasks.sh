@@ -18,8 +18,8 @@ W=$T/work
 rm -rf "$W"; mkdir -p "$W"
 pass=0; fail=0
 bare() { env -i HOME="$HOME" PATH=/usr/bin:/bin "$@"; }
-eessi_runpath() { readelf -d "$1" | grep -E 'RPATH|RUNPATH' | grep -q "/cvmfs/software.eessi.io/.*/$2/"; }
-from_eessi() { case "$(command -v "$1")" in /cvmfs/*) ;; *) echo "$1 is $(command -v "$1"), not EESSI's"; return 1;; esac; }
+eessi_runpath() { readelf -d "$1" | grep -E 'RPATH|RUNPATH' | grep -q "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/.*/$2/"; }
+from_eessi() { case "$(command -v "$1")" in "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}"/*) ;; *) echo "$1 is $(command -v "$1"), not EESSI's"; return 1;; esac; }
 task() {
     local name="$1"; shift
     if ( set -e; module purge >/dev/null 2>&1; unset LD_LIBRARY_PATH; "$@" ) > "$W/$name.log" 2>&1; then
