@@ -298,6 +298,58 @@ class LmodCache(unittest.TestCase):
                     self.assertEqual(previous.read_text(), "previous\n")
                     self.assertEqual(stamp.read_text(), "old\n")
 
+    def test_mode_specific_options_are_rejected_when_used_in_the_other_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "calls.log"
+            updater = root / "update_lmod_system_cache_files"
+            updater.write_text(UPDATE)
+            updater.chmod(updater.stat().st_mode | stat.S_IEXEC)
+            spider = root / "spider"
+            spider.write_text(SPIDER)
+            spider.chmod(spider.stat().st_mode | stat.S_IEXEC)
+            cpu = root / "versions/2026.06/software/linux/x86_64/amd/zen4"
+            (cpu / "modules/all").mkdir(parents=True)
+            cache = root / "cache"
+            stamp = root / "timestamp"
+            env = {**os.environ, "EB_LOCAL_UPDATE_LOG": str(log)}
+
+            bad_prefix = run(
+                ["--prefix", str(root), "--spider", str(spider), "--update-cmd", str(updater)],
+                env=env,
+            )
+            self.assertEqual(bad_prefix.returncode, 2, bad_prefix.stdout + bad_prefix.stderr)
+            self.assertEqual(bad_prefix.stdout, "")
+            self.assertIn("--spider applies only with --modulepath", bad_prefix.stderr)
+            self.assertFalse(log.exists())
+
+            for flag, val in (
+                ("--eessi-version", "2026.06"),
+                ("--update-cmd", str(updater)),
+            ):
+                with self.subTest(flag=flag):
+                    bad_single = run(
+                        [
+                            "--modulepath",
+                            str(cpu / "modules/all"),
+                            "--cache-dir",
+                            str(cache),
+                            "--timestamp",
+                            str(stamp),
+                            "--spider",
+                            str(spider),
+                            flag,
+                            val,
+                        ],
+                        env=env,
+                    )
+                    self.assertEqual(bad_single.returncode, 2, bad_single.stdout + bad_single.stderr)
+                    self.assertEqual(bad_single.stdout, "")
+                    self.assertIn("apply only with --prefix", bad_single.stderr)
+                    self.assertFalse(cache.exists())
+                    self.assertFalse(stamp.exists())
+                    self.assertFalse(log.exists())
+
     def test_prefix_dry_run_lists_cpu_and_accelerator_module_trees(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

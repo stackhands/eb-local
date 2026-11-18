@@ -1,0 +1,1 @@
+`eb-local lmod-cache` now exits 2 when `--spider` is passed with `--prefix`, or when `--eessi-version` or `--update-cmd` is passed without `--prefix`, matching the existing validation for `--modulepath`, `--cache-dir`, `--timestamp`, `--verify`, and `--dry-run`.
