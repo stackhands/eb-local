@@ -152,7 +152,7 @@ fn proxyLine(text: []const u8) ?[]const u8 {
         if (value.len > 0 and (value[0] == '"' or value[0] == '\'')) {
             const q = value[0];
             if (std.mem.indexOfScalarPos(u8, value, 1, q)) |end| {
-                value = value[1..end];
+                value = std.mem.trim(u8, value[1..end], " \t");
             } else continue;
         } else {
             if (std.mem.indexOfScalar(u8, value, '#')) |hash| value = std.mem.trimEnd(u8, value[0..hash], " \t");
@@ -352,6 +352,24 @@ test "export with tab prefix sets CVMFS_HTTP_PROXY" {
     const got = try readProxy(a, &env, root, "software.eessi.io");
     try testing.expectEqual(ProxyMode.proxy, got.mode);
     try testing.expectEqualStrings("http://tab:3128", got.value);
+}
+
+test "quoted CVMFS_HTTP_PROXY trims surrounding spaces and tabs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try scratch(a);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    var env = std.process.Environ.Map.init(a);
+
+    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "CVMFS_HTTP_PROXY=\" DIRECT \"\n");
+    const direct = try readProxy(a, &env, root, "software.eessi.io");
+    try testing.expectEqual(ProxyMode.direct, direct.mode);
+    try testing.expectEqualStrings("DIRECT", direct.value);
+
+    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "CVMFS_HTTP_PROXY=\" \t \"\n");
+    const blank = try readProxy(a, &env, root, "software.eessi.io");
+    try testing.expectEqual(ProxyMode.unset, blank.mode);
 }
 
 test "a parallel read uses srun when it is on PATH, and forks when it is not" {
