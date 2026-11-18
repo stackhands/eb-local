@@ -53,11 +53,13 @@ fn unescape(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
         if (s[i] == '\\' and i + 3 < s.len) {
-            if (std.fmt.parseInt(u8, s[i + 1 .. i + 4], 8)) |c| {
+            const oct = s[i + 1 .. i + 4];
+            if (oct[0] >= '0' and oct[0] <= '3' and oct[1] >= '0' and oct[1] <= '7' and oct[2] >= '0' and oct[2] <= '7') {
+                const c: u8 = ((oct[0] - '0') << 6) | ((oct[1] - '0') << 3) | (oct[2] - '0');
                 try out.append(a, c);
                 i += 3;
                 continue;
-            } else |_| {}
+            }
         }
         try out.append(a, s[i]);
     }
@@ -742,6 +744,7 @@ test "the mount a path lies on" {
         \\41 40 0:41 / /local/u.123 rw,nosuid shared:5 - xfs /dev/nvme0n1 rw
         \\50 22 0:50 / /home rw - gpfs home rw
         \\51 22 0:51 / /mnt/with\040space ro - tmpfs tmpfs ro
+        \\52 22 0:52 / /mnt/lit\+40_1\1_0 rw - xfs /dev/sdb1 rw
     ;
     const m = (try mountOf(a, info, "/local/u.123")).?;
     try testing.expectEqualStrings("/local/u.123", m.target);
@@ -750,6 +753,7 @@ test "the mount a path lies on" {
     try testing.expectEqualStrings("/local", (try mountOf(a, info, "/local/u.1234")).?.target);
     try testing.expectEqualStrings("gpfs", (try mountOf(a, info, "/home/u/x")).?.fstype);
     try testing.expectEqualStrings("/mnt/with space", (try mountOf(a, info, "/mnt/with space/a")).?.target);
+    try testing.expectEqualStrings("/mnt/lit\\+40_1\\1_0", (try mountOf(a, info, "/mnt/lit\\+40_1\\1_0/a")).?.target);
     try testing.expectEqualStrings("/", (try mountOf(a, info, "/etc")).?.target);
 }
 
