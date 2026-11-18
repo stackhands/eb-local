@@ -139,6 +139,9 @@ Check what you copy out of it before you share it.
 
 ## nimvault
 
+The `nimvault:` source is deprecated, says so on each build that uses it, and is removed in 4.0.0.
+A vault that can write a file or set a variable serves through `file:` or `env:` instead, for example `nimvault get licences/flexlm > ~/.config/eb-local/flexlm` with mode 600 and `file:~/.config/eb-local/flexlm`.
+
 A `nimvault:` source runs `nimvault get ENTRY`, with `--vault` when `nimvault.vault` names the vault, and takes what it prints as the value.
 nimvault has 30 seconds, since a passphrase prompt that nobody answers would otherwise hold the build until its job ends.
 When it takes longer, `eb-local config --check` shows:

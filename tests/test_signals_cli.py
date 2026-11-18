@@ -50,6 +50,8 @@ KEY = "licence-key-6f1c2e9a"
 class Signals(StorageFixture):
     def setUp(self):
         super().setUp()
+        for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
+            self.env.pop(name, None)
         (self.root / "slow-eb.py").write_text(SLOW_EB)
         programs = self.root / "slow-bin"
         programs.mkdir()
@@ -136,6 +138,14 @@ class Signals(StorageFixture):
         # on only what was sent to it alone.
         self.assertEqual((self.root / "eb.signals").read_text(), "SIGINT")
         self.assert_stopped_and_clean(eb)
+
+    def test_unsignalled_build_with_secrets_keeps_default_raw_bytes(self):
+        self.build_env["SLOW_EB_WAIT"] = "0"
+        run = subprocess.run(self.argv, env=self.build_env, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stderr, b"")
+        self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
+        self.assertEqual(list(self.job.iterdir()), [])
 
 
 if __name__ == "__main__":

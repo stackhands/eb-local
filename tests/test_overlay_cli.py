@@ -344,6 +344,252 @@ class OverlayMaterialize(unittest.TestCase):
                 self.assertEqual(got.stdout, "")
                 self.assertIn(expected_err, got.stderr)
 
+    def test_materialize_parameter_with_trailing_spaces_keeps_valid_python(self):
+        import ast
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"name = 'demo'   \nversion = '1.0'\r\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n'
+                '[replace]\nname = "\'custom\'"\nversion = "\'2.0\'"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            ast.parse(text)
+            self.assertEqual(text, "name = 'custom'\nversion = '2.0'\n")
+
+    def test_materialize_dependency_replace_ignores_strings_and_comments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing_dep = b"description = \"needs ('zlib', '0.9')\"\ndependencies = [('other', '1.0')]\n"
+            (root / "missing.eb").write_bytes(missing_dep)
+            (root / "missing.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(missing_dep)}"\n'
+                '[dependencies.replace]\nzlib = "(\'zlib\', \'1.2\')"\n',
+                encoding="utf-8",
+            )
+            got_missing = run(["materialize", "--overlay", "missing.toml", "--base", "missing.eb"], cwd=root)
+            self.assertEqual(got_missing.returncode, 2, got_missing.stdout + got_missing.stderr)
+            self.assertIn("has no dependency 'zlib' to replace", got_missing.stderr)
+
+            real_dep = b"description = \"('zlib', '0.9')\"\ndependencies = [('zlib', ('1.0', True))]\n"
+            (root / "real.eb").write_bytes(real_dep)
+            (root / "real.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(real_dep)}"\n'
+                '[dependencies.replace]\nzlib = "(\'zlib\', \'1.2\')"\n',
+                encoding="utf-8",
+            )
+            got_real = run(["materialize", "--overlay", "real.toml", "--base", "real.eb", "--out-dir", "out"], cwd=root)
+            self.assertEqual(got_real.returncode, 0, got_real.stdout + got_real.stderr)
+            out_text = (root / "out" / "materialized-real.eb").read_text(encoding="utf-8")
+            self.assertEqual(
+                out_text,
+                "description = \"('zlib', '0.9')\"\ndependencies = [('zlib', '1.2')]\n",
+            )
+
+    def test_materialize_replace_and_append_ignore_triple_quoted_docstrings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = (
+                b'""" header\n'
+                b"name = 'docstring'\n"
+                b"patches = [\n"
+                b'"""\n'
+                b"name = 'real'\n"
+                b"patches = ['real.patch']\n"
+            )
+            (root / "base.eb").write_bytes(base)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base)}"\n'
+                '[replace]\nname = "\'custom\'"\n'
+                '[patches]\nsite = "site.patch"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            out_text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            self.assertEqual(
+                out_text,
+                '""" header\n'
+                "name = 'docstring'\n"
+                "patches = [\n"
+                '"""\n'
+                "name = 'custom'\n"
+                "patches = ['real.patch',\n"
+                "    ('site', 'site.patch')]\n",
+            )
+
+    def test_materialize_appends_to_trailing_comma_list_as_valid_python(self):
+        import ast
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"dependencies = [\n    ('zlib', '1.3'),\n]\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n'
+                '[dependencies.add]\npkg = "(\'pkg\', \'1.0\')"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            ast.parse(text)
+            self.assertNotIn(",,", text)
+
+    def test_materialize_ignores_brackets_in_quoted_strings_and_comments(self):
+        import ast
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"patches = [\n    # [note]\n    ('fix-[1].patch', 1),\n    ('a]b.patch', 1),\n]\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n'
+                '[patches]\nsite = "site.patch"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            ast.parse(text)
+            self.assertIn("('site', 'site.patch')", text)
+
+    def test_materialize_missing_inputs_exit_two_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(b"name = 'demo'\n")
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(b"name = \'demo\'\n")}"\n',
+                encoding="utf-8",
+            )
+            missing_ov = run(
+                ["materialize", "--overlay", "missing.toml", "--base", "base.eb", "--check"],
+                cwd=root,
+                text=False,
+            )
+            self.assertEqual(missing_ov.returncode, 2, missing_ov.stderr)
+            self.assertEqual(missing_ov.stdout, b"")
+            self.assertEqual(
+                missing_ov.stderr,
+                b"eb-local: cannot read missing.toml: FileNotFound\n",
+            )
+
+            missing_base = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "missing.eb", "--check"],
+                cwd=root,
+                text=False,
+            )
+            self.assertEqual(missing_base.returncode, 2, missing_base.stderr)
+            self.assertEqual(missing_base.stdout, b"")
+            self.assertEqual(
+                missing_base.stderr,
+                b"eb-local: cannot read missing.eb: FileNotFound\n",
+            )
+
+    def test_materialize_leaves_no_partial_outputs_when_provenance_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_bytes = b"name = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                '[replace]\nversion = "\'2.0\'"\n',
+                encoding="utf-8",
+            )
+
+            out_dir = root / "out"
+            out_dir.mkdir()
+            prev_recipe = out_dir / "materialized-base.eb"
+            prev_recipe.write_text("previous\n", encoding="utf-8")
+            (out_dir / "provenance.toml").mkdir()
+
+            got = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "out",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertEqual(prev_recipe.read_text(encoding="utf-8"), "previous\n")
+
+            fresh_dir = root / "fresh-out"
+            fresh_dir.mkdir()
+            (fresh_dir / "provenance.toml").mkdir()
+            got_fresh = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "fresh-out",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(got_fresh.returncode, 1, got_fresh.stdout + got_fresh.stderr)
+            self.assertFalse((fresh_dir / "materialized-base.eb").exists())
+
+    def test_unknown_overlay_keys_are_refused_with_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_bytes = b"name = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(base_bytes)
+            digest = digest_of(base_bytes)
+            cases = [
+                (
+                    f'overlay_version = 1\nbase_digest = "{digest}"\n[replaces]\nversion = "\'2.0\'"\n',
+                    "unknown key replaces",
+                ),
+                (
+                    f'overlay_version = 1\nbase_digest = "{digest}"\n[dependencies.remove]\nzlib = "1"\n',
+                    "unknown key dependencies.remove",
+                ),
+            ]
+            for overlay_text, needle in cases:
+                with self.subTest(needle=needle):
+                    (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+                    out_dir = root / "out"
+                    got = run(
+                        [
+                            "materialize",
+                            "--overlay",
+                            "site.overlay.toml",
+                            "--base",
+                            "base.eb",
+                            "--out-dir",
+                            str(out_dir),
+                        ],
+                        cwd=root,
+                    )
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertIn(needle, got.stderr)
+                    self.assertFalse(out_dir.exists())
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
@@ -363,6 +609,50 @@ class OverlayDefaultOutput(unittest.TestCase):
             run.stdout,
             rf"^eb-local 3\.1\.0 \({self.host_musl_target_triple()}",
         )
+
+
+@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+class OverlayCheckUnreadableOutputs(unittest.TestCase):
+    def test_unreadable_existing_outputs_exit_two(self):
+        base_bytes = b"name = 'demo'\n"
+        overlay_text = f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+        for bad_name in ("materialized-base.eb", "provenance.toml"):
+            with self.subTest(bad_name=bad_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+                (root / bad_name).mkdir()
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", ".", "--check"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(f"eb-local: cannot read ./{bad_name}:", got.stderr)
+
+    def test_provenance_toml_escapes_rationale_triple_quotes_and_backslashes(self):
+        import tomllib
+
+        base_bytes = b"name = 'demo'\n"
+        rationale = 'keep \\ and """ and trailing "'
+        toml_escaped = rationale.replace("\\", "\\\\").replace('"', '\\"')
+        overlay_text = (
+            f'overlay_version = 1\n'
+            f'base_digest = "{digest_of(base_bytes)}"\n'
+            f'rationale = "{toml_escaped}"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            prov_text = (root / "out" / "provenance.toml").read_text(encoding="utf-8")
+            parsed = tomllib.loads(prov_text)
+            self.assertEqual(parsed["rationale"].rstrip("\n"), rationale)
 
 
 if __name__ == "__main__":

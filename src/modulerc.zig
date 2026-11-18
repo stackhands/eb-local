@@ -1,5 +1,6 @@
 //! `eb-local modulerc`: add operator-selected defaults, aliases and hides.
 const std = @import("std");
+const common = @import("zig_common");
 const jsonout = @import("jsonout.zig");
 
 /// One `module_alias` directive.
@@ -102,12 +103,20 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         return 2;
     }
     const path = std.fs.path.join(a, &.{ opts.tree, ".modulerc.lua" }) catch return 1;
+    if (opts.check or opts.dry_run) {
+        if (common.fsx.statAt(common.fsx.cwd, path, false)) |st| {
+            if (st.isLink()) {
+                fail("cannot read {s}: symlink is not followed", .{path});
+                return 2;
+            }
+        } else |_| {}
+    }
     const cwd = std.Io.Dir.cwd();
     const previous = cwd.readFileAlloc(io, path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => "",
         else => {
             fail("cannot read {s}: {s}", .{ path, @errorName(err) });
-            return 1;
+            return 2;
         },
     };
     const text = render(a, previous, opts) catch return 1;
@@ -154,17 +163,27 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         }
         return 0;
     }
-    cwd.createDirPath(io, opts.tree) catch |err| {
+    var first_missing: ?[]const u8 = null;
+    {
+        var probe: []const u8 = opts.tree;
+        while (probe.len > 1) {
+            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
+                if (st.isDir()) break;
+                break;
+            } else |_| {}
+            first_missing = probe;
+            probe = std.fs.path.dirname(probe) orelse break;
+        }
+    }
+    common.atomic.makedirs(opts.tree) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.tree, @errorName(err) });
         return 1;
     };
-    const temporary = std.fmt.allocPrint(a, "{s}.new", .{path}) catch return 1;
-    cwd.writeFile(io, .{ .sub_path = temporary, .data = text }) catch |err| {
-        fail("cannot write {s}: {s}", .{ temporary, @errorName(err) });
-        return 1;
-    };
-    std.Io.Dir.renameAbsolute(temporary, path, io) catch |err| {
-        fail("cannot write {s}: {s}", .{ path, @errorName(err) });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    common.atomic.atomicWrite(a, path, text, .{ .mode = 0o644 }, &why) catch |err| {
+        fail("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     if (opts.json) {

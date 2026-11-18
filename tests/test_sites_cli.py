@@ -220,6 +220,20 @@ class SitesCli(StorageFixture):
                 self.assertIn(needle, run.stderr)
                 self.assertFalse(target.exists())
 
+    def test_unclosed_placeholder_in_template_is_refused(self):
+        template = self.root / "bad-template.toml"
+        template.write_text('[storage]\nnode_local_root = "/local"\n'
+                            '[build]\nallocation_hint = "salloc -p {{partition"\n')
+        template.chmod(0o644)
+        target = self.root / "bad-config.toml"
+        for argv in (["site", "show", "./bad-template.toml"], ["site", "install", "./bad-template.toml", "--to", str(target)]):
+            with self.subTest(argv=argv):
+                run = self.run_tool(argv)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn("unclosed placeholder", run.stderr)
+                self.assertFalse(target.exists())
+
     # -- configuration in the environment -------------------------------------
 
     def test_config_env_round_trips(self):
@@ -368,6 +382,30 @@ class SitesCli(StorageFixture):
         flag_err = self.run_tool(["site", "check", str(staged), "--force"])
         self.assertEqual(flag_err.returncode, 2)
         self.assertIn("site check takes only a configuration file", flag_err.stderr)
+
+    def test_site_install_refuses_directory_target_with_helpful_message(self):
+        target_dir = self.root / "site-dir"
+        target_dir.mkdir()
+        for extra in ([], ["--force"]):
+            with self.subTest(extra=extra):
+                got = self.run_tool(
+                    [
+                        "site",
+                        "install",
+                        "slurm",
+                        "--set",
+                        "node_local_root=/local",
+                        "--set",
+                        "shared_scratch=/scratch",
+                        "--to",
+                        str(target_dir),
+                        *extra,
+                    ]
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertIn("is a directory", got.stderr)
+                self.assertIn(f"{target_dir}/config.toml", got.stderr)
+                self.assertTrue(target_dir.is_dir())
 
 
 if __name__ == "__main__":

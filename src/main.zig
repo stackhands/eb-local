@@ -217,28 +217,8 @@ const Ctx = struct {
 
 // ---- shell output ---------------------------------------------------------
 
-/// A word the shell reads back as exactly `s`: as it is when it holds only
-/// safe characters, single-quoted otherwise.
-fn shellQuote(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
-    var safe = s.len > 0;
-    for (s) |ch| {
-        if (!(std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "_./:@%+,=-", ch) != null)) {
-            safe = false;
-            break;
-        }
-    }
-    if (safe) return s;
-    var out: std.ArrayList(u8) = .empty;
-    try out.append(a, '\'');
-    for (s) |ch| {
-        if (ch == '\'') try out.appendSlice(a, "'\\''") else try out.append(a, ch);
-    }
-    try out.append(a, '\'');
-    return out.items;
-}
-
 fn q(a: Allocator, s: []const u8) []const u8 {
-    return shellQuote(a, s) catch oom();
+    return common.pytext.shellQuote(a, s) catch oom();
 }
 
 fn str(a: Allocator, comptime f: []const u8, args: anytype) []const u8 {
@@ -594,12 +574,15 @@ fn locate(c: Ctx, s: config.Settings) Place {
 }
 
 /// eb-local 2.x installed into ~/.local/eessi by default. Where
-/// that tree exists and the new default does not, it stays in use, so
-/// installed modules do not disappear; set `prefix` to choose for good.
+/// that tree holds an install and the new default does not exist, it stays
+/// in use, so installed modules do not disappear; set `prefix` to choose
+/// for good. An empty ~/.local/eessi holds nothing to keep.
 fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u8 {
     if (isDir(default_prefix)) return null;
     const old = std.fs.path.join(c.a, &.{ home, ".local", "eessi" }) catch oom();
-    if (!isDir(old)) return null;
+    const versions = std.fs.path.join(c.a, &.{ old, "versions" }) catch oom();
+    const own = std.fs.path.join(c.a, &.{ old, ".eb-local" }) catch oom();
+    if (!isDir(versions) and !isDir(own)) return null;
     warn("using {s}, the default before eb-local 3.0; EESSI-extend and `eb-local eb` use {s}.", .{ old, default_prefix });
     cli.err("  Keep it with prefix = \"~/.local/eessi\" in ~/.config/eb-local/config.toml, or move it to {s}.\n", .{default_prefix});
     return storage.canonical(c.a, old, c.cwd) catch oom();
@@ -698,6 +681,15 @@ fn llvmToolchain(module: []const u8) ?[]const u8 {
         }
     }
     return null;
+}
+
+test "onlyXalt is XALT's init library and nothing else" {
+    try std.testing.expect(onlyXalt("/opt/xalt/current/lib64/libxalt_init.so:"));
+    try std.testing.expect(onlyXalt("/opt/xalt/lib64/libxalt_init.so /usr/lib/xalt/libxalt_init.so.1"));
+    try std.testing.expect(!onlyXalt(""));
+    try std.testing.expect(!onlyXalt(":"));
+    try std.testing.expect(!onlyXalt("/opt/xalt/lib64/libxalt_init.so:/home/u/hack.so"));
+    try std.testing.expect(!onlyXalt("/home/u/libxalt.so"));
 }
 
 test "llvmToolchain names the lfoss hierarchy and nothing else" {
@@ -801,9 +793,9 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
     }
     const dir = rpath.directory(a, c.env, found) catch |e| switch (e) {
         error.NoCacheDir => die("rpath-wrappers needs an absolute XDG_CACHE_HOME or HOME", .{}),
-        else => die("cannot work out the wrapper directory ({s})", .{@errorName(e)}),
+        else => die("cannot work out the wrapper directory ({s})", .{storage.describeError(e)}),
     };
-    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, @errorName(e) });
+    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, storage.describeError(e) });
     const names = std.mem.join(a, " ", found) catch oom();
     if (only_unwrapped) {
         warn("the build environment does not wrap {s};", .{names});
@@ -854,11 +846,10 @@ const Check = struct {
     }
 
     fn isAudited(k: *Check, a: Allocator, path: []const u8) bool {
-        return k.recursive and k.audited.contains(canonicalKey(a, path));
+        return k.audited.contains(canonicalKey(a, path));
     }
 
     fn markAudited(k: *Check, a: Allocator, path: []const u8) void {
-        if (!k.recursive) return;
         k.audited.put(a, canonicalKey(a, path), {}) catch oom();
     }
 
@@ -923,6 +914,11 @@ fn isDir(path: []const u8) bool {
     return st.isDir();
 }
 
+fn resolveRootPath(a: Allocator, root: []const u8, path: []const u8) []const u8 {
+    if (std.mem.eql(u8, root, "/") or storage.under(path, root)) return path;
+    return std.fs.path.join(a, &.{ root, path }) catch oom();
+}
+
 /// The directories the loader under `root` searches last: those its
 /// ld.so.conf names, one level of `include DIR/*.conf` deep, then its
 /// built-in ones. The loader reads a cache built from the same list.
@@ -932,11 +928,17 @@ fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
     const conf = std.fs.path.join(a, &.{ root, "etc/ld.so.conf" }) catch oom();
     if (readSmall(a, conf)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &includes) catch oom();
     for (includes.items) |pat| {
-        // Only the DIR/*.SUFFIX form; anything else is skipped.
-        const slash = std.mem.lastIndexOfScalar(u8, pat, '/') orelse continue;
-        const base = pat[slash + 1 ..];
+        // Only the DIR/*.SUFFIX (or *.SUFFIX under etc/) form; anything else is skipped.
+        const slash = std.mem.lastIndexOfScalar(u8, pat, '/');
+        const base = if (slash) |s| pat[s + 1 ..] else pat;
         if (!std.mem.startsWith(u8, base, "*") or std.mem.indexOfAny(u8, base[1..], "*?[") != null) continue;
-        const dir = if (slash == 0) "/" else pat[0..slash];
+        const dir = if (slash) |s| blk: {
+            const raw_dir = if (s == 0) "/" else pat[0..s];
+            break :blk if (raw_dir[0] == '/')
+                resolveRootPath(a, root, raw_dir)
+            else
+                std.fs.path.join(a, &.{ root, "etc", raw_dir }) catch oom();
+        } else std.fs.path.join(a, &.{ root, "etc" }) catch oom();
         const fd = fsx.openDir(fsx.cwd, dir, true) catch continue;
         defer sys.close(fd);
         var names: std.ArrayList([]const u8) = .empty;
@@ -950,6 +952,7 @@ fn loaderDirs(a: Allocator, root: []const u8) []const []const u8 {
             if (readSmall(a, p)) |text| elfcheck.parseLdSoConf(a, text, &dirs, &none) catch oom();
         }
     }
+    for (dirs.items) |*d| d.* = resolveRootPath(a, root, d.*);
     for ([_][]const u8{ "lib64", "usr/lib64", "lib", "usr/lib" }) |sub|
         dirs.append(a, std.fs.path.join(a, &.{ root, sub }) catch oom()) catch oom();
     return dirs.items;
@@ -1002,7 +1005,11 @@ fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
 /// either way.
 fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool) void {
     const a = c.a;
-    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const target = if (raw_target) |rt| blk: {
+        const trimmed = std.mem.trimEnd(u8, rt, "/");
+        break :blk if (trimmed.len > 0) trimmed else rt;
+    } else null;
     const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
     const machine = elfcheck.machineName(elf.machine);
     if (k.json) k.beginFile(a, path, machine);
@@ -1062,11 +1069,17 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
 
     for (elf.needed) |n| {
         if (std.mem.indexOfScalar(u8, n, '/') != null) {
-            if (!quiet) say("  needs    {s}", .{n});
-            if (!isFile(n)) {
+            const needed_path = elfcheck.expandOrigin(a, n, origin) catch oom();
+            if (!quiet) {
+                if (std.mem.eql(u8, needed_path, n))
+                    say("  needs    {s}", .{n})
+                else
+                    say("  needs    {s} => {s}", .{ n, needed_path });
+            }
+            if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{n});
-            } else k.enqueue(a, n);
+                k.problem(a, "{s} does not exist", .{needed_path});
+            } else k.enqueue(a, needed_path);
             continue;
         }
         // The job may run without this shell's LD_LIBRARY_PATH, so the
@@ -1134,6 +1147,7 @@ fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursiv
     var unreadable = false;
     var elfs: usize = 0;
     for (files) |f| {
+        if (k.isAudited(c.a, f)) continue;
         if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
     }
     drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
@@ -1240,7 +1254,11 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
                 findInstalls(c, versions, name, ver, null, &found, 0);
                 if (found.installs.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
             }
-            roots.appendSlice(a, found.installs.items) catch oom();
+            for (found.installs.items) |dir| {
+                for (roots.items) |seen| {
+                    if (std.mem.eql(u8, seen, dir)) break;
+                } else roots.append(a, dir) catch oom();
+            }
         },
     }
     var k: Check = .{ .json = json, .recursive = recursive };
@@ -1611,6 +1629,12 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         cli.put(1, text);
         return 0;
     }
+    if (fsx.statAt(fsx.cwd, target, false)) |st| {
+        if (st.isDir()) {
+            const clean = std.mem.trimEnd(u8, target, "/");
+            die("{s} is a directory; pass a file path such as {s}/config.toml", .{ target, if (clean.len > 0) clean else "" });
+        }
+    } else |_| {}
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
@@ -1752,6 +1776,10 @@ const Guard = struct {
         for (passed_on) |sig| linux.sigaddset(&block, sig);
         var mask: linux.sigset_t = undefined;
         _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &mask);
+        if (g.received()) |sig| {
+            _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
+            return .{ .signal = sig };
+        }
         const pid: isize = @bitCast(linux.fork());
         if (pid == 0) {
             for (passed_on, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
@@ -2194,7 +2222,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
             removed_ws += 1;
         } else |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
     }
-    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{spaces.items.len});
+    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
     var removed_items: usize = 0;
     var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
@@ -2228,7 +2256,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
                 }
             }
             action = "deleted";
-            if (!json) say("eb-local: deleted {d} item(s)", .{targets.len});
+            if (!json) say("eb-local: deleted {d} item(s)", .{removed_items});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
@@ -2236,6 +2264,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         }
     }
     if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces.items, removed_items, removed_ws);
+    if (removed_ws < spaces.items.len or removed_items < targets.len) return 1;
     return 0;
 }
 
@@ -2397,6 +2426,19 @@ const shell_startup = [_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" 
 /// RPATH.
 const host_loader = [_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" };
 
+/// Whether `value`, an LD_PRELOAD list split on ':' or ' ', names only
+/// XALT's libxalt_init.so: the usage tracker sites preload for every
+/// login. A build leaves it out like any preload, without a warning.
+fn onlyXalt(value: []const u8) bool {
+    var seen = false;
+    var it = std.mem.tokenizeAny(u8, value, ": ");
+    while (it.next()) |entry| {
+        if (!std.mem.startsWith(u8, std.fs.path.basename(entry), "libxalt_init.")) return false;
+        seen = true;
+    }
+    return seen;
+}
+
 /// The variables a build sets for its script: build and temporary space in
 /// the workspace `work`, sources and logs beside the install.
 fn buildVariables(a: Allocator, work: []const u8, d: Durable) [11][2][]const u8 {
@@ -2557,6 +2599,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     // the build with nothing but the installation directory made.
     var failure: secrets.Failure = .{};
     const wanted = config.buildSecrets(a, s) catch oom();
+    for (wanted) |w| if (std.mem.startsWith(u8, w.source, "nimvault:"))
+        warn("secret {s}: the nimvault: source is deprecated and is removed in 4.0.0; use file: or env:", .{w.name});
     const values = secrets.resolve(a, wanted, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
         error.Unavailable => die("{s}", .{failure.message}),
         error.OutOfMemory => oom(),
@@ -2564,6 +2608,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     for (values) |v| if (v.value.len < secrets.min_redacted_len)
         warn("secret {s} is shorter than {d} bytes and is not removed from logs", .{ v.name, secrets.min_redacted_len });
 
+    const guard = Guard.hold();
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
         common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
@@ -2608,7 +2653,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     };
     var dropped_loader = false;
     for (host_loader) |name| {
-        if (env.swapRemove(name)) dropped_loader = true;
+        const quiet = std.mem.eql(u8, name, "LD_PRELOAD") and onlyXalt(env.get(name) orelse "");
+        if (env.swapRemove(name) and !quiet) dropped_loader = true;
     }
     if (dropped_loader) {
         warn("LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT was set; a build does not pass them to eb,", .{});
@@ -2624,9 +2670,13 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     for (s.eessi.items) |v| env.put(v.name, v.value) catch oom();
     for (values) |v| env.put(v.name, v.value) catch oom();
 
+    if (guard.received()) |sig| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        guard.release();
+        return stop(.{ .signal = sig });
+    }
     // The guard stays until the logs are clean: a signal stops the build, but
     // eb-local first waits for EasyBuild, which writes them, to exit.
-    const guard = Guard.hold();
     const ran = guard.run(a, buildCommand(a, c, s, p, args), envpOf(a, &env));
     const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
@@ -2733,9 +2783,21 @@ fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
     if (filters.len == 0) return true;
     for (filters) |f| {
         if (std.mem.eql(u8, module, f)) return true;
-        if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') return true;
+        if (std.mem.endsWith(u8, f, "/")) {
+            if (f.len > 1 and std.mem.startsWith(u8, module, f)) return true;
+        } else if (module.len > f.len and std.mem.startsWith(u8, module, f) and module[f.len] == '/') {
+            return true;
+        }
     }
     return false;
+}
+
+test "matchesFilter matches NAME, NAME/, and NAME/VERSION" {
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo"}));
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo/"}));
+    try std.testing.expect(matchesFilter("demo/1.0", &.{"demo/1.0"}));
+    try std.testing.expect(!matchesFilter("demo2/1.0", &.{"demo/"}));
+    try std.testing.expect(!matchesFilter("demo/1.0", &.{"/"}));
 }
 
 const ListTargetJson = struct { label: []const u8, here: bool };
@@ -2799,7 +2861,11 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     std.mem.sort(Listed, rows.items, {}, listedLess);
 
     // This node's target, when EESSI is loaded.
-    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_here = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const here_target = if (raw_here) |ht| blk: {
+        const trimmed = std.mem.trimEnd(u8, ht, "/");
+        break :blk if (trimmed.len > 0) trimmed else ht;
+    } else null;
     const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
     var here: ?usize = null;
     if (here_target) |ht| for (trees.items, 0..) |t, ti| {
@@ -3189,11 +3255,10 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
         return;
     }
-    var cwd_buf: [sys.path_max]u8 = undefined;
-    const cwd = fsx.realpath(fsx.cwd, ".", &cwd_buf) catch ".";
-    const work = std.fmt.allocPrint(a, "{s}/.zig-cache/mpi-hello-{d}", .{ cwd, linux.getpid() }) catch oom();
-    common.atomic.makedirs(work) catch {
-        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
+    const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
+    const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
+    const work = storage.makeWorkspace(a, base) catch {
+        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{base});
         return;
     };
     defer fsx.deleteTree(a, fsx.cwd, work) catch {};
@@ -3213,6 +3278,10 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         }
         const hello = mpi.runHello(a, transport, mpicc, mpirun, work, c.env, c.envp) catch oom();
         const label = @tagName(transport);
+        if (hello.source_error) |msg| {
+            note(a, out, json_lines, "warn", "MPI hello could not be written ({s})", .{msg});
+            return;
+        }
         if (hello.missing_compiler) {
             note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
             return;
@@ -3380,8 +3449,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         note(a, &out, lines_ptr, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
         if (!site) failed = true;
     }
-    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
-        note(a, &out, lines_ptr, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v))) |value| {
+        if (std.mem.eql(u8, v, "LD_PRELOAD") and onlyXalt(value))
+            note(a, &out, lines_ptr, "info", "LD_PRELOAD loads only XALT's libxalt_init.so, the site's usage tracker; builds leave it out", .{})
+        else
+            note(a, &out, lines_ptr, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    };
     reportForeign(c, s, p.prefix, &out, lines_ptr);
 
     // The allocation.
@@ -3412,9 +3485,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         const mp = c.env.get("MODULEPATH") orelse "";
         var seen = false;
         var it = std.mem.splitScalar(u8, mp, ':');
-        while (it.next()) |d| if (storage.under(d, p.prefix)) {
-            seen = true;
-        };
+        while (it.next()) |d| {
+            if (d.len == 0) continue;
+            const resolved = storage.canonical(a, d, c.cwd) catch d;
+            if (storage.under(resolved, p.prefix)) {
+                seen = true;
+                break;
+            }
+        }
         if (seen) note(a, &out, lines_ptr, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, lines_ptr, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
     } else |_| {}
     if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
@@ -3554,7 +3632,9 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
                 for (all) |k| known.append(a, k.name) catch oom();
                 die("--on {s}: no such node type; the site has {s}", .{ n, std.mem.join(a, ", ", known.items) catch oom() });
             };
-            chosen.append(a, t) catch oom();
+            for (chosen.items) |already| {
+                if (std.mem.eql(u8, already.name, t.name)) break;
+            } else chosen.append(a, t) catch oom();
         }
     }
     const p = place(c, s);
@@ -3597,12 +3677,13 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
             die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
         say("eb-local: {s}:", .{t.name});
-        switch (runAttached(a, argv.items, c.envp)) {
+        const run = runAttached(a, argv.items, c.envp);
+        switch (run) {
             .exit => |code| if (code != 0) {
                 warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
                 failed = true;
             },
-            .signal => failed = true,
+            .signal => return stop(run),
         }
     }
     if (o.print) return 0;
@@ -3765,10 +3846,13 @@ fn loadsAny(text: []const u8, wanted: []const []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        for ([_][]const u8{ "depends_on(\"", "load(\"" }) |call| {
+        for ([_][]const u8{ "depends_on(", "load(" }) |call| {
             if (!std.mem.startsWith(u8, line, call)) continue;
-            const rest = line[call.len..];
-            const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+            const after = line[call.len..];
+            if (after.len < 2 or (after[0] != '"' and after[0] != '\'')) continue;
+            const quote = after[0];
+            const rest = after[1..];
+            const end = std.mem.indexOfScalar(u8, rest, quote) orelse continue;
             if (listed(wanted, rest[0..end])) return true;
         }
     }
@@ -3859,7 +3943,8 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         }
     }
     var found: Found = .{};
-    for (modules) |m| {
+    for (modules, 0..) |m, idx| {
+        if (listed(modules[0..idx], m)) continue;
         var parts = std.mem.splitScalar(u8, m, '/');
         const name = parts.next().?;
         const ver = parts.next() orelse die("uninstall needs NAME/VERSION; '{s}' has no version", .{m});
@@ -4359,6 +4444,8 @@ pub fn main(init: std.process.Init) u8 {
                     submit.on = joined(x, "--on").?;
                 } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
                     submit.print = true;
+                } else if (rest.items.len == 0 and x.len > 0 and x[0] == '-') {
+                    die("submit does not know '{s}'", .{x});
                 } else rest.append(a, x) catch oom();
             },
             .list => {
@@ -4599,6 +4686,7 @@ fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     var env = c.env.clone(c.a) catch oom();
     defer env.deinit();
     extend.apply(&env);
+    for (shell_startup) |name| _ = env.swapRemove(name);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
     return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
 }
@@ -4705,13 +4793,40 @@ test "a signal that killed the child kills this process, and an ignored one does
     try std.testing.expectEqual(@as(u8, 129), linux.W.EXITSTATUS(status2));
 }
 
+test "Guard.run does not launch child when a guarded signal already arrived" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/guard-prefork-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const marker = try std.fs.path.join(a, &.{ root, "ran" });
+
+    for ([_]linux.SIG{ .TERM, .INT }) |sig| {
+        const guard = Guard.hold();
+        defer guard.release();
+        _ = linux.kill(linux.getpid(), sig);
+        const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
+        const cmd = try std.fmt.allocPrint(a, "echo ran > '{s}'", .{marker});
+        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env);
+        switch (ran) {
+            .signal => |got| try std.testing.expectEqual(sig, got),
+            .exit => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, marker, false));
+    }
+}
+
 test "shell quoting reads back as the same word" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const shellQuote = common.pytext.shellQuote;
     try std.testing.expectEqualStrings("EESSI/2026.06", try shellQuote(a, "EESSI/2026.06"));
     try std.testing.expectEqualStrings("/home/u/eessi", try shellQuote(a, "/home/u/eessi"));
     try std.testing.expectEqualStrings("'owned space'", try shellQuote(a, "owned space"));
-    try std.testing.expectEqualStrings("'a'\\''b $(x)'", try shellQuote(a, "a'b $(x)"));
+    try std.testing.expectEqualStrings("'a'\"'\"'b $(x)'", try shellQuote(a, "a'b $(x)"));
     try std.testing.expectEqualStrings("''", try shellQuote(a, ""));
 }

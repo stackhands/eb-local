@@ -36,6 +36,7 @@ class SubcommandFlags(StorageFixture):
             (["clean", "--bogus"], "clean does not know '--bogus'"),
             (["uninstall", "--bogus"], "uninstall does not know '--bogus'"),
             (["restore", "--bogus"], "restore does not know '--bogus'"),
+            (["submit", "--bogus", "demo.eb"], "submit does not know '--bogus'"),
         ]
         for args, needle in cases:
             with self.subTest(args=args):
