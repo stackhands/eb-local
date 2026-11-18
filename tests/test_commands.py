@@ -203,7 +203,7 @@ class Commands(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
 
     @unittest.skipUnless(binary.BIN, "the shared default prefix is a feature of the Zig build")
-    def test_the_default_prefix_is_eessi_extends_and_an_older_tree_stays_in_use(self):
+    def test_the_default_prefix_is_eessi_extends_and_an_older_install_stays_in_use(self):
         home = self.root / "home"
         home.mkdir()
         self.env = dict(self.env, HOME=str(home), XDG_CONFIG_HOME=str(self.root / "xdg"), SLURM_JOB_ID="")
@@ -218,6 +218,10 @@ class Commands(StorageFixture):
         self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/eessi"])
         self.assertNotIn("before eb-local 3.0", err)
         (home / ".local" / "eessi").mkdir(parents=True)
+        lines, err = chosen()
+        self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/eessi"])
+        self.assertNotIn("before eb-local 3.0", err)
+        (home / ".local" / "eessi" / "versions").mkdir()
         lines, err = chosen()
         self.assertEqual(lines, [f"export EESSI_USER_INSTALL={home}/.local/eessi"])
         self.assertIn("before eb-local 3.0", err)

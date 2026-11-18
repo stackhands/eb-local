@@ -574,12 +574,15 @@ fn locate(c: Ctx, s: config.Settings) Place {
 }
 
 /// eb-local 2.x installed into ~/.local/eessi by default. Where
-/// that tree exists and the new default does not, it stays in use, so
-/// installed modules do not disappear; set `prefix` to choose for good.
+/// that tree holds an install and the new default does not exist, it stays
+/// in use, so installed modules do not disappear; set `prefix` to choose
+/// for good. An empty ~/.local/eessi holds nothing to keep.
 fn legacyPrefix(c: Ctx, home: []const u8, default_prefix: []const u8) ?[]const u8 {
     if (isDir(default_prefix)) return null;
     const old = std.fs.path.join(c.a, &.{ home, ".local", "eessi" }) catch oom();
-    if (!isDir(old)) return null;
+    const versions = std.fs.path.join(c.a, &.{ old, "versions" }) catch oom();
+    const own = std.fs.path.join(c.a, &.{ old, ".eb-local" }) catch oom();
+    if (!isDir(versions) and !isDir(own)) return null;
     warn("using {s}, the default before eb-local 3.0; EESSI-extend and `eb-local eb` use {s}.", .{ old, default_prefix });
     cli.err("  Keep it with prefix = \"~/.local/eessi\" in ~/.config/eb-local/config.toml, or move it to {s}.\n", .{default_prefix});
     return storage.canonical(c.a, old, c.cwd) catch oom();
