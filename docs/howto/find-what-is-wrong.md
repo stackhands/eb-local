@@ -39,7 +39,7 @@ These steps run them and read what they say.
     ```
 
     Each line says `ok`, `info`, `warn` or `FAIL`, and a `warn` or `FAIL` line says what to change.
-    `doctor` changes nothing, and exits 1 when a line says `FAIL`.
+    `doctor` changes nothing, and exits 1 when a line says `FAIL` (or `warn` with `--strict`).
     With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
     Here `EESSI_PROJECT_INSTALL` would send EESSI-extend, loaded by hand or by `eb-local eb`, to a project directory that is not there; `unset EESSI_PROJECT_INSTALL LD_LIBRARY_PATH` clears both warnings.
 

@@ -97,10 +97,11 @@ const usage_text =
     \\                                       what this node's target lacks; --json prints one
     \\                                       line of JSON with schema_version 1; --missing
     \\                                       lists only modules missing on this node's target
-    \\  eb-local doctor [--json] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing;
     \\                                       --json prints one line of JSON with schema_version 1.
+    \\                                       --strict exits 1 on warn lines as well as FAIL.
     \\                                       --workspace probes PATH without starting a build.
     \\                                       --cvmfs checks the CernVM-FS client.
     \\                                       --cvmfs-parallel N (1 to 8) reads repository
@@ -2945,6 +2946,8 @@ fn note(a: Allocator, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(Docto
 }
 
 const DoctorOpts = struct {
+    /// `--strict`: treat `warn` lines as failures alongside `FAIL`.
+    strict: bool = false,
     /// `--cvmfs`: check the client. Off unless the flag asks.
     cvmfs: bool = false,
     /// `--cvmfs-parallel`. Null uses `doctor.cvmfs_parallel`.
@@ -3229,6 +3232,18 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
     }
 }
 
+fn hasDoctorWarning(out: []const u8, json_lines: []const DoctorLine, json: bool) bool {
+    if (json) {
+        for (json_lines) |l| if (std.mem.eql(u8, l.level, "warn")) return true;
+        return false;
+    }
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, line, "warn ")) return true;
+    }
+    return false;
+}
+
 /// Everything about this shell, this node and the configuration that would
 /// make a build, `eb-local eb` or a module load go wrong, one line each: ok,
 /// info, warn or FAIL. Changes nothing; exits 1 when a line says FAIL. A
@@ -3415,26 +3430,31 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         if (reportWorkspace(c, s, workspace, &out, lines_ptr)) failed = true;
     }
 
-    const summary = if (site)
-        (if (failed) "Something above says FAIL; builds stop there." else "Nothing above stops a build.")
-    else if (failed)
-        "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file."
+    const warned = hasDoctorWarning(out.items, json_lines.items, g.json_out);
+    const strict_fail = opts.strict and warned;
+    const any_failed = failed or strict_fail;
+    const summary = if (failed)
+        (if (site) "Something above says FAIL; builds stop there." else "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.")
+    else if (strict_fail)
+        "Something above says warn (--strict); warnings fail under --strict."
+    else if (site)
+        "Nothing above stops a build."
     else
         "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.";
     if (g.json_out) {
         jsonout.emit(a, DoctorReport{
             .site_file = site,
-            .failed = failed,
+            .failed = any_failed,
             .lines = json_lines.items,
             .summary = summary,
         });
-        return if (failed) 1 else 0;
+        return if (any_failed) 1 else 0;
     }
     out.appendSlice(a, "\n") catch oom();
     out.appendSlice(a, summary) catch oom();
     out.appendSlice(a, "\n") catch oom();
     cli.put(1, out.items);
-    return if (failed) 1 else 0;
+    return if (any_failed) 1 else 0;
 }
 
 // ---- submit ---------------------------------------------------------------
@@ -4095,6 +4115,7 @@ pub fn main(init: std.process.Init) u8 {
     var module_hidden: std.ArrayList([]const u8) = .empty;
     var modulerc_dry_run = false;
     var modulerc_check = false;
+    var doctor_strict = false;
     var doctor_cvmfs = false;
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
@@ -4196,6 +4217,8 @@ pub fn main(init: std.process.Init) u8 {
             .doctor => {
                 if (std.mem.eql(u8, x, "--json")) {
                     g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--strict")) {
+                    doctor_strict = true;
                 } else if (std.mem.eql(u8, x, "--cvmfs")) {
                     doctor_cvmfs = true;
                 } else if (std.mem.eql(u8, x, "--cvmfs-parallel") or joined(x, "--cvmfs-parallel") != null) {
@@ -4210,7 +4233,7 @@ pub fn main(init: std.process.Init) u8 {
                     doctor_workspace = value(args, &i, "--workspace");
                 } else if (joined(x, "--workspace")) |v| {
                     doctor_workspace = v;
-                } else die("doctor takes --json, --workspace, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
+                } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
             },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
@@ -4489,7 +4512,7 @@ pub fn main(init: std.process.Init) u8 {
             if (list_missing and g.json_out) die("list takes --missing or --json, not both", .{});
             break :blk cmdList(c, s, rest.items, g.json_out, list_missing);
         },
-        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .workspace = doctor_workspace }),
+        .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
     };

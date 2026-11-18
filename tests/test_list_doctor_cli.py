@@ -576,6 +576,58 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"warn EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
                       "and `eb-local eb` stops", run.stdout)
 
+    def test_doctor_strict_promotes_warn_lines_to_failures(self):
+        import json
+
+        clean = {
+            name: ""
+            for name in (
+                "PERL5LIB", "PYTHONPATH", "R_LIBS", "R_LIBS_USER",
+                "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH", "LD_LIBRARY_PATH",
+                "LD_PRELOAD", "LD_AUDIT",
+            )
+        }
+        # Default doctor passes in raw bytes even when a warn line appears.
+        argv, env = binary.command(self.script, ["doctor"], dict(self.env, **dict(clean, LD_LIBRARY_PATH="/host/lib")))
+        default_warn = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(default_warn.returncode, 0, default_warn.stderr)
+        self.assertEqual(default_warn.stderr, b"")
+        self.assertIn(b"warn LD_LIBRARY_PATH is set", default_warn.stdout)
+        self.assertTrue(default_warn.stdout.endswith(b"Nothing above stops a build.\n"))
+
+        # Without warnings or failures, --strict passes.
+        repo = self.root / "repo"
+        init = repo / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        init.parent.mkdir(parents=True)
+        init.write_text("")
+        tools_bin = self.root / "tools-bin"
+        tools_bin.mkdir()
+        (tools_bin / "rtrash").write_text("#!/bin/sh\nexit 0\n")
+        (tools_bin / "rtrash").chmod(0o755)
+        no_warn = dict(clean, EESSI_CVMFS_REPO=str(repo), PATH=f"{tools_bin}:{os.environ['PATH']}")
+        ok_strict = self.run_tool(["doctor", "--strict"], **no_warn)
+        self.assertEqual(ok_strict.returncode, 0, ok_strict.stdout + ok_strict.stderr)
+        self.assertTrue(ok_strict.stdout.rstrip().endswith("Nothing above stops a build."))
+
+        # With a warning, --strict exits 1 in both human and JSON modes.
+        warn_strict = self.run_tool(["doctor", "--strict"], **dict(no_warn, LD_LIBRARY_PATH="/host/lib"))
+        self.assertEqual(warn_strict.returncode, 1, warn_strict.stdout + warn_strict.stderr)
+        self.assertIn("warn LD_LIBRARY_PATH is set", warn_strict.stdout)
+        self.assertTrue(warn_strict.stdout.rstrip().endswith(
+            "Something above says warn (--strict); warnings fail under --strict."))
+
+        json_strict = self.run_tool(["doctor", "--strict", "--json"], **dict(no_warn, LD_LIBRARY_PATH="/host/lib"))
+        self.assertEqual(json_strict.returncode, 1, json_strict.stdout + json_strict.stderr)
+        doc = json.loads(json_strict.stdout)
+        self.assertTrue(doc["failed"])
+        self.assertEqual(doc["summary"], "Something above says warn (--strict); warnings fail under --strict.")
+        self.assertTrue(any(line["level"] == "warn" for line in doc["lines"]))
+
+        # When FAIL already occurred, --strict keeps the FAIL summary.
+        fail_strict = self.run_tool(["doctor", "--strict"], **dict(clean, SLURM_JOB_ID="bogus", LD_LIBRARY_PATH="/host/lib"))
+        self.assertEqual(fail_strict.returncode, 1, fail_strict.stdout + fail_strict.stderr)
+        self.assertTrue(fail_strict.stdout.rstrip().endswith("Something above says FAIL; builds stop there."))
+
 
 if __name__ == "__main__":
     unittest.main()
