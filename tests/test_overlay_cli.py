@@ -261,6 +261,28 @@ class OverlayMaterialize(unittest.TestCase):
             self.assertEqual(got.returncode, 2, got.stdout)
             self.assertIn("base digest", got.stderr)
 
+    def test_bump_and_plan_forward_global_options_after_double_dash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "eb-stack"
+            stub.write_text(
+                "#!/bin/sh\n"
+                'printf "%s\\n" "$@"\n',
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            extra = ["--help", "-h", "--config", "site.toml", "--profile", "gpu", "--project", "/proj", "--"]
+            for action in ("bump", "plan"):
+                with self.subTest(action=action):
+                    got = run([action, "--eb-stack", str(stub), "--", *extra], text=False)
+                    self.assertEqual(got.returncode, 0, got.stderr)
+                    self.assertEqual(got.stderr, b"")
+                    self.assertEqual(got.stdout.decode().splitlines(), ["package", action, *extra])
+
+            # Before --, --help stays eb-local's.
+            help_run = run(["bump", "--eb-stack", str(stub), "--help"])
+            self.assertEqual(help_run.returncode, 0, help_run.stderr)
+            self.assertIn("eb-local overlay bump", help_run.stdout)
+
     def test_bump_forwards_to_eb_stack(self):
         with tempfile.TemporaryDirectory() as tmp:
             stub = Path(tmp) / "eb-stack"

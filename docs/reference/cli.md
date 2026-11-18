@@ -481,7 +481,7 @@ Keep site recipe changes in a digest-pinned overlay file instead of copying an u
 | Subcommand | Meaning |
 |---|---|
 | `materialize` | Read `--overlay FILE` and `--base PATH`; write outputs under `--out-dir` (default: beside the overlay). `--dry-run` validates the inputs and lists both output paths without creating them. `--check` compares the materialized recipe and provenance against disk without writing, exiting 0 when up to date and 1 when either would update. Exit 2 when the base digest drifted or both `--dry-run` and `--check` are given. |
-| `bump` | Run `eb-stack package bump` with the arguments after `--`; `--eb-stack PATH` names the program when it is not on `PATH`. |
+| `bump` | Run `eb-stack package bump` with every argument after `--` (including `--help`, `--config`, `--profile`, and `--project`); `--eb-stack PATH` names the program when it is not on `PATH`. |
 | `plan` | Run `eb-stack package plan` the same way. |
 
 The overlay format is documented in [Recipe overlay file](recipe-overlay.md).
