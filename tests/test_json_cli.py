@@ -82,6 +82,125 @@ class JsonCli(StorageFixture):
         expected = (ROOT / "tests/fixtures/site-list-without-json.txt").read_bytes()
         self.assertEqual(run.stdout, expected)
 
+    def test_clean_without_json_is_byte_identical(self):
+        import os
+        import time
+
+        logs = self.prefix / ".eb-local" / "logs"
+        logs.mkdir(parents=True)
+        old = logs / "easybuild-0.log"
+        old.write_text("log\n")
+        t = time.time() - 40 * 86400
+        os.utime(old, (t, t))
+
+        argv, env = binary.command(
+            self.script, ["clean", "--dry-run"], dict(self.env, SLURM_JOB_ID="")
+        )
+        dry = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        expected_dry = (
+            f"  {old}\n"
+            "eb-local: dry run, nothing removed (1 item(s), 0 workspace(s))\n"
+        ).encode()
+        self.assertEqual((dry.returncode, dry.stdout, dry.stderr), (0, expected_dry, b""))
+
+        argv, env = binary.command(
+            self.script, ["clean", "--delete"], dict(self.env, SLURM_JOB_ID="")
+        )
+        deleted = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        expected_del = (
+            f"  {old}\n"
+            "eb-local: deleted 1 item(s)\n"
+        ).encode()
+        self.assertEqual((deleted.returncode, deleted.stdout, deleted.stderr), (0, expected_del, b""))
+
+        argv, env = binary.command(
+            self.script, ["clean"], dict(self.env, SLURM_JOB_ID="")
+        )
+        empty = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        expected_empty = f"eb-local: nothing to clean in {self.prefix}\n".encode()
+        self.assertEqual((empty.returncode, empty.stdout, empty.stderr), (0, expected_empty, b""))
+
+    def test_clean_json_matches_schema(self):
+        import os
+        import time
+
+        schema = load_schema("clean.schema.json")
+        nothing = self.run_json(["clean", "--json"], SLURM_JOB_ID="")
+        validate(nothing, schema)
+        self.assertEqual(nothing["action"], "nothing")
+        self.assertEqual(nothing["items"], [])
+        self.assertEqual(nothing["workspaces"], [])
+
+        logs = self.prefix / ".eb-local" / "logs"
+        logs.mkdir(parents=True)
+        old_file = logs / "easybuild-0.log"
+        old_file.write_text("log\n")
+        old_dir = logs / "reprod_1"
+        old_dir.mkdir()
+        (old_dir / "easybuild.log").write_text("inner\n")
+        t = time.time() - 40 * 86400
+        os.utime(old_file, (t, t))
+        os.utime(old_dir / "easybuild.log", (t, t))
+        os.utime(old_dir, (t, t))
+
+        dry = self.run_json(["clean", "--dry-run", "--json"], SLURM_JOB_ID="")
+        validate(dry, schema)
+        self.assertTrue(dry["dry_run"])
+        self.assertEqual(dry["action"], "dry-run")
+        self.assertEqual(dry["removed_items"], 0)
+        self.assertEqual(len(dry["items"]), 2)
+        self.assertTrue(old_file.exists() and old_dir.exists())
+
+        refused = self.run_json(
+            ["clean", "--json"],
+            allow_fail=True,
+            SLURM_JOB_ID="",
+            EB_LOCAL_CLEAN_TRASH="none",
+        )
+        validate(refused, schema)
+        self.assertEqual(refused["action"], "refused")
+        self.assertEqual(refused["removed_items"], 0)
+        self.assertTrue(old_file.exists())
+
+        deleted = self.run_json(["clean", "--delete", "--json"], SLURM_JOB_ID="")
+        validate(deleted, schema)
+        self.assertEqual(deleted["action"], "deleted")
+        self.assertEqual(deleted["removed_items"], 2)
+        self.assertFalse(old_file.exists() or old_dir.exists())
+
+        ws = self.job / "eb-local.AbCdEf12"
+        ws.mkdir()
+        ws_doc = self.run_json(["clean", "--workspaces", "--no-logs", "--json"])
+        validate(ws_doc, schema)
+        self.assertEqual(ws_doc["action"], "workspaces-only")
+        self.assertEqual(ws_doc["workspaces"], [str(ws)])
+        self.assertEqual(ws_doc["removed_workspaces"], 1)
+        self.assertFalse(ws.exists())
+
+        rtrash_bin = self.root / "rtrash-bin"
+        rtrash_bin.mkdir()
+        trashed_log = self.root / "trashed"
+        rtrash = rtrash_bin / "rtrash"
+        rtrash.write_text(
+            "#!/bin/sh\n"
+            'shift; shift\n'
+            'for p in "$@"; do printf "%s\\n" "$p" >> "' + str(trashed_log) + '"; rm -rf -- "$p"; done\n'
+        )
+        rtrash.chmod(0o755)
+        trashed_file = logs / "easybuild-1.log"
+        trashed_file.parent.mkdir(parents=True, exist_ok=True)
+        trashed_file.write_text("trash me\n")
+        os.utime(trashed_file, (t, t))
+        trashed = self.run_json(
+            ["clean", "--json"],
+            SLURM_JOB_ID="",
+            PATH=f"{rtrash_bin}:{os.environ['PATH']}",
+        )
+        validate(trashed, schema)
+        self.assertEqual(trashed["action"], "trashed")
+        self.assertEqual(trashed["removed_items"], 1)
+        self.assertEqual(trashed_log.read_text().splitlines(), [str(trashed_file)])
+
 
 if __name__ == "__main__":
     unittest.main()

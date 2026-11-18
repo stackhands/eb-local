@@ -24,7 +24,7 @@ eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry
 eb-local modulerc --module-tree DIR [--default MODULE]...
                    [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
-                           [--dry-run] [--delete]
+                           [--dry-run] [--delete] [--json]
 eb-local [OPTION]... config [--check | --env] [--json]
 eb-local [OPTION]... profiles [--json]
 eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
@@ -121,9 +121,9 @@ directory you own.
                                        preserve other lines. --dry-run prints the file;
                                        --check reports drift and writes nothing
   eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
-                 [--dry-run] [--delete]
+                 [--dry-run] [--delete] [--json]
                                        remove what eb-local left behind; --no-logs
-                                       leaves the logs
+                                       leaves the logs; --json prints one line of JSON
   eb-local config [--check | --env] [--json]
                                        the settings in force and where each came from;
                                        --check also reads every secret (values not shown);
@@ -481,11 +481,13 @@ Remove what eb-local left in the prefix, or the project directory: by default th
 | =--workspaces=            | Your build workspaces in the job's node-local mount too; only inside the Slurm job that made them.         |
 | =--dry-run=               | Print what would be removed, and remove nothing.                                                            |
 | =--delete=                | Delete for good when =clean.trash= does not move files to the trash.                                        |
+| =--json=                  | Print one JSON document with =schema_version= 1 instead of text.                                            |
 
 Files go to the trash with =rtrash= as =clean.trash= says; workspaces are deleted.
 A directory among the logs, such as the =reprod_*= copies of a failed build's easyconfig, easyblocks and hooks, goes whole once neither it nor anything in it is newer than the cutoff: the copies keep their originals' older times, and a file added to a directory makes the directory new.
 =clean= never follows a symbolic link out of the installation directory.
 With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
+With =--json=, stdout holds one line of JSON with =schema_version= 1, =kind= =clean=, =prefix=, =dry_run=, =action= (=nothing=, =dry-run=, =trashed=, =deleted=, =workspaces-only= or =refused=), =items= (=path= and =kind=), =workspaces=, =removed_items= and =removed_workspaces=; see [[file:json/clean.schema.json][clean.schema.json]].
 
 ** config
 
