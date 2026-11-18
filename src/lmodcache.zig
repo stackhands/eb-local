@@ -535,8 +535,10 @@ fn installVerified(
         fail("candidate and uncached module inventories differ; the cache was not changed", .{});
         return 1;
     }
-    std.Io.Dir.renameAbsolute(candidate_path, cache_path, io) catch |err| {
-        fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    common.atomic.atomicWrite(a, cache_path, candidate, .{ .mode = 0o644 }, &why) catch |err| {
+        fail("cannot write {s}: {s}", .{ cache_path, if (why.msg.len > 0) why.msg else @errorName(err) });
         return 1;
     };
     return 0;
@@ -604,7 +606,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     }
     const cwd = std.Io.Dir.cwd();
     const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
-    const prev_cache: ?[]const u8 = if (opts.verify) null else cwd.readFileAlloc(io, cache_path, a, .limited(64 * 1024 * 1024)) catch null;
+    const prev_cache: ?[]const u8 = cwd.readFileAlloc(io, cache_path, a, .limited(64 * 1024 * 1024)) catch null;
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = opts.cache_dir;
@@ -638,6 +640,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
             if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
             return code;
         }
+        cache_written = true;
     } else {
         var why: common.atomic.Why = .{};
         defer why.deinit(a);
