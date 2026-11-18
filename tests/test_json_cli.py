@@ -344,6 +344,22 @@ class JsonCli(StorageFixture):
         self.assertIsInstance(dry_doc["content"], str)
         self.assertIn("\ufffd", dry_doc["content"])
 
+    def test_modulerc_write_refuses_symlink_to_directory_with_exit_1(self):
+        target_dir = self.root / "target-dir"
+        target_dir.mkdir()
+        tree = self.root / "modulerc-link-dir"
+        tree.mkdir()
+        (tree / ".modulerc.lua").symlink_to(target_dir)
+
+        argv, env = binary.command(
+            self.script,
+            ["modulerc", "--module-tree", str(tree), "--default", "Example/2.0"],
+            dict(self.env, SLURM_JOB_ID=""),
+        )
+        proc = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("symlink is not followed", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
