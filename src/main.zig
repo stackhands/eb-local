@@ -992,10 +992,12 @@ fn checkStatus(c: Ctx, k: *Check, unreadable: bool, elfs: usize) u8 {
     return 0;
 }
 
+var suppress_check_stdout: bool = false;
+
 /// Print the header for `path` once, so a quiet audit still names the file
 /// a problem belongs to.
 fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
-    if (shown.*) return;
+    if (suppress_check_stdout or shown.*) return;
     say("{s}: {s}", .{ path, machine });
     shown.* = true;
 }
@@ -1132,7 +1134,7 @@ fn auditFile(c: Ctx, k: *Check, path: []const u8, quiet: bool, skip_non_elf: boo
         return false;
     };
     k.markAudited(c.a, path);
-    reportElf(c, k, path, elf, quiet);
+    reportElf(c, k, path, elf, quiet or k.json);
     return true;
 }
 
@@ -1147,6 +1149,8 @@ fn drainCheckQueue(c: Ctx, k: *Check, quiet: bool, unreadable: *bool, elfs: *usi
 
 fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursive: bool) u8 {
     if (files.len == 0) die("check needs one or more programs or libraries", .{});
+    suppress_check_stdout = json;
+    defer suppress_check_stdout = false;
     var k: Check = .{ .json = json, .recursive = recursive };
     var unreadable = false;
     var elfs: usize = 0;
@@ -1269,6 +1273,8 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
             }
         },
     }
+    suppress_check_stdout = json;
+    defer suppress_check_stdout = false;
     var k: Check = .{ .json = json, .recursive = recursive };
     var unreadable = false;
     var elfs: usize = 0;
