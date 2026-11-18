@@ -1,0 +1,17 @@
+ok   eb-local 3.1.0
+ok   site file {root}/site.conf
+ok   builds use the allocation's own xfs mount {root}/node-mounts/%u.%j
+ok   installs go to {root}/durable/owned prefix: a user install, prefix from environment EB_LOCAL_PREFIX
+info {root}/durable/owned prefix does not exist yet; the first build creates it
+ok   no other EESSI or EasyBuild install variable is set in this shell
+warn /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere
+ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi
+info no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes
+info timezone target {timezone}
+info no runtime-injected host library directory was found
+ok   Slurm job 123: build space {root}/node-mounts/{user}.123
+info EESSI is not loaded in this shell; eval "$(eb-local env)" loads it with your modules
+info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects
+warn rtrash is not on PATH: clean and uninstall remove nothing unless given --delete
+
+Nothing above stops a build.

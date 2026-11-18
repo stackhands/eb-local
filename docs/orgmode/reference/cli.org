@@ -18,7 +18,7 @@ eb-local check [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json] [NAME[/VERSION]...]
-eb-local [OPTION]... doctor [--json]
+eb-local [OPTION]... doctor [--json] [--workspace PATH]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
@@ -87,10 +87,11 @@ directory you own.
                                        what you installed, for which CPU targets, and
                                        what this node's target lacks; --json prints one
                                        line of JSON with schema_version 1
-  eb-local doctor [--json] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+  eb-local doctor [--json] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing;
                                        --json prints one line of JSON with schema_version 1.
+                                       --workspace probes PATH without starting a build.
                                        --cvmfs checks the CernVM-FS client.
                                        --cvmfs-parallel N (1 to 8) reads repository
                                        metadata from N tasks inside an allocation.
@@ -364,6 +365,9 @@ The shape is in [[file:json/list.schema.json][list.schema.json]].
 
 Print one line for each check of what would stop a build, =eb-local eb= or a module load, each starting =ok=, =info=, =warn= or =FAIL=, then a line that says whether anything stops a build.
 It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and =LD_LIBRARY_PATH= left in the shell, the EESSI init =eb-local eb= sources, the allocation's node-local mount, whether EESSI is loaded and your modules are on =MODULEPATH=, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
+With =--workspace PATH=, it also creates, writes, renames, executes and removes a small probe in that existing directory.
+It reports the file-system type, whether the storage is node-local or shared, free bytes and inodes, a =noexec= mount, and whether the effective =XDG_CACHE_HOME= (or =$HOME/.cache= when unset) is inside the workspace.
+The check does not create a build workspace and never starts a build.
 It names an entry of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =CMAKE_PREFIX_PATH= or =PKG_CONFIG_PATH=, and a compiler-wrapper variable (=CC=, =CXX=, =FC=, =F77=, =F90=, =F95=, =CPP=, the =OMPI_=, =MPICH_= and =I_MPI_= forms, =RUSTC_WRAPPER=, =CCACHE_*=, =SCCACHE_*= and =CMAKE_*_COMPILER_LAUNCHER=), that resolves outside the approved prefixes.
 A build keeps that entry unless =build.clear_foreign_prefixes= is set.
 It reports the path =/etc/localtime= resolves to, warns when that file is its own bind mount, and warns about a host library directory a container runtime injected, including =/.singularity.d/libs= and a directory named by =APPTAINER_CONTAINLIBS= or =SINGULARITY_CONTAINLIBS=.
@@ -389,6 +393,7 @@ It changes nothing, and exits 1 when a line says =FAIL=.
 | Option | Meaning |
 |--------+---------|
 | =--json= | Print one JSON document instead of human-readable lines. |
+| =--workspace PATH= | Probe the existing absolute directory PATH and report its storage and cache isolation. |
 | =--cvmfs= | Check the CernVM-FS client. Off unless this flag, or =--cvmfs-parallel=, is given. |
 | =--cvmfs-parallel N= | Also read repository metadata from N tasks, 1 to 8, inside an allocation. Implies =--cvmfs=. |
 | =--mpi= | Report libfabric, UCX and Slurm binding, and run a two-rank hello per site-approved transport inside an allocation. Off unless this flag is given. |

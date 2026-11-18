@@ -92,10 +92,11 @@ const usage_text =
     \\                                       what you installed, for which CPU targets, and
     \\                                       what this node's target lacks; --json prints one
     \\                                       line of JSON with schema_version 1
-    \\  eb-local doctor [--json] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+    \\  eb-local doctor [--json] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing;
     \\                                       --json prints one line of JSON with schema_version 1.
+    \\                                       --workspace probes PATH without starting a build.
     \\                                       --cvmfs checks the CernVM-FS client.
     \\                                       --cvmfs-parallel N (1 to 8) reads repository
     \\                                       metadata from N tasks inside an allocation.
@@ -194,6 +195,7 @@ fn say(comptime fmt: []const u8, args: anytype) void {
 
 const Ctx = struct {
     a: Allocator,
+    io: std.Io,
     env: *const std.process.Environ.Map,
     envp: proc.Envp,
     cwd: []const u8,
@@ -2706,7 +2708,98 @@ const DoctorOpts = struct {
     parallel: ?u8 = null,
     /// `--mpi`: report fabrics and, in an allocation, run the hello. Off unless the flag asks.
     mpi: bool = false,
+    /// `--workspace`: exercise and describe this existing build workspace.
+    workspace: ?[]const u8 = null,
 };
+
+fn workspaceCapacityOverride(c: Ctx) ?storage.Capacity {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_CAPACITY"))) |value| {
+            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+            return .{
+                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
+                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
+            };
+        }
+    }
+    return null;
+}
+
+fn workspaceExecuteOverride(c: Ctx) ?bool {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_EXEC"))) |value| {
+            if (std.mem.eql(u8, value, "ok")) return true;
+            if (std.mem.eql(u8, value, "fail")) return false;
+        }
+    }
+    return null;
+}
+
+/// Create, write, rename, execute and remove a probe, then describe the
+/// workspace's mount, capacity and effective user cache. A build is not run.
+fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) bool {
+    const a = c.a;
+    if (!std.fs.path.isAbsolute(raw_path)) {
+        note(a, out, json_lines, "FAIL", "workspace {s} is not an absolute path", .{raw_path});
+        return true;
+    }
+    const path = storage.canonical(a, raw_path, c.cwd) catch {
+        note(a, out, json_lines, "FAIL", "workspace {s} cannot be resolved", .{raw_path});
+        return true;
+    };
+    const stat = fsx.statAt(fsx.cwd, path, true) catch |err| {
+        note(a, out, json_lines, "FAIL", "workspace {s} cannot be read ({s})", .{ path, @errorName(err) });
+        return true;
+    };
+    if (!stat.isDir()) {
+        note(a, out, json_lines, "FAIL", "workspace {s} is not a directory", .{path});
+        return true;
+    }
+    const mount = (storage.mountOf(a, mountinfoSoft(c), path) catch null) orelse {
+        note(a, out, json_lines, "FAIL", "workspace {s} is not covered by a readable mount table entry", .{path});
+        return true;
+    };
+    var failed = false;
+    const probe: ?storage.WorkspaceProbe = storage.probeWorkspace(c.io, a, path, workspaceExecuteOverride(c)) catch |err| blk: {
+        note(a, out, json_lines, "FAIL", "workspace {s} probe could not complete ({s})", .{ path, @errorName(err) });
+        failed = true;
+        break :blk null;
+    };
+    if (probe) |p| {
+        if (p.created and p.written and p.renamed and p.executed and p.removed) {
+            note(a, out, json_lines, "ok  ", "workspace {s}: created, wrote, renamed, executed and removed a probe", .{path});
+        } else {
+            note(a, out, json_lines, "FAIL", "workspace {s}: probe create={s}, write={s}, rename={s}, execute={s}, remove={s}", .{
+                path,
+                if (p.created) "ok" else "failed",
+                if (p.written) "ok" else "failed",
+                if (p.renamed) "ok" else "failed",
+                if (p.executed) "ok" else "failed",
+                if (p.removed) "ok" else "failed",
+            });
+            failed = true;
+        }
+    }
+    const class = storage.workspaceClass(path, mount.fstype, s.shared_scratch.value);
+    note(a, out, json_lines, "info", "workspace {s}: {s} file system, classified {s}", .{ path, mount.fstype, class });
+    const available: ?storage.Capacity = workspaceCapacityOverride(c) orelse storage.capacity(path) catch |err| blk: {
+        note(a, out, json_lines, "FAIL", "workspace {s}: free bytes and inodes cannot be read ({s})", .{ path, @errorName(err) });
+        failed = true;
+        break :blk null;
+    };
+    if (available) |free| note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+    if (storage.hasMountOption(mount.options, "noexec")) {
+        note(a, out, json_lines, "FAIL", "workspace {s}: mount {s} has noexec", .{ path, mount.target });
+        failed = true;
+    } else note(a, out, json_lines, "ok  ", "workspace {s}: mount {s} does not have noexec", .{ path, mount.target });
+    if (rpath.cacheHome(a, c.env)) |cache| {
+        const canonical_cache = storage.canonical(a, cache, c.cwd) catch cache;
+        if (storage.under(canonical_cache, path)) {
+            note(a, out, json_lines, "ok  ", "effective XDG cache {s} is private to workspace {s}", .{ canonical_cache, path });
+        } else note(a, out, json_lines, "warn", "effective XDG cache {s} is outside workspace {s}", .{ canonical_cache, path });
+    } else |_| note(a, out, json_lines, "warn", "effective XDG cache is unavailable: XDG_CACHE_HOME, or HOME for its .cache, must be absolute", .{});
+    return failed;
+}
 
 fn cvmfsConfigRoot(c: Ctx) []const u8 {
     if (comptime build_options.test_ops) {
@@ -3075,6 +3168,9 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         if (reportCvmfs(c, tasks, &out, lines_ptr)) failed = true;
     }
     if (opts.mpi) reportMpi(c, s, &out, lines_ptr);
+    if (opts.workspace) |workspace| {
+        if (reportWorkspace(c, s, workspace, &out, lines_ptr)) failed = true;
+    }
 
     const summary = if (site)
         (if (failed) "Something above says FAIL; builds stop there." else "Nothing above stops a build.")
@@ -3654,7 +3750,7 @@ pub fn main(init: std.process.Init) u8 {
     const argv_all = init.minimal.args.toSlice(a) catch die("cannot read the arguments", .{});
     var cwd_buf: [sys.path_max]u8 = undefined;
     const cwd = a.dupe(u8, fsx.realpath(fsx.cwd, ".", &cwd_buf) catch "/") catch oom();
-    const c: Ctx = .{ .a = a, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
+    const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
     }
@@ -3712,6 +3808,7 @@ pub fn main(init: std.process.Init) u8 {
     var doctor_cvmfs = false;
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
+    var doctor_workspace: ?[]const u8 = null;
     var overlay_action: []const u8 = "";
     var overlay_materialize: recipe_overlay.MaterializeOptions = .{};
     var overlay_eb_stack: []const u8 = "";
@@ -3816,7 +3913,11 @@ pub fn main(init: std.process.Init) u8 {
                     doctor_cvmfs = true;
                 } else if (std.mem.eql(u8, x, "--mpi")) {
                     doctor_mpi = true;
-                } else die("doctor takes --json, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
+                } else if (std.mem.eql(u8, x, "--workspace")) {
+                    doctor_workspace = value(args, &i, "--workspace");
+                } else if (joined(x, "--workspace")) |v| {
+                    doctor_workspace = v;
+                } else die("doctor takes --json, --workspace, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
             },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
@@ -4056,7 +4157,7 @@ pub fn main(init: std.process.Init) u8 {
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
         .list => cmdList(c, s, rest.items, g.json_out),
-        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi }),
+        .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
     };
