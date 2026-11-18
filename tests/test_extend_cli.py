@@ -207,5 +207,14 @@ class ExtendCli(unittest.TestCase):
         self.assertTrue((self.root / "eb-ran").exists())
 
 
+    def test_eb_refuses_directory_at_init_with_exit_two(self):
+        init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        init.unlink()
+        init.mkdir()
+        run = self.run_tool(["eb", "x.eb"])
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn(f"eb-local: cannot read {init}, the EESSI init; eb was not run.", run.stderr)
+        self.assertFalse((self.root / "eb-ran").exists())
+
 if __name__ == "__main__":
     unittest.main()

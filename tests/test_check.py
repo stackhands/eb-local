@@ -485,6 +485,17 @@ class Check(unittest.TestCase):
         self.assertEqual(paths2.count(str(tree / "lib" / "libdemo.so")), 1)
         self.assertEqual(doc2["elf_count"], len(paths2))
 
+    def test_json_without_quiet_emits_pure_json_even_with_errors(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--enable-new-dtags")
+        run = self.check("--json", prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        doc = json.loads(run.stdout)
+        validate(doc, load_schema("check.schema.json"))
+        self.assertEqual(doc["problem_count"], 1)
+        self.assertEqual(len(doc["files"]), 1)
+        self.assertEqual(doc["files"][0]["path"], str(prog))
+
     def test_compat_ld_so_conf_resolves_relative_and_root_includes_under_loader_root(self):
         compat = self.root / "compat"
         (compat / "etc" / "ld.so.conf.d").mkdir(parents=True)
@@ -560,6 +571,21 @@ class Check(unittest.TestCase):
         self.assertNotIn(str(link), paths)
         self.assertEqual(doc_rec["elf_count"], len(paths), doc_rec)
         self.assertEqual(doc_rec["problem_count"], 1, doc_rec)
+
+    def test_eprefix_trailing_slash_accepts_compat_loader(self):
+        compat = self.root / "compat"
+        (compat / "lib64").mkdir(parents=True)
+        interp = compat / "lib64" / "ld-linux-x86-64.so.2"
+        (self.root / "compat_only.c").write_text("void _start(void) {}\n")
+        prog = self.root / "compat_only"
+        subprocess.run(
+            [GCC, "-nostdlib", "-e", "_start", "-o", str(prog), str(self.root / "compat_only.c"), f"-Wl,--dynamic-linker={interp}"],
+            check=True,
+        )
+        run = self.check(prog, EESSI_EPREFIX=f"{compat}/")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("eb-local check: no problems", run.stdout)
+        self.assertNotIn("the loader is the host's", run.stdout)
 
 
 if __name__ == "__main__":
