@@ -4537,8 +4537,10 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (std.mem.eql(u8, x, "--env")) {
                     as_env = true;
                 } else if (std.mem.eql(u8, x, "--get")) {
+                    if (config_get != null) die("config takes one --get", .{});
                     config_get = value(args, &i, "--get");
                 } else if (joined(x, "--get")) |v| {
+                    if (config_get != null) die("config takes one --get", .{});
                     config_get = v;
                 } else if (std.mem.eql(u8, x, "--json")) {
                     g.json_out = true;
