@@ -313,6 +313,16 @@ class ListAndDoctor(StorageFixture):
             self.assertIn(f"FAIL workspace {mountpoint}: mount {mountpoint} has noexec\n", run.stdout)
             self.assertEqual(list(mountpoint.iterdir()), [])
 
+    def test_doctor_rejects_duplicate_workspace_flag(self):
+        ws1 = self.root / "ws1"
+        ws2 = self.root / "ws2"
+        ws1.mkdir()
+        ws2.mkdir()
+        run = self.run_tool(["doctor", "--workspace", str(ws1), "--workspace", str(ws2)], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertEqual(run.stdout, "")
+        self.assertIn("doctor takes one --workspace", run.stderr)
+
     def test_doctor_reports_an_xalt_only_preload_as_info(self):
         xalt = "/opt/xalt/current/lib64/libxalt_init.so:"
         run = self.run_tool(["doctor"], LD_PRELOAD=xalt)
