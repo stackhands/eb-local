@@ -457,6 +457,10 @@ fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: 
         const is_root = if (fsx.statAt(dir, "easybuild", false)) |st| st.isDir() else |_| false;
         if (is_root) {
             const eb_path = try std.fs.path.join(a, &.{ path, "easybuild" });
+            if (depth >= max_depth) {
+                try report.too_deep.append(a, eb_path);
+                return;
+            }
             const sub = fsx.openDir(dir, "easybuild", false) catch |e| {
                 return report.unchecked.append(a, .{ .path = eb_path, .why = storage.describeError(e) });
             };
@@ -734,27 +738,30 @@ test "an installation log nested past the search depth is reported" {
     var s = try Scratch.init();
     defer s.deinit();
     const a = s.arena.allocator();
-    var dir = try a.dupe(u8, s.root);
-    var depth: usize = 0;
-    while (depth < max_depth + 2) : (depth += 1) {
-        dir = try std.fs.path.join(a, &.{ dir, "d" });
-        try common.atomic.makedirs(dir);
+    for ([_]usize{ max_depth + 2, max_depth }) |target_depth| {
+        const branch = try std.fmt.allocPrint(a, "{s}/depth-{d}", .{ s.root, target_depth });
+        var dir = try a.dupe(u8, branch);
+        var depth: usize = 0;
+        while (depth < target_depth) : (depth += 1) {
+            dir = try std.fs.path.join(a, &.{ dir, "d" });
+            try common.atomic.makedirs(dir);
+        }
+        const eb = try std.fs.path.join(a, &.{ dir, "easybuild" });
+        try common.atomic.makedirs(eb);
+        const log = try std.fs.path.join(a, &.{ eb, "easybuild.log" });
+        const fd = try sys.openat(fsx.cwd, log, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
+        defer sys.close(fd);
+        try sys.writeAll(fd, "copied s3cret-value\n");
+        const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
+        var report: RedactReport = .{};
+        try redactTree(a, branch, 0, &values, .easybuild_dirs, .{ .path = "", .envp = no_env }, &report);
+        try testing.expect(report.too_deep.items.len > 0);
+        try testing.expectEqual(@as(usize, 0), report.files);
+        const opened = try fsx.openRegular(fsx.cwd, log, false);
+        defer sys.close(opened.fd);
+        const text = try fsx.readAll(a, opened.fd, 4096);
+        try testing.expect(std.mem.indexOf(u8, text, "s3cret-value") != null);
     }
-    const eb = try std.fs.path.join(a, &.{ dir, "easybuild" });
-    try common.atomic.makedirs(eb);
-    const log = try std.fs.path.join(a, &.{ eb, "easybuild.log" });
-    const fd = try sys.openat(fsx.cwd, log, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
-    defer sys.close(fd);
-    try sys.writeAll(fd, "copied s3cret-value\n");
-    const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
-    var report: RedactReport = .{};
-    try redactTree(a, s.root, 0, &values, .easybuild_dirs, .{ .path = "", .envp = no_env }, &report);
-    try testing.expect(report.too_deep.items.len > 0);
-    try testing.expectEqual(@as(usize, 0), report.files);
-    const opened = try fsx.openRegular(fsx.cwd, log, false);
-    defer sys.close(opened.fd);
-    const text = try fsx.readAll(a, opened.fd, 4096);
-    try testing.expect(std.mem.indexOf(u8, text, "s3cret-value") != null);
 }
 
 test "unreadable subdirectories and full writes are reported while sibling logs are redacted" {
