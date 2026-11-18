@@ -304,6 +304,71 @@ class SitesCli(StorageFixture):
         self.assertEqual(run.returncode, 2)
         self.assertIn("EB_LOCAL_NIMVAULT_PROGRAM must be an absolute path", run.stderr)
 
+    def test_default_site_outputs_and_statuses_are_unchanged_raw_bytes(self):
+        def run_raw(args):
+            argv, env = binary.command(self.script, args, dict(self.env))
+            return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+
+        listed = run_raw(["site", "list"])
+        expected_list = b"slurm        placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition\n"
+        self.assertEqual((listed.returncode, listed.stdout, listed.stderr), (0, expected_list, b""))
+
+        shown = run_raw(["site", "show", "slurm"] + PATHS)
+        self.assertEqual((shown.returncode, shown.stderr), (0, b""))
+        self.assertIn(b'node_local_root = "/local"\n', shown.stdout)
+
+        target = self.root / "installed-raw.toml"
+        installed = run_raw(["site", "install", "slurm", "--to", str(target)] + PATHS)
+        expected_install = f"wrote {target} from template slurm; eb-local config shows what it sets\n".encode()
+        self.assertEqual((installed.returncode, installed.stdout, installed.stderr), (0, expected_install, b""))
+
+    def test_site_check_validates_toml_and_conf_files_as_site_layer(self):
+        staged = self.root / "staged-site.toml"
+        staged.write_text(
+            '[storage]\n'
+            'node_local_root = "/local"\n'
+            'shared_scratch = ["/scratch"]\n'
+            '[build.node_types]\n'
+            'cpu = "-p cpu -n 8"\n'
+        )
+        staged.chmod(0o644)
+        ok = self.run_tool(["site", "check", str(staged)])
+        self.assertEqual((ok.returncode, ok.stdout, ok.stderr), (0, f"site file {staged} is valid\n", ""))
+
+        legacy = self.root / "staged-site.conf"
+        legacy.write_text("node_local_root = /local\nshared_scratch = /scratch\n")
+        legacy.chmod(0o644)
+        ok_legacy = self.run_tool(["site", "check", str(legacy)])
+        self.assertEqual(ok_legacy.returncode, 0, ok_legacy.stderr)
+
+        bad_toml = self.root / "bad-site.toml"
+        bad_toml.write_text('[storage]\nnode_local_root = "relative"\n')
+        bad_toml.chmod(0o644)
+        refused = self.run_tool(["site", "check", str(bad_toml)])
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("storage.node_local_root", refused.stderr)
+
+        bad_mode = self.root / "open-site.toml"
+        bad_mode.write_text('[storage]\nnode_local_root = "/local"\n')
+        bad_mode.chmod(0o664)
+        mode_err = self.run_tool(["site", "check", str(bad_mode)])
+        self.assertEqual(mode_err.returncode, 2)
+        self.assertIn("chmod go-w", mode_err.stderr)
+
+        link = self.root / "link-site.toml"
+        link.symlink_to(staged)
+        link_err = self.run_tool(["site", "check", str(link)])
+        self.assertEqual(link_err.returncode, 2)
+        self.assertIn("symbolic link", link_err.stderr)
+
+        json_err = self.run_tool(["site", "check", str(staged), "--json"])
+        self.assertEqual(json_err.returncode, 2)
+        self.assertIn("--json goes with site list", json_err.stderr)
+
+        flag_err = self.run_tool(["site", "check", str(staged), "--force"])
+        self.assertEqual(flag_err.returncode, 2)
+        self.assertIn("site check takes only a configuration file", flag_err.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
