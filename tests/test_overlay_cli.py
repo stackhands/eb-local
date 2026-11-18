@@ -365,6 +365,70 @@ class OverlayMaterialize(unittest.TestCase):
             ast.parse(text)
             self.assertEqual(text, "name = 'custom'\nversion = '2.0'\n")
 
+    def test_materialize_dependency_replace_ignores_strings_and_comments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing_dep = b"description = \"needs ('zlib', '0.9')\"\ndependencies = [('other', '1.0')]\n"
+            (root / "missing.eb").write_bytes(missing_dep)
+            (root / "missing.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(missing_dep)}"\n'
+                '[dependencies.replace]\nzlib = "(\'zlib\', \'1.2\')"\n',
+                encoding="utf-8",
+            )
+            got_missing = run(["materialize", "--overlay", "missing.toml", "--base", "missing.eb"], cwd=root)
+            self.assertEqual(got_missing.returncode, 2, got_missing.stdout + got_missing.stderr)
+            self.assertIn("has no dependency 'zlib' to replace", got_missing.stderr)
+
+            real_dep = b"description = \"('zlib', '0.9')\"\ndependencies = [('zlib', ('1.0', True))]\n"
+            (root / "real.eb").write_bytes(real_dep)
+            (root / "real.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(real_dep)}"\n'
+                '[dependencies.replace]\nzlib = "(\'zlib\', \'1.2\')"\n',
+                encoding="utf-8",
+            )
+            got_real = run(["materialize", "--overlay", "real.toml", "--base", "real.eb", "--out-dir", "out"], cwd=root)
+            self.assertEqual(got_real.returncode, 0, got_real.stdout + got_real.stderr)
+            out_text = (root / "out" / "materialized-real.eb").read_text(encoding="utf-8")
+            self.assertEqual(
+                out_text,
+                "description = \"('zlib', '0.9')\"\ndependencies = [('zlib', '1.2')]\n",
+            )
+
+    def test_materialize_replace_and_append_ignore_triple_quoted_docstrings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = (
+                b'""" header\n'
+                b"name = 'docstring'\n"
+                b"patches = [\n"
+                b'"""\n'
+                b"name = 'real'\n"
+                b"patches = ['real.patch']\n"
+            )
+            (root / "base.eb").write_bytes(base)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base)}"\n'
+                '[replace]\nname = "\'custom\'"\n'
+                '[patches]\nsite = "site.patch"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            out_text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            self.assertEqual(
+                out_text,
+                '""" header\n'
+                "name = 'docstring'\n"
+                "patches = [\n"
+                '"""\n'
+                "name = 'custom'\n"
+                "patches = ['real.patch',\n"
+                "    ('site', 'site.patch')]\n",
+            )
+
     def test_materialize_appends_to_trailing_comma_list_as_valid_python(self):
         import ast
 

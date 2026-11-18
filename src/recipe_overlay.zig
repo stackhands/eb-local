@@ -159,19 +159,78 @@ fn lineSetsParameter(line: []const u8, name: []const u8) bool {
     return std.mem.startsWith(u8, rest, "=");
 }
 
+const PyLineState = struct {
+    triple_quote: ?u8 = null,
+    depth: usize = 0,
+
+    fn isTopLevel(self: PyLineState) bool {
+        return self.triple_quote == null and self.depth == 0;
+    }
+
+    fn advanceLine(self: *PyLineState, line: []const u8) void {
+        var i: usize = 0;
+        while (i < line.len) {
+            if (self.triple_quote) |tq| {
+                if (line[i] == '\\') {
+                    i += @min(2, line.len - i);
+                    continue;
+                }
+                if (i + 2 < line.len and line[i] == tq and line[i + 1] == tq and line[i + 2] == tq) {
+                    self.triple_quote = null;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            const ch = line[i];
+            if (ch == '#') break;
+            if (ch == '\'' or ch == '"') {
+                if (i + 2 < line.len and line[i + 1] == ch and line[i + 2] == ch) {
+                    self.triple_quote = ch;
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                while (i < line.len) {
+                    if (line[i] == '\\') {
+                        i += @min(2, line.len - i);
+                        continue;
+                    }
+                    if (line[i] == ch) {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if (ch == '(' or ch == '[' or ch == '{') {
+                self.depth += 1;
+            } else if ((ch == ')' or ch == ']' or ch == '}') and self.depth > 0) {
+                self.depth -= 1;
+            }
+            i += 1;
+        }
+    }
+};
+
 fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var replaced = false;
+    var state: PyLineState = .{};
     while (lines.next()) |line| {
-        if (!replaced and lineSetsParameter(line, param.name)) {
+        if (!replaced and state.isTopLevel() and lineSetsParameter(line, param.name)) {
             const leading = std.mem.trimStart(u8, line, " \t");
             const indent_len = line.len - leading.len;
             const nl = try std.fmt.allocPrint(a, "{s}{s} = {s}", .{ line[0..indent_len], param.name, param.value });
             try out.appendSlice(a, nl);
             replaced = true;
+            state.advanceLine(nl);
         } else {
             try out.appendSlice(a, line);
+            state.advanceLine(line);
         }
         if (lines.peek() != null) try out.append(a, '\n');
     }
@@ -181,18 +240,21 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
 
 fn findArrayStart(text: []const u8, key: []const u8) ?usize {
     var pos: usize = 0;
+    var state: PyLineState = .{};
     while (pos < text.len) {
         const rest = text[pos..];
         const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
         const line = rest[0..line_end];
-        if (lineSetsParameter(line, key)) {
+        if (state.isTopLevel() and lineSetsParameter(line, key)) {
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+                state.advanceLine(line);
                 pos += line_end + 1;
                 continue;
             };
             const after = std.mem.trimStart(u8, line[eq + 1 ..], " \t");
             if (std.mem.startsWith(u8, after, "[")) return pos + eq + 1 + (line[eq + 1 ..].len - after.len);
         }
+        state.advanceLine(line);
         pos += line_end + 1;
     }
     return null;
@@ -288,18 +350,140 @@ fn patchEntry(a: Allocator, p: Patch) ![]const u8 {
     return std.fmt.allocPrint(a, "('{s}', '{s}')", .{ p.name, p.file });
 }
 
+fn skipPyString(text: []const u8, start: usize) usize {
+    const quote = text[start];
+    if (start + 2 < text.len and text[start + 1] == quote and text[start + 2] == quote) {
+        var i = start + 3;
+        while (i < text.len) {
+            if (text[i] == '\\') {
+                i += @min(2, text.len - i);
+                continue;
+            }
+            if (i + 2 < text.len and text[i] == quote and text[i + 1] == quote and text[i + 2] == quote) {
+                return i + 3;
+            }
+            i += 1;
+        }
+        return text.len;
+    }
+    var i = start + 1;
+    while (i < text.len) {
+        if (text[i] == '\\') {
+            i += @min(2, text.len - i);
+            continue;
+        }
+        if (text[i] == quote or text[i] == '\n') return i + 1;
+        i += 1;
+    }
+    return text.len;
+}
+
+fn skipWsAndComments(text: []const u8, start: usize, limit: usize) usize {
+    var i = start;
+    while (i < limit) {
+        const ch = text[i];
+        if (ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n') {
+            i += 1;
+        } else if (ch == '#') {
+            i += 1;
+            while (i < limit and text[i] != '\n') : (i += 1) {}
+        } else {
+            break;
+        }
+    }
+    return i;
+}
+
+fn tupleStartsWithDepName(text: []const u8, open_paren: usize, limit: usize, name: []const u8) bool {
+    var i = skipWsAndComments(text, open_paren + 1, limit);
+    if (i >= limit) return false;
+    const quote = text[i];
+    if (quote != '\'' and quote != '"') return false;
+    if (i + 2 < limit and text[i + 1] == quote and text[i + 2] == quote) return false;
+    i += 1;
+    if (i + name.len >= limit) return false;
+    if (!std.mem.eql(u8, text[i .. i + name.len], name)) return false;
+    if (text[i + name.len] != quote) return false;
+    const after = skipWsAndComments(text, i + name.len + 1, limit);
+    return after < limit and text[after] == ',';
+}
+
+fn findMatchingParen(text: []const u8, open: usize, limit: usize) ?usize {
+    var depth: i32 = 0;
+    var i = open;
+    while (i < limit) {
+        const ch = text[i];
+        if (ch == '#') {
+            i += 1;
+            while (i < limit and text[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (ch == '\'' or ch == '"') {
+            i = @min(limit, skipPyString(text, i));
+            continue;
+        }
+        if (ch == '(') {
+            depth += 1;
+        } else if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+        i += 1;
+    }
+    return null;
+}
+
 fn replaceDependency(a: Allocator, text: []const u8, dep: Dependency, d: *Diagnostic) Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    const needle = try std.fmt.allocPrint(a, "('{s}',", .{dep.name});
-    const idx = std.mem.indexOf(u8, text, needle) orelse
+    const list_start = findArrayStart(text, "dependencies") orelse
         return fail(a, d, "easyconfig has no dependency '{s}' to replace", .{dep.name});
-    const start = idx;
-    const end = std.mem.indexOfPos(u8, text, start, ")") orelse
-        return fail(a, d, "easyconfig dependency '{s}' has no closing parenthesis", .{dep.name});
-    try out.appendSlice(a, text[0..start]);
-    try out.appendSlice(a, dep.spec);
-    try out.appendSlice(a, text[end + 1 ..]);
-    return out.toOwnedSlice(a);
+    const list_close = findMatchingBracket(text, list_start);
+    const limit = list_close orelse text.len;
+
+    var i = list_start + 1;
+    var paren_depth: i32 = 0;
+    var bracket_depth: i32 = 0;
+    var brace_depth: i32 = 0;
+    while (i < limit) {
+        const ch = text[i];
+        if (ch == '#') {
+            i += 1;
+            while (i < limit and text[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (ch == '\'' or ch == '"') {
+            i = @min(limit, skipPyString(text, i));
+            continue;
+        }
+        if (ch == '(') {
+            if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0 and
+                tupleStartsWithDepName(text, i, limit, dep.name))
+            {
+                const end = findMatchingParen(text, i, limit) orelse
+                    return fail(a, d, "easyconfig dependency '{s}' has no closing parenthesis", .{dep.name});
+                var out: std.ArrayList(u8) = .empty;
+                try out.appendSlice(a, text[0..i]);
+                try out.appendSlice(a, dep.spec);
+                try out.appendSlice(a, text[end + 1 ..]);
+                return out.toOwnedSlice(a);
+            }
+            paren_depth += 1;
+        } else if (ch == ')') {
+            if (paren_depth > 0) paren_depth -= 1;
+        } else if (ch == '[') {
+            bracket_depth += 1;
+        } else if (ch == ']') {
+            if (bracket_depth > 0) bracket_depth -= 1;
+        } else if (ch == '{') {
+            brace_depth += 1;
+        } else if (ch == '}') {
+            if (brace_depth > 0) brace_depth -= 1;
+        }
+        i += 1;
+    }
+    if (list_close == null) {
+        return fail(a, d, "easyconfig dependencies list has no closing bracket", .{});
+    }
+    return fail(a, d, "easyconfig has no dependency '{s}' to replace", .{dep.name});
 }
 
 /// Apply `spec` to `base_text`. Refuses when the digest of `base_text` differs
