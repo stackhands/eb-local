@@ -130,11 +130,13 @@ eb-local-readiness --prefix /opt/site/eessi
 
 The repository defaults to =EESSI_CVMFS_REPO=, or =/cvmfs/software.eessi.io=.
 The prefix defaults to =EB_LOCAL_PREFIX=, =EESSI_SITE_SOFTWARE_PREFIX=, =EESSI_PROJECT_INSTALL= or =EESSI_USER_INSTALL=, in that order.
+When none of these is set and =--prefix= is omitted, the probe prints an =info= line and skips the =MODULEPATH= precedence check (exit 0 unless the repository itself is missing).
 A ready shell reports that the repository is mounted with CVMFS and that local modules precede EESSI on =MODULEPATH=.
 
-The probe exits 1 when the repository is missing, no local module directory is on =MODULEPATH=, or upstream EESSI modules occur first.
+The probe exits 1 when the repository is missing, or (with a prefix selected) no local module directory is on =MODULEPATH= or upstream EESSI modules occur first.
 It warns but exits 0 for another filesystem because a site may deliberately expose CVMFS through a bind mount.
 Use =--mountinfo FILE= to check a saved node mount table or a container's view.
+See [[file:../reference/readiness.org][Readiness probe]] for every option and exit status.
 
 * A path from outside the prefix
 

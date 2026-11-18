@@ -11,6 +11,7 @@ Each page states facts in the order the thing itself has them.
 cli
 configuration
 recipe-overlay
+readiness
 environment
 refusals
 api

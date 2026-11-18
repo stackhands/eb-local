@@ -1,0 +1,1 @@
+Add `docs/orgmode/reference/readiness.org` to document `eb-local-readiness` options, output prefixes, and exit codes, register it in the reference index, and note the `--prefix` requirement in `find-what-is-wrong.org`.
