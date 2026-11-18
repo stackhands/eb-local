@@ -220,6 +220,12 @@ fn forkReads(path: []const u8, n: u8) u32 {
     var started: usize = 0;
     var i: u8 = 0;
     while (i < n) : (i += 1) {
+        if (started == pids.len) {
+            for (pids[0..started]) |pid| {
+                if (!reapOk(pid)) failed += 1;
+            }
+            started = 0;
+        }
         const pid: isize = @bitCast(linux.fork());
         if (pid == 0) linux.exit_group(oneRead(path));
         if (pid < 0) {
@@ -408,4 +414,8 @@ test "a parallel read uses srun when it is on PATH, and forks when it is not" {
     try testing.expectEqual(ParallelKind.outside, outside.kind);
     const stale = parallelProbe(a, repo, 2, true, true, found, no_env);
     try testing.expectEqual(ParallelKind.stale, stale.kind);
+
+    const many = parallelProbe(a, repo, 11, true, false, null, no_env);
+    try testing.expectEqual(ParallelKind.fork_ok, many.kind);
+    try testing.expectEqual(@as(u8, 11), many.tasks);
 }
