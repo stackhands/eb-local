@@ -1993,6 +1993,20 @@ fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     return d;
 }
 
+fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
+    const a = c.a;
+    var err_msg: []const u8 = "";
+    const timeout_ms = storage.lockTimeoutMs(c.env, &err_msg) orelse die("{s}", .{err_msg});
+    const dir = std.fs.path.join(a, &.{ prefix, ".eb-local" }) catch oom();
+    common.atomic.makedirs(dir) catch |e| die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
+    const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+    return switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &err_msg)) {
+        .held => |fd| fd,
+        .unlocked => null,
+        .failed => die("{s}", .{err_msg}),
+    };
+}
+
 /// The stop when the checked node-local mount takes no workspace.
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
@@ -2608,6 +2622,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         if (ownInstallVar(c, s, p, v, val) == null)
             warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
     };
+    var prefix_lock: ?sys.fd_t = blk: {
+        var lock_err: []const u8 = "";
+        const timeout_ms = storage.lockTimeoutMs(c.env, &lock_err) orelse {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("{s}", .{lock_err});
+        };
+        const dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        common.atomic.makedirs(dir) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
+        };
+        const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+        break :blk switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &lock_err)) {
+            .held => |fd| fd,
+            .unlocked => null,
+            .failed => {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("{s}", .{lock_err});
+            },
+        };
+    };
+    defer storage.releaseLock(&prefix_lock);
+    const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
+    var ws_lock: ?sys.fd_t = storage.acquireOptionalLock(ws_lock_path);
+    defer storage.releaseLock(&ws_lock);
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -2676,6 +2715,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
     guard.release();
+    storage.releaseLock(&ws_lock);
+    storage.releaseLock(&prefix_lock);
     return stop(ended);
 }
 
