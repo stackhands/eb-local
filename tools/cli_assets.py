@@ -11,8 +11,8 @@ from dataclasses import dataclass
 
 OPT_RE = re.compile(r"--[a-zA-Z0-9][a-zA-Z0-9-]*")
 BRACED_CMDS_RE = re.compile(r"\{([a-z0-9][a-z0-9-]*(?:,[a-z0-9][a-z0-9-]*)+)\}")
-LINE_CMD_RE = re.compile(r"^\s{2,}(?:[a-z0-9][a-z0-9-]*\s+)?([a-z0-9][a-z0-9-]*)\b", re.I)
-SKIP_CMDS = {"help", "completion", "completions"}
+HELP_ROW_RE = re.compile(r"^\s{2}([a-z][a-z0-9-]*)\s{2,}\S")
+SKIP_CMDS = {"completion", "completions"}
 
 
 @dataclass
@@ -35,16 +35,28 @@ def parse_subcommands(help_text: str, tool_name: str) -> list[str]:
             item = item.strip()
             if item and item not in SKIP_CMDS:
                 out.add(item)
+    usage_re = re.compile(
+        rf"^\s{{2}}{re.escape(tool_name)}(?:\s+\[OPTION\]\.\.\.)?\s+([a-z][a-z0-9-]*)(?:\s+(?:\[([^\]]+)\]|([a-z][a-z0-9-]*)))?"
+    )
     for line in help_text.splitlines():
-        m = LINE_CMD_RE.match(line)
-        if not m:
+        um = usage_re.match(line)
+        if um:
+            cmd = um.group(1)
+            if cmd not in SKIP_CMDS:
+                out.add(cmd)
+            if um.group(2) and "|" in um.group(2):
+                for part in um.group(2).split("|"):
+                    tok = part.strip().split()[0] if part.strip() else ""
+                    if re.fullmatch(r"[a-z][a-z0-9-]*", tok) and tok not in SKIP_CMDS:
+                        out.add(tok)
+            elif um.group(3) and um.group(3) not in SKIP_CMDS:
+                out.add(um.group(3))
             continue
-        item = m.group(1)
-        if item == tool_name or item in SKIP_CMDS:
-            continue
-        if item.startswith("-"):
-            continue
-        out.add(item)
+        rm = HELP_ROW_RE.match(line)
+        if rm:
+            item = rm.group(1)
+            if item != tool_name and item not in SKIP_CMDS:
+                out.add(item)
     return sorted(out)
 
 
