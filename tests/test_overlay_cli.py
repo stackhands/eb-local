@@ -15,16 +15,74 @@ def digest_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def run(args):
+def run(args, *, cwd=None, text=True):
     return subprocess.run(
         [binary.BIN, "overlay", *args],
         capture_output=True,
-        text=True,
+        cwd=cwd,
+        text=text,
     )
 
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayMaterialize(unittest.TestCase):
+    def test_default_output_and_status_are_unchanged_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "out",
+                ],
+                cwd=root,
+                text=False,
+            )
+            self.assertEqual(
+                (got.returncode, got.stdout, got.stderr),
+                (0, b"wrote out/materialized-base.eb and out/provenance.toml\n", b""),
+            )
+
+    def test_dry_run_validates_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "out",
+                    "--dry-run",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertEqual(
+                got.stdout,
+                "would write out/materialized-base.eb and out/provenance.toml\n",
+            )
+            self.assertEqual(got.stderr, "")
+            self.assertFalse((root / "out").exists())
+
     def test_pinned_overlay_without_edits_is_byte_identical(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.eb"

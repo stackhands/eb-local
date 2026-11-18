@@ -294,6 +294,7 @@ pub const MaterializeOptions = struct {
     overlay_path: []const u8 = "",
     base_path: []const u8 = "",
     out_dir: []const u8 = "",
+    dry_run: bool = false,
 };
 
 fn quoted(a: Allocator, value: []const u8) ![]const u8 {
@@ -330,7 +331,7 @@ fn failMsg(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("eb-local: " ++ fmt ++ "\n", args);
 }
 
-/// Read overlay and base files, verify the digest, write the recipe and provenance.
+/// Read overlay and base files, verify the digest, and write or preview the outputs.
 pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     if (opts.overlay_path.len == 0) {
         failMsg("overlay materialize needs --overlay FILE", .{});
@@ -375,6 +376,12 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     const provenance_path = std.fs.path.join(a, &.{ out_dir, "provenance.toml" }) catch return 1;
     const provenance = writeProvenance(a, .{ .overlay_path = opts.overlay_path, .base_path = opts.base_path, .out_dir = out_dir }, spec, base_digest, overlay_digest, recipe_name) catch return 1;
     defer a.free(provenance);
+    var stdout = std.Io.File.stdout();
+    if (opts.dry_run) {
+        const message = std.fmt.allocPrint(a, "would write {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
+        stdout.writeStreamingAll(io, message) catch return 1;
+        return 0;
+    }
     cwd.createDirPath(io, out_dir) catch |err| {
         failMsg("cannot create {s}: {s}", .{ out_dir, @errorName(err) });
         return 1;
@@ -387,7 +394,6 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         failMsg("cannot write {s}: {s}", .{ provenance_path, @errorName(err) });
         return 1;
     };
-    var stdout = std.Io.File.stdout();
     const message = std.fmt.allocPrint(a, "wrote {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
     stdout.writeStreamingAll(io, message) catch return 1;
     return 0;
