@@ -409,6 +409,110 @@ pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator
     return error.Exists;
 }
 
+/// Capacity available to an unprivileged caller.
+pub const Capacity = struct {
+    bytes: u64,
+    inodes: u64,
+};
+
+const StatFs = extern struct {
+    fs_type: i64,
+    block_size: i64,
+    blocks: u64,
+    blocks_free: u64,
+    blocks_available: u64,
+    files: u64,
+    files_free: u64,
+    fsid: [2]i32,
+    name_max: i64,
+    fragment_size: i64,
+    flags: i64,
+    spare: [4]i64,
+};
+
+/// Free bytes and inodes on the file system containing `path`.
+pub fn capacity(path: []const u8) sys.Error!Capacity {
+    var path_buf: [sys.path_max:0]u8 = undefined;
+    const zpath = try sys.z(&path_buf, path);
+    var stat: StatFs = undefined;
+    const rc = linux.syscall2(.statfs, @intFromPtr(zpath.ptr), @intFromPtr(&stat));
+    _ = try sys.result(rc);
+    const size: u64 = @intCast(if (stat.fragment_size > 0) stat.fragment_size else stat.block_size);
+    return .{
+        .bytes = std.math.mul(u64, stat.blocks_available, size) catch std.math.maxInt(u64),
+        .inodes = stat.files_free,
+    };
+}
+
+/// Whether a mount option is present as one whole comma-separated word.
+pub fn hasMountOption(options: []const u8, wanted: []const u8) bool {
+    var words = std.mem.splitScalar(u8, options, ',');
+    while (words.next()) |word| if (std.mem.eql(u8, word, wanted)) return true;
+    return false;
+}
+
+/// Operational storage class for a workspace. Configured shared roots and
+/// network file systems are shared; other file systems are node-local.
+pub fn workspaceClass(path: []const u8, fstype: []const u8, shared_roots: []const []const u8) []const u8 {
+    for (shared_roots) |root| if (under(path, root)) return "shared";
+    const shared_types = [_][]const u8{
+        "9p",   "afs",    "beegfs", "ceph", "cifs",  "cvmfs", "fuse.sshfs",
+        "gpfs", "lustre", "nfs",    "nfs4", "panfs", "smb3",
+    };
+    for (shared_types) |kind| if (std.mem.eql(u8, fstype, kind)) return "shared";
+    return "node-local";
+}
+
+/// Result of creating, writing, renaming, executing and removing one probe.
+pub const WorkspaceProbe = struct {
+    created: bool = false,
+    written: bool = false,
+    renamed: bool = false,
+    executed: bool = false,
+    removed: bool = false,
+};
+
+/// Exercise the file operations a build workspace needs. `execute_result` is
+/// a test seam; null executes the renamed probe.
+pub fn probeWorkspace(
+    io: std.Io,
+    a: Allocator,
+    path: []const u8,
+    execute_result: ?bool,
+) (fsx.Error || sys.Error || std.process.RunError || Allocator.Error)!WorkspaceProbe {
+    const dir = try fsx.openDir(fsx.cwd, path, false);
+    defer sys.close(dir);
+    var random: [8]u8 = undefined;
+    if (linux.getrandom(&random, random.len, 0) != random.len) return error.Unexpected;
+    const first = try std.fmt.allocPrint(a, ".eb-local-doctor-{x}.probe", .{std.mem.readInt(u64, &random, .little)});
+    const renamed = try std.fmt.allocPrint(a, "{s}.run", .{first});
+    const absolute = try std.fs.path.join(a, &.{ path, renamed });
+    var result: WorkspaceProbe = .{};
+    const fd = try sys.openat(dir, first, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o700);
+    result.created = true;
+    var current = first;
+    defer sys.unlinkat(dir, current, 0) catch {};
+    {
+        defer sys.close(fd);
+        try sys.writeAll(fd, "#!/bin/sh\nexit 0\n");
+        result.written = true;
+    }
+    try sys.renameat(dir, first, dir, renamed);
+    current = renamed;
+    result.renamed = true;
+    result.executed = execute_result orelse blk: {
+        const ran = try std.process.run(a, io, .{
+            .argv = &.{absolute},
+            .stdout_limit = .limited(4096),
+            .stderr_limit = .limited(4096),
+        });
+        break :blk ran.term.success();
+    };
+    try sys.unlinkat(dir, renamed, 0);
+    result.removed = true;
+    return result;
+}
+
 // ---- tests ----------------------------------------------------------------
 
 const testing = std.testing;

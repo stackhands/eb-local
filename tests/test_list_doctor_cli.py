@@ -6,6 +6,7 @@ target; doctor reports what would stop a build or a module load.
 """
 import os
 from pathlib import Path
+import pwd
 import re
 import subprocess
 import unittest
@@ -14,6 +15,7 @@ import binary
 from test_storage import StorageFixture
 
 SITE_DEFAULTS = Path(__file__).resolve().parents[1] / "docs" / "orgmode" / "howto" / "set-site-defaults.org"
+DOCTOR_DEFAULT = Path(__file__).resolve().parent / "fixtures" / "doctor-without-workspace.txt"
 
 
 def guide_block(language):
@@ -126,6 +128,64 @@ class ListAndDoctor(StorageFixture):
         self.assertNotIn("FAIL", run.stdout)
         self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
         self.assertFalse(self.prefix.exists())
+
+    def test_doctor_without_workspace_is_byte_identical(self):
+        clean = {
+            name: ""
+            for name in (
+                "PERL5LIB", "PYTHONPATH", "R_LIBS", "R_LIBS_USER",
+                "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH", "LD_LIBRARY_PATH",
+                "LD_PRELOAD", "LD_AUDIT",
+            )
+        }
+        run = self.run_tool(["doctor"], **clean)
+        expected = DOCTOR_DEFAULT.read_text().format(
+            root=self.root,
+            user=pwd.getpwuid(os.getuid()).pw_name,
+            timezone=os.path.realpath("/etc/localtime"),
+        )
+        self.assertEqual((run.returncode, run.stdout.encode(), run.stderr.encode()),
+                         (0, expected.encode(), b""))
+
+    def test_doctor_workspace_probes_a_private_node_local_path(self):
+        workspace = self.job / "candidate"
+        cache = workspace / "cache"
+        cache.mkdir(parents=True)
+        run = self.run_tool(
+            ["doctor", "--workspace", str(workspace)],
+            XDG_CACHE_HOME=str(cache),
+            EB_LOCAL_TEST_WORKSPACE_CAPACITY="987654321:4321",
+            EB_LOCAL_TEST_WORKSPACE_EXEC="ok",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"ok   workspace {workspace}: created, wrote, renamed, executed and removed a probe\n", run.stdout)
+        self.assertIn(f"info workspace {workspace}: xfs file system, classified node-local\n", run.stdout)
+        self.assertIn(f"info workspace {workspace}: 987654321 free bytes, 4321 free inodes\n", run.stdout)
+        self.assertIn(f"ok   workspace {workspace}: mount {self.job} does not have noexec\n", run.stdout)
+        self.assertIn(f"ok   effective XDG cache {cache} is private to workspace {workspace}\n", run.stdout)
+        self.assertEqual(list(workspace.iterdir()), [cache])
+
+    def test_doctor_workspace_reports_shared_noexec_and_failed_execution(self):
+        workspace = self.root / "shared" / "candidate"
+        workspace.mkdir(parents=True)
+        argv, env = binary.command(
+            self.script,
+            ["doctor", "--workspace", str(workspace)],
+            dict(
+                self.env,
+                EB_LOCAL_TEST_WORKSPACE_CAPACITY="20:3",
+                EB_LOCAL_TEST_WORKSPACE_EXEC="fail",
+            ),
+        )
+        mountinfo = Path(env["EB_LOCAL_TEST_MOUNTINFO"])
+        with mountinfo.open("a") as table:
+            table.write(f"3 1 0:3 / {workspace} rw,noexec - nfs server:/workspace rw\n")
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("execute=failed, remove=ok", run.stdout)
+        self.assertIn(f"info workspace {workspace}: nfs file system, classified shared\n", run.stdout)
+        self.assertIn(f"FAIL workspace {workspace}: mount {workspace} has noexec\n", run.stdout)
+        self.assertEqual(list(workspace.iterdir()), [])
 
     def test_doctor_names_variables_left_in_the_shell(self):
         run = self.run_tool(["doctor"], EASYBUILD_INSTALLPATH="/elsewhere", LD_LIBRARY_PATH="/host/lib",

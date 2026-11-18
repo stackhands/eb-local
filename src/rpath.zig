@@ -104,16 +104,24 @@ pub const script =
 /// directory is not one the caller owns, or a wrapper cannot be written.
 pub const Error = error{ NoCacheDir, Unsafe } || sys.Error || Allocator.Error;
 
+/// The effective user cache directory: absolute `$XDG_CACHE_HOME`, or
+/// absolute `$HOME/.cache` when XDG_CACHE_HOME is unset or empty.
+pub fn cacheHome(a: Allocator, env: *const std.process.Environ.Map) Error![]const u8 {
+    const base = if (nonEmpty(env.get("XDG_CACHE_HOME"))) |x|
+        try a.dupe(u8, x)
+    else if (nonEmpty(env.get("HOME"))) |h|
+        try std.fs.path.join(a, &.{ h, ".cache" })
+    else
+        return error.NoCacheDir;
+    if (base.len == 0 or base[0] != '/') return error.NoCacheDir;
+    return base;
+}
+
 /// The directory for the wrappers of `found`: below the user's cache
 /// directory, named by the names it holds and the script it writes.
 pub fn directory(a: Allocator, env: *const std.process.Environ.Map, found: []const []const u8) Error![]const u8 {
-    const base = if (nonEmpty(env.get("XDG_CACHE_HOME"))) |x|
-        try std.fs.path.join(a, &.{ x, "eb-local" })
-    else if (nonEmpty(env.get("HOME"))) |h|
-        try std.fs.path.join(a, &.{ h, ".cache", "eb-local" })
-    else
-        return error.NoCacheDir;
-    if (base[0] != '/') return error.NoCacheDir;
+    const cache = try cacheHome(a, env);
+    const base = try std.fs.path.join(a, &.{ cache, "eb-local" });
     var h = std.hash.Wyhash.init(0);
     h.update(script);
     for (found) |n| {
