@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local doctor --json",
+  "type": "object",
+  "required": ["schema_version", "kind", "site_file", "failed", "lines", "summary"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "doctor" },
+    "site_file": { "type": "boolean" },
+    "failed": { "type": "boolean" },
+    "summary": { "type": "string" },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["level", "text"],
+        "properties": {
+          "level": { "enum": ["ok", "info", "warn", "FAIL"] },
+          "text": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

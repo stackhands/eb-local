@@ -7,3 +7,4 @@ docs/reference/api/
 .zig-cache/
 zig-out/
 zig-pkg/
+out/

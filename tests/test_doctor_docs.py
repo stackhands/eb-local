@@ -29,7 +29,9 @@ def message(literal):
 
 
 def messages():
-    found = (message(m) for m in re.findall(r'\bnote\(a, &?out, [^,]+, "((?:[^"\\]|\\.)*)"', MAIN.read_text()))
+    found = (message(m) for m in re.findall(
+        r'\bnote\(a, &?out, (?:[^,]+, )?(?:"(?:ok  |info|warn|FAIL)"|[^,]+), "((?:[^"\\]|\\.)*)"',
+        MAIN.read_text()))
     return [m for m in found if m]
 
 

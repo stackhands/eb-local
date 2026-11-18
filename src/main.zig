@@ -37,6 +37,8 @@ pub const cvmfs = @import("cvmfs.zig");
 pub const mpi = @import("mpi.zig");
 /// `eb-local overlay`: declarative site overlays for upstream easyconfigs.
 pub const recipe_overlay = @import("recipe_overlay.zig");
+/// `--json` for scriptable commands.
+const jsonout = @import("jsonout.zig");
 const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
@@ -74,9 +76,9 @@ const usage_text =
     \\                                       --unwrapped: only clang, clang++, flang,
     \\                                       flang-new and ld.lld, where no wrapper comes
     \\                                       first; dev adds them after a build environment
-    \\  eb-local check FILE...               whether a program or library built here runs here:
+    \\  eb-local check [--json] FILE...      whether a program or library built here runs here:
     \\                                       its architecture, loader, run paths and libraries
-    \\  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
+    \\  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
     \\                                       the same for every ELF file in those installations,
     \\                                       the dev tree, or DIR; a file that is not ELF is skipped.
     \\                                       --quiet prints a file only when it has a problem
@@ -86,11 +88,14 @@ const usage_text =
     \\                                       its CPU target; --print shows the jobs instead.
     \\                                       Deprecated, and removed in 4.0.0: --explain
     \\                                       prints an sbatch line for each node type
-    \\  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
-    \\                                       what this node's target lacks
-    \\  eb-local doctor [--cvmfs] [--cvmfs-parallel N] [--mpi]
+    \\  eb-local list [--json] [NAME[/VERSION]...]
+    \\                                       what you installed, for which CPU targets, and
+    \\                                       what this node's target lacks; --json prints one
+    \\                                       line of JSON with schema_version 1
+    \\  eb-local doctor [--json] [--cvmfs] [--cvmfs-parallel N] [--mpi]
     \\                                       what in this shell, node or configuration would
-    \\                                       stop a build or a module load; changes nothing.
+    \\                                       stop a build or a module load; changes nothing;
+    \\                                       --json prints one line of JSON with schema_version 1.
     \\                                       --cvmfs checks the CernVM-FS client.
     \\                                       --cvmfs-parallel N (1 to 8) reads repository
     \\                                       metadata from N tasks inside an allocation.
@@ -120,10 +125,13 @@ const usage_text =
     \\                 [--dry-run] [--delete]
     \\                                       remove what eb-local left behind; --no-logs
     \\                                       leaves the logs
-    \\  eb-local config [--check | --env]    the settings in force and where each came from;
+    \\  eb-local config [--check | --env] [--json]
+    \\                                       the settings in force and where each came from;
     \\                                       --check also reads every secret (values not shown);
-    \\                                       --env prints them as EB_LOCAL_* lines for export
-    \\  eb-local profiles                    the profiles the configuration defines
+    \\                                       --env prints them as EB_LOCAL_* lines for export;
+    \\                                       --json is for the default output or --check, not --env
+    \\  eb-local profiles [--json]           the profiles the configuration defines; --json
+    \\                                       prints one line of JSON with schema_version 1
     \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
     \\                                       remove an installation and its module file, for
     \\                                       every CPU target, to the trash with rtrash.
@@ -134,7 +142,8 @@ const usage_text =
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
     \\                                       a site file from a template built in, or from a
     \\                                       template file (a NAME with a slash); install
-    \\                                       writes config.toml beside this program, mode 644
+    \\                                       writes config.toml beside this program, mode 644;
+    \\                                       site list takes --json for machine-readable output
     \\  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR]
     \\                                       apply a digest-pinned overlay; writes a materialized
     \\                                       easyconfig and provenance.toml, or refuses when the
@@ -466,6 +475,8 @@ const Global = struct {
     explain: bool = false,
     /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
     env_strict: bool = false,
+    /// One line of JSON on stdout instead of the human report.
+    json_out: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -791,12 +802,44 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
 
 // ---- check ----------------------------------------------------------------
 
+const CheckFileJson = struct {
+    path: []const u8,
+    machine: []const u8,
+    problems: std.ArrayList([]const u8) = .empty,
+};
+
+const CheckFileOut = struct {
+    path: []const u8,
+    machine: []const u8,
+    problems: []const []const u8,
+};
+
+const CheckReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "check",
+    problem_count: usize,
+    unreadable: bool,
+    elf_count: usize,
+    files: []const CheckFileOut,
+};
+
 const Check = struct {
     problems: usize = 0,
+    json: bool = false,
+    files: std.ArrayList(CheckFileJson) = .empty,
 
-    fn problem(k: *Check, comptime fmt: []const u8, args: anytype) void {
-        say("  problem: " ++ fmt, args);
+    fn beginFile(k: *Check, a: Allocator, path: []const u8, machine: []const u8) void {
+        if (!k.json) return;
+        k.files.append(a, .{ .path = path, .machine = machine, .problems = .empty }) catch oom();
+    }
+
+    fn problem(k: *Check, a: Allocator, comptime fmt: []const u8, args: anytype) void {
+        if (!k.json) say("  problem: " ++ fmt, args);
         k.problems += 1;
+        if (!k.json) return;
+        const msg = std.fmt.allocPrint(a, fmt, args) catch oom();
+        if (k.files.items.len == 0) return;
+        k.files.items[k.files.items.len - 1].problems.append(a, msg) catch oom();
     }
 };
 
@@ -880,13 +923,27 @@ fn readSmall(a: Allocator, path: []const u8) ?[]const u8 {
     return fsx.readAll(a, f.fd, 64 * 1024) catch null;
 }
 
-fn checkStatus(k: *const Check, unreadable: bool) u8 {
-    if (k.problems > 0) {
+fn checkStatus(c: Ctx, k: *Check, unreadable: bool, elfs: usize) u8 {
+    if (k.json) {
+        const a = c.a;
+        var outs: std.ArrayList(CheckFileOut) = .empty;
+        for (k.files.items) |f| {
+            outs.append(a, .{ .path = f.path, .machine = f.machine, .problems = f.problems.items }) catch oom();
+        }
+        const report: CheckReport = .{
+            .problem_count = k.problems,
+            .unreadable = unreadable,
+            .elf_count = elfs,
+            .files = outs.items,
+        };
+        jsonout.emit(a, report);
+    } else if (k.problems > 0) {
         say("eb-local check: {d} problem(s)", .{k.problems});
-        return 1;
-    }
+    } else if (unreadable) {
+        return 2;
+    } else say("eb-local check: no problems", .{});
+    if (k.problems > 0) return 1;
     if (unreadable) return 2;
-    say("eb-local check: no problems", .{});
     return 0;
 }
 
@@ -906,11 +963,12 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
     const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
     const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
     const machine = elfcheck.machineName(elf.machine);
+    if (k.json) k.beginFile(a, path, machine);
     var shown = false;
     if (!quiet) showHeader(&shown, path, machine);
     if (elf.machine != elfcheck.hostMachine()) {
         showHeader(&shown, path, machine);
-        k.problem("built for {s}; this node is {s}", .{ machine, elfcheck.machineName(elfcheck.hostMachine()) });
+        k.problem(a, "built for {s}; this node is {s}", .{ machine, elfcheck.machineName(elfcheck.hostMachine()) });
     }
     var buf: [sys.path_max]u8 = undefined;
     const real = fsx.realpath(fsx.cwd, path, &buf) catch path;
@@ -919,14 +977,14 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
         if (!quiet) say("  loader   {s}", .{interp});
         if (eprefix) |ep| if (!storage.under(interp, ep)) {
             showHeader(&shown, path, machine);
-            k.problem("the loader is the host's, not the compatibility layer's under {s}", .{ep});
+            k.problem(a, "the loader is the host's, not the compatibility layer's under {s}", .{ep});
         };
     }
     if (elf.rpath) |r| if (!quiet) say("  RPATH    {s}", .{r});
     if (elf.runpath) |r| {
         if (!quiet) say("  RUNPATH  {s}", .{r});
         showHeader(&shown, path, machine);
-        k.problem("RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH", .{});
+        k.problem(a, "RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH", .{});
     }
     if (elf.interp == null and elf.needed.len == 0) {
         if (!quiet) say("  static: no loader and no libraries", .{});
@@ -956,7 +1014,7 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
         } else {
             seen_targets.append(a, t) catch oom();
             showHeader(&shown, path, machine);
-            k.problem("run paths into the {s} software tree; this shell is {s}: build it again on this node type", .{ t, want });
+            k.problem(a, "run paths into the {s} software tree; this shell is {s}: build it again on this node type", .{ t, want });
         }
     }
 
@@ -965,7 +1023,7 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             if (!quiet) say("  needs    {s}", .{n});
             if (!isFile(n)) {
                 showHeader(&shown, path, machine);
-                k.problem("{s} does not exist", .{n});
+                k.problem(a, "{s} does not exist", .{n});
             }
             continue;
         }
@@ -977,10 +1035,10 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             showHeader(&shown, path, machine);
             if (with) |w| {
                 if (!quiet) say("  needs    {s} => {s}   [LD_LIBRARY_PATH]", .{ n, w.path });
-                k.problem("{s} is found only through LD_LIBRARY_PATH", .{n});
+                k.problem(a, "{s} is found only through LD_LIBRARY_PATH", .{n});
             } else {
                 if (!quiet) say("  needs    {s} => not found", .{n});
-                k.problem("{s} is not found", .{n});
+                k.problem(a, "{s} is not found", .{n});
             }
             continue;
         };
@@ -989,7 +1047,7 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             say("           LD_LIBRARY_PATH in this shell picks {s} instead", .{w.path});
         if (eprefix != null and elfcheck.isHostPath(h.path)) {
             showHeader(&shown, path, machine);
-            k.problem("{s} comes from the host, not from EESSI", .{n});
+            k.problem(a, "{s} comes from the host, not from EESSI", .{n});
         }
     }
 }
@@ -1017,12 +1075,15 @@ fn auditFile(c: Ctx, k: *Check, path: []const u8, quiet: bool, skip_non_elf: boo
     return true;
 }
 
-fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool) u8 {
+fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool) u8 {
     if (files.len == 0) die("check needs one or more programs or libraries", .{});
-    var k: Check = .{};
+    var k: Check = .{ .json = json };
     var unreadable = false;
-    for (files) |f| _ = auditFile(c, &k, f, quiet, false, &unreadable);
-    return checkStatus(&k, unreadable);
+    var elfs: usize = 0;
+    for (files) |f| {
+        if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
+    }
+    return checkStatus(c, &k, unreadable, elfs);
 }
 
 /// How deep a tree audit walks. A module or dev tree is far shallower.
@@ -1093,7 +1154,7 @@ const CheckMode = enum { module, dev, prefix };
 
 /// Audit every ELF file in the installations `--module` names, in the dev
 /// tree, or under `--prefix`. `s` is set for a module or the dev tree.
-fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const []const u8, prefix_dir: []const u8, quiet: bool) u8 {
+fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const []const u8, prefix_dir: []const u8, quiet: bool, json: bool) u8 {
     const a = c.a;
     var roots: std.ArrayList([]const u8) = .empty;
     switch (mode) {
@@ -1128,71 +1189,101 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
             roots.appendSlice(a, found.installs.items) catch oom();
         },
     }
-    var k: Check = .{};
+    var k: Check = .{ .json = json };
     var unreadable = false;
     var elfs: usize = 0;
     for (roots.items) |root| walkElfs(c, root, quiet, &k, &unreadable, &elfs, 0);
-    if (elfs == 0 and !quiet and !unreadable) say("eb-local check: no ELF files", .{});
-    return checkStatus(&k, unreadable);
+    if (elfs == 0 and !quiet and !unreadable and !json) say("eb-local check: no ELF files", .{});
+    return checkStatus(c, &k, unreadable, elfs);
 }
 
-fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
+const ConfigSetting = struct { key: []const u8, value: []const u8, from: []const u8 };
+const ConfigSecretJson = struct { name: []const u8, source: []const u8, from: []const u8, status: []const u8, detail: ?[]const u8 = null };
+const ConfigReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "config",
+    profile: []const u8,
+    check: bool,
+    settings: []const ConfigSetting,
+    secrets: []const ConfigSecretJson,
+    check_failed: bool,
+};
+
+fn cmdConfig(c: Ctx, s: config.Settings, check: bool, json: bool) u8 {
     const a = c.a;
     const p = locate(c, s);
+    var settings: std.ArrayList(ConfigSetting) = .empty;
+    var secrets_json: std.ArrayList(ConfigSecretJson) = .empty;
     const row = struct {
-        fn f(key: []const u8, value: []const u8, from: []const u8) void {
-            say("{s: <28} {s}   [{s}]", .{ key, value, from });
+        fn f(st: *std.ArrayList(ConfigSetting), al: Allocator, json_out: bool, key: []const u8, value: []const u8, from: []const u8) void {
+            if (json_out) {
+                st.append(al, .{ .key = key, .value = value, .from = from }) catch oom();
+            } else {
+                say("{s: <28} {s}   [{s}]", .{ key, value, from });
+            }
         }
     }.f;
-    say("{s: <28} {s}", .{ "profile", s.profile orelse "(none)" });
-    if (p.project) row("project", p.prefix, s.project.from) else row("prefix", p.prefix, s.prefix.from);
-    row("stack.module", s.stack_module.value, s.stack_module.from);
-    row("stack.extend", s.extend_module.value, s.extend_module.from);
-    row("dev.buildenv", s.dev_buildenv.value, s.dev_buildenv.from);
+    const profile = s.profile orelse "(none)";
+    if (json) settings.append(a, .{ .key = "profile", .value = profile, .from = "option" }) catch oom() else say("{s: <28} {s}", .{ "profile", profile });
+    if (p.project) row(&settings, a, json, "project", p.prefix, s.project.from) else row(&settings, a, json, "prefix", p.prefix, s.prefix.from);
+    row(&settings, a, json, "stack.module", s.stack_module.value, s.stack_module.from);
+    row(&settings, a, json, "stack.extend", s.extend_module.value, s.extend_module.from);
+    row(&settings, a, json, "dev.buildenv", s.dev_buildenv.value, s.dev_buildenv.from);
     for (config.families, s.buildenv_for) |f, b|
-        row(str(a, "dev.buildenv_for.{s}", .{f.name}), if (b.value.len == 0) "(none: RPATH wrappers)" else b.value, b.from);
+        row(&settings, a, json, str(a, "dev.buildenv_for.{s}", .{f.name}), if (b.value.len == 0) "(none: RPATH wrappers)" else b.value, b.from);
     const mods = std.mem.join(a, " ", s.dev_modules.value) catch oom();
-    row("dev.modules", if (mods.len == 0) "(none)" else mods, s.dev_modules.from);
-    row("build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
+    row(&settings, a, json, "dev.modules", if (mods.len == 0) "(none)" else mods, s.dev_modules.from);
+    row(&settings, a, json, "build.allocation_hint", if (s.allocation_hint.value.len == 0) "(none)" else s.allocation_hint.value, s.allocation_hint.from);
     const tcs = std.mem.join(a, " ", s.site_toolchains.value) catch oom();
-    row("build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
+    row(&settings, a, json, "build.site_toolchains", if (tcs.len == 0) "(none)" else tcs, s.site_toolchains.from);
     const types = nodeTypes(s);
-    if (types.len == 0) row("build.node_types", "(none)", s.node_types.from);
-    for (types) |t| row(str(a, "build.node_types.{s}", .{t.name}), t.sbatch, t.from);
+    if (types.len == 0) row(&settings, a, json, "build.node_types", "(none)", s.node_types.from);
+    for (types) |t| row(&settings, a, json, str(a, "build.node_types.{s}", .{t.name}), t.sbatch, t.from);
     if (s.build_secrets.value) |names| {
-        row("build.secrets", if (names.len == 0) "(none)" else std.mem.join(a, " ", names) catch oom(), s.build_secrets.from);
-    } else row("build.secrets", "(every secret)", s.build_secrets.from);
-    row("build.clear_foreign_prefixes", if (s.clear_foreign_prefixes.value) "true" else "false", s.clear_foreign_prefixes.from);
+        row(&settings, a, json, "build.secrets", if (names.len == 0) "(none)" else std.mem.join(a, " ", names) catch oom(), s.build_secrets.from);
+    } else row(&settings, a, json, "build.secrets", "(every secret)", s.build_secrets.from);
+    row(&settings, a, json, "build.clear_foreign_prefixes", if (s.clear_foreign_prefixes.value) "true" else "false", s.clear_foreign_prefixes.from);
     const approved = std.mem.join(a, " ", s.approved_prefixes.value) catch oom();
-    row("doctor.approved_prefixes", if (approved.len == 0) "(none)" else approved, s.approved_prefixes.from);
-    row("doctor.cvmfs_parallel", str(a, "{d}", .{s.cvmfs_parallel.value}), s.cvmfs_parallel.from);
+    row(&settings, a, json, "doctor.approved_prefixes", if (approved.len == 0) "(none)" else approved, s.approved_prefixes.from);
+    row(&settings, a, json, "doctor.cvmfs_parallel", str(a, "{d}", .{s.cvmfs_parallel.value}), s.cvmfs_parallel.from);
     const transports = std.mem.join(a, " ", s.mpi_transports.value) catch oom();
-    row("doctor.mpi_transports", if (transports.len == 0) "(none)" else transports, s.mpi_transports.from);
-    row("clean.trash", @tagName(s.trash.value), s.trash.from);
-    row("clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
-    row("nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
-    row("nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
-    row("storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
-    row("storage.node_local_mount", s.node_local_mount.value, s.node_local_mount.from);
-    row("storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
+    row(&settings, a, json, "doctor.mpi_transports", if (transports.len == 0) "(none)" else transports, s.mpi_transports.from);
+    row(&settings, a, json, "clean.trash", @tagName(s.trash.value), s.trash.from);
+    row(&settings, a, json, "clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
+    row(&settings, a, json, "nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
+    row(&settings, a, json, "nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
+    row(&settings, a, json, "storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
+    row(&settings, a, json, "storage.node_local_mount", s.node_local_mount.value, s.node_local_mount.from);
+    row(&settings, a, json, "storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
     const scratch = std.mem.join(a, " ", s.shared_scratch.value) catch oom();
-    row("storage.shared_scratch", if (scratch.len == 0) "(none)" else scratch, s.shared_scratch.from);
+    row(&settings, a, json, "storage.shared_scratch", if (scratch.len == 0) "(none)" else scratch, s.shared_scratch.from);
     if (s.eessi.items.len == 0) {
-        say("{s: <28} (none)", .{"eessi"});
-    } else for (s.eessi.items) |v| row(str(a, "eessi.{s}", .{v.name}), q(a, v.value), v.from);
+        if (!json) say("{s: <28} (none)", .{"eessi"});
+    } else for (s.eessi.items) |v| row(&settings, a, json, str(a, "eessi.{s}", .{v.name}), q(a, v.value), v.from);
     var failed = false;
-    if (s.secrets.items.len == 0) say("{s: <28} (none)", .{"secrets"}) else say("secrets (values are never shown)", .{});
+    if (s.secrets.items.len == 0) {
+        if (!json) say("{s: <28} (none)", .{"secrets"});
+    } else if (!json) say("secrets (values are never shown)", .{});
     for (s.secrets.items) |sec| {
         if (!check) {
-            say("  {s: <26} {s}   [{s}]", .{ sec.name, sec.source, sec.from });
+            if (json)
+                secrets_json.append(a, .{ .name = sec.name, .source = sec.source, .from = sec.from, .status = "listed" }) catch oom()
+            else
+                say("  {s: <26} {s}   [{s}]", .{ sec.name, sec.source, sec.from });
             continue;
         }
         var f: secrets.Failure = .{};
         if (secrets.resolve(a, &.{sec}, c.env, c.envp, nimvaultOf(s), &f)) |_| {
-            say("  {s: <26} {s}   ok", .{ sec.name, sec.source });
+            if (json)
+                secrets_json.append(a, .{ .name = sec.name, .source = sec.source, .from = sec.from, .status = "ok" }) catch oom()
+            else
+                say("  {s: <26} {s}   ok", .{ sec.name, sec.source });
         } else |e| switch (e) {
             error.Unavailable => {
-                say("  {s: <26} {s}   FAILED: {s}", .{ sec.name, sec.source, f.message });
+                if (json)
+                    secrets_json.append(a, .{ .name = sec.name, .source = sec.source, .from = sec.from, .status = "failed", .detail = f.message }) catch oom()
+                else
+                    say("  {s: <26} {s}   FAILED: {s}", .{ sec.name, sec.source, f.message });
                 failed = true;
             },
             error.OutOfMemory => oom(),
@@ -1202,6 +1293,15 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool) u8 {
     // shows the settings first, so the profile that names it can be read.
     if (s.project.value) |dir| {
         if (!projectUsable(c, dir) and check) failed = true;
+    }
+    if (json) {
+        jsonout.emit(a, ConfigReport{
+            .profile = profile,
+            .check = check,
+            .settings = settings.items,
+            .secrets = secrets_json.items,
+            .check_failed = failed,
+        });
     }
     return if (failed) 1 else 0;
 }
@@ -1258,11 +1358,19 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     return 0;
 }
 
+const SiteTemplateJson = struct { name: []const u8, placeholders: []const []const u8 };
+const SiteListReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "site_list",
+    templates: []const SiteTemplateJson,
+};
+
 const SiteOpts = struct {
     words: std.ArrayList([]const u8) = .empty,
     sets: std.ArrayList(sites.Set) = .empty,
     to: ?[]const u8 = null,
     force: bool = false,
+    json: bool = false,
 };
 
 /// The template `eb-local site` renders: one built in, or a site's own
@@ -1283,6 +1391,15 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const action = if (w.len > 0) w[0] else "list";
     if (std.mem.eql(u8, action, "list")) {
         if (w.len > 1 or o.sets.items.len > 0 or o.to != null or o.force) die("site list takes nothing else", .{});
+        if (o.json) {
+            var templates: std.ArrayList(SiteTemplateJson) = .empty;
+            for (sites.all) |t| {
+                const names = sites.placeholders(a, t.text) catch oom();
+                templates.append(a, .{ .name = t.name, .placeholders = names }) catch oom();
+            }
+            jsonout.emit(a, SiteListReport{ .templates = templates.items });
+            return 0;
+        }
         for (sites.all) |t| {
             const names = sites.placeholders(a, t.text) catch oom();
             say("{s: <12} placeholders: {s}", .{ t.name, if (names.len == 0) "none" else std.mem.join(a, ", ", names) catch oom() });
@@ -1323,24 +1440,38 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     return 0;
 }
 
+const ProfileRow = struct { name: []const u8, layer: []const u8, path: []const u8 };
+const ProfilesReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "profiles",
+    profiles: []const ProfileRow,
+};
+
 fn cmdProfiles(c: Ctx, g: Global) u8 {
+    const a = c.a;
     const sources = configSources(c, g);
     // Loading checks every profile in every file.
     var d: config.Diagnostic = .{};
-    _ = config.load(c.a, sources, c.env, .{}, &d) catch |e| switch (e) {
+    _ = config.load(a, sources, c.env, .{}, &d) catch |e| switch (e) {
         error.Invalid => die("{s}", .{d.message}),
         error.OutOfMemory => oom(),
     };
-    var shown = false;
+    var rows: std.ArrayList(ProfileRow) = .empty;
     for (sources) |src| {
         var td: toml.Diagnostic = .{};
-        const t = toml.parse(c.a, src.text, &td) catch continue;
-        for (config.profileNames(c.a, t) catch oom()) |name| {
-            say("{s: <20} {s} {s}", .{ name, @tagName(src.layer), src.path });
-            shown = true;
+        const t = toml.parse(a, src.text, &td) catch continue;
+        for (config.profileNames(a, t) catch oom()) |name| {
+            if (g.json_out)
+                rows.append(a, .{ .name = name, .layer = @tagName(src.layer), .path = src.path }) catch oom()
+            else
+                say("{s: <20} {s} {s}", .{ name, @tagName(src.layer), src.path });
         }
     }
-    if (!shown) say("no profiles are defined", .{});
+    if (g.json_out) {
+        jsonout.emit(a, ProfilesReport{ .profiles = rows.items });
+        return 0;
+    }
+    if (rows.items.len == 0) say("no profiles are defined", .{});
     return 0;
 }
 
@@ -1504,33 +1635,33 @@ fn envpOf(a: Allocator, map: *const std.process.Environ.Map) proc.Envp {
 /// The line for eessi-arch-guard, whose target builds, env and dev load
 /// EESSI for. Inside a job with EESSI loaded the guard is asked as a build
 /// asks it, strictly, with a private directory that is removed after.
-fn noteGuard(c: Ctx, out: *std.ArrayList(u8)) void {
+fn noteGuard(c: Ctx, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) void {
     const a = c.a;
     const guard = (proc.which(a, "eessi-arch-guard", c.env.get("PATH") orelse "") catch null) orelse
-        return note(a, out, "info", "eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects", .{});
+        return note(a, out, json_lines, "info", "eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects", .{});
     if (std.mem.eql(u8, c.env.get("EESSI_ARCH_GUARD") orelse "", "0"))
-        return note(a, out, "info", "eessi-arch-guard is on PATH, and EESSI_ARCH_GUARD=0 turns it off", .{});
+        return note(a, out, json_lines, "info", "eessi-arch-guard is on PATH, and EESSI_ARCH_GUARD=0 turns it off", .{});
     const loaded = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR")) orelse "";
     if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null or loaded.len == 0)
-        return note(a, out, "info", "eessi-arch-guard is on PATH; builds, env and dev load EESSI for the target it selects, which doctor shows inside a job with EESSI loaded", .{});
+        return note(a, out, json_lines, "info", "eessi-arch-guard is on PATH; builds, env and dev load EESSI for the target it selects, which doctor shows inside a job with EESSI loaded", .{});
     const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
     const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
     const dir = storage.makeWorkspace(a, base) catch
-        return note(a, out, "warn", "eessi-arch-guard was not asked: doctor could not make a private directory in {s}", .{base});
+        return note(a, out, json_lines, "warn", "eessi-arch-guard was not asked: doctor could not make a private directory in {s}", .{base});
     defer fsx.deleteTree(a, fsx.cwd, dir) catch {};
     var env = c.env.clone(a) catch oom();
     env.put("EESSI_ARCH_GUARD_WORKDIR", dir) catch oom();
     const r = proc.run(a, guard, &.{ guard, "--strict", "--shell" }, envpOf(a, &env), .{ .stdout_limit = 1 << 20, .stderr_limit = 64 << 10, .timeout_ms = 120_000 }) catch |e|
-        return note(a, out, "warn", "eessi-arch-guard could not be run: {s}", .{@errorName(e)});
+        return note(a, out, json_lines, "warn", "eessi-arch-guard could not be run: {s}", .{@errorName(e)});
     if (r.term.code() != 0) {
         var lines = std.mem.splitScalar(u8, std.mem.trim(u8, r.stderr, " \n"), '\n');
         const why = lines.first();
-        return note(a, out, "warn", "eessi-arch-guard cannot select a target here (exit {d}{s}{s}); builds stop when it cannot, and EESSI_ARCH_GUARD=0 turns it off", .{ r.term.code(), if (why.len > 0) ": " else "", why });
+        return note(a, out, json_lines, "warn", "eessi-arch-guard cannot select a target here (exit {d}{s}{s}); builds stop when it cannot, and EESSI_ARCH_GUARD=0 turns it off", .{ r.term.code(), if (why.len > 0) ": " else "", why });
     }
     const chosen = shellExport(a, r.stdout, "EESSI_SOFTWARE_SUBDIR") orelse loaded;
     if (std.mem.eql(u8, chosen, loaded)) {
-        note(a, out, "ok  ", "eessi-arch-guard selects {s}, the target EESSI is loaded for", .{chosen});
-    } else note(a, out, "ok  ", "eessi-arch-guard selects {s} here, not {s}, which EESSI is loaded for; builds, env and dev use {s}", .{ chosen, loaded, chosen });
+        note(a, out, json_lines, "ok  ", "eessi-arch-guard selects {s}, the target EESSI is loaded for", .{chosen});
+    } else note(a, out, json_lines, "ok  ", "eessi-arch-guard selects {s} here, not {s}, which EESSI is loaded for; builds, env and dev use {s}", .{ chosen, loaded, chosen });
 }
 
 /// The value `export NAME=VALUE` gives NAME in the output of
@@ -2356,9 +2487,24 @@ fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
     return false;
 }
 
+const ListTargetJson = struct { label: []const u8, here: bool };
+const ListModuleJson = struct { name: []const u8, built: []const bool };
+const ListReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "list",
+    prefix: []const u8,
+    filters: []const []const u8,
+    empty: bool,
+    targets: []const ListTargetJson,
+    modules: []const ListModuleJson,
+    node_target: ?[]const u8 = null,
+    missing_on_node: []const []const u8,
+    hint: ?[]const u8 = null,
+};
+
 /// What is installed in the prefix, for which CPU targets, and what the
 /// target of this node lacks.
-fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
+fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool) u8 {
     const a = c.a;
     const p = place(c, s);
     const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
@@ -2401,6 +2547,48 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
     }
     std.mem.sort(Listed, rows.items, {}, listedLess);
 
+    // This node's target, when EESSI is loaded.
+    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
+    var here: ?usize = null;
+    if (here_target) |ht| for (trees.items, 0..) |t, ti| {
+        if (!std.mem.eql(u8, treeTarget(t), ht)) continue;
+        if (here_version) |hv| if (!std.mem.eql(u8, treeVersion(versions, t), hv)) continue;
+        here = ti;
+    };
+
+    if (json) {
+        var missing_on_node: std.ArrayList([]const u8) = .empty;
+        var hint: ?[]const u8 = null;
+        if (here) |hi| {
+            for (rows.items) |r| if (std.mem.indexOfScalar(usize, r.at.items, hi) == null)
+                missing_on_node.append(a, r.module) catch oom();
+        } else if (here_target == null) {
+            hint = "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.";
+        }
+        var targets: std.ArrayList(ListTargetJson) = .empty;
+        for (labels.items, 0..) |l, li|
+            targets.append(a, .{ .label = l, .here = here != null and here.? == li }) catch oom();
+        var modules: std.ArrayList(ListModuleJson) = .empty;
+        for (rows.items) |r| {
+            var built: std.ArrayList(bool) = .empty;
+            for (0..labels.items.len) |li|
+                built.append(a, std.mem.indexOfScalar(usize, r.at.items, li) != null) catch oom();
+            modules.append(a, .{ .name = r.module, .built = built.items }) catch oom();
+        }
+        jsonout.emit(a, ListReport{
+            .prefix = p.prefix,
+            .filters = filters,
+            .empty = trees.items.len == 0 or rows.items.len == 0,
+            .targets = targets.items,
+            .modules = modules.items,
+            .node_target = here_target,
+            .missing_on_node = missing_on_node.items,
+            .hint = hint,
+        });
+        return 0;
+    }
+
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
@@ -2412,15 +2600,6 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
         cli.put(1, out.items);
         return 0;
     }
-    // This node's target, when EESSI is loaded.
-    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
-    const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
-    var here: ?usize = null;
-    if (here_target) |ht| for (trees.items, 0..) |t, ti| {
-        if (!std.mem.eql(u8, treeTarget(t), ht)) continue;
-        if (here_version) |hv| if (!std.mem.eql(u8, treeVersion(versions, t), hv)) continue;
-        here = ti;
-    };
 
     var width: usize = "MODULE".len;
     for (rows.items) |r| width = @max(width, r.module.len);
@@ -2463,6 +2642,24 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8) u8 {
 
 // ---- doctor ---------------------------------------------------------------
 
+const DoctorLine = struct {
+    level: []const u8,
+    text: []const u8,
+};
+
+const DoctorReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "doctor",
+    site_file: bool,
+    failed: bool,
+    lines: []const DoctorLine,
+    summary: []const u8,
+};
+
+fn doctorLevel(kind: []const u8) []const u8 {
+    return std.mem.trim(u8, kind, " ");
+}
+
 fn mountinfoSoft(c: Ctx) []const u8 {
     var path: []const u8 = "/proc/self/mountinfo";
     if (comptime build_options.test_ops) {
@@ -2473,27 +2670,32 @@ fn mountinfoSoft(c: Ctx) []const u8 {
     return fsx.readAll(c.a, fd, 8 << 20) catch "";
 }
 
-fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.ArrayList(u8)) void {
+fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) void {
     const a = c.a;
     const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, prefix) catch oom();
     const found = foreign.scan(a, c.env, prefs, s.clear_foreign_prefixes.value, mountinfoSoft(c)) catch oom();
     for (found) |f| switch (f.code) {
-        .none => note(a, out, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
-        .list_keep => note(a, out, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
-        .list_drop => note(a, out, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
-        .wrap_keep => note(a, out, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
-        .wrap_drop => note(a, out, "warn", "{s} resolves to {s}, outside the approved prefixes; a build unsets it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
-        .timezone => note(a, out, "info", "timezone target {s}", .{f.path}),
-        .timezone_bind => note(a, out, "warn", "/etc/localtime is a bind mount of {s}; the runtime injected the host timezone", .{f.path}),
-        .host_lib => note(a, out, "warn", "runtime-injected host library directory {s}", .{f.path}),
-        .host_none => note(a, out, "info", "no runtime-injected host library directory was found", .{}),
+        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
+        .list_keep => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .list_drop => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .wrap_keep => note(a, out, json_lines, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .wrap_drop => note(a, out, json_lines, "warn", "{s} resolves to {s}, outside the approved prefixes; a build unsets it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
+        .timezone => note(a, out, json_lines, "info", "timezone target {s}", .{f.path}),
+        .timezone_bind => note(a, out, json_lines, "warn", "/etc/localtime is a bind mount of {s}; the runtime injected the host timezone", .{f.path}),
+        .host_lib => note(a, out, json_lines, "warn", "runtime-injected host library directory {s}", .{f.path}),
+        .host_none => note(a, out, json_lines, "info", "no runtime-injected host library directory was found", .{}),
     };
 }
 
-fn note(a: Allocator, out: *std.ArrayList(u8), kind: []const u8, comptime fmt: []const u8, args: anytype) void {
+fn note(a: Allocator, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine), kind: []const u8, comptime fmt: []const u8, args: anytype) void {
+    const text = str(a, fmt, args);
+    if (json_lines) |lines| {
+        lines.append(a, .{ .level = doctorLevel(kind), .text = text }) catch oom();
+        return;
+    }
     out.appendSlice(a, kind) catch oom();
     out.appendSlice(a, " ") catch oom();
-    out.appendSlice(a, str(a, fmt, args)) catch oom();
+    out.appendSlice(a, text) catch oom();
     out.appendSlice(a, "\n") catch oom();
 }
 
@@ -2523,61 +2725,61 @@ fn cvmfsMountOverride(c: Ctx) ?[]const u8 {
 /// The CernVM-FS client: the mount, the proxy in force, `cvmfs_config` when
 /// it is on PATH, and an optional metadata read. Returns whether a line said
 /// FAIL. A build does not run this.
-fn reportCvmfs(c: Ctx, tasks: u8, out: *std.ArrayList(u8)) bool {
+fn reportCvmfs(c: Ctx, tasks: u8, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) bool {
     const a = c.a;
     const repo = cvmfs.repository(c.env);
     const mount = cvmfs.mountState(repo.path, cvmfsMountOverride(c));
     var failed = false;
     switch (mount) {
-        .ok => note(a, out, "ok  ", "CernVM-FS repository {s} is mounted", .{repo.path}),
+        .ok => note(a, out, json_lines, "ok  ", "CernVM-FS repository {s} is mounted", .{repo.path}),
         .enotconn => {
-            note(a, out, "FAIL", "CernVM-FS repository {s} is a stale FUSE mount: transport endpoint is not connected", .{repo.path});
+            note(a, out, json_lines, "FAIL", "CernVM-FS repository {s} is a stale FUSE mount: transport endpoint is not connected", .{repo.path});
             failed = true;
         },
-        .eio => note(a, out, "warn", "CernVM-FS repository {s} returned an input/output error", .{repo.path}),
-        .absent => note(a, out, "info", "CernVM-FS repository {s} is not mounted", .{repo.path}),
+        .eio => note(a, out, json_lines, "warn", "CernVM-FS repository {s} returned an input/output error", .{repo.path}),
+        .absent => note(a, out, json_lines, "info", "CernVM-FS repository {s} is not mounted", .{repo.path}),
     }
     const proxy = cvmfs.readProxy(a, c.env, cvmfsConfigRoot(c), repo.name) catch oom();
     switch (proxy.mode) {
-        .unset => note(a, out, "info", "CernVM-FS HTTP proxy is unset", .{}),
+        .unset => note(a, out, json_lines, "info", "CernVM-FS HTTP proxy is unset", .{}),
         .direct => if (proxy.host_injected) {
-            note(a, out, "warn", "CernVM-FS HTTP proxy mode is direct, from environment CVMFS_HTTP_PROXY; a host can inject this", .{});
-        } else note(a, out, "info", "CernVM-FS HTTP proxy mode is direct, from {s}", .{proxy.from}),
+            note(a, out, json_lines, "warn", "CernVM-FS HTTP proxy mode is direct, from environment CVMFS_HTTP_PROXY; a host can inject this", .{});
+        } else note(a, out, json_lines, "info", "CernVM-FS HTTP proxy mode is direct, from {s}", .{proxy.from}),
         .proxy => if (proxy.host_injected) {
-            note(a, out, "warn", "CernVM-FS HTTP proxy {s}, from environment CVMFS_HTTP_PROXY; a host can inject this", .{proxy.value});
-        } else note(a, out, "info", "CernVM-FS HTTP proxy {s}, from {s}", .{ proxy.value, proxy.from }),
+            note(a, out, json_lines, "warn", "CernVM-FS HTTP proxy {s}, from environment CVMFS_HTTP_PROXY; a host can inject this", .{proxy.value});
+        } else note(a, out, json_lines, "info", "CernVM-FS HTTP proxy {s}, from {s}", .{ proxy.value, proxy.from }),
     }
     const path_env = c.env.get("PATH") orelse "";
     if (proc.which(a, "cvmfs_config", path_env) catch null) |exe| {
         if (mount == .enotconn) {
-            note(a, out, "info", "cvmfs_config probe was not run; the mount is stale", .{});
+            note(a, out, json_lines, "info", "cvmfs_config probe was not run; the mount is stale", .{});
         } else {
             const probe = cvmfs.runTool(a, exe, &.{ exe, "probe", repo.name }, c.envp);
             if (probe.timed_out) {
-                note(a, out, "warn", "cvmfs_config probe {s} timed out", .{repo.name});
+                note(a, out, json_lines, "warn", "cvmfs_config probe {s} timed out", .{repo.name});
             } else if (probe.code == 0) {
-                note(a, out, "ok  ", "cvmfs_config probe {s} exited 0", .{repo.name});
-            } else note(a, out, "warn", "cvmfs_config probe {s} exited {d}", .{ repo.name, probe.code });
+                note(a, out, json_lines, "ok  ", "cvmfs_config probe {s} exited 0", .{repo.name});
+            } else note(a, out, json_lines, "warn", "cvmfs_config probe {s} exited {d}", .{ repo.name, probe.code });
         }
         const check = cvmfs.runTool(a, exe, &.{ exe, "chksetup" }, c.envp);
         if (check.timed_out) {
-            note(a, out, "warn", "cvmfs_config chksetup timed out", .{});
+            note(a, out, json_lines, "warn", "cvmfs_config chksetup timed out", .{});
         } else if (check.code == 0) {
-            note(a, out, "ok  ", "cvmfs_config chksetup exited 0", .{});
-        } else note(a, out, "warn", "cvmfs_config chksetup exited {d}", .{check.code});
-    } else note(a, out, "info", "cvmfs_config is not on PATH, so probe and chksetup were not run", .{});
+            note(a, out, json_lines, "ok  ", "cvmfs_config chksetup exited 0", .{});
+        } else note(a, out, json_lines, "warn", "cvmfs_config chksetup exited {d}", .{check.code});
+    } else note(a, out, json_lines, "info", "cvmfs_config is not on PATH, so probe and chksetup were not run", .{});
     if (tasks > 0) {
         const srun = proc.which(a, "srun", path_env) catch null;
         const ran = cvmfs.parallelProbe(a, repo.path, tasks, nonEmpty(c.env.get("SLURM_JOB_ID")) != null, mount == .enotconn, srun, c.envp);
         switch (ran.kind) {
             .off => {},
-            .stale => note(a, out, "info", "parallel metadata read was not run; the mount is stale", .{}),
-            .outside => note(a, out, "info", "parallel metadata read of {d} tasks runs only inside an allocation", .{ran.tasks}),
-            .srun_ok => note(a, out, "ok  ", "srun -n {d} read metadata of {s}", .{ ran.tasks, repo.path }),
-            .srun_fail => note(a, out, "warn", "srun -n {d} read metadata of {s} and exited {d}", .{ ran.tasks, repo.path, ran.code }),
-            .srun_timeout => note(a, out, "warn", "srun -n {d} read metadata of {s} and timed out", .{ ran.tasks, repo.path }),
-            .fork_ok => note(a, out, "ok  ", "parallel metadata read of {d} tasks on {s}", .{ ran.tasks, repo.path }),
-            .fork_fail => note(a, out, "warn", "parallel metadata read of {d} tasks on {s}: {d} failed", .{ ran.tasks, repo.path, ran.code }),
+            .stale => note(a, out, json_lines, "info", "parallel metadata read was not run; the mount is stale", .{}),
+            .outside => note(a, out, json_lines, "info", "parallel metadata read of {d} tasks runs only inside an allocation", .{ran.tasks}),
+            .srun_ok => note(a, out, json_lines, "ok  ", "srun -n {d} read metadata of {s}", .{ ran.tasks, repo.path }),
+            .srun_fail => note(a, out, json_lines, "warn", "srun -n {d} read metadata of {s} and exited {d}", .{ ran.tasks, repo.path, ran.code }),
+            .srun_timeout => note(a, out, json_lines, "warn", "srun -n {d} read metadata of {s} and timed out", .{ ran.tasks, repo.path }),
+            .fork_ok => note(a, out, json_lines, "ok  ", "parallel metadata read of {d} tasks on {s}", .{ ran.tasks, repo.path }),
+            .fork_fail => note(a, out, json_lines, "warn", "parallel metadata read of {d} tasks on {s}: {d} failed", .{ ran.tasks, repo.path, ran.code }),
         }
     }
     return failed;
@@ -2590,51 +2792,51 @@ fn bindWord(c: Ctx, name: []const u8) []const u8 {
 /// libfabric, UCX and Slurm binding, then a two-rank hello for each
 /// site-approved transport. The hello's variables are not put in this
 /// process, and a build does not set them. Nothing here is a FAIL.
-fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8)) void {
+fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) void {
     const a = c.a;
     const path_env = c.env.get("PATH") orelse "";
     if (proc.which(a, "fi_info", path_env) catch null) |exe| {
         const info = mpi.summarize(a, exe, &.{ exe, "-l" }, c.envp);
         if (info.timed_out) {
-            note(a, out, "warn", "fi_info timed out", .{});
+            note(a, out, json_lines, "warn", "fi_info timed out", .{});
         } else if (info.code != 0) {
-            note(a, out, "warn", "fi_info exited {d}", .{info.code});
-        } else note(a, out, "info", "fi_info: {s}", .{info.line});
-    } else note(a, out, "info", "fi_info is not on PATH", .{});
+            note(a, out, json_lines, "warn", "fi_info exited {d}", .{info.code});
+        } else note(a, out, json_lines, "info", "fi_info: {s}", .{info.line});
+    } else note(a, out, json_lines, "info", "fi_info is not on PATH", .{});
     if (proc.which(a, "ucx_info", path_env) catch null) |exe| {
         const info = mpi.summarize(a, exe, &.{ exe, "-v" }, c.envp);
         if (info.timed_out) {
-            note(a, out, "warn", "ucx_info timed out", .{});
+            note(a, out, json_lines, "warn", "ucx_info timed out", .{});
         } else if (info.code != 0) {
-            note(a, out, "warn", "ucx_info exited {d}", .{info.code});
-        } else note(a, out, "info", "ucx_info: {s}", .{info.line});
-    } else note(a, out, "info", "ucx_info is not on PATH", .{});
+            note(a, out, json_lines, "warn", "ucx_info exited {d}", .{info.code});
+        } else note(a, out, json_lines, "info", "ucx_info: {s}", .{info.line});
+    } else note(a, out, json_lines, "info", "ucx_info is not on PATH", .{});
     const cpu = bindWord(c, "SLURM_CPU_BIND");
     const list = bindWord(c, "SLURM_CPU_BIND_LIST");
     const mem = bindWord(c, "SLURM_MEM_BIND");
     if (std.mem.eql(u8, cpu, "unset") and std.mem.eql(u8, list, "unset") and std.mem.eql(u8, mem, "unset")) {
-        note(a, out, "info", "no Slurm CPU or memory bind is set", .{});
-    } else note(a, out, "info", "Slurm bind SLURM_CPU_BIND={s} SLURM_CPU_BIND_LIST={s} SLURM_MEM_BIND={s}", .{ cpu, list, mem });
+        note(a, out, json_lines, "info", "no Slurm CPU or memory bind is set", .{});
+    } else note(a, out, json_lines, "info", "Slurm bind SLURM_CPU_BIND={s} SLURM_CPU_BIND_LIST={s} SLURM_MEM_BIND={s}", .{ cpu, list, mem });
 
     if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
-        note(a, out, "info", "MPI hello was not compiled; this shell is not inside an allocation", .{});
+        note(a, out, json_lines, "info", "MPI hello was not compiled; this shell is not inside an allocation", .{});
         return;
     }
     if (s.mpi_transports.value.len == 0) {
-        note(a, out, "info", "no site-approved MPI transport is configured", .{});
+        note(a, out, json_lines, "info", "no site-approved MPI transport is configured", .{});
         return;
     }
     const mpicc = proc.which(a, "mpicc", path_env) catch null;
     const mpirun = proc.which(a, "mpirun", path_env) catch null;
     if (mpicc == null) {
-        note(a, out, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
+        note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
         return;
     }
     var cwd_buf: [sys.path_max]u8 = undefined;
     const cwd = fsx.realpath(fsx.cwd, ".", &cwd_buf) catch ".";
     const work = std.fmt.allocPrint(a, "{s}/.zig-cache/mpi-hello-{d}", .{ cwd, linux.getpid() }) catch oom();
     common.atomic.makedirs(work) catch {
-        note(a, out, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
+        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
         return;
     };
     defer fsx.deleteTree(a, fsx.cwd, work) catch {};
@@ -2655,39 +2857,39 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8)) void {
         const hello = mpi.runHello(a, transport, mpicc, mpirun, work, c.env, c.envp) catch oom();
         const label = @tagName(transport);
         if (hello.missing_compiler) {
-            note(a, out, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
+            note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
             return;
         }
         if (hello.compile_timeout) {
-            note(a, out, "warn", "mpicc for {s} timed out", .{label});
+            note(a, out, json_lines, "warn", "mpicc for {s} timed out", .{label});
             continue;
         }
         if (hello.compile_code != 0) {
-            note(a, out, "warn", "mpicc for {s} exited {d}", .{ label, hello.compile_code });
+            note(a, out, json_lines, "warn", "mpicc for {s} exited {d}", .{ label, hello.compile_code });
             continue;
         }
         if (hello.missing_launcher) {
-            note(a, out, "info", "mpirun is not on PATH, so the MPI hello was not run", .{});
+            note(a, out, json_lines, "info", "mpirun is not on PATH, so the MPI hello was not run", .{});
             return;
         }
         if (hello.run_timeout) {
-            note(a, out, "warn", "mpirun for {s} timed out", .{label});
+            note(a, out, json_lines, "warn", "mpirun for {s} timed out", .{label});
             continue;
         }
         if (hello.run_code != 0) {
-            note(a, out, "warn", "mpirun for {s} exited {d}", .{ label, hello.run_code });
+            note(a, out, json_lines, "warn", "mpirun for {s} exited {d}", .{ label, hello.run_code });
             continue;
         }
         if (hello.ranks.len != 2 or hello.ranks[0].size != 2 or hello.ranks[1].size != 2) {
-            note(a, out, "warn", "MPI {s} hello did not report two ranks", .{label});
+            note(a, out, json_lines, "warn", "MPI {s} hello did not report two ranks", .{label});
             continue;
         }
         if (mpi.sharedCpu(hello.ranks)) {
-            note(a, out, "warn", "MPI {s} hello ranks share cpu {d} with {s}", .{ label, hello.ranks[0].cpu, hello.override_text });
+            note(a, out, json_lines, "warn", "MPI {s} hello ranks share cpu {d} with {s}", .{ label, hello.ranks[0].cpu, hello.override_text });
             continue;
         }
         const cpus = std.fmt.allocPrint(a, "{d},{d}", .{ hello.ranks[0].cpu, hello.ranks[1].cpu }) catch oom();
-        note(a, out, "ok  ", "MPI {s} hello size {d} on cpus {s} with {s}", .{ label, hello.ranks[0].size, cpus, hello.override_text });
+        note(a, out, json_lines, "ok  ", "MPI {s} hello size {d} on cpus {s} with {s}", .{ label, hello.ranks[0].size, cpus, hello.override_text });
     }
 }
 
@@ -2699,17 +2901,19 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8)) void {
 fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
+    var json_lines: std.ArrayList(DoctorLine) = .empty;
+    const lines_ptr: ?*std.ArrayList(DoctorLine) = if (g.json_out) &json_lines else null;
     var failed = false;
-    note(a, &out, "ok  ", "eb-local {s}", .{version});
+    note(a, &out, lines_ptr, "ok  ", "eb-local {s}", .{version});
 
     // Configuration.
     const sources = configSources(c, g);
-    for (sources) |src| note(a, &out, "ok  ", "{s} file {s}", .{ @tagName(src.layer), src.path });
+    for (sources) |src| note(a, &out, lines_ptr, "ok  ", "{s} file {s}", .{ @tagName(src.layer), src.path });
     const site = s.node_local_root.value.len > 0;
     if (site) {
-        note(a, &out, "ok  ", "builds use the allocation's own {s} mount {s}/{s}", .{ s.node_local_fstype.value, s.node_local_root.value, s.node_local_mount.value });
+        note(a, &out, lines_ptr, "ok  ", "builds use the allocation's own {s} mount {s}/{s}", .{ s.node_local_fstype.value, s.node_local_root.value, s.node_local_mount.value });
     } else {
-        note(a, &out, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
+        note(a, &out, lines_ptr, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
     }
 
     // A build reads each secret it gets before it starts, so one of those
@@ -2720,18 +2924,18 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         var f: secrets.Failure = .{};
         if (secrets.resolve(a, &.{sec}, c.env, c.envp, nimvaultOf(s), &f)) |values| {
             if (values[0].value.len < secrets.min_redacted_len) {
-                note(a, &out, "warn", "secret {s} from {s} is shorter than {d} bytes and is not removed from logs", .{ sec.name, sec.source, secrets.min_redacted_len });
+                note(a, &out, lines_ptr, "warn", "secret {s} from {s} is shorter than {d} bytes and is not removed from logs", .{ sec.name, sec.source, secrets.min_redacted_len });
             } else if (gets) {
-                note(a, &out, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
-            } else note(a, &out, "info", "secret {s} can be read from {s}; builds do not get it, as build.secrets [{s}] does not name it", .{ sec.name, sec.source, s.build_secrets.from });
+                note(a, &out, lines_ptr, "ok  ", "secret {s} can be read from {s}", .{ sec.name, sec.source });
+            } else note(a, &out, lines_ptr, "info", "secret {s} can be read from {s}; builds do not get it, as build.secrets [{s}] does not name it", .{ sec.name, sec.source, s.build_secrets.from });
         } else |e| switch (e) {
             error.Unavailable => if (!gets) {
-                note(a, &out, "warn", "{s} [{s}]; builds do not read it, as build.secrets [{s}] does not name it, but one that names it stops there", .{ f.message, sec.from, s.build_secrets.from });
+                note(a, &out, lines_ptr, "warn", "{s} [{s}]; builds do not read it, as build.secrets [{s}] does not name it, but one that names it stops there", .{ f.message, sec.from, s.build_secrets.from });
             } else {
                 if (s.build_secrets.value == null) {
-                    note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}. " ++
+                    note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, whether or not it uses {s}. " ++
                         "Name in build.secrets the secrets builds need, or in EB_LOCAL_BUILD_SECRETS those one build needs", .{ f.message, sec.from, sec.name });
-                } else note(a, &out, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, as build.secrets [{s}] names {s}", .{ f.message, sec.from, s.build_secrets.from, sec.name });
+                } else note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "{s} [{s}]; every build stops there, as build.secrets [{s}] names {s}", .{ f.message, sec.from, s.build_secrets.from, sec.name });
                 if (site) failed = true;
             },
             error.OutOfMemory => oom(),
@@ -2740,9 +2944,9 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
 
     // Where installs go.
     const p = locate(c, s);
-    note(a, &out, "ok  ", "installs go to {s}: a {s} install, prefix from {s}", .{ p.prefix, if (p.project) "project" else "user", if (p.project) s.project.from else s.prefix.from });
+    note(a, &out, lines_ptr, "ok  ", "installs go to {s}: a {s} install, prefix from {s}", .{ p.prefix, if (p.project) "project" else "user", if (p.project) s.project.from else s.prefix.from });
     for (refusedTrees(c, s, false)) |t| if (t.path.len > 0 and storage.under(p.prefix, t.path)) {
-        note(a, &out, "FAIL", "the install prefix {s} [{s}] is under {s}, {s}; builds refuse it. " ++ outlive ++ "; " ++ prefix_fix, .{ p.prefix, prefixFrom(s, p), t.path, t.what });
+        note(a, &out, lines_ptr, "FAIL", "the install prefix {s} [{s}] is under {s}, {s}; builds refuse it. " ++ outlive ++ "; " ++ prefix_fix, .{ p.prefix, prefixFrom(s, p), t.path, t.what });
         failed = true;
     };
     if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| {
@@ -2752,45 +2956,45 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         else |_|
             false;
         if (!st.isDir()) {
-            note(a, &out, "FAIL", "{s} is not a directory", .{p.prefix});
+            note(a, &out, lines_ptr, "FAIL", "{s} is not a directory", .{p.prefix});
             failed = true;
         } else if (!writable) {
-            note(a, &out, "FAIL", "you cannot write to {s}", .{p.prefix});
+            note(a, &out, lines_ptr, "FAIL", "you cannot write to {s}", .{p.prefix});
             failed = true;
         }
         if (p.project and st.isDir()) {
             if (st.mode & 0o002 != 0) {
-                note(a, &out, "FAIL", "project directory {s} is writable by others; anyone could add modules the group loads. chmod o-w it", .{p.prefix});
+                note(a, &out, lines_ptr, "FAIL", "project directory {s} is writable by others; anyone could add modules the group loads. chmod o-w it", .{p.prefix});
                 failed = true;
             }
-            if (st.mode & 0o2000 == 0) note(a, &out, "warn", "project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p.prefix});
+            if (st.mode & 0o2000 == 0) note(a, &out, lines_ptr, "warn", "project directory {s} has no setgid bit, so installs keep the installer's group; chmod g+s it", .{p.prefix});
         }
     } else |_| {
         if (p.project) {
-            note(a, &out, "FAIL", "project directory {s} does not exist; the project owner creates it with the project group and chmod 2770", .{p.prefix});
+            note(a, &out, lines_ptr, "FAIL", "project directory {s} does not exist; the project owner creates it with the project group and chmod 2770", .{p.prefix});
             failed = true;
-        } else note(a, &out, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+        } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
     }
 
     // What this shell carries.
     var leftovers: usize = 0;
     for (install_vars) |v| if (c.env.get(v)) |val| {
         if (ownInstallVar(c, s, p, v, val)) |why| {
-            note(a, &out, "ok  ", "{s} {s}", .{ v, why });
+            note(a, &out, lines_ptr, "ok  ", "{s} {s}", .{ v, why });
             continue;
         }
         leftovers += 1;
-        note(a, &out, "warn", "{s}={s} is set in this shell; eb-local builds clear it, but EESSI-extend or eb run by hand would use it", .{ v, val });
+        note(a, &out, lines_ptr, "warn", "{s}={s} is set in this shell; eb-local builds clear it, but EESSI-extend or eb run by hand would use it", .{ v, val });
     };
-    if (leftovers == 0) note(a, &out, "ok  ", "no other EESSI or EasyBuild install variable is set in this shell", .{});
+    if (leftovers == 0) note(a, &out, lines_ptr, "ok  ", "no other EESSI or EasyBuild install variable is set in this shell", .{});
 
     // What eb-local eb needs: the EESSI init, and at most one install variable.
     const eb_stop = if (site) "warn" else "FAIL";
     const init = extend.initPath(a, c.env) catch oom();
     if (fsx.statAt(fsx.cwd, init, true)) |_| {
-        note(a, &out, "ok  ", "`eb-local eb` sources {s}", .{init});
+        note(a, &out, lines_ptr, "ok  ", "`eb-local eb` sources {s}", .{init});
     } else |_| {
-        note(a, &out, eb_stop, "{s} is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere", .{init});
+        note(a, &out, lines_ptr, eb_stop, "{s} is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere", .{init});
         if (!site) failed = true;
     }
     if (extend.select(c.env)) |sel| {
@@ -2799,41 +3003,41 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
             // `eb-local eb` creates a user prefix, but EESSI-extend refuses
             // to load for a project directory that is not there.
             if (sel.mode == .project and !isDir(v)) {
-                note(a, &out, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
+                note(a, &out, lines_ptr, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
                 if (!site) failed = true;
-            } else note(a, &out, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
-        } else note(a, &out, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
+            } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+        } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
     } else |_| {
-        note(a, &out, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
+        note(a, &out, lines_ptr, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
         if (!site) failed = true;
     }
     for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
-        note(a, &out, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
-    reportForeign(c, s, p.prefix, &out);
+        note(a, &out, lines_ptr, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    reportForeign(c, s, p.prefix, &out, lines_ptr);
 
     // The allocation.
     if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         if (s.node_local_root.value.len > 0) {
             var r: storage.Refusal = .{};
             if (storage.jobRoot(a, nodeLocal(s), job, userName(c, s, "doctor checks no further"), mountinfoText(c), callerUid(c), &r)) |jr| {
-                note(a, &out, "ok  ", "Slurm job {s}: build space {s}", .{ job, jr.path });
+                note(a, &out, lines_ptr, "ok  ", "Slurm job {s}: build space {s}", .{ job, jr.path });
             } else |e| switch (e) {
                 error.Refused => {
-                    note(a, &out, "FAIL", "Slurm job {s}: {s}; builds refuse it. {s}", .{ job, r.message, r.fix });
+                    note(a, &out, lines_ptr, "FAIL", "Slurm job {s}: {s}; builds refuse it. {s}", .{ job, r.message, r.fix });
                     failed = true;
                 },
                 error.OutOfMemory => oom(),
             }
         }
     } else {
-        note(a, &out, "info", "not in a Slurm job; builds need one on the node type that will run the software{s}{s}", .{ if (s.allocation_hint.value.len > 0) ", for example: " else "", s.allocation_hint.value });
+        note(a, &out, lines_ptr, "info", "not in a Slurm job; builds need one on the node type that will run the software{s}{s}", .{ if (s.allocation_hint.value.len > 0) ", for example: " else "", s.allocation_hint.value });
     }
 
     // Modules and the stack.
     if (nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"))) |sub| {
-        note(a, &out, "ok  ", "EESSI {s} is loaded for {s}", .{ c.env.get("EESSI_VERSION") orelse "?", sub });
-    } else note(a, &out, "info", "EESSI is not loaded in this shell; eval \"$(eb-local env)\" loads it with your modules", .{});
-    noteGuard(c, &out);
+        note(a, &out, lines_ptr, "ok  ", "EESSI {s} is loaded for {s}", .{ c.env.get("EESSI_VERSION") orelse "?", sub });
+    } else note(a, &out, lines_ptr, "info", "EESSI is not loaded in this shell; eval \"$(eb-local env)\" loads it with your modules", .{});
+    noteGuard(c, &out, lines_ptr);
     const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
     if (fsx.statAt(fsx.cwd, versions, false)) |_| {
         const mp = c.env.get("MODULEPATH") orelse "";
@@ -2842,42 +3046,54 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         while (it.next()) |d| if (storage.under(d, p.prefix)) {
             seen = true;
         };
-        if (seen) note(a, &out, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
+        if (seen) note(a, &out, lines_ptr, "ok  ", "your modules are on MODULEPATH", .{}) else note(a, &out, lines_ptr, "warn", "your modules are not on MODULEPATH in this shell; eval \"$(eb-local env)\"", .{});
     } else |_| {}
     if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
         const inits = lmodInits(a, c.env);
         for (inits) |file| {
             if (readable(file)) {
-                note(a, &out, "info", "no module command in this shell; builds, env and dev source {s}", .{file});
+                note(a, &out, lines_ptr, "info", "no module command in this shell; builds, env and dev source {s}", .{file});
                 break;
             }
         } else {
-            note(a, &out, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} can be read; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
+            note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} can be read; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
             if (site) failed = true;
         }
     } else if (!onModulePath(a, c.env.get("MODULEPATH") orelse "", s.stack_module.value)) {
         // A build keeps the shell's module command, and with it MODULEPATH,
         // and sources no init that would put EESSI's modules there.
         const repo = nonEmpty(c.env.get("EESSI_CVMFS_REPO")) orelse "/cvmfs/software.eessi.io";
-        note(a, &out, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
+        note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
         if (site) failed = true;
     }
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
-        note(a, &out, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
-    } else note(a, &out, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});
+        note(a, &out, lines_ptr, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
+    } else note(a, &out, lines_ptr, "warn", "rtrash is not on PATH: clean and uninstall remove nothing unless given --delete", .{});
 
     if (opts.cvmfs) {
         const tasks = opts.parallel orelse s.cvmfs_parallel.value;
-        if (reportCvmfs(c, tasks, &out)) failed = true;
+        if (reportCvmfs(c, tasks, &out, lines_ptr)) failed = true;
     }
-    if (opts.mpi) reportMpi(c, s, &out);
+    if (opts.mpi) reportMpi(c, s, &out, lines_ptr);
 
-    out.appendSlice(a, if (site)
-        (if (failed) "\nSomething above says FAIL; builds stop there.\n" else "\nNothing above stops a build.\n")
+    const summary = if (site)
+        (if (failed) "Something above says FAIL; builds stop there." else "Nothing above stops a build.")
     else if (failed)
-        "\nSomething above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.\n"
+        "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file."
     else
-        "\nNothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.\n") catch oom();
+        "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.";
+    if (g.json_out) {
+        jsonout.emit(a, DoctorReport{
+            .site_file = site,
+            .failed = failed,
+            .lines = json_lines.items,
+            .summary = summary,
+        });
+        return if (failed) 1 else 0;
+    }
+    out.appendSlice(a, "\n") catch oom();
+    out.appendSlice(a, summary) catch oom();
+    out.appendSlice(a, "\n") catch oom();
     cli.put(1, out.items);
     return if (failed) 1 else 0;
 }
@@ -3557,7 +3773,9 @@ pub fn main(init: std.process.Init) u8 {
                 } else die("rpath-wrappers takes only --for FAMILY or --unwrapped; got '{s}'", .{x});
             },
             .check => {
-                if (std.mem.eql(u8, x, "--quiet")) {
+                if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--quiet")) {
                     check_quiet = true;
                 } else if (std.mem.eql(u8, x, "--dev")) {
                     check_dev = true;
@@ -3580,9 +3798,15 @@ pub fn main(init: std.process.Init) u8 {
                     g.env_strict = true;
                 } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
             },
-            .profiles => die("profiles takes only --project, --profile and --config; got '{s}'", .{x}),
+            .profiles => {
+                if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else die("profiles takes only --project, --profile, --config and --json; got '{s}'", .{x});
+            },
             .doctor => {
-                if (std.mem.eql(u8, x, "--cvmfs")) {
+                if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--cvmfs")) {
                     doctor_cvmfs = true;
                 } else if (std.mem.eql(u8, x, "--cvmfs-parallel") or joined(x, "--cvmfs-parallel") != null) {
                     const v = if (joined(x, "--cvmfs-parallel")) |got| got else value(args, &i, "--cvmfs-parallel");
@@ -3592,7 +3816,7 @@ pub fn main(init: std.process.Init) u8 {
                     doctor_cvmfs = true;
                 } else if (std.mem.eql(u8, x, "--mpi")) {
                     doctor_mpi = true;
-                } else die("doctor takes --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
+                } else die("doctor takes --json, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
             },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
@@ -3688,7 +3912,9 @@ pub fn main(init: std.process.Init) u8 {
                 } else rest.append(a, x) catch oom();
             },
             .list => {
-                if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
+                if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
                 if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
                 rest.append(a, x) catch oom();
             },
@@ -3697,11 +3923,15 @@ pub fn main(init: std.process.Init) u8 {
                     check = true;
                 } else if (std.mem.eql(u8, x, "--env")) {
                     as_env = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
                 } else die("config does not know '{s}'", .{x});
                 if (check and as_env) die("config takes --check or --env, not both", .{});
             },
             .site => {
-                if (std.mem.eql(u8, x, "--set")) {
+                if (std.mem.eql(u8, x, "--json")) {
+                    site.json = true;
+                } else if (std.mem.eql(u8, x, "--set")) {
                     var d: sites.Diagnostic = .{};
                     const set = sites.parseSet(a, value(args, &i, "--set"), &d) catch |e| switch (e) {
                         error.Invalid => die("{s}", .{d.message}),
@@ -3788,7 +4018,11 @@ pub fn main(init: std.process.Init) u8 {
     });
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
-    if (command == .site) return cmdSite(c, site);
+    if (command == .site) {
+        const action = if (site.words.items.len > 0) site.words.items[0] else "list";
+        if (site.json and !std.mem.eql(u8, action, "list")) die("--json goes with site list, not site {s}", .{action});
+        return cmdSite(c, site);
+    }
     if (command == .@"rpath-wrappers") {
         if (only_unwrapped and family.len > 0) die("rpath-wrappers takes --for FAMILY or --unwrapped, not both", .{});
         return cmdRpathWrappers(c, family, only_unwrapped);
@@ -3797,11 +4031,11 @@ pub fn main(init: std.process.Init) u8 {
         const modes: usize = @as(usize, @intFromBool(check_dev)) + @intFromBool(check_prefix != null) + @intFromBool(check_modules.items.len > 0);
         if (modes > 1 or (modes == 1 and rest.items.len > 0))
             die("check takes files, or one of --module, --dev and --prefix", .{});
-        if (modes == 0) return cmdCheck(c, rest.items, check_quiet);
-        if (check_prefix) |dir| return cmdCheckTree(c, null, .prefix, &.{}, dir, check_quiet);
+        if (modes == 0) return cmdCheck(c, rest.items, check_quiet, g.json_out);
+        if (check_prefix) |dir| return cmdCheckTree(c, null, .prefix, &.{}, dir, check_quiet, g.json_out);
         const s = loadSettings(c, g);
-        if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet);
-        return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet);
+        if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet, g.json_out);
+        return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet, g.json_out);
     }
     // The install mode is the four EESSI variables, not the site file.
     if (command == .eb) {
@@ -3813,12 +4047,15 @@ pub fn main(init: std.process.Init) u8 {
     return switch (command) {
         .env => cmdEnv(c, s, g),
         .dev => cmdDev(c, s, g, rest.items),
-        .config => if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check),
+        .config => blk: {
+            if (as_env and g.json_out) die("config --json does not go with --env", .{});
+            break :blk if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check, g.json_out);
+        },
         .clean => cmdClean(c, s, clean),
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
-        .list => cmdList(c, s, rest.items),
+        .list => cmdList(c, s, rest.items, g.json_out),
         .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
