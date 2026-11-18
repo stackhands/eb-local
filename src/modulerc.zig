@@ -1,5 +1,6 @@
 //! `eb-local modulerc`: add operator-selected defaults, aliases and hides.
 const std = @import("std");
+const jsonout = @import("jsonout.zig");
 
 /// One `module_alias` directive.
 pub const Alias = struct {
@@ -15,6 +16,20 @@ pub const Options = struct {
     hidden: []const []const u8 = &.{},
     dry_run: bool = false,
     check: bool = false,
+    json: bool = false,
+};
+
+const JsonReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "modulerc",
+    module_tree: []const u8,
+    file: []const u8,
+    mode: []const u8,
+    changed: bool,
+    defaults: []const []const u8,
+    aliases: []const Alias,
+    hidden: []const []const u8,
+    content: ?[]const u8 = null,
 };
 
 fn fail(comptime fmt: []const u8, args: anytype) void {
@@ -96,22 +111,47 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         },
     };
     const text = render(a, previous, opts) catch return 1;
+    const changed = !std.mem.eql(u8, previous, text);
     if (opts.check) {
-        const changed = !std.mem.eql(u8, previous, text);
-        var stdout = std.Io.File.stdout();
-        const message = std.fmt.allocPrint(a, "{s} {s}\n", .{ if (changed) "would update" else "up to date", path }) catch return 1;
-        stdout.writeStreamingAll(io, message) catch {
-            fail("cannot print {s}", .{path});
-            return 1;
-        };
+        if (opts.json) {
+            jsonout.emit(a, JsonReport{
+                .module_tree = opts.tree,
+                .file = path,
+                .mode = "check",
+                .changed = changed,
+                .defaults = opts.defaults,
+                .aliases = opts.aliases,
+                .hidden = opts.hidden,
+            });
+        } else {
+            var stdout = std.Io.File.stdout();
+            const message = std.fmt.allocPrint(a, "{s} {s}\n", .{ if (changed) "would update" else "up to date", path }) catch return 1;
+            stdout.writeStreamingAll(io, message) catch {
+                fail("cannot print {s}", .{path});
+                return 1;
+            };
+        }
         return if (changed) 1 else 0;
     }
     if (opts.dry_run) {
-        var stdout = std.Io.File.stdout();
-        stdout.writeStreamingAll(io, text) catch {
-            fail("cannot print {s}", .{path});
-            return 1;
-        };
+        if (opts.json) {
+            jsonout.emit(a, JsonReport{
+                .module_tree = opts.tree,
+                .file = path,
+                .mode = "dry-run",
+                .changed = changed,
+                .defaults = opts.defaults,
+                .aliases = opts.aliases,
+                .hidden = opts.hidden,
+                .content = text,
+            });
+        } else {
+            var stdout = std.Io.File.stdout();
+            stdout.writeStreamingAll(io, text) catch {
+                fail("cannot print {s}", .{path});
+                return 1;
+            };
+        }
         return 0;
     }
     cwd.createDirPath(io, opts.tree) catch |err| {
@@ -127,9 +167,21 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         fail("cannot write {s}: {s}", .{ path, @errorName(err) });
         return 1;
     };
-    var stdout = std.Io.File.stdout();
-    const message = std.fmt.allocPrint(a, "wrote {s}\n", .{path}) catch return 1;
-    stdout.writeStreamingAll(io, message) catch return 1;
+    if (opts.json) {
+        jsonout.emit(a, JsonReport{
+            .module_tree = opts.tree,
+            .file = path,
+            .mode = "write",
+            .changed = changed,
+            .defaults = opts.defaults,
+            .aliases = opts.aliases,
+            .hidden = opts.hidden,
+        });
+    } else {
+        var stdout = std.Io.File.stdout();
+        const message = std.fmt.allocPrint(a, "wrote {s}\n", .{path}) catch return 1;
+        stdout.writeStreamingAll(io, message) catch return 1;
+    }
     return 0;
 }
 
