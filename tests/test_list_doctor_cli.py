@@ -187,6 +187,46 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"FAIL workspace {workspace}: mount {workspace} has noexec\n", run.stdout)
         self.assertEqual(list(workspace.iterdir()), [])
 
+    def test_doctor_workspace_reports_real_noexec_mount_execution_failure(self):
+        import shlex
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            mountpoint = Path(tmp) / "noexec-ws"
+            mountpoint.mkdir()
+            probe = subprocess.run(
+                ["unshare", "-U", "-r", "-m", "sh", "-c",
+                 f'mount -t tmpfs -o noexec,size=1m tmpfs "{mountpoint}" && umount "{mountpoint}"'],
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode != 0:
+                self.skipTest(f"unprivileged noexec mount unavailable: {probe.stderr.strip()}")
+            argv, env = binary.command(
+                self.script,
+                ["doctor", "--workspace", str(mountpoint)],
+                self.env,
+            )
+            env.pop("EB_LOCAL_TEST_MOUNTINFO", None)
+            env.pop("EB_LOCAL_TEST_WORKSPACE_EXEC", None)
+            quoted_mp = shlex.quote(str(mountpoint))
+            quoted_cmd = " ".join(shlex.quote(a) for a in argv)
+            script = (
+                f"mount -t tmpfs -o noexec,size=1m tmpfs {quoted_mp} && "
+                f"trap 'umount {quoted_mp} >/dev/null 2>&1 || true' EXIT && "
+                f"{quoted_cmd}"
+            )
+            run = subprocess.run(
+                ["unshare", "-U", "-r", "-m", "sh", "-c", script],
+                env=env,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn("probe create=ok, write=ok, rename=ok, execute=failed, remove=ok", run.stdout, run.stdout + run.stderr)
+            self.assertIn(f"FAIL workspace {mountpoint}: mount {mountpoint} has noexec\n", run.stdout)
+            self.assertEqual(list(mountpoint.iterdir()), [])
+
     def test_doctor_names_variables_left_in_the_shell(self):
         run = self.run_tool(["doctor"], EASYBUILD_INSTALLPATH="/elsewhere", LD_LIBRARY_PATH="/host/lib",
                             EESSI_USER_INSTALL=str(self.prefix))

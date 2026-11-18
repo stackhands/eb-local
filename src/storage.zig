@@ -501,11 +501,14 @@ pub fn probeWorkspace(
     current = renamed;
     result.renamed = true;
     result.executed = execute_result orelse blk: {
-        const ran = try std.process.run(a, io, .{
+        const ran = std.process.run(a, io, .{
             .argv = &.{absolute},
             .stdout_limit = .limited(4096),
             .stderr_limit = .limited(4096),
-        });
+        }) catch |err| switch (err) {
+            error.AccessDenied, error.PermissionDenied => break :blk false,
+            else => return err,
+        };
         break :blk ran.term.success();
     };
     try sys.unlinkat(dir, renamed, 0);
