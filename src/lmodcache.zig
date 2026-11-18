@@ -603,6 +603,8 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         return 1;
     }
     const cwd = std.Io.Dir.cwd();
+    const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
+    const prev_cache: ?[]const u8 = if (opts.verify) null else cwd.readFileAlloc(io, cache_path, a, .limited(64 * 1024 * 1024)) catch null;
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = opts.cache_dir;
@@ -611,12 +613,25 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
-    cwd.createDirPath(io, opts.cache_dir) catch |err| {
+    common.atomic.makedirs(opts.cache_dir) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.cache_dir, @errorName(err) });
         return 1;
     };
-    const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
-    const tmp_path = std.fmt.allocPrint(a, "{s}.new", .{cache_path}) catch return 1;
+    const cleanup = struct {
+        fn rollback(alloc: std.mem.Allocator, missing: ?[]const u8, path: []const u8, prev: ?[]const u8, wrote: bool) void {
+            if (wrote) {
+                if (prev) |data| {
+                    var why: common.atomic.Why = .{};
+                    defer why.deinit(alloc);
+                    common.atomic.atomicWrite(alloc, path, data, .{ .mode = 0o644 }, &why) catch {};
+                } else {
+                    sys.unlinkat(fsx.cwd, path, 0) catch {};
+                }
+            }
+            if (missing) |dir| fsx.deleteTree(alloc, fsx.cwd, dir) catch {};
+        }
+    }.rollback;
+    var cache_written = false;
     if (opts.verify) {
         const code = installVerified(io, a, env, opts, cache_path, ran.stdout);
         if (code != 0) {
@@ -624,21 +639,23 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
             return code;
         }
     } else {
-        cwd.writeFile(io, .{ .sub_path = tmp_path, .data = ran.stdout }) catch |err| {
-            fail("cannot write {s}: {s}", .{ tmp_path, @errorName(err) });
+        var why: common.atomic.Why = .{};
+        defer why.deinit(a);
+        common.atomic.atomicWrite(a, cache_path, ran.stdout, .{ .mode = 0o644 }, &why) catch |err| {
+            fail("cannot write {s}: {s}", .{ cache_path, if (why.msg.len > 0) why.msg else @errorName(err) });
+            cleanup(a, first_missing, cache_path, prev_cache, false);
             return 1;
         };
-        std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch |err| {
-            fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
-            return 1;
-        };
+        cache_written = true;
     }
     const stat = cwd.statFile(io, cache_path, .{}) catch |err| {
         fail("cannot stat {s}: {s}", .{ cache_path, @errorName(err) });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
     const stamp = std.Io.Dir.createFileAbsolute(io, opts.timestamp, .{}) catch |err| {
         fail("cannot write {s}: {s}", .{ opts.timestamp, @errorName(err) });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
     defer stamp.close(io);
@@ -647,6 +664,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         .modify_timestamp = .{ .new = olderThan(stat.mtime) },
     }) catch |err| {
         fail("cannot set the time of {s}: {s}", .{ opts.timestamp, @errorName(err) });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
     var line: std.ArrayList(u8) = .empty;
