@@ -2194,7 +2194,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
             removed_ws += 1;
         } else |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
     }
-    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{spaces.items.len});
+    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
     var removed_items: usize = 0;
     var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
@@ -2228,7 +2228,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
                 }
             }
             action = "deleted";
-            if (!json) say("eb-local: deleted {d} item(s)", .{targets.len});
+            if (!json) say("eb-local: deleted {d} item(s)", .{removed_items});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
@@ -2236,6 +2236,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         }
     }
     if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces.items, removed_items, removed_ws);
+    if (removed_ws < spaces.items.len or removed_items < targets.len) return 1;
     return 0;
 }
 

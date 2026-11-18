@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 import binary
@@ -527,6 +528,75 @@ class InstallPathChecks(StorageFixture):
                                EASYBUILD_INSTALLPATH=f"{self.prefix}/versions/2026.06/software/linux/x86_64/amd/zen4")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn("is set in this shell", run.stderr)
+
+
+@unittest.skipUnless(binary.BIN, "clean removal edge cases target the Zig build")
+class CleanFilesystemEdgeCases(StorageFixture):
+    def test_clean_removes_readonly_reprod_and_workspace_trees_with_spaces(self):
+        logs = self.prefix / ".eb-local" / "logs"
+        reprod = logs / "reprod_1"
+        sub = reprod / "ro sub"
+        sub.mkdir(parents=True)
+        ro_file = sub / "recipe.eb"
+        ro_file.write_text("easyblock = 'ConfigureMake'\n")
+        ro_file.chmod(0o444)
+        sub.chmod(0o555)
+        reprod.chmod(0o555)
+        old = time.time() - 40 * 86400
+        os.utime(ro_file, (old, old))
+        os.utime(sub, (old, old))
+        os.utime(reprod, (old, old))
+
+        ws = self.job / "eb-local.AbCd1234"
+        ws_ro = ws / "go pkg"
+        ws_ro.mkdir(parents=True)
+        ws_file = ws_ro / "mod.txt"
+        ws_file.write_text("cached\n")
+        ws_file.chmod(0o444)
+        ws_ro.chmod(0o555)
+
+        argv, env = binary.command(
+            self.script,
+            ["clean", "--delete", "--workspaces"],
+            dict(self.env),
+        )
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        expected = (
+            f"  {reprod}/\n"
+            f"  {ws}/ (build workspace)\n"
+            "eb-local: removed 1 build workspace(s)\n"
+            "eb-local: deleted 1 item(s)\n"
+        ).encode()
+        self.assertEqual((run.returncode, run.stdout, run.stderr), (0, expected, b""))
+        self.assertFalse(reprod.exists())
+        self.assertFalse(ws.exists())
+
+    def test_clean_reports_actual_count_and_exits_1_on_partial_delete_failure(self):
+        sources = self.prefix / ".eb-local" / "sources"
+        removable_dir = sources / "ok"
+        locked_dir = sources / "locked"
+        removable_dir.mkdir(parents=True)
+        locked_dir.mkdir(parents=True)
+        ok_file = removable_dir / "ok.tar.gz"
+        bad_file = locked_dir / "bad.tar.gz"
+        ok_file.write_text("ok\n")
+        bad_file.write_text("locked\n")
+        locked_dir.chmod(0o555)
+        try:
+            argv, env = binary.command(
+                self.script,
+                ["clean", "--delete", "--no-logs", "--sources"],
+                dict(self.env, SLURM_JOB_ID=""),
+            )
+            run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertIn(f"cannot remove {bad_file}", run.stderr)
+            self.assertIn("eb-local: deleted 1 item(s)\n", run.stdout)
+            self.assertNotIn("deleted 2 item(s)", run.stdout)
+            self.assertFalse(ok_file.exists())
+            self.assertTrue(bad_file.exists())
+        finally:
+            locked_dir.chmod(0o755)
 
 
 if __name__ == "__main__":
