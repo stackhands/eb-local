@@ -1,6 +1,7 @@
 //! Declarative site overlays for upstream easyconfigs: parameter replacements,
 //! patch additions, dependency variants, keyed by the base file digest.
 const std = @import("std");
+const common = @import("zig_common");
 const toml = @import("toml.zig");
 const Allocator = std.mem.Allocator;
 
@@ -463,16 +464,43 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         stdout.writeStreamingAll(io, message) catch return 1;
         return 0;
     }
-    cwd.createDirPath(io, out_dir) catch |err| {
+    const prev_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch null;
+    defer if (prev_recipe) |buf| a.free(buf);
+    var first_missing: ?[]const u8 = null;
+    {
+        var probe: []const u8 = out_dir;
+        while (probe.len > 0 and !std.mem.eql(u8, probe, ".") and !std.mem.eql(u8, probe, "/")) {
+            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
+                if (st.isDir()) break;
+                break;
+            } else |_| {}
+            first_missing = probe;
+            probe = std.fs.path.dirname(probe) orelse break;
+        }
+    }
+    common.atomic.makedirs(out_dir) catch |err| {
         failMsg("cannot create {s}: {s}", .{ out_dir, @errorName(err) });
         return 1;
     };
-    cwd.writeFile(io, .{ .sub_path = recipe_path, .data = recipe }) catch |err| {
-        failMsg("cannot write {s}: {s}", .{ recipe_path, @errorName(err) });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    common.atomic.atomicWrite(a, recipe_path, recipe, .{ .mode = 0o644 }, &why) catch |err| {
+        failMsg("cannot write {s}: {s}", .{ recipe_path, if (why.msg.len > 0) why.msg else @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
-    cwd.writeFile(io, .{ .sub_path = provenance_path, .data = provenance }) catch |err| {
-        failMsg("cannot write {s}: {s}", .{ provenance_path, @errorName(err) });
+    var why_prov: common.atomic.Why = .{};
+    defer why_prov.deinit(a);
+    common.atomic.atomicWrite(a, provenance_path, provenance, .{ .mode = 0o644 }, &why_prov) catch |err| {
+        failMsg("cannot write {s}: {s}", .{ provenance_path, if (why_prov.msg.len > 0) why_prov.msg else @errorName(err) });
+        if (prev_recipe) |data| {
+            var why_rb: common.atomic.Why = .{};
+            defer why_rb.deinit(a);
+            common.atomic.atomicWrite(a, recipe_path, data, .{ .mode = 0o644 }, &why_rb) catch {};
+        } else {
+            common.sys.unlinkat(common.fsx.cwd, recipe_path, 0) catch {};
+        }
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     const message = std.fmt.allocPrint(a, "wrote {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
