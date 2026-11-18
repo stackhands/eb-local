@@ -110,9 +110,12 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
             return if (ro) 2 else 1;
         }
     } else |_| {}
-    const cwd = std.Io.Dir.cwd();
-    const previous = cwd.readFileAlloc(io, path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+    const previous = readExisting(io, a, path) catch |err| switch (err) {
         error.FileNotFound => "",
+        error.NotRegularFile => {
+            fail("cannot read {s}: not a regular file", .{path});
+            return 2;
+        },
         else => {
             fail("cannot read {s}: {s}", .{ path, @errorName(err) });
             return 2;
@@ -227,4 +230,30 @@ test "rendering named directives is idempotent" {
         padded,
         try render(a, padded, .{ .defaults = &.{"Example/2.0"} }),
     );
+}
+
+fn readExisting(io: std.Io, a: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (common.fsx.statAt(common.fsx.cwd, path, false)) |st| {
+        if (!st.isReg()) return error.NotRegularFile;
+    } else |_| {}
+    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 * 1024 * 1024));
+}
+
+test "reading a FIFO .modulerc.lua fails instead of blocking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [common.sys.path_max]u8 = undefined;
+    const cwd = try common.fsx.realpath(common.fsx.cwd, ".", &cwd_buf);
+    const dir = try std.fmt.allocPrint(a, "{s}/.zig-cache/modulerc-fifo-{d}", .{ cwd, std.os.linux.getpid() });
+    try common.atomic.makedirs(dir);
+    defer common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
+    const fifo = try std.fs.path.join(a, &.{ dir, ".modulerc.lua" });
+    var zbuf: [common.sys.path_max:0]u8 = undefined;
+    const zfifo = try common.sys.z(&zbuf, fifo);
+    try std.testing.expectEqual(
+        std.os.linux.E.SUCCESS,
+        std.os.linux.errno(std.os.linux.mknodat(std.os.linux.AT.FDCWD, zfifo.ptr, 0o010600, 0)),
+    );
+    try std.testing.expectError(error.NotRegularFile, readExisting(std.testing.io, a, fifo));
 }
