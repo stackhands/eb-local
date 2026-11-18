@@ -236,12 +236,64 @@ class ConfigCli(StorageFixture):
         self.assertNotIn("--config=", run.stdout)
         # An empty --project= made the current directory the project.
         for args in (["--project=", "config"], ["--profile=", "config"], ["--config=", "config"],
-                     ["dev", "--buildenv="], ["submit", "--on=", "recipe.eb"]):
+                     ["dev", "--buildenv="], ["submit", "--on=", "recipe.eb"],
+                     ["rpath-wrappers", "--for="], ["site", "list", "--set="],
+                     ["site", "list", "--to="], ["clean", "--logs-older-than="]):
             with self.subTest(args=args):
                 run = self.run_tool(args, SLURM_JOB_ID="")
                 option = next(a for a in args if a.endswith("="))[:-1]
                 self.assertEqual((run.returncode, run.stdout), (2, ""), run.stderr)
                 self.assertEqual(run.stderr, f"eb-local: {option} needs a value\n")
+
+    def test_subcommand_value_options_match_between_space_and_equals(self):
+        # rpath-wrappers --for=FAMILY
+        fake_cc_bin = self.root / "cc-bin"
+        fake_cc_bin.mkdir()
+        (fake_cc_bin / "gcc").write_text("#!/bin/sh\nexit 0\n")
+        (fake_cc_bin / "gcc").chmod(0o755)
+        rw_env = dict(self.env, PATH=f"{fake_cc_bin}:/usr/bin:/bin", XDG_CACHE_HOME=str(self.root / "xdg-cache"))
+        argv_sp, env_sp = binary.command(self.script, ["rpath-wrappers", "--for", "llvm"], rw_env)
+        argv_eq, env_eq = binary.command(self.script, ["rpath-wrappers", "--for=llvm"], rw_env)
+        rw_sp = subprocess.run(argv_sp, env=env_sp, cwd=self.root, capture_output=True, text=False)
+        rw_eq = subprocess.run(argv_eq, env=env_eq, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(rw_sp.returncode, 0, rw_sp.stderr)
+        self.assertEqual((rw_eq.returncode, rw_eq.stdout, rw_eq.stderr), (rw_sp.returncode, rw_sp.stdout, rw_sp.stderr))
+
+        # site show/install --set=KEY=VALUE and --to=FILE
+        argv_sp, env_sp = binary.command(
+            self.script,
+            ["site", "show", "slurm", "--set", "node_local_root=/local", "--set", "shared_scratch=/scratch"],
+            dict(self.env),
+        )
+        argv_eq, env_eq = binary.command(
+            self.script,
+            ["site", "show", "slurm", "--set=node_local_root=/local", "--set=shared_scratch=/scratch"],
+            dict(self.env),
+        )
+        sh_sp = subprocess.run(argv_sp, env=env_sp, cwd=self.root, capture_output=True, text=False)
+        sh_eq = subprocess.run(argv_eq, env=env_eq, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(sh_sp.returncode, 0, sh_sp.stderr)
+        self.assertEqual((sh_eq.returncode, sh_eq.stdout, sh_eq.stderr), (sh_sp.returncode, sh_sp.stdout, sh_sp.stderr))
+
+        dest_sp = self.root / "site-sp.toml"
+        dest_eq = self.root / "site-eq.toml"
+        ins_sp = self.run_tool(
+            ["site", "install", "slurm", "--set", "node_local_root=/local", "--set", "shared_scratch=/scratch", "--to", str(dest_sp)]
+        )
+        ins_eq = self.run_tool(
+            ["site", "install", "slurm", "--set=node_local_root=/local", "--set=shared_scratch=/scratch", f"--to={dest_eq}"]
+        )
+        self.assertEqual(ins_sp.returncode, 0, ins_sp.stderr)
+        self.assertEqual(ins_eq.returncode, 0, ins_eq.stderr)
+        self.assertEqual(dest_eq.read_bytes(), dest_sp.read_bytes())
+
+        # clean --logs-older-than=DAYS
+        argv_sp, env_sp = binary.command(self.script, ["clean", "--dry-run", "--logs-older-than", "5"], dict(self.env, SLURM_JOB_ID=""))
+        argv_eq, env_eq = binary.command(self.script, ["clean", "--dry-run", "--logs-older-than=5"], dict(self.env, SLURM_JOB_ID=""))
+        cl_sp = subprocess.run(argv_sp, env=env_sp, cwd=self.root, capture_output=True, text=False)
+        cl_eq = subprocess.run(argv_eq, env=env_eq, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(cl_sp.returncode, 0, cl_sp.stderr)
+        self.assertEqual((cl_eq.returncode, cl_eq.stdout, cl_eq.stderr), (cl_sp.returncode, cl_sp.stdout, cl_sp.stderr))
 
     def test_profiles_lists_every_profile(self):
         run = self.run_tool(["profiles"])

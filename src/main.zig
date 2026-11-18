@@ -4174,8 +4174,8 @@ pub fn main(init: std.process.Init) u8 {
         } else switch (command) {
             .build, .eb => rest.append(a, x) catch oom(),
             .@"rpath-wrappers" => {
-                if (std.mem.eql(u8, x, "--for")) {
-                    family = value(args, &i, "--for");
+                if (std.mem.eql(u8, x, "--for") or joined(x, "--for") != null) {
+                    family = if (joined(x, "--for")) |v| v else value(args, &i, "--for");
                     for (family) |ch| if (!std.ascii.isAlphanumeric(ch)) die("--for takes a compiler family name", .{});
                 } else if (std.mem.eql(u8, x, "--unwrapped")) {
                     only_unwrapped = true;
@@ -4367,15 +4367,18 @@ pub fn main(init: std.process.Init) u8 {
             .site => {
                 if (std.mem.eql(u8, x, "--json")) {
                     site.json = true;
-                } else if (std.mem.eql(u8, x, "--set")) {
+                } else if (std.mem.eql(u8, x, "--set") or joined(x, "--set") != null) {
                     var d: sites.Diagnostic = .{};
-                    const set = sites.parseSet(a, value(args, &i, "--set"), &d) catch |e| switch (e) {
+                    const raw = if (joined(x, "--set")) |v| v else value(args, &i, "--set");
+                    const set = sites.parseSet(a, raw, &d) catch |e| switch (e) {
                         error.Invalid => die("{s}", .{d.message}),
                         error.OutOfMemory => oom(),
                     };
                     site.sets.append(a, set) catch oom();
                 } else if (std.mem.eql(u8, x, "--to")) {
                     site.to = value(args, &i, "--to");
+                } else if (joined(x, "--to")) |v| {
+                    site.to = v;
                 } else if (std.mem.eql(u8, x, "--force")) {
                     site.force = true;
                 } else if (x.len > 0 and x[0] == '-') {
@@ -4396,8 +4399,8 @@ pub fn main(init: std.process.Init) u8 {
                 } else rest.append(a, x) catch oom();
             },
             .clean => {
-                if (std.mem.eql(u8, x, "--logs-older-than")) {
-                    const v = value(args, &i, "--logs-older-than");
+                if (std.mem.eql(u8, x, "--logs-older-than") or joined(x, "--logs-older-than") != null) {
+                    const v = if (joined(x, "--logs-older-than")) |got| got else value(args, &i, "--logs-older-than");
                     const n = std.fmt.parseInt(u32, v, 10) catch die("--logs-older-than needs a number of days", .{});
                     if (n > 99999) die("--logs-older-than needs a number of days", .{});
                     clean.logs_days = n;
