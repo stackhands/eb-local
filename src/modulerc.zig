@@ -103,14 +103,13 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         return 2;
     }
     const path = std.fs.path.join(a, &.{ opts.tree, ".modulerc.lua" }) catch return 1;
-    if (opts.check or opts.dry_run) {
-        if (common.fsx.statAt(common.fsx.cwd, path, false)) |st| {
-            if (st.isLink()) {
-                fail("cannot read {s}: symlink is not followed", .{path});
-                return 2;
-            }
-        } else |_| {}
-    }
+    if (common.fsx.statAt(common.fsx.cwd, path, false)) |st| {
+        if (st.isLink()) {
+            const ro = opts.check or opts.dry_run;
+            fail("cannot {s} {s}: symlink is not followed", .{ if (ro) "read" else "write", path });
+            return if (ro) 2 else 1;
+        }
+    } else |_| {}
     const cwd = std.Io.Dir.cwd();
     const previous = cwd.readFileAlloc(io, path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => "",

@@ -360,6 +360,45 @@ export -f eb
         self.assertIn("remove them before sharing", red_run.stderr)
         self.assertIn("eb-local: done.", red_run.stdout)
 
+    @unittest.skipUnless(_can_mount_tmpfs(), "user-namespace tmpfs mounts unavailable in this environment")
+    def test_workspace_subdir_enospc_removes_workspace_and_reports_errno(self):
+        root_job = self.nodes / "root.123"
+        root_job.mkdir()
+        site = self.root / "site-ws.toml"
+        site.write_text(f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "%u.%j"\n')
+        site.chmod(0o600)
+        argv, env = binary.command(
+            self.script,
+            ["--config", str(site), "recipe.eb"],
+            dict(self.env, CONTROL_JOB_ROOT=str(root_job), TMPDIR=str(root_job)),
+        )
+        cmd = [
+            "unshare",
+            "-r",
+            "-m",
+            "python3",
+            "-c",
+            (
+                "import os, subprocess, sys\n"
+                "jr, argv = sys.argv[1], sys.argv[2:]\n"
+                "subprocess.run(['mount', '-t', 'tmpfs', '-o', 'size=64k,nr_inodes=2', 'tmpfs', jr], check=True)\n"
+                "try:\n"
+                "    p = subprocess.run(argv)\n"
+                "    left = os.listdir(jr)\n"
+                "    if left:\n"
+                "        sys.stderr.write('LEAKED_WORK=' + repr(left) + '\\n')\n"
+                "    sys.exit(p.returncode)\n"
+                "finally:\n"
+                "    subprocess.run(['umount', jr], check=False)\n"
+            ),
+            str(root_job),
+            *argv,
+        ]
+        run = subprocess.run(cmd, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("[Errno 28] No space left on device", run.stderr)
+        self.assertNotIn("LEAKED_WORK=", run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
