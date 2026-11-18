@@ -148,5 +148,36 @@ class ReadinessProbeTests(unittest.TestCase):
         self.assertIn("ok   local modules precede EESSI", run.stdout)
 
 
+    def test_shorter_real_mount_covers_earlier_longer_symlink_mount(self):
+        alias_dir = self.root / "longer-symlink-alias"
+        alias_dir.symlink_to(self.repo)
+        self.mountinfo.write_text(
+            "80 1 0:80 / {alias} rw,relatime - autofs systemd-1 rw\n"
+            "81 80 0:81 / {real} rw,relatime - cvmfs cvmfs2 rw\n".format(
+                alias=alias_dir, real=self.repo
+            )
+        )
+        run = subprocess.run(
+            [
+                str(PROBE),
+                "--repo",
+                str(self.repo),
+                "--prefix",
+                str(self.local),
+                "--mountinfo",
+                str(self.mountinfo),
+            ],
+            env=dict(
+                os.environ,
+                MODULEPATH="{}:{}".format(self.local_modules, self.upstream_modules),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("mounted with cvmfs", run.stdout)
+        self.assertNotIn("autofs", run.stdout)
+
 if __name__ == "__main__":
     unittest.main()
