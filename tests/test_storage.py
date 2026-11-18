@@ -475,6 +475,29 @@ class RefusalWording(StorageFixture):
         self.assertIn(f"replace the symbolic link in {self.prefix}/versions with a directory", fix)
         self.assertEqual(list(self.job.iterdir()), [])
 
+    def test_mount_symlink_non_directory_and_absent_mountinfo_refusals(self):
+        real_job = self.root / "real-job"
+        real_job.mkdir()
+        self.job.rmdir()
+        self.job.symlink_to(real_job, target_is_directory=True)
+        first, fix = self.refusal()
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is a symbolic link; nothing was built.")
+        self.assertIn("build in an allocation whose node-local mount is a directory of its own", fix)
+
+        self.job.unlink()
+        self.job.write_text("not a directory\n", encoding="utf-8")
+        first, fix = self.refusal()
+        self.assertEqual(first, f"eb-local: the node-local mount {self.job} is not a directory; nothing was built.")
+        self.assertIn("node_local_root", fix)
+
+        self.job.unlink()
+        self.job.mkdir()
+        empty_mountinfo = self.root / "empty-mountinfo"
+        empty_mountinfo.write_text("", encoding="utf-8")
+        first, fix = self.refusal(CONTROL_JOB_ROOT="", EB_LOCAL_TEST_MOUNTINFO=str(empty_mountinfo))
+        self.assertEqual(first, f"eb-local: no mount in /proc/self/mountinfo holds the node-local mount {self.job}; nothing was built.")
+        self.assertIn("where /proc is mounted", fix)
+
     def test_clean_workspaces_says_nothing_was_removed(self):
         first, fix = self.refusal(["clean", "--workspaces"], SLURM_JOB_ID="")
         self.assertEqual(first, "eb-local: clean --workspaces works only inside the Slurm job that made the workspaces, "
