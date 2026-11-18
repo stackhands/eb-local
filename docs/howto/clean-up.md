@@ -51,6 +51,7 @@ With rtrash on `PATH`, files go to the trash, not away for good.
     ```
 
     `rtrash list` shows what is in the trash, and `rtrash restore PATH` brings one file back.
+    Add `--json` to print a single JSON line describing the planned or removed paths for scripts.
 
 ## Remove the workspace of a failed build
 

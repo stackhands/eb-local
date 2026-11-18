@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local clean --json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "prefix",
+    "dry_run",
+    "action",
+    "items",
+    "workspaces",
+    "removed_items",
+    "removed_workspaces"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "clean" },
+    "prefix": { "type": "string" },
+    "dry_run": { "type": "boolean" },
+    "action": { "enum": ["nothing", "dry-run", "trashed", "deleted", "workspaces-only", "refused"] },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind"],
+        "properties": {
+          "path": { "type": "string" },
+          "kind": { "enum": ["file", "dir"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "workspaces": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "removed_items": { "type": "integer", "minimum": 0 },
+    "removed_workspaces": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": false
+}

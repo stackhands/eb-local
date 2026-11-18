@@ -126,9 +126,9 @@ const usage_text =
     \\                                       preserve other lines. --dry-run prints the file;
     \\                                       --check reports drift and writes nothing
     \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
-    \\                 [--dry-run] [--delete]
+    \\                 [--dry-run] [--delete] [--json]
     \\                                       remove what eb-local left behind; --no-logs
-    \\                                       leaves the logs
+    \\                                       leaves the logs; --json prints one line of JSON
     \\  eb-local config [--check | --env] [--json]
     \\                                       the settings in force and where each came from;
     \\                                       --check also reads every secret (values not shown);
@@ -1924,7 +1924,34 @@ fn removeEmptyDirs(c: Ctx, path: []const u8, dev: u64, depth: usize) void {
     }
 }
 
-fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
+const CleanItemJson = struct { path: []const u8, kind: []const u8 };
+const CleanReport = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "clean",
+    prefix: []const u8,
+    dry_run: bool,
+    action: []const u8,
+    items: []const CleanItemJson,
+    workspaces: []const []const u8,
+    removed_items: usize,
+    removed_workspaces: usize,
+};
+
+fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) void {
+    var items: std.ArrayList(CleanItemJson) = .empty;
+    for (targets) |t| items.append(a, .{ .path = t.path, .kind = if (t.dir) "dir" else "file" }) catch oom();
+    jsonout.emit(a, CleanReport{
+        .prefix = prefix,
+        .dry_run = dry_run,
+        .action = action,
+        .items = items.items,
+        .workspaces = spaces,
+        .removed_items = removed_items,
+        .removed_workspaces = removed_workspaces,
+    });
+}
+
+fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
     const a = c.a;
     var job_root: ?[]const u8 = null;
     if (o.workspaces) {
@@ -1961,23 +1988,41 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
     }
     const targets = collect.out.items;
     if (targets.len == 0 and spaces.items.len == 0) {
-        say("eb-local: nothing to clean in {s}", .{p.prefix});
+        if (json) {
+            emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces.items, 0, 0);
+        } else {
+            say("eb-local: nothing to clean in {s}", .{p.prefix});
+        }
         return 0;
     }
-    for (targets) |t| say("  {s}{s}", .{ t.path, if (t.dir) "/" else "" });
-    for (spaces.items) |w| say("  {s}/ (build workspace)", .{w});
+    if (!json) {
+        for (targets) |t| say("  {s}{s}", .{ t.path, if (t.dir) "/" else "" });
+        for (spaces.items) |w| say("  {s}/ (build workspace)", .{w});
+    }
     if (o.dry_run) {
-        say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
+        if (json) {
+            emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces.items, 0, 0);
+        } else {
+            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
+        }
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
         notTrashed(s);
+        if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces.items, 0, 0);
         return 1;
     }
     // Build workspaces are node-local scratch the scheduler removes anyway;
     // they are deleted, not trashed.
-    for (spaces.items) |w| storage.removeTree(a, w) catch |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
-    if (spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{spaces.items.len});
+    var removed_ws: usize = 0;
+    for (spaces.items) |w| {
+        if (storage.removeTree(a, w)) |_| {
+            removed_ws += 1;
+        } else |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
+    }
+    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{spaces.items.len});
+    var removed_items: usize = 0;
+    var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
         if (trash == .rtrash) {
             var argv: std.ArrayList([]const u8) = .empty;
@@ -1993,22 +2038,30 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts) u8 {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}", .{rc}),
                 .signal => return stop(run),
             }
-            say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
+            removed_items = targets.len;
+            action = "trashed";
+            if (!json) say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
         } else {
             for (targets) |t| {
                 if (t.dir) {
-                    storage.removeTree(a, t.path) catch |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
+                    if (storage.removeTree(a, t.path)) |_| {
+                        removed_items += 1;
+                    } else |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
                 } else {
-                    sys.unlinkat(fsx.cwd, t.path, 0) catch |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
+                    if (sys.unlinkat(fsx.cwd, t.path, 0)) |_| {
+                        removed_items += 1;
+                    } else |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
                 }
             }
-            say("eb-local: deleted {d} item(s)", .{targets.len});
+            action = "deleted";
+            if (!json) say("eb-local: deleted {d} item(s)", .{targets.len});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
             removeEmptyDirs(c, dir, st.dev, 0);
         }
     }
+    if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces.items, removed_items, removed_ws);
     return 0;
 }
 
@@ -4085,6 +4138,8 @@ pub fn main(init: std.process.Init) u8 {
                     clean.dry_run = true;
                 } else if (std.mem.eql(u8, x, "--delete")) {
                     clean.delete = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
                 } else die("clean does not know '{s}'", .{x});
             },
             .uninstall, .restore => {
@@ -4167,7 +4222,7 @@ pub fn main(init: std.process.Init) u8 {
             if (as_env and g.json_out) die("config --json does not go with --env", .{});
             break :blk if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check, g.json_out);
         },
-        .clean => cmdClean(c, s, clean),
+        .clean => cmdClean(c, s, clean, g.json_out),
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
