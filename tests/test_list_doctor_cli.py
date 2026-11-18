@@ -103,6 +103,72 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("Nothing that matches", run.stdout)
         self.assertEqual(self.run_tool(["list", "--all"], SLURM_JOB_ID="").returncode, 2)
 
+    def test_list_without_missing_is_unchanged_raw_bytes(self):
+        self.two_targets()
+        argv, env = binary.command(
+            self.script,
+            ["list"],
+            dict(
+                self.env,
+                SLURM_JOB_ID="",
+                EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+                EESSI_VERSION="2026.06",
+            ),
+        )
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+        expected = (
+            f"{self.prefix}: 2 module(s) for 2 CPU target(s)\n"
+            "MODULE                   zen2  zen4*\n"
+            "GSL/2.8-GCC-15.2.0       x     x\n"
+            "pigz/2.8-GCCcore-15.2.0  x     -\n"
+            "Not built for this node's target, x86_64/amd/zen4 (*): pigz/2.8-GCCcore-15.2.0.\n"
+            "Build them in an allocation on this node type; each target needs its own build.\n"
+        ).encode()
+        self.assertEqual((run.returncode, run.stdout, run.stderr), (0, expected, b""))
+
+    def test_list_missing_prints_only_missing_modules_for_this_node(self):
+        self.two_targets()
+        missing = self.run_tool(
+            ["list", "--missing"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertEqual(missing.stdout, "pigz/2.8-GCCcore-15.2.0\n")
+
+        filtered = self.run_tool(
+            ["list", "--missing", "GSL"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual((filtered.returncode, filtered.stdout, filtered.stderr), (0, "", ""))
+
+        empty_target = self.run_tool(
+            ["list", "--missing"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/intel/icelake",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(empty_target.returncode, 0, empty_target.stderr)
+        self.assertEqual(
+            empty_target.stdout,
+            "GSL/2.8-GCC-15.2.0\npigz/2.8-GCCcore-15.2.0\n",
+        )
+
+        no_eessi = self.run_tool(["list", "--missing"], SLURM_JOB_ID="")
+        self.assertEqual(no_eessi.returncode, 2)
+        self.assertIn("needs EESSI loaded", no_eessi.stderr)
+
+        conflict = self.run_tool(
+            ["list", "--missing", "--json"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+        )
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn("--missing or --json", conflict.stderr)
+
     def test_list_of_an_empty_prefix_and_a_symlinked_tree(self):
         run = self.run_tool(["list"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
