@@ -342,6 +342,16 @@ fn inventoryLess(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
 }
 
+fn validMarker(marker: []const u8) bool {
+    if (marker.len < 3 or marker[0] != '(' or marker[marker.len - 1] != ')') return false;
+    const inner = marker[1 .. marker.len - 1];
+    for (inner) |ch| switch (ch) {
+        'D', 'H', 'L', 'S', 'E', 'm', '@', ',', ':' => {},
+        else => return false,
+    };
+    return true;
+}
+
 /// Module names from `module --terse avail`, sorted and deduplicated.
 fn normalizeInventory(a: std.mem.Allocator, text: []const u8) InventoryError![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
@@ -351,12 +361,19 @@ fn normalizeInventory(a: std.mem.Allocator, text: []const u8) InventoryError![]c
         if (line.len == 0) continue;
         if (line[0] == '/' and line[line.len - 1] == ':') continue;
         if (std.mem.eql(u8, line, "No module(s) or extension(s) found!")) continue;
+        if (line.len > 1 and line[line.len - 1] == '/' and config.validModule(line[0 .. line.len - 1])) continue;
         var fields = std.mem.tokenizeAny(u8, line, " \t");
         const name = fields.next() orelse continue;
         if (!config.validModule(name)) return error.InvalidInventory;
+        var saw_alias = false;
         while (fields.next()) |marker| {
-            if (!(std.mem.eql(u8, marker, "(D)") or std.mem.eql(u8, marker, "(H)")))
-                return error.InvalidInventory;
+            if (!saw_alias and std.mem.eql(u8, marker, "->")) {
+                const target = fields.next() orelse return error.InvalidInventory;
+                if (!config.validModule(target)) return error.InvalidInventory;
+                saw_alias = true;
+                continue;
+            }
+            if (!validMarker(marker)) return error.InvalidInventory;
         }
         try names.append(a, try a.dupe(u8, name));
     }
@@ -679,4 +696,21 @@ test "discovering targets under a versioned prefix" {
     try std.testing.expectEqualStrings(cpu, targets[0].archdir);
     try std.testing.expect(std.mem.indexOf(u8, targets[0].modulepath, accel) != null);
     try std.testing.expect(std.mem.indexOf(u8, targets[0].modulepath, all) != null);
+}
+
+test "normalizeInventory skips directory headers and accepts loaded and alias lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const items = try normalizeInventory(
+        a,
+        "/modules:\nGSL/\nGSL/2.7\nGSL/2.8 (L,D)\npigz/\npigz/2.8 (L)\nGSL/default -> GSL/2.8 (H)\n",
+    );
+    try std.testing.expectEqual(@as(usize, 4), items.len);
+    try std.testing.expectEqualStrings("GSL/2.7", items[0]);
+    try std.testing.expectEqualStrings("GSL/2.8", items[1]);
+    try std.testing.expectEqualStrings("GSL/default", items[2]);
+    try std.testing.expectEqualStrings("pigz/2.8", items[3]);
+    try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "Lmod has detected the following error:\n"));
+    try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "GSL/default ->\n"));
 }
