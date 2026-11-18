@@ -223,7 +223,7 @@ pub fn validModule(name: []const u8) bool {
 pub fn validSecretName(name: []const u8) bool {
     if (name.len == 0 or !(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
     for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
-    const refused = [_][]const u8{ "PATH", "HOME", "USER", "SHELL", "TMPDIR", "MODULEPATH", "PYTHONPATH", "BASH_ENV", "ENV" };
+    const refused = [_][]const u8{ "PATH", "HOME", "USER", "SHELL", "TMPDIR", "MODULEPATH", "PYTHONPATH", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" };
     for (refused) |r| if (std.mem.eql(u8, name, r)) return false;
     const refused_prefixes = [_][]const u8{ "LD_", "EESSI_", "EASYBUILD_", "LMOD_", "SLURM_", "EB_LOCAL_", "BASH_FUNC_" };
     for (refused_prefixes) |r| if (std.mem.startsWith(u8, name, r)) return false;
@@ -1054,6 +1054,8 @@ test "refusals" {
     try r.one(&t, "[secrets]\nTOKEN = \"hunter2\"\n", .user, "never written");
     try r.one(&t, "[secrets]\nLD_PRELOAD = \"env:X\"\n", .user, "not a variable name");
     try r.one(&t, "[secrets]\nPATH = \"env:X\"\n", .user, "not a variable name");
+    try r.one(&t, "[secrets]\nSHELLOPTS = \"env:X\"\n", .user, "not a variable name");
+    try r.one(&t, "[secrets]\nBASHOPTS = \"env:X\"\n", .user, "not a variable name");
     try r.one(&t, "[secrets]\nT = \"file:relative\"\n", .user, "c.toml:2: secret T: file: takes an absolute path or one starting ~/");
     try r.one(&t, "[secrets]\nT = \"env:1X\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
     try r.one(&t, "[secrets]\nT = \"env:\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
