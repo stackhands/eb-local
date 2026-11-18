@@ -14,6 +14,7 @@ pub const Options = struct {
     aliases: []const Alias = &.{},
     hidden: []const []const u8 = &.{},
     dry_run: bool = false,
+    check: bool = false,
 };
 
 fn fail(comptime fmt: []const u8, args: anytype) void {
@@ -71,7 +72,7 @@ pub fn render(a: std.mem.Allocator, previous: []const u8, opts: Options) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-/// Write or print the resulting `.modulerc.lua`.
+/// Write, print, or check the resulting `.modulerc.lua`.
 pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     if (opts.tree.len == 0) {
         fail("modulerc needs --module-tree DIR", .{});
@@ -95,6 +96,16 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         },
     };
     const text = render(a, previous, opts) catch return 1;
+    if (opts.check) {
+        const changed = !std.mem.eql(u8, previous, text);
+        var stdout = std.Io.File.stdout();
+        const message = std.fmt.allocPrint(a, "{s} {s}\n", .{ if (changed) "would update" else "up to date", path }) catch return 1;
+        stdout.writeStreamingAll(io, message) catch {
+            fail("cannot print {s}", .{path});
+            return 1;
+        };
+        return if (changed) 1 else 0;
+    }
     if (opts.dry_run) {
         var stdout = std.Io.File.stdout();
         stdout.writeStreamingAll(io, text) catch {

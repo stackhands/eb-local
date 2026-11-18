@@ -22,7 +22,7 @@ eb-local [OPTION]... doctor [--json] [--workspace PATH]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
-                   [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
+                   [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                            [--dry-run] [--delete]
 eb-local [OPTION]... config [--check | --env] [--json]
@@ -115,10 +115,11 @@ directory you own.
                                        --dry-run lists targets; existing
                                        --modulepath mode is unchanged
   eb-local modulerc --module-tree DIR [--default MODULE]...
-                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
+                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
                                        write DIR/.modulerc.lua with the
                                        defaults, aliases and hidden versions named;
-                                       preserve other lines. --dry-run prints the file
+                                       preserve other lines. --dry-run prints the file;
+                                       --check reports drift and writes nothing
   eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                  [--dry-run] [--delete]
                                        remove what eb-local left behind; --no-logs
@@ -447,8 +448,10 @@ Existing lines are preserved, and a line already present is not duplicated.
 | =--alias NAME=MODULE= | Add =module_alias("NAME", "MODULE")=. Repeatable. |
 | =--hide MODULE= | Add =hide_version("MODULE")=. Repeatable. |
 | =--dry-run= | Print the complete resulting file and leave the tree unchanged. |
+| =--check= | Print whether the requested directives would update the file, write nothing, and exit 1 when they would. |
 
 At least one directive option is required.
+=--dry-run= and =--check= cannot be used together.
 Running the same command again produces identical file contents.
 This command does not read the site file; =--profile=, =--project= and =--config= are accepted and ignored.
 
@@ -563,7 +566,7 @@ A value with a quote, a backslash or a control character is refused.
 | Status  | Meaning                                                                                                                                         |
 |---------+-------------------------------------------------------------------------------------------------------------------------------------------------|
 | 0       | Done, or nothing to do.                                                                                                                         |
-| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =clean= or =uninstall= had something to remove and no way to; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
+| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =modulerc --check= would update the file; =clean= or =uninstall= had something to remove and no way to; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
 | 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file. |
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |
