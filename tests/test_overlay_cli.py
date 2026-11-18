@@ -270,6 +270,30 @@ class OverlayMaterialize(unittest.TestCase):
             )
             compile(recipe, "materialized-base.eb", "exec")
 
+    def test_append_to_array_with_trailing_inline_comment_stays_valid_python(self):
+        for body in (
+            b"dependencies = [\n    ('zlib', '1.3'), # compression\n]\n",
+            b"dependencies = [\n    ('zlib', '1.3') # compression\n]\n",
+        ):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(body)
+                (root / "site.overlay.toml").write_text(
+                    f'overlay_version = 1\nbase_digest = "{digest_of(body)}"\n'
+                    '\n[dependencies.add]\npkg = "(\'pkg\', \'1.0\')"\n',
+                    encoding="utf-8",
+                )
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+                compile(recipe, "materialized-base.eb", "exec")
+                ns = {}
+                exec(recipe, ns)
+                self.assertEqual(ns["dependencies"], [("zlib", "1.3"), ("pkg", "1.0")])
+
     def test_refuses_when_base_digest_changed(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.eb"
@@ -684,6 +708,38 @@ class OverlayCheckUnreadableOutputs(unittest.TestCase):
             prov_text = (root / "out" / "provenance.toml").read_text(encoding="utf-8")
             parsed = tomllib.loads(prov_text)
             self.assertEqual(parsed["rationale"].rstrip("\n"), rationale)
+
+    def test_equality_comparison_does_not_mask_parameter_or_array_assignment(self):
+        base_bytes = (
+            b"configopts == '--ignore'\n"
+            b"configopts = '--old'\n"
+            b"dependencies == []\n"
+            b"dependencies = [\n"
+            b"    ('zlib', '1.3'),\n"
+            b"]\n"
+        )
+        overlay_text = (
+            f'overlay_version = 1\n'
+            f'base_digest = "{digest_of(base_bytes)}"\n'
+            '\n[replace]\n'
+            'configopts = "\'--new\'"\n'
+            '\n[dependencies.add]\n'
+            'pkg = "(\'pkg\', \'1.0\')"\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            self.assertIn("configopts == '--ignore'\n", recipe)
+            self.assertIn("configopts = '--new'\n", recipe)
+            self.assertIn("dependencies == []\n", recipe)
+            self.assertIn("('pkg', '1.0')", recipe)
 
 
 if __name__ == "__main__":
