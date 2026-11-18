@@ -1541,10 +1541,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         const name = key["eessi.".len..];
         if (name.len == 0) die("unknown configuration key '{s}'", .{key});
         for (s.eessi.items) |v| {
-            if (std.mem.eql(u8, v.name, name)) {
-                say("{s}", .{v.value});
-                return 0;
-            }
+            if (std.mem.eql(u8, v.name, name)) return scalar(v.value);
         }
         return 1;
     } else if (std.mem.startsWith(u8, key, "secrets.")) {

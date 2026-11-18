@@ -518,7 +518,7 @@ class ConfigCli(StorageFixture):
             + '[build.node_types]\ncpu = "-p cpu -n 16"\n'
             + '[dev.buildenv_for]\nllvm = "buildenv/site-llvm"\n'
             + '[doctor]\napproved_prefixes = ["/opt/site"]\nmpi_transports = ["ofi", "ucx"]\n'
-            + '[eessi]\nEESSI_CVMFS_REPO = "/cvmfs/custom"\n'
+            + '[eessi]\nEESSI_CVMFS_REPO = "/cvmfs/custom"\nEESSI_EMPTY = ""\n'
         )
 
         def get(key, *extra_args, **extra_env):
@@ -548,6 +548,7 @@ class ConfigCli(StorageFixture):
         self.assertEqual((get("clean.trash").returncode, get("clean.trash").stdout), (0, "auto\n"))
         self.assertEqual((get("clean.logs_older_than_days").returncode, get("clean.logs_older_than_days").stdout), (0, "30\n"))
         self.assertEqual((get("eessi.EESSI_CVMFS_REPO").returncode, get("eessi.EESSI_CVMFS_REPO").stdout), (0, "/cvmfs/custom\n"))
+        self.assertEqual((get("eessi.EESSI_EMPTY").returncode, get("eessi.EESSI_EMPTY").stdout), (1, ""))
         self.assertEqual((get("eessi.OTHER").returncode, get("eessi.OTHER").stdout), (1, ""))
 
         self.assertEqual((get("dev.modules").returncode, get("dev.modules").stdout), (0, "FFTW/3.3.10-GCC-15.2.0\n"))
