@@ -407,6 +407,38 @@ class OverlayMaterialize(unittest.TestCase):
             ast.parse(text)
             self.assertIn("('site', 'site.patch')", text)
 
+    def test_materialize_missing_inputs_exit_two_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(b"name = 'demo'\n")
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(b"name = \'demo\'\n")}"\n',
+                encoding="utf-8",
+            )
+            missing_ov = run(
+                ["materialize", "--overlay", "missing.toml", "--base", "base.eb", "--check"],
+                cwd=root,
+                text=False,
+            )
+            self.assertEqual(missing_ov.returncode, 2, missing_ov.stderr)
+            self.assertEqual(missing_ov.stdout, b"")
+            self.assertEqual(
+                missing_ov.stderr,
+                b"eb-local: cannot read missing.toml: FileNotFound\n",
+            )
+
+            missing_base = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "missing.eb", "--check"],
+                cwd=root,
+                text=False,
+            )
+            self.assertEqual(missing_base.returncode, 2, missing_base.stderr)
+            self.assertEqual(missing_base.stdout, b"")
+            self.assertEqual(
+                missing_base.stderr,
+                b"eb-local: cannot read missing.eb: FileNotFound\n",
+            )
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
