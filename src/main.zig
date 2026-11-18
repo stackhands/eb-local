@@ -793,9 +793,9 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
     }
     const dir = rpath.directory(a, c.env, found) catch |e| switch (e) {
         error.NoCacheDir => die("rpath-wrappers needs an absolute XDG_CACHE_HOME or HOME", .{}),
-        else => die("cannot work out the wrapper directory ({s})", .{@errorName(e)}),
+        else => die("cannot work out the wrapper directory ({s})", .{storage.describeError(e)}),
     };
-    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, @errorName(e) });
+    rpath.write(a, dir, found) catch |e| die("cannot write RPATH wrappers in {s} ({s})", .{ dir, storage.describeError(e) });
     const names = std.mem.join(a, " ", found) catch oom();
     if (only_unwrapped) {
         warn("the build environment does not wrap {s};", .{names});
