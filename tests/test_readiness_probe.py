@@ -179,5 +179,20 @@ class ReadinessProbeTests(unittest.TestCase):
         self.assertIn("mounted with cvmfs", run.stdout)
         self.assertNotIn("autofs", run.stdout)
 
+
+    def test_empty_eessi_cvmfs_repo_env_uses_default_repo(self):
+        self.mountinfo.write_text("")
+        env = dict(os.environ, EESSI_CVMFS_REPO="", EB_LOCAL_PREFIX="", MODULEPATH="")
+        run = subprocess.run(
+            [str(PROBE), "--mountinfo", str(self.mountinfo)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertEqual(run.stderr, "")
+        self.assertIn("/cvmfs/software.eessi.io", run.stdout)
+
 if __name__ == "__main__":
     unittest.main()

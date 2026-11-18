@@ -101,7 +101,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--repo",
-        default=os.environ.get("EESSI_CVMFS_REPO", "/cvmfs/software.eessi.io"),
+        default=os.environ.get("EESSI_CVMFS_REPO") or "/cvmfs/software.eessi.io",
         help="EESSI repository (default: EESSI_CVMFS_REPO or /cvmfs/software.eessi.io)",
     )
     parser.add_argument(
