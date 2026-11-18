@@ -665,11 +665,24 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
-    const stamp = std.Io.Dir.createFileAbsolute(io, opts.timestamp, .{}) catch |err| {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const zp = sys.z(&zb, opts.timestamp) catch |err| {
         fail("cannot write {s}: {s}", .{ opts.timestamp, @errorName(err) });
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
+    const stamp_fd: sys.fd_t = @intCast(sys.call(linux.openat, .{
+        linux.AT.FDCWD,
+        zp.ptr,
+        linux.O{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true },
+        @as(linux.mode_t, 0o644),
+    }) catch |err| {
+        const detail = if (err == error.SymLink or err == error.SymLinkLoop) "symlink is not followed" else @errorName(err);
+        fail("cannot write {s}: {s}", .{ opts.timestamp, detail });
+        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
+        return 1;
+    });
+    const stamp: std.Io.File = .{ .handle = stamp_fd, .flags = .{ .nonblocking = false } };
     defer stamp.close(io);
     stamp.setTimestamps(io, .{
         .access_timestamp = .{ .new = olderThan(stat.mtime) },
