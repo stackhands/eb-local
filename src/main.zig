@@ -1560,7 +1560,7 @@ fn siteTemplate(c: Ctx, name: []const u8) sites.Template {
         return sites.find(name) orelse die("no site template '{s}' (eb-local site list shows them; a template file is named with a slash, as ./{s})", .{ name, name });
     const opened = openConfig(name);
     defer sys.close(opened.fd);
-    const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ name, @errorName(e) });
+    const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ name, storage.describeError(e) });
     return .{ .name = name, .text = text };
 }
 
@@ -1601,7 +1601,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         const path = w[1];
         const opened = openConfig(path);
         defer sys.close(opened.fd);
-        const raw = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, @errorName(e) });
+        const raw = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, storage.describeError(e) });
         const text = if (std.mem.endsWith(u8, path, ".toml")) raw else blk: {
             var ld: config.Diagnostic = .{};
             break :blk config.legacyToToml(a, raw, &ld) catch |e| switch (e) {
@@ -1643,7 +1643,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
     common.atomic.atomicWrite(a, target, text, .{ .mode = 0o644 }, &why) catch |e|
-        die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else @errorName(e) });
+        die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else storage.describeError(e) });
     say("wrote {s} from template {s}; eb-local config shows what it sets", .{ target, t.name });
     return 0;
 }
