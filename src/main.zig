@@ -4374,8 +4374,10 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (std.mem.eql(u8, x, "--dev")) {
                     check_dev = true;
                 } else if (std.mem.eql(u8, x, "--prefix")) {
+                    if (check_prefix != null) die("check takes one --prefix", .{});
                     check_prefix = value(args, &i, "--prefix");
                 } else if (joined(x, "--prefix")) |v| {
+                    if (check_prefix != null) die("check takes one --prefix", .{});
                     check_prefix = v;
                 } else if (std.mem.eql(u8, x, "--module")) {
                     check_modules.append(a, value(args, &i, "--module")) catch oom();
