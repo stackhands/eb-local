@@ -1210,12 +1210,16 @@ fn devTree(c: Ctx, s: config.Settings) []const u8 {
         die("check --dev needs EB_LOCAL_DEV_PREFIX, or EESSI_VERSION and EESSI_SOFTWARE_SUBDIR", .{});
     const sub = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR")) orelse
         die("check --dev needs EB_LOCAL_DEV_PREFIX, or EESSI_VERSION and EESSI_SOFTWARE_SUBDIR", .{});
-    const base = std.fs.path.join(c.a, &.{ place(c, s).prefix, "dev", eessi_version, sub }) catch oom();
+    const dev_root = storage.canonical(c.a, std.fs.path.join(c.a, &.{ place(c, s).prefix, "dev" }) catch oom(), c.cwd) catch oom();
+    const base = std.fs.path.join(c.a, &.{ dev_root, eessi_version, sub }) catch oom();
     const raw = if (nonEmpty(c.env.get("EESSI_ACCELERATOR_TARGET"))) |accel|
         std.fs.path.join(c.a, &.{ base, accel }) catch oom()
     else
         base;
-    return storage.canonical(c.a, raw, c.cwd) catch oom();
+    const resolved = storage.canonical(c.a, raw, c.cwd) catch oom();
+    if (!storage.under(resolved, dev_root) or std.mem.eql(u8, resolved, dev_root))
+        die("check --dev: {s} leaves {s}", .{ resolved, dev_root });
+    return resolved;
 }
 
 const CheckMode = enum { module, dev, prefix };

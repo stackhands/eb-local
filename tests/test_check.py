@@ -264,6 +264,25 @@ class Check(unittest.TestCase):
         self.assertNotEqual(absent.returncode, 0)
         self.assertIn("EB_LOCAL_DEV_PREFIX", absent.stderr)
 
+        escape = self.root / "escape"
+        (escape / "bin").mkdir(parents=True)
+        (escape / "bin" / "prog").write_bytes(prog.read_bytes())
+        for bad_env in (
+            dict(EB_LOCAL_PREFIX=str(prefix), EESSI_VERSION="../../escape", EESSI_SOFTWARE_SUBDIR="."),
+            dict(EB_LOCAL_PREFIX=str(prefix), EESSI_VERSION="2026.06", EESSI_SOFTWARE_SUBDIR="../../../escape"),
+            dict(
+                EB_LOCAL_PREFIX=str(prefix),
+                EESSI_VERSION="2026.06",
+                EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+                EESSI_ACCELERATOR_TARGET="../../../../../../escape",
+            ),
+        ):
+            with self.subTest(bad_env=bad_env):
+                escaped = self.check("--dev", **bad_env)
+                self.assertEqual(escaped.returncode, 2, escaped.stdout + escaped.stderr)
+                self.assertEqual(escaped.stdout, "")
+                self.assertIn("leaves", escaped.stderr)
+
     def test_the_tree_modes_are_alternatives(self):
         run = self.check("--dev", "--prefix", str(self.root))
         self.assertNotEqual(run.returncode, 0)
