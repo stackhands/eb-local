@@ -4341,10 +4341,11 @@ pub fn main(init: std.process.Init) u8 {
             .list => {
                 if (std.mem.eql(u8, x, "--missing")) {
                     list_missing = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (x.len > 0 and x[0] == '-') {
+                    die("list does not know '{s}'", .{x});
                 } else {
-                    if (std.mem.eql(u8, x, "--json")) {
-                        g.json_out = true;
-                    } else if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
                     if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
                     rest.append(a, x) catch oom();
                 }

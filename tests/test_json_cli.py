@@ -44,12 +44,35 @@ class JsonCli(StorageFixture):
 
     def test_list_json_matches_schema(self):
         tree = self.prefix / "versions/2026.06/software/linux/x86_64/amd/zen2"
+        (tree / "software/demo/1.0").mkdir(parents=True)
         (tree / "modules/all/demo/1.0.lua").parent.mkdir(parents=True)
         (tree / "modules/all/demo/1.0.lua").write_text("-- m\n")
+        (tree / "software/other/2.0").mkdir(parents=True)
+        (tree / "modules/all/other/2.0.lua").parent.mkdir(parents=True)
+        (tree / "modules/all/other/2.0.lua").write_text("-- m\n")
+
+        # Default text output in raw bytes stays unchanged.
+        argv_txt, env_txt = binary.command(self.script, ["list"], dict(self.env, SLURM_JOB_ID=""))
+        raw_txt = subprocess.run(argv_txt, env=env_txt, cwd=self.root, capture_output=True, text=False)
+        self.assertEqual(raw_txt.returncode, 0, raw_txt.stderr)
+        self.assertEqual(raw_txt.stderr, b"")
+        self.assertIn(b"2 module(s) for 1 CPU target(s)", raw_txt.stdout)
+        self.assertIn(b"demo/1.0", raw_txt.stdout)
+        self.assertIn(b"other/2.0", raw_txt.stdout)
+
         doc = self.run_json(["list", "--json"], SLURM_JOB_ID="")
         validate(doc, load_schema("list.schema.json"))
         self.assertEqual(doc["kind"], "list")
         self.assertEqual(doc["prefix"], str(self.prefix))
+        self.assertEqual(doc["filters"], [])
+        self.assertFalse(doc["empty"])
+        self.assertEqual([m["name"] for m in doc["modules"]], ["demo/1.0", "other/2.0"])
+
+        filtered = self.run_json(["list", "--json", "demo"], SLURM_JOB_ID="")
+        validate(filtered, load_schema("list.schema.json"))
+        self.assertEqual(filtered["filters"], ["demo"])
+        self.assertFalse(filtered["empty"])
+        self.assertEqual([m["name"] for m in filtered["modules"]], ["demo/1.0"])
 
     def test_doctor_json_matches_schema(self):
         doc = self.run_json(["doctor", "--json"], allow_fail=True, SLURM_JOB_ID="")
