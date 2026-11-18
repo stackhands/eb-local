@@ -30,7 +30,7 @@ eb-local [OPTION]... profiles [--json]
 eb-local [OPTION]... uninstall NAME/VERSION... [--target TARGET] [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
 eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
-eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run]
+eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run | --check]
 eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
 eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
 eb-local help | -h | --help | --version
@@ -146,11 +146,12 @@ directory you own.
                                        template file (a NAME with a slash); install
                                        writes config.toml beside this program, mode 644;
                                        site list takes --json for machine-readable output
-  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run]
+  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run | --check]
                                        apply a digest-pinned overlay; writes a materialized
                                        easyconfig and provenance.toml, or refuses when the
                                        base digest changed; --dry-run validates and lists
-                                       the outputs without writing them
+                                       the outputs without writing them; --check reports drift
+                                       and writes nothing
   eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
   eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
                                        run eb-stack package bump or plan by subprocess only
@@ -469,7 +470,7 @@ Keep site recipe changes in a digest-pinned overlay file instead of copying an u
 
 | Subcommand | Meaning |
 |------------|---------|
-| =materialize= | Read =--overlay FILE= and =--base PATH=; write outputs under =--out-dir= (default: beside the overlay). =--dry-run= validates the inputs and lists both output paths without creating them. Exit 2 when the base digest drifted. |
+| =materialize= | Read =--overlay FILE= and =--base PATH=; write outputs under =--out-dir= (default: beside the overlay). =--dry-run= validates the inputs and lists both output paths without creating them. =--check= compares the materialized recipe and provenance against disk without writing, exiting 0 when up to date and 1 when either would update. Exit 2 when the base digest drifted or both =--dry-run= and =--check= are given. |
 | =bump= | Run =eb-stack package bump= with the arguments after =--=; =--eb-stack PATH= names the program when it is not on =PATH=. |
 | =plan= | Run =eb-stack package plan= the same way. |
 
@@ -576,7 +577,7 @@ A value with a quote, a backslash or a control character is refused.
 | Status  | Meaning                                                                                                                                         |
 |---------+-------------------------------------------------------------------------------------------------------------------------------------------------|
 | 0       | Done, or nothing to do.                                                                                                                         |
-| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =modulerc --check= would update the file; =clean= or =uninstall= had something to remove and no way to; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
+| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
 | 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file. |
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |

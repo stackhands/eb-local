@@ -32,6 +32,14 @@ eb-local overlay materialize --overlay site/OpenMPI.overlay.toml --base easyconf
 When the digest still matches, this writes =materialized-OpenMPI-4.1.6.eb= and =provenance.toml= beside the overlay (or under =--out-dir=).
 When upstream changed, it exits =2= and tells you to refresh using eb-stack.
 
+Check whether the materialized recipe and provenance on disk are still current without writing anything:
+
+#+begin_src shell
+eb-local overlay materialize --overlay site/OpenMPI.overlay.toml --base easyconfigs/OpenMPI-4.1.6.eb --check
+#+end_src
+
+This prints =up to date= and exits =0= when both files match, or prints =would update= and exits =1= when either is missing or drifted.
+
 * Rebase after upstream moves
 
 Run eb-stack through eb-local so this repository does not duplicate its logic:
