@@ -220,7 +220,20 @@ fn appendToArray(a: Allocator, text: []const u8, key: []const u8, entry: []const
         var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(a, text[0..close]);
         const inner = std.mem.trim(u8, text[start + 1 .. close], " \t\n\r");
-        if (inner.len > 0) try out.appendSlice(a, ",\n    ");
+        if (inner.len > 0) {
+            if (inner[inner.len - 1] == ',') {
+                if (close > 0 and text[close - 1] == '\n') {
+                    try out.appendSlice(a, "    ");
+                } else {
+                    try out.appendSlice(a, "\n    ");
+                }
+                try out.appendSlice(a, entry);
+                try out.appendSlice(a, ",\n");
+                try out.appendSlice(a, text[close..]);
+                return out.toOwnedSlice(a);
+            }
+            try out.appendSlice(a, ",\n    ");
+        }
         try out.appendSlice(a, entry);
         try out.appendSlice(a, text[close..]);
         return out.toOwnedSlice(a);
@@ -558,4 +571,21 @@ test "parameter replacement preserves leading indent when line has trailing spac
     var d: Diagnostic = .{};
     const out = try materialize(a, base, spec, &d);
     try std.testing.expectEqualStrings("  name = 'custom'\nversion = '2.0'\n", out);
+}
+
+test "appendToArray handles trailing commas without producing double commas" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "dependencies = [\n    ('zlib', '1.3'),\n]\n";
+    const digest = try sha256Hex(a, base);
+    const deps = [_]Dependency{.{ .action = "add", .name = "pkg", .spec = "('pkg', '1.0')" }};
+    const spec: Spec = .{
+        .base_digest = digest,
+        .dependencies = &deps,
+    };
+    var d: Diagnostic = .{};
+    const out = try materialize(a, base, spec, &d);
+    try std.testing.expect(std.mem.indexOf(u8, out, ",,") == null);
+    try std.testing.expectEqualStrings("dependencies = [\n    ('zlib', '1.3'),\n    ('pkg', '1.0'),\n]\n", out);
 }

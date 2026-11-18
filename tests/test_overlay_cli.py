@@ -365,6 +365,27 @@ class OverlayMaterialize(unittest.TestCase):
             ast.parse(text)
             self.assertEqual(text, "name = 'custom'\nversion = '2.0'\n")
 
+    def test_materialize_appends_to_trailing_comma_list_as_valid_python(self):
+        import ast
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"dependencies = [\n    ('zlib', '1.3'),\n]\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n'
+                '[dependencies.add]\npkg = "(\'pkg\', \'1.0\')"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            ast.parse(text)
+            self.assertNotIn(",,", text)
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
