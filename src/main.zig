@@ -103,13 +103,15 @@ const usage_text =
     \\                                       --mpi reports libfabric and UCX, and inside an
     \\                                       allocation runs a two-rank hello per approved transport
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
-    \\                      --timestamp FILE [--spider CMD]
+    \\                      --timestamp FILE [--spider CMD] [--verify]
     \\                                       write Lmod's spiderT.lua for those module
     \\                                       directories, and a timestamp one second
     \\                                       older, so Lmod trusts the cache. A spider
     \\                                       that fails leaves both files unchanged.
     \\                                       --spider names the spider program;
-    \\                                       default: spider. Does not read the site file
+    \\                                       default: spider. --verify compares
+    \\                                       cached and uncached module inventories.
+    \\                                       Does not read the site file
     \\  eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD]
     \\                      [--dry-run]
     \\                                       for every CPU target under DIR, refresh
@@ -3950,6 +3952,8 @@ pub fn main(init: std.process.Init) u8 {
                     cache.update_cmd = v;
                 } else if (std.mem.eql(u8, x, "--dry-run")) {
                     cache.dry_run = true;
+                } else if (std.mem.eql(u8, x, "--verify")) {
+                    cache.verify = true;
                 } else die("lmod-cache does not know '{s}'", .{x});
             },
             .modulerc => {
@@ -4101,7 +4105,7 @@ pub fn main(init: std.process.Init) u8 {
     if (g.explain and command != .build and command != .eb)
         die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
     // The cache is a pair of files. It does not read the site file.
-    if (command == .@"lmod-cache") return lmodcache.run(init.io, a, cache);
+    if (command == .@"lmod-cache") return lmodcache.run(init.io, a, c.env, cache);
     if (command == .overlay) {
         if (overlay_action.len == 0) die("overlay takes materialize, bump or plan", .{});
         if (std.mem.eql(u8, overlay_action, "materialize")) return recipe_overlay.runMaterialize(init.io, a, overlay_materialize);
