@@ -79,6 +79,25 @@ class Check(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f"=> {lib}/libdemo.so   [RPATH]", run.stdout)
 
+    def test_needed_origin_is_expanded_for_plain_and_recursive_checks(self):
+        (self.root / "lib.c").write_text("int f(void) { return 7; }\n")
+        (self.root / "main.c").write_text("int f(void);\nint main(void) { return f() == 7 ? 0 : 1; }\n")
+        lib = self.root / "liborigin.so"
+        prog = self.root / "origin_prog"
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-Wl,-soname,$ORIGIN/liborigin.so", "-o", str(lib), str(self.root / "lib.c")],
+            check=True,
+        )
+        subprocess.run(
+            [GCC, "-o", str(prog), str(self.root / "main.c"), str(lib), "-Wl,-rpath,$ORIGIN", "-Wl,--disable-new-dtags"],
+            check=True,
+        )
+        run = self.check("--recursive", "--quiet", "--json", prog)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        doc = json.loads(run.stdout)
+        paths = [f["path"] for f in doc["files"]]
+        self.assertIn(str(lib), paths)
+
     def test_a_library_found_only_through_ld_library_path_is_a_problem(self):
         lib = self.tree("x86_64/amd/zen4")
         prog = self.program(lib)
