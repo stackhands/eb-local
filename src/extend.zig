@@ -173,6 +173,10 @@ pub const script =
     \\  echo "eb-local: missing ${init}, the EESSI init; eb was not run." >&2
     \\  echo "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere." >&2
     \\  exit 2
+    \\elif [[ ! -f $init || ! -r $init ]]; then
+    \\  echo "eb-local: cannot read ${init}, the EESSI init; eb was not run." >&2
+    \\  echo "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere." >&2
+    \\  exit 2
     \\fi
     \\# shellcheck disable=SC1090
     \\source "$init"

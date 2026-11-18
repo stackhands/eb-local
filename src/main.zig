@@ -1012,7 +1012,11 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
         const trimmed = std.mem.trimEnd(u8, rt, "/");
         break :blk if (trimmed.len > 0) trimmed else rt;
     } else null;
-    const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
+    const raw_eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
+    const eprefix = if (raw_eprefix) |ep| blk: {
+        const trimmed = std.mem.trimEnd(u8, ep, "/");
+        break :blk if (trimmed.len > 0) trimmed else ep;
+    } else null;
     const machine = elfcheck.machineName(elf.machine);
     if (k.json) k.beginFile(a, path, machine);
     var shown = false;
@@ -2041,7 +2045,7 @@ fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
     die("cannot make a build workspace in the node-local mount {s} ({s}); nothing was built.\n" ++
-        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, @errorName(e), q(a, job_root) });
+        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, storage.describeError(e), q(a, job_root) });
 }
 
 // ---- clean ----------------------------------------------------------------
@@ -2325,7 +2329,7 @@ const lmod_init =
     \\if ! type module >/dev/null 2>&1; then
     \\    for eb_local_init in "${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash" /etc/profile.d/lmod.sh \
     \\        "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash"; do
-    \\        [ -r "$eb_local_init" ] && { . "$eb_local_init" >/dev/null; break; }
+    \\        [ -f "$eb_local_init" ] && [ -r "$eb_local_init" ] && { . "$eb_local_init" >/dev/null; break; }
     \\    done
     \\    unset eb_local_init
     \\fi
@@ -2356,6 +2360,8 @@ fn onModulePath(a: Allocator, modulepath: []const u8, name: []const u8) bool {
 }
 
 fn readable(path: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, path, true) catch return false;
+    if (!st.isReg()) return false;
     var zb: [sys.path_max:0]u8 = undefined;
     const zp = sys.z(&zb, path) catch return false;
     return linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.R_OK, 0)) == .SUCCESS;
@@ -2568,9 +2574,9 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
     out.appendSlice(a, " \"$SCRIPT\"") catch oom();
-    for (argv[5..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    for (argv[5..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
-    for (argv[6..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{build_script}) catch oom();
     cli.put(1, out.items);
     return 0;
@@ -2667,7 +2673,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const guard = Guard.hold();
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
-        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
+        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            workspaceFailed(a, job_root, e);
+        };
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
@@ -3200,7 +3209,12 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
         failed = true;
         break :blk null;
     };
-    if (available) |free| note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+    if (available) |free| {
+        if (free.bytes == 0 or free.inodes == 0) {
+            note(a, out, json_lines, "FAIL", "workspace {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ path, free.bytes, free.inodes });
+            failed = true;
+        } else note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+    }
     if (storage.hasMountOption(mount.options, "noexec")) {
         note(a, out, json_lines, "FAIL", "workspace {s}: mount {s} has noexec", .{ path, mount.target });
         failed = true;
@@ -3679,6 +3693,23 @@ fn jobNamePart(a: Allocator, s: []const u8) []const u8 {
     return out;
 }
 
+fn qSingleLine(a: Allocator, s: []const u8) []const u8 {
+    if (std.mem.indexOfAny(u8, s, "\n\r") == null) return q(a, s);
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, "$'") catch oom();
+    for (s) |ch| switch (ch) {
+        '\\' => out.appendSlice(a, "\\\\") catch oom(),
+        '\'' => out.appendSlice(a, "\\'") catch oom(),
+        '\n' => out.appendSlice(a, "\\n") catch oom(),
+        '\r' => out.appendSlice(a, "\\r") catch oom(),
+        '\t' => out.appendSlice(a, "\\t") catch oom(),
+        0...8, 11...12, 14...31, 127 => out.print(a, "\\x{x:0>2}", .{ch}) catch oom(),
+        else => out.append(a, ch) catch oom(),
+    };
+    out.append(a, '\'') catch oom();
+    return out.items;
+}
+
 /// The command a batch job runs to build: this program, the options that
 /// chose this configuration, and the recipe with its eb options as given.
 fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []const u8) []const u8 {
@@ -3686,11 +3717,11 @@ fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []c
     var self_buf: [sys.path_max]u8 = undefined;
     const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
     var line: std.ArrayList([]const u8) = .empty;
-    line.appendSlice(a, &.{ "exec", q(a, self) }) catch oom();
-    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", q(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
-    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", q(a, pr) }) catch oom();
-    if (p.project) line.appendSlice(a, &.{ "--project", q(a, p.prefix) }) catch oom();
-    for (args) |x| line.append(a, q(a, x)) catch oom();
+    line.appendSlice(a, &.{ "exec", qSingleLine(a, self) }) catch oom();
+    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", qSingleLine(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
+    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
+    if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
+    for (args) |x| line.append(a, qSingleLine(a, x)) catch oom();
     return std.mem.join(a, " ", line.items) catch oom();
 }
 
@@ -3702,10 +3733,10 @@ fn batchLines(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []c
     const a = c.a;
     const types = nodeTypes(s);
     if (types.len == 0) return &.{};
-    const wrap = q(a, jobCommand(c, s, g, p, args));
+    const wrap = qSingleLine(a, jobCommand(c, s, g, p, args));
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     var lines: std.ArrayList([]const u8) = .empty;
-    const dir = q(a, c.cwd);
+    const dir = qSingleLine(a, c.cwd);
     for (types) |t| lines.append(a, str(a, "sbatch {s} --job-name=eb-local-{s}-{s} --chdir={s} --output=%x-%j.out --wrap={s}", .{ t.sbatch, t.name, recipe, dir, wrap })) catch oom();
     return lines.items;
 }
@@ -4871,9 +4902,9 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
     out.appendSlice(a, " \"$SCRIPT\"") catch oom();
-    for (argv[5..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    for (argv[5..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
-    for (argv[6..]) |x| out.print(a, " {s}", .{q(a, x)}) catch oom();
+    for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
     cli.put(1, out.items);
     return 0;
