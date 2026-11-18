@@ -425,6 +425,7 @@ fn readInventory(
 ) VerifyInventoryError![]const []const u8 {
     var child_env = try env.clone(a);
     defer child_env.deinit();
+    for ([_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" }) |name| _ = child_env.swapRemove(name);
     try child_env.put("LMOD_RC", rc_path);
     try child_env.put("MODULEPATH", modulepath);
     if (ignore_cache) {

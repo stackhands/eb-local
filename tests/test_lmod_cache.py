@@ -255,6 +255,20 @@ class LmodCache(unittest.TestCase):
         self.assertEqual(got.returncode, 2, got.stderr)
         self.assertIn("not an absolute path", got.stderr)
 
+    def test_verify_ignores_caller_shell_startup_variables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache_dir, stamp = self.single_target(root)
+            env = self.verify_env(root, "GSL/2.8\n", "GSL/2.8\n")
+            startup = root / "bash_env.sh"
+            startup.write_text("echo 'injected noise on stdout'\n", encoding="utf-8")
+            env["BASH_ENV"] = str(startup)
+            env["SHELLOPTS"] = "xtrace"
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            self.assertTrue((cache_dir / "spiderT.lua").exists())
+            self.assertTrue(stamp.exists())
+
     def test_prefix_cannot_be_combined_with_single_target_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
