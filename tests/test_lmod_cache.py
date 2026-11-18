@@ -382,6 +382,81 @@ class LmodCache(unittest.TestCase):
             self.assertEqual(previous.read_text(), "previous\n")
             self.assertEqual(sorted(p.name for p in existing_cache.iterdir()), ["spiderT.lua"])
 
+    def test_verify_writes_atomically_refuses_symlink_and_rolls_back_on_timestamp_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, _, _ = self.single_target(root)
+            modules = root / "modules"
+            env = self.verify_env(root, "GSL/2.8\n", "GSL/2.8\n")
+
+            new_cache = root / "verify-missing" / "cache"
+            bad_stamp = root / "no-such-dir" / "timestamp"
+            got_new = run(
+                [
+                    "--modulepath",
+                    str(modules),
+                    "--cache-dir",
+                    str(new_cache),
+                    "--timestamp",
+                    str(bad_stamp),
+                    "--spider",
+                    str(root / "spider"),
+                    "--verify",
+                ],
+                env=env,
+            )
+            self.assertEqual(got_new.returncode, 1, got_new.stdout + got_new.stderr)
+            self.assertFalse(new_cache.parent.exists())
+
+            existing_cache = root / "verify-existing"
+            existing_cache.mkdir()
+            previous = existing_cache / "spiderT.lua"
+            previous.write_text("previous\n")
+            stamp_dir = root / "verify-stamp-dir"
+            stamp_dir.mkdir()
+            got_existing = run(
+                [
+                    "--modulepath",
+                    str(modules),
+                    "--cache-dir",
+                    str(existing_cache),
+                    "--timestamp",
+                    str(stamp_dir),
+                    "--spider",
+                    str(root / "spider"),
+                    "--verify",
+                ],
+                env=env,
+            )
+            self.assertEqual(got_existing.returncode, 1, got_existing.stdout + got_existing.stderr)
+            self.assertEqual(previous.read_text(), "previous\n")
+
+            sym_cache = root / "verify-symlink"
+            sym_cache.mkdir()
+            target = root / "outside-cache.lua"
+            target.write_text("outside\n")
+            link = sym_cache / "spiderT.lua"
+            link.symlink_to(target)
+            sym_stamp = root / "sym-stamp"
+            got_sym = run(
+                [
+                    "--modulepath",
+                    str(modules),
+                    "--cache-dir",
+                    str(sym_cache),
+                    "--timestamp",
+                    str(sym_stamp),
+                    "--spider",
+                    str(root / "spider"),
+                    "--verify",
+                ],
+                env=env,
+            )
+            self.assertEqual(got_sym.returncode, 1, got_sym.stdout + got_sym.stderr)
+            self.assertIn("symlink", got_sym.stderr)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_text(), "outside\n")
+
 
 if __name__ == "__main__":
     unittest.main()
