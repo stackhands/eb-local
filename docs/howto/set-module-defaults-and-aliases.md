@@ -51,6 +51,7 @@ would update MODULE_TREE/.modulerc.lua
 
 and exits 1.
 After the directive is present, it prints `up to date MODULE_TREE/.modulerc.lua` and exits 0.
+Add `--json` to any invocation to print one JSON document with `mode`, `changed`, and applied directives (plus `content` for `--dry-run`) instead of text.
 
 Existing lines stay in the file.
 Repeating the same command leaves the bytes unchanged.

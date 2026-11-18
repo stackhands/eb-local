@@ -24,7 +24,7 @@ eb-local [OPTION]... doctor [--json] [--workspace PATH]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
-                   [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
+                   [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check] [--json]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                            [--dry-run] [--delete] [--json]
 eb-local [OPTION]... config [--check | --env] [--json]
@@ -118,11 +118,12 @@ directory you own.
                                        --dry-run lists targets; existing
                                        --modulepath mode is unchanged
   eb-local modulerc --module-tree DIR [--default MODULE]...
-                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
+                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check] [--json]
                                        write DIR/.modulerc.lua with the
                                        defaults, aliases and hidden versions named;
                                        preserve other lines. --dry-run prints the file;
-                                       --check reports drift and writes nothing
+                                       --check reports drift and writes nothing;
+                                       --json prints one line of JSON with schema_version 1
   eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                  [--dry-run] [--delete] [--json]
                                        remove what eb-local left behind; --no-logs
@@ -454,9 +455,11 @@ Existing lines are preserved, and a line already present is not duplicated.
 | `--hide MODULE` | Add `hide_version("MODULE")`. Repeatable. |
 | `--dry-run` | Print the complete resulting file and leave the tree unchanged. |
 | `--check` | Print whether the requested directives would update the file, write nothing, and exit 1 when they would. |
+| `--json` | Print one JSON document with `schema_version` 1 instead of text; see [modulerc.schema.json](json/modulerc.schema.json). |
 
 At least one directive option is required.
 `--dry-run` and `--check` cannot be used together.
+`--json` works with write, `--dry-run` (including `content` in the JSON) and `--check` (keeping exit 1 on drift).
 Running the same command again produces identical file contents.
 This command does not read the site file; `--profile`, `--project` and `--config` are accepted and ignored.
 

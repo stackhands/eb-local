@@ -201,6 +201,59 @@ class JsonCli(StorageFixture):
         self.assertEqual(trashed["removed_items"], 1)
         self.assertEqual(trashed_log.read_text().splitlines(), [str(trashed_file)])
 
+    def test_modulerc_json_matches_schema(self):
+        schema = load_schema("modulerc.schema.json")
+        tree = self.root / "modulerc-tree"
+        control = tree / ".modulerc.lua"
+        base_args = [
+            "modulerc",
+            "--module-tree",
+            str(tree),
+            "--default",
+            "Example/2.0",
+            "--alias",
+            "Example/latest=Example/2.0",
+            "--hide",
+            "Example/1.0",
+        ]
+
+        drift = self.run_json([*base_args, "--check", "--json"], allow_fail=True, SLURM_JOB_ID="")
+        argv, env = binary.command(self.script, [*base_args, "--check", "--json"], dict(self.env, SLURM_JOB_ID=""))
+        drift_proc = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual((drift_proc.returncode, drift_proc.stderr), (1, ""))
+        validate(drift, schema)
+        self.assertEqual(set(drift.keys()), set(schema["properties"].keys()))
+        self.assertEqual(drift["mode"], "check")
+        self.assertTrue(drift["changed"])
+        self.assertIsNone(drift["content"])
+        self.assertEqual(drift["defaults"], ["Example/2.0"])
+        self.assertEqual(drift["aliases"], [{"name": "Example/latest", "target": "Example/2.0"}])
+        self.assertEqual(drift["hidden"], ["Example/1.0"])
+        self.assertFalse(tree.exists())
+
+        dry = self.run_json([*base_args, "--dry-run", "--json"], SLURM_JOB_ID="")
+        validate(dry, schema)
+        self.assertEqual(set(dry.keys()), set(schema["properties"].keys()))
+        self.assertEqual(dry["mode"], "dry-run")
+        self.assertTrue(dry["changed"])
+        self.assertIn('module_version("Example/2.0", "default")', dry["content"])
+        self.assertFalse(tree.exists())
+
+        wrote = self.run_json([*base_args, "--json"], SLURM_JOB_ID="")
+        validate(wrote, schema)
+        self.assertEqual(set(wrote.keys()), set(schema["properties"].keys()))
+        self.assertEqual(wrote["mode"], "write")
+        self.assertTrue(wrote["changed"])
+        self.assertIsNone(wrote["content"])
+        self.assertEqual(wrote["file"], str(control))
+        self.assertTrue(control.is_file())
+
+        clean = self.run_json([*base_args, "--check", "--json"], SLURM_JOB_ID="")
+        validate(clean, schema)
+        self.assertEqual(clean["mode"], "check")
+        self.assertFalse(clean["changed"])
+        self.assertIsNone(clean["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

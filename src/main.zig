@@ -121,11 +121,12 @@ const usage_text =
     \\                                       --dry-run lists targets; existing
     \\                                       --modulepath mode is unchanged
     \\  eb-local modulerc --module-tree DIR [--default MODULE]...
-    \\                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
+    \\                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check] [--json]
     \\                                       write DIR/.modulerc.lua with the
     \\                                       defaults, aliases and hidden versions named;
     \\                                       preserve other lines. --dry-run prints the file;
-    \\                                       --check reports drift and writes nothing
+    \\                                       --check reports drift and writes nothing;
+    \\                                       --json prints one line of JSON with schema_version 1
     \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
     \\                 [--dry-run] [--delete] [--json]
     \\                                       remove what eb-local left behind; --no-logs
@@ -4049,6 +4050,8 @@ pub fn main(init: std.process.Init) u8 {
                     modulerc_dry_run = true;
                 } else if (std.mem.eql(u8, x, "--check")) {
                     modulerc_check = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
                 } else die("modulerc does not know '{s}'", .{x});
             },
             .overlay => {
@@ -4204,6 +4207,7 @@ pub fn main(init: std.process.Init) u8 {
             .hidden = module_hidden.items,
             .dry_run = modulerc_dry_run,
             .check = modulerc_check,
+            .json = g.json_out,
         });
     }
     if (command == .profiles) return cmdProfiles(c, g);

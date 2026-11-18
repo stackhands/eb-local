@@ -25,18 +25,35 @@ class Modulerc(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp) / "modules"
             control = tree / ".modulerc.lua"
-            got = run(
-                [
-                    "--module-tree",
-                    str(tree),
-                    "--default",
-                    "Example/2.0",
-                ],
-                text=False,
+            args = [
+                "--module-tree",
+                str(tree),
+                "--default",
+                "Example/2.0",
+            ]
+
+            check_drift = run([*args, "--check"], text=False)
+            self.assertEqual(
+                (check_drift.returncode, check_drift.stdout, check_drift.stderr),
+                (1, f"would update {control}\n".encode(), b""),
             )
+
+            dry = run([*args, "--dry-run"], text=False)
+            self.assertEqual(
+                (dry.returncode, dry.stdout, dry.stderr),
+                (0, b'module_version("Example/2.0", "default")\n', b""),
+            )
+
+            got = run(args, text=False)
             self.assertEqual(
                 (got.returncode, got.stdout, got.stderr),
                 (0, f"wrote {control}\n".encode(), b""),
+            )
+
+            check_ok = run([*args, "--check"], text=False)
+            self.assertEqual(
+                (check_ok.returncode, check_ok.stdout, check_ok.stderr),
+                (0, f"up to date {control}\n".encode(), b""),
             )
 
     def test_check_reports_drift_without_creating_the_tree(self):
