@@ -286,6 +286,10 @@ pub fn runUpdate(io: std.Io, a: std.mem.Allocator, update_cmd: []const u8, targe
 }
 
 fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
+    if (opts.spider.len != 0) {
+        fail("--spider applies only with --modulepath, --cache-dir and --timestamp", .{});
+        return 2;
+    }
     if (opts.verify) {
         fail("--verify applies only with --modulepath, --cache-dir and --timestamp", .{});
         return 2;
@@ -567,6 +571,10 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     }
     if (opts.dry_run) {
         fail("--dry-run applies only with --prefix", .{});
+        return 2;
+    }
+    if (opts.eessi_version.len != 0 or opts.update_cmd.len != 0) {
+        fail("--eessi-version and --update-cmd apply only with --prefix", .{});
         return 2;
     }
     if (opts.modulepath.len == 0 or opts.cache_dir.len == 0 or opts.timestamp.len == 0) {
