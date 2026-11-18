@@ -411,7 +411,7 @@ With =--json=, exit 1 still means a =FAIL= line appeared; scripts read =failed= 
 Write =spiderT.lua= in =--cache-dir= from Lmod's =spider -o spiderT=, for every directory in =--modulepath=, then set =--timestamp= one second older than that file.
 Lmod treats a newer timestamp as a stale cache and does not show the modules the cache names.
 A =spider= that cannot start, exits non-zero, or writes nothing leaves the cache and the timestamp as they were.
-With =--verify=, the command first writes the candidate to a temporary directory beside the cache.
+With =--verify=, the command first writes the candidate to a temporary directory inside =--cache-dir=.
 It points a temporary =LMOD_RC= at the candidate and compares normalized output from =module --terse avail= with and without =LMOD_IGNORE_CACHE=yes=.
 It atomically replaces =spiderT.lua= only when both inventories parse and match.
 An inventory mismatch or parsing failure leaves the previous cache and timestamp unchanged.
@@ -433,7 +433,7 @@ It does not read the site file. =--profile=, =--project= and =--config= are acce
 | =--update-cmd CMD= | Lmod's =update_lmod_system_cache_files= program. Default: =DIR/compat/linux/$(uname -m)/usr/share/Lmod/libexec/update_lmod_system_cache_files=. |
 | =--dry-run= | With =--prefix=, list targets only. |
 
-Exit 0 means both files were written or every prefix target was updated. Exit 2 is a missing or relative path. Exit 127 means =spider= or the cache updater could not be started. Any other exit is the child program's, and caches are left as they were on failure.
+Exit 0 means both files were written or every prefix target was updated. Exit 2 is a missing or relative path. Exit 127 means =spider=, the cache updater, or =module= with =--verify= could not be started. Any other exit is the child program's, and caches are left as they were on failure.
 
 ** modulerc
 

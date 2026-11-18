@@ -197,6 +197,26 @@ class LmodCache(unittest.TestCase):
             self.assertEqual(stamp.read_text(), "old\n")
             self.assertEqual(sorted(path.name for path in cache.iterdir()), ["spiderT.lua"])
 
+    def test_verify_cleans_missing_cache_dir_and_reports_missing_module_command(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root)
+            self.assertFalse(cache.exists())
+            only_bash = root / "only-bash"
+            only_bash.mkdir()
+            (only_bash / "bash").symlink_to(shutil.which("bash"))
+            env = {
+                **os.environ,
+                "PATH": str(only_bash),
+                "LMOD_CMD": "",
+            }
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 127, got.stderr)
+            self.assertIn("module command not found", got.stderr)
+            self.assertFalse(cache.exists())
+            self.assertFalse(stamp.exists())
+
     def test_a_failed_spider_leaves_the_previous_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

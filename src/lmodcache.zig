@@ -337,6 +337,7 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
 }
 
 const InventoryError = error{InvalidInventory} || std.mem.Allocator.Error;
+const VerifyInventoryError = error{ModuleNotFound} || InventoryError || std.process.RunError;
 
 fn inventoryLess(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
@@ -412,7 +413,7 @@ fn readInventory(
     rc_path: []const u8,
     modulepath: []const u8,
     ignore_cache: bool,
-) ![]const []const u8 {
+) VerifyInventoryError![]const []const u8 {
     var child_env = try env.clone(a);
     defer child_env.deinit();
     try child_env.put("LMOD_RC", rc_path);
@@ -428,7 +429,10 @@ fn readInventory(
         .stdout_limit = .limited(8 * 1024 * 1024),
         .stderr_limit = .limited(8 * 1024 * 1024),
     });
-    if (!ran.term.success()) return error.InvalidInventory;
+    switch (ran.term) {
+        .exited => |code| if (code == 127) return error.ModuleNotFound else if (code != 0) return error.InvalidInventory,
+        else => return error.InvalidInventory,
+    }
     const combined = try std.mem.concat(a, u8, &.{ ran.stdout, ran.stderr });
     return normalizeInventory(a, combined);
 }
@@ -507,13 +511,25 @@ fn installVerified(
         fail("cannot write {s}: {s}", .{ rc_path, @errorName(err) });
         return 1;
     };
-    const cached = readInventory(io, a, env, rc_path, opts.modulepath, false) catch {
-        fail("cannot parse the candidate cache inventory; the cache was not changed", .{});
-        return 1;
+    const cached = readInventory(io, a, env, rc_path, opts.modulepath, false) catch |err| switch (err) {
+        error.ModuleNotFound => {
+            fail("module command not found; the cache was not changed", .{});
+            return 127;
+        },
+        else => {
+            fail("cannot parse the candidate cache inventory; the cache was not changed", .{});
+            return 1;
+        },
     };
-    const uncached = readInventory(io, a, env, rc_path, opts.modulepath, true) catch {
-        fail("cannot parse the uncached module inventory; the cache was not changed", .{});
-        return 1;
+    const uncached = readInventory(io, a, env, rc_path, opts.modulepath, true) catch |err| switch (err) {
+        error.ModuleNotFound => {
+            fail("module command not found; the cache was not changed", .{});
+            return 127;
+        },
+        else => {
+            fail("cannot parse the uncached module inventory; the cache was not changed", .{});
+            return 1;
+        },
     };
     if (!sameInventory(cached, uncached)) {
         fail("candidate and uncached module inventories differ; the cache was not changed", .{});
@@ -585,6 +601,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         return 1;
     }
     const cwd = std.Io.Dir.cwd();
+    var first_missing: ?[]const u8 = null;
+    {
+        var probe: []const u8 = opts.cache_dir;
+        while (probe.len > 1 and !isDir(probe)) {
+            first_missing = probe;
+            probe = std.fs.path.dirname(probe) orelse break;
+        }
+    }
     cwd.createDirPath(io, opts.cache_dir) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.cache_dir, @errorName(err) });
         return 1;
@@ -593,7 +617,10 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     const tmp_path = std.fmt.allocPrint(a, "{s}.new", .{cache_path}) catch return 1;
     if (opts.verify) {
         const code = installVerified(io, a, env, opts, cache_path, ran.stdout);
-        if (code != 0) return code;
+        if (code != 0) {
+            if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
+            return code;
+        }
     } else {
         cwd.writeFile(io, .{ .sub_path = tmp_path, .data = ran.stdout }) catch |err| {
             fail("cannot write {s}: {s}", .{ tmp_path, @errorName(err) });
