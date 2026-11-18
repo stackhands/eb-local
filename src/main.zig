@@ -4576,19 +4576,23 @@ pub fn main(init: std.process.Init) u8 {
                     module_tree = value(args, &i, "--module-tree");
                 } else if (joined(x, "--module-tree")) |v| {
                     module_tree = v;
-                } else if (std.mem.eql(u8, x, "--default")) {
-                    module_defaults.append(a, value(args, &i, "--default")) catch oom();
-                } else if (joined(x, "--default")) |v| {
-                    module_defaults.append(a, v) catch oom();
+                } else if (std.mem.eql(u8, x, "--default") or joined(x, "--default") != null) {
+                    const m = if (joined(x, "--default")) |v| v else value(args, &i, "--default");
+                    if (!config.validModule(m)) die("'{s}' is not a module name", .{m});
+                    module_defaults.append(a, m) catch oom();
                 } else if (std.mem.eql(u8, x, "--alias") or joined(x, "--alias") != null) {
                     const spec = if (joined(x, "--alias")) |v| v else value(args, &i, "--alias");
                     const equal = std.mem.indexOfScalar(u8, spec, '=') orelse die("--alias needs NAME=MODULE", .{});
                     if (equal == 0 or equal + 1 == spec.len) die("--alias needs NAME=MODULE", .{});
-                    module_aliases.append(a, .{ .name = spec[0..equal], .target = spec[equal + 1 ..] }) catch oom();
-                } else if (std.mem.eql(u8, x, "--hide")) {
-                    module_hidden.append(a, value(args, &i, "--hide")) catch oom();
-                } else if (joined(x, "--hide")) |v| {
-                    module_hidden.append(a, v) catch oom();
+                    const alias_name = spec[0..equal];
+                    const alias_target = spec[equal + 1 ..];
+                    if (!config.validModule(alias_name)) die("'{s}' is not a module name", .{alias_name});
+                    if (!config.validModule(alias_target)) die("'{s}' is not a module name", .{alias_target});
+                    module_aliases.append(a, .{ .name = alias_name, .target = alias_target }) catch oom();
+                } else if (std.mem.eql(u8, x, "--hide") or joined(x, "--hide") != null) {
+                    const m = if (joined(x, "--hide")) |v| v else value(args, &i, "--hide");
+                    if (!config.validModule(m)) die("'{s}' is not a module name", .{m});
+                    module_hidden.append(a, m) catch oom();
                 } else if (std.mem.eql(u8, x, "--dry-run")) {
                     modulerc_dry_run = true;
                 } else if (std.mem.eql(u8, x, "--check")) {
