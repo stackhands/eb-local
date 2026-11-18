@@ -1,0 +1,1 @@
+`eb-local modulerc` now writes `.modulerc.lua` via `atomicWrite` and cleans up any newly created module tree directory on failure, refusing to replace symlinks and leaving no `.new` temporary file behind.

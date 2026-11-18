@@ -185,6 +185,23 @@ class Modulerc(unittest.TestCase):
             self.assertEqual(got.stdout, "")
             self.assertIn("eb-local: cannot read ", got.stderr)
 
+    def test_refuses_to_replace_symlink_and_leaves_no_temp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "outside.lua"
+            target.write_text("-- external\n", encoding="utf-8")
+            tree = root / "modules"
+            tree.mkdir()
+            control = tree / ".modulerc.lua"
+            control.symlink_to(target)
+
+            got = run(["--module-tree", str(tree), "--default", "Example/2.0"])
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertIn("symlink", got.stderr)
+            self.assertTrue(control.is_symlink())
+            self.assertEqual(target.read_text(encoding="utf-8"), "-- external\n")
+            self.assertEqual(sorted(p.name for p in tree.iterdir()), [".modulerc.lua"])
+
 
 if __name__ == "__main__":
     unittest.main()
