@@ -4419,6 +4419,8 @@ pub fn main(init: std.process.Init) u8 {
                     submit.on = joined(x, "--on").?;
                 } else if (rest.items.len == 0 and std.mem.eql(u8, x, "--print")) {
                     submit.print = true;
+                } else if (rest.items.len == 0 and x.len > 0 and x[0] == '-') {
+                    die("submit does not know '{s}'", .{x});
                 } else rest.append(a, x) catch oom();
             },
             .list => {
