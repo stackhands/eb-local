@@ -344,7 +344,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     var od: Diagnostic = .{};
     const overlay_text = cwd.readFileAlloc(io, opts.overlay_path, a, .limited(4 * 1024 * 1024)) catch |err| {
         failMsg("cannot read {s}: {s}", .{ opts.overlay_path, @errorName(err) });
-        return 1;
+        return 2;
     };
     const spec = parseSpec(a, overlay_text, &od) catch |e| switch (e) {
         error.Invalid => {
@@ -356,7 +356,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     };
     const base_text = cwd.readFileAlloc(io, opts.base_path, a, .limited(16 * 1024 * 1024)) catch |err| {
         failMsg("cannot read {s}: {s}", .{ opts.base_path, @errorName(err) });
-        return 1;
+        return 2;
     };
     const recipe = materialize(a, base_text, spec, &od) catch |e| switch (e) {
         error.DigestMismatch, error.Invalid => {
