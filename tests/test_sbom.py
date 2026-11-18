@@ -79,6 +79,26 @@ class Sbom(unittest.TestCase):
         names = {c["name"] for c in bom["components"]}
         self.assertIn("zig-common", names)
 
+    def test_ignores_commented_out_dependencies_in_zon(self):
+        zon = (
+            '.{\n'
+            '  .name = .eb_local,\n'
+            f'  .version = "{self.version}",\n'
+            '  .dependencies = .{\n'
+            '    // .old_dep = .{ .url = "https://example.org/old.tar.gz", .hash = "deadbeef" },\n'
+            '    .zig_common = .{\n'
+            '      .url = "git+https://github.com/stackhands/zig-common#v0.10.0",\n'
+            '      .hash = "zig_common-0.10.0-abc",\n'
+            '    },\n'
+            '  },\n'
+            '}\n'
+        )
+        run = self.generate(zon)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        bom = json.loads(run.stdout)
+        names = {c["name"] for c in bom["components"]}
+        self.assertEqual(names, {"zig-common", "musl"})
+
 
 if __name__ == "__main__":
     unittest.main()
