@@ -3215,6 +3215,10 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         }
         const hello = mpi.runHello(a, transport, mpicc, mpirun, work, c.env, c.envp) catch oom();
         const label = @tagName(transport);
+        if (hello.source_error) |msg| {
+            note(a, out, json_lines, "warn", "MPI hello could not be written ({s})", .{msg});
+            return;
+        }
         if (hello.missing_compiler) {
             note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
             return;
