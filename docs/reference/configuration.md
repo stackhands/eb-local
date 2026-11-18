@@ -141,7 +141,7 @@ Each value is one line of at most 4096 bytes.
 ### [secrets]
 
 A secret's name is the variable `eb` gets: letters, digits and `_`, not starting with a digit.
-It may not be `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `MODULEPATH`, `PYTHONPATH`, `BASH_ENV` or `ENV`, nor start with `LD_`, `EESSI_`, `EASYBUILD_`, `LMOD_`, `SLURM_`, `EB_LOCAL_` or `BASH_FUNC_`.
+It may not be `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `MODULEPATH`, `PYTHONPATH`, `BASH_ENV`, `ENV`, `SHELLOPTS` or `BASHOPTS`, nor start with `LD_`, `EESSI_`, `EASYBUILD_`, `LMOD_`, `SLURM_`, `EB_LOCAL_` or `BASH_FUNC_`.
 
 | Source | The value |
 |---|---|
