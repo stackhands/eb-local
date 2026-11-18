@@ -4149,6 +4149,10 @@ pub fn main(init: std.process.Init) u8 {
             for (args[i..]) |arg| rest.append(a, arg) catch oom();
             break;
         }
+        if (command == .overlay and overlay_passthrough) {
+            overlay_forward.append(a, x) catch oom();
+            continue;
+        }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
             cli.put(1, usage_text);
             return 0;
@@ -4297,9 +4301,7 @@ pub fn main(init: std.process.Init) u8 {
                 } else die("modulerc does not know '{s}'", .{x});
             },
             .overlay => {
-                if (overlay_passthrough) {
-                    overlay_forward.append(a, x) catch oom();
-                } else if (std.mem.eql(u8, x, "--")) {
+                if (std.mem.eql(u8, x, "--")) {
                     overlay_passthrough = true;
                 } else if (std.mem.eql(u8, x, "--overlay")) {
                     overlay_materialize.overlay_path = value(args, &i, "--overlay");
