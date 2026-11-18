@@ -270,6 +270,30 @@ class OverlayMaterialize(unittest.TestCase):
             )
             compile(recipe, "materialized-base.eb", "exec")
 
+    def test_append_to_array_with_trailing_inline_comment_stays_valid_python(self):
+        for body in (
+            b"dependencies = [\n    ('zlib', '1.3'), # compression\n]\n",
+            b"dependencies = [\n    ('zlib', '1.3') # compression\n]\n",
+        ):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(body)
+                (root / "site.overlay.toml").write_text(
+                    f'overlay_version = 1\nbase_digest = "{digest_of(body)}"\n'
+                    '\n[dependencies.add]\npkg = "(\'pkg\', \'1.0\')"\n',
+                    encoding="utf-8",
+                )
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+                compile(recipe, "materialized-base.eb", "exec")
+                ns = {}
+                exec(recipe, ns)
+                self.assertEqual(ns["dependencies"], [("zlib", "1.3"), ("pkg", "1.0")])
+
     def test_refuses_when_base_digest_changed(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.eb"
