@@ -178,6 +178,11 @@ class Check(unittest.TestCase):
         self.assertNotIn("other", run.stdout)
         self.assertEqual(run.stdout.count(str(tree / "bin" / "prog")), 1)
 
+        dup = self.check("--prefix", tree, "--prefix", self.root)
+        self.assertEqual(dup.returncode, 2, dup.stdout + dup.stderr)
+        self.assertEqual(dup.stdout, "")
+        self.assertIn("check takes one --prefix", dup.stderr)
+
     def test_quiet_prints_a_file_only_when_it_has_a_problem(self):
         tree = self.install_elf("-Wl,--enable-new-dtags", dest="noisy")
         run = self.check("--prefix", tree, "--quiet")
