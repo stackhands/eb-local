@@ -48,38 +48,38 @@ fn fail(a: Allocator, d: *Diagnostic, comptime fmt: []const u8, args: anytype) E
     return error.Invalid;
 }
 
-fn expectString(e: *const toml.Entry, d: *Diagnostic) Error![]const u8 {
+fn expectString(a: Allocator, e: *const toml.Entry, d: *Diagnostic) Error![]const u8 {
     return switch (e.value) {
         .string => |s| s,
         else => {
             d.line = e.line;
-            return fail(std.heap.page_allocator, d, "{s} must be a string", .{e.key});
+            return fail(a, d, "{s} must be a string", .{e.key});
         },
     };
 }
 
-fn tableString(t: *const toml.Table, key: []const u8, d: *Diagnostic) Error!?[]const u8 {
+fn tableString(a: Allocator, t: *const toml.Table, key: []const u8, d: *Diagnostic) Error!?[]const u8 {
     const e = t.get(key) orelse return null;
-    return try expectString(e, d);
+    return try expectString(a, e, d);
 }
 
 fn walkTable(a: Allocator, t: *const toml.Table, d: *Diagnostic, out: *std.ArrayList(Parameter)) Error!void {
     for (t.entries.items) |*e| {
-        const value = try expectString(e, d);
+        const value = try expectString(a, e, d);
         try out.append(a, .{ .name = e.key, .value = value });
     }
 }
 
 fn walkPatches(a: Allocator, t: *const toml.Table, d: *Diagnostic, out: *std.ArrayList(Patch)) Error!void {
     for (t.entries.items) |*e| {
-        const file = try expectString(e, d);
+        const file = try expectString(a, e, d);
         try out.append(a, .{ .name = e.key, .file = file });
     }
 }
 
 fn walkDependencies(a: Allocator, t: *const toml.Table, action: []const u8, d: *Diagnostic, out: *std.ArrayList(Dependency)) Error!void {
     for (t.entries.items) |*e| {
-        const spec = try expectString(e, d);
+        const spec = try expectString(a, e, d);
         try out.append(a, .{ .action = action, .name = e.key, .spec = spec });
     }
 }
@@ -93,13 +93,13 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
         d.message = std.fmt.allocPrint(a, "{s}", .{td.message}) catch return error.OutOfMemory;
         return error.Invalid;
     };
-    const digest = (try tableString(root, "base_digest", d)) orelse return fail(a, d, "base_digest is required", .{});
+    const digest = (try tableString(a, root, "base_digest", d)) orelse return fail(a, d, "base_digest is required", .{});
     if (digest.len != 64) return fail(a, d, "base_digest must be a SHA-256 hex digest (64 characters)", .{});
     for (digest) |ch| if (!std.ascii.isHex(ch)) return fail(a, d, "base_digest must be a SHA-256 hex digest", .{});
     var spec: Spec = .{
         .base_digest = digest,
-        .base_easyconfig = (try tableString(root, "base_easyconfig", d)) orelse "",
-        .rationale = (try tableString(root, "rationale", d)) orelse "",
+        .base_easyconfig = (try tableString(a, root, "base_easyconfig", d)) orelse "",
+        .rationale = (try tableString(a, root, "rationale", d)) orelse "",
     };
     if (root.get("overlay_version")) |e| {
         spec.overlay_version = switch (e.value) {
@@ -158,7 +158,7 @@ fn lineSetsParameter(line: []const u8, name: []const u8) bool {
     return std.mem.startsWith(u8, rest, "=");
 }
 
-fn replaceParameter(a: Allocator, text: []const u8, param: Parameter) Error![]u8 {
+fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     var replaced = false;
@@ -174,10 +174,7 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter) Error![]u8
         }
         if (lines.peek() != null) try out.append(a, '\n');
     }
-    if (!replaced) {
-        var local: Diagnostic = .{};
-        return fail(a, &local, "easyconfig has no parameter '{s}' to replace", .{param.name});
-    }
+    if (!replaced) return fail(a, d, "easyconfig has no parameter '{s}' to replace", .{param.name});
     return out.toOwnedSlice(a);
 }
 
@@ -216,12 +213,10 @@ fn findMatchingBracket(text: []const u8, open: usize) ?usize {
     return null;
 }
 
-fn appendToArray(a: Allocator, text: []const u8, key: []const u8, entry: []const u8) Error![]u8 {
+fn appendToArray(a: Allocator, text: []const u8, key: []const u8, entry: []const u8, d: *Diagnostic) Error![]u8 {
     if (findArrayStart(text, key)) |start| {
-        const close = findMatchingBracket(text, start) orelse {
-            var local: Diagnostic = .{};
-            return fail(a, &local, "easyconfig {s} list has no closing bracket", .{key});
-        };
+        const close = findMatchingBracket(text, start) orelse
+            return fail(a, d, "easyconfig {s} list has no closing bracket", .{key});
         var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(a, text[0..close]);
         const inner = std.mem.trim(u8, text[start + 1 .. close], " \t\n\r");
@@ -242,15 +237,14 @@ fn patchEntry(a: Allocator, p: Patch) ![]const u8 {
     return std.fmt.allocPrint(a, "('{s}', '{s}')", .{ p.name, p.file });
 }
 
-fn replaceDependency(a: Allocator, text: []const u8, dep: Dependency) Error![]u8 {
+fn replaceDependency(a: Allocator, text: []const u8, dep: Dependency, d: *Diagnostic) Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     const needle = try std.fmt.allocPrint(a, "('{s}',", .{dep.name});
-    const idx = std.mem.indexOf(u8, text, needle) orelse {
-        var local: Diagnostic = .{};
-        return fail(a, &local, "easyconfig has no dependency '{s}' to replace", .{dep.name});
-    };
+    const idx = std.mem.indexOf(u8, text, needle) orelse
+        return fail(a, d, "easyconfig has no dependency '{s}' to replace", .{dep.name});
     const start = idx;
-    const end = std.mem.indexOfPos(u8, text, start, ")") orelse return error.Invalid;
+    const end = std.mem.indexOfPos(u8, text, start, ")") orelse
+        return fail(a, d, "easyconfig dependency '{s}' has no closing parenthesis", .{dep.name});
     try out.appendSlice(a, text[0..start]);
     try out.appendSlice(a, dep.spec);
     try out.appendSlice(a, text[end + 1 ..]);
@@ -268,21 +262,21 @@ pub fn materialize(a: Allocator, base_text: []const u8, spec: Spec, d: *Diagnost
     var text = try a.dupe(u8, base_text);
     if (spec.parameters.len == 0 and spec.patches.len == 0 and spec.dependencies.len == 0) return text;
     for (spec.parameters) |p| {
-        const next = try replaceParameter(a, text, p);
+        const next = try replaceParameter(a, text, p, d);
         a.free(text);
         text = next;
     }
     for (spec.patches) |p| {
         const entry = try patchEntry(a, p);
-        const next = try appendToArray(a, text, "patches", entry);
+        const next = try appendToArray(a, text, "patches", entry, d);
         a.free(text);
         text = next;
     }
     for (spec.dependencies) |dep| {
         const next = if (std.mem.eql(u8, dep.action, "replace"))
-            try replaceDependency(a, text, dep)
+            try replaceDependency(a, text, dep, d)
         else
-            try appendToArray(a, text, "dependencies", dep.spec);
+            try appendToArray(a, text, "dependencies", dep.spec, d);
         a.free(text);
         text = next;
     }
@@ -366,7 +360,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     };
     const recipe = materialize(a, base_text, spec, &od) catch |e| switch (e) {
         error.DigestMismatch, error.Invalid => {
-            failMsg("{s}", .{od.message});
+            failMsg("{s}", .{if (od.message.len > 0) od.message else "overlay cannot be materialized"});
             return 2;
         },
         error.OutOfMemory => return 1,
@@ -501,4 +495,49 @@ test "parameter replacement" {
     var d: Diagnostic = .{};
     const out = try materialize(a, base, spec, &d);
     try std.testing.expectEqualStrings("preconfigopts = '--new'\n", out);
+}
+
+test "materialize populates diagnostic on failing edits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Non-string parameter value allocates diagnostic in caller arena.
+    var bad_spec_diag: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, parseSpec(a, "base_digest = 123\n", &bad_spec_diag));
+    try std.testing.expectEqualStrings("base_digest must be a string", bad_spec_diag.message);
+
+    // Parameter lookup failure populates diagnostic.
+    const base_param = "name = 'demo'\n";
+    var d1: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, materialize(a, base_param, .{
+        .base_digest = try sha256Hex(a, base_param),
+        .parameters = &.{.{ .name = "preconfigopts", .value = "'--new'" }},
+    }, &d1));
+    try std.testing.expectEqualStrings("easyconfig has no parameter 'preconfigopts' to replace", d1.message);
+
+    // Unclosed array bracket populates diagnostic.
+    const base_arr = "patches = [\n    'a.patch',\n";
+    var d2: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, materialize(a, base_arr, .{
+        .base_digest = try sha256Hex(a, base_arr),
+        .patches = &.{.{ .name = "site", .file = "site.patch" }},
+    }, &d2));
+    try std.testing.expectEqualStrings("easyconfig patches list has no closing bracket", d2.message);
+
+    // Dependency lookup failure and unclosed tuple both populate diagnostic.
+    var d3: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, materialize(a, base_param, .{
+        .base_digest = try sha256Hex(a, base_param),
+        .dependencies = &.{.{ .action = "replace", .name = "zlib", .spec = "('zlib', '1.3')" }},
+    }, &d3));
+    try std.testing.expectEqualStrings("easyconfig has no dependency 'zlib' to replace", d3.message);
+
+    const base_dep = "dependencies = [('zlib', '1.2'\n";
+    var d4: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, materialize(a, base_dep, .{
+        .base_digest = try sha256Hex(a, base_dep),
+        .dependencies = &.{.{ .action = "replace", .name = "zlib", .spec = "('zlib', '1.3')" }},
+    }, &d4));
+    try std.testing.expectEqualStrings("easyconfig dependency 'zlib' has no closing parenthesis", d4.message);
 }

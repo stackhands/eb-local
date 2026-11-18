@@ -286,6 +286,42 @@ class OverlayMaterialize(unittest.TestCase):
         joined = got.stdout.replace("\n", " ")
         self.assertIn("package bump", joined)
 
+    def test_materialize_reports_diagnostics_when_edits_fail(self):
+        cases = [
+            (
+                b"name = 'demo'\n",
+                '[replace]\nunknown_param = "\'--foo\'"\n',
+                "eb-local: easyconfig has no parameter 'unknown_param' to replace",
+            ),
+            (
+                b"patches = [\n    'a.patch',\n",
+                '[patches]\nsite = "site.patch"\n',
+                "eb-local: easyconfig patches list has no closing bracket",
+            ),
+            (
+                b"dependencies = [('other', '1.0')]\n",
+                '[dependencies.replace]\nunknown_dep = "(\'unknown_dep\', \'2.0\')"\n',
+                "eb-local: easyconfig has no dependency 'unknown_dep' to replace",
+            ),
+            (
+                b"dependencies = [('zlib', '1.0'\n",
+                '[dependencies.replace]\nzlib = "(\'zlib\', \'1.2\')"\n',
+                "eb-local: easyconfig dependency 'zlib' has no closing parenthesis",
+            ),
+        ]
+        for base_bytes, section, expected_err in cases:
+            with self.subTest(expected_err=expected_err), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(
+                    f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n{section}',
+                    encoding="utf-8",
+                )
+                got = run(["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb"], cwd=root)
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(expected_err, got.stderr)
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
