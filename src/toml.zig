@@ -150,7 +150,7 @@ const Parser = struct {
     fn keyPart(p: *Parser) Error![]const u8 {
         p.skipSpace();
         const c = p.peek() orelse return p.fail("a key is missing", .{});
-        if (c == '"') return p.basicString();
+        if (c == '"') return p.basicString(false);
         if (c == '\'') return p.literalString();
         const start = p.pos;
         while (p.peek()) |d| {
@@ -174,18 +174,85 @@ const Parser = struct {
         return parts.items;
     }
 
-    fn basicString(p: *Parser) Error![]const u8 {
+    fn skipLineEndingBackslash(p: *Parser) bool {
+        var look = p.pos;
+        while (look < p.src.len and (p.src[look] == ' ' or p.src[look] == '\t')) look += 1;
+        if (look < p.src.len and p.src[look] == '\r' and look + 1 < p.src.len and p.src[look + 1] == '\n') {
+            look += 2;
+        } else if (look < p.src.len and p.src[look] == '\n') {
+            look += 1;
+        } else {
+            return false;
+        }
+        p.pos = look;
+        p.line += 1;
+        while (p.pos < p.src.len) {
+            const c = p.src[p.pos];
+            if (c == ' ' or c == '\t') {
+                p.pos += 1;
+            } else if (c == '\n') {
+                p.pos += 1;
+                p.line += 1;
+            } else if (c == '\r' and p.pos + 1 < p.src.len and p.src[p.pos + 1] == '\n') {
+                p.pos += 2;
+                p.line += 1;
+            } else {
+                break;
+            }
+        }
+        return true;
+    }
+
+    fn basicString(p: *Parser, allow_multiline: bool) Error![]const u8 {
         p.pos += 1; // opening quote
-        if (p.pos + 1 < p.src.len and p.src[p.pos] == '"' and p.src[p.pos + 1] == '"')
-            return p.fail("multi-line strings are not supported", .{});
+        const multiline = p.pos + 1 < p.src.len and p.src[p.pos] == '"' and p.src[p.pos + 1] == '"';
+        if (multiline) {
+            if (!allow_multiline) return p.fail("multi-line strings are not supported", .{});
+            p.pos += 2;
+            // TOML 1.0 trims a single newline immediately after opening `"""`.
+            if (p.peek() == '\r' and p.pos + 1 < p.src.len and p.src[p.pos + 1] == '\n') {
+                p.pos += 2;
+                p.line += 1;
+            } else if (p.peek() == '\n') {
+                p.pos += 1;
+                p.line += 1;
+            }
+        }
         var out: std.ArrayList(u8) = .empty;
         while (true) {
             const c = p.peek() orelse return p.fail("a string is not closed", .{});
             p.pos += 1;
             switch (c) {
-                '"' => return out.items,
-                '\n' => return p.fail("a string is not closed on its line", .{}),
+                '"' => {
+                    if (!multiline) return out.items;
+                    var extra: usize = 0;
+                    while (p.peek() == '"' and extra < 5) : (extra += 1) p.pos += 1;
+                    const total = 1 + extra;
+                    if (total < 3) {
+                        try out.appendNTimes(p.a, '"', total);
+                    } else if (total <= 5) {
+                        try out.appendNTimes(p.a, '"', total - 3);
+                        return out.items;
+                    } else {
+                        return p.fail("too many quotes in a multi-line string", .{});
+                    }
+                },
+                '\n' => {
+                    if (!multiline) return p.fail("a string is not closed on its line", .{});
+                    try out.append(p.a, '\n');
+                    p.line += 1;
+                },
+                '\r' => {
+                    if (multiline and p.peek() == '\n') {
+                        p.pos += 1;
+                        try out.appendSlice(p.a, "\r\n");
+                        p.line += 1;
+                    } else {
+                        return p.fail("a control character is in a string", .{});
+                    }
+                },
                 '\\' => {
+                    if (multiline and p.skipLineEndingBackslash()) continue;
                     const e = p.peek() orelse return p.fail("a string is not closed", .{});
                     p.pos += 1;
                     switch (e) {
@@ -241,7 +308,7 @@ const Parser = struct {
         p.skipSpace();
         const c = p.peek() orelse return p.fail("a value is missing", .{});
         switch (c) {
-            '"' => return .{ .string = try p.basicString() },
+            '"' => return .{ .string = try p.basicString(true) },
             '\'' => return .{ .string = try p.literalString() },
             '[' => return p.array(),
             '{' => return p.fail("inline tables are not supported; use a [table]", .{}),
@@ -483,7 +550,7 @@ test "every refusal names its line" {
     try expectInvalid("x = 012\n", 1, "not a value");
     try expectInvalid("x = 99999999999999999999\n", 1, "out of range");
     try expectInvalid("= 1\n", 1, "cannot start a key");
-    try expectInvalid("x = \"\"\"a\"\"\"\n", 1, "multi-line");
+    try expectInvalid("x = '''a'''\n", 1, "multi-line");
     try expectInvalid("x = \"a\x01\"\n", 1, "control character");
     try expectInvalid("x = \"a\x7f\"\n", 1, "control character");
     try expectInvalid("x = 'a\x7f'\n", 1, "control character");
@@ -499,4 +566,29 @@ test "an empty file and a file of comments are empty tables" {
     defer arena.deinit();
     try std.testing.expectEqual(@as(usize, 0), (try parseOk(arena.allocator(), "")).entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), (try parseOk(arena.allocator(), "# x\n\n  # y\r\n")).entries.items.len);
+}
+
+test "multi-line basic strings follow TOML 1.0 newline and backslash rules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try parseOk(
+        a,
+        "a = \"\"\"\nline1\nline2\n\"\"\"\n" ++
+            "b = \"\"\"hello \\\n   \tworld\"\"\"\n" ++
+            "c = \"\"\"a \"b\" \"\"c\"\"\"\"\"\n" ++
+            "d = \"\"\"\r\nkept\r\n\"\"\"\n" ++
+            "after = 42\n",
+    );
+    try std.testing.expectEqualStrings("line1\nline2\n", t.get("a").?.value.string);
+    try std.testing.expectEqualStrings("hello world", t.get("b").?.value.string);
+    try std.testing.expectEqualStrings("a \"b\" \"\"c\"\"", t.get("c").?.value.string);
+    try std.testing.expectEqualStrings("kept\r\n", t.get("d").?.value.string);
+    try std.testing.expectEqual(@as(i64, 42), t.get("after").?.value.int);
+    try std.testing.expectEqual(@as(usize, 11), t.get("after").?.line);
+
+    try expectInvalid("x = \"\"\"too\"\"\"\"\"\"many\"\"\"\n", 1, "too many quotes");
+    try expectInvalid("x = \"\"\"unclosed\n", 2, "not closed");
+    try expectInvalid("x = \"\"\"bad\rline\"\"\"\n", 1, "control character");
+    try expectInvalid("\"\"\"k\"\"\" = 1\n", 1, "multi-line");
 }
