@@ -2013,6 +2013,20 @@ fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     return d;
 }
 
+fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
+    const a = c.a;
+    var err_msg: []const u8 = "";
+    const timeout_ms = storage.lockTimeoutMs(c.env, &err_msg) orelse die("{s}", .{err_msg});
+    const dir = std.fs.path.join(a, &.{ prefix, ".eb-local" }) catch oom();
+    common.atomic.makedirs(dir) catch |e| die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
+    const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+    return switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &err_msg)) {
+        .held => |fd| fd,
+        .unlocked => null,
+        .failed => die("{s}", .{err_msg}),
+    };
+}
+
 /// The stop when the checked node-local mount takes no workspace.
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
@@ -2172,6 +2186,14 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
         .none => {},
     }
+    var prefix_lock: ?sys.fd_t = null;
+    defer storage.releaseLock(&prefix_lock);
+    if (!o.dry_run and (o.logs or o.sources)) {
+        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
+            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
+        } else |_| {}
+    }
     // find -mtime +N: more than N whole days old.
     const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
     const now: i64 = nowSecs();
@@ -2185,7 +2207,10 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
         while (it.next() catch null) |e| {
             const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
-            if (storage.ownWorkspace(jr, full, callerUid(c))) spaces.append(a, full) catch oom();
+            if (storage.ownWorkspace(jr, full, callerUid(c))) {
+                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
+                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
+            }
         }
     }
     const targets = collect.out.items;
@@ -2644,6 +2669,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         if (ownInstallVar(c, s, p, v, val) == null)
             warn("{s}={s} is set in this shell; this build clears it, but EESSI-extend or eb run by hand would use it", .{ v, q(a, val) });
     };
+    var prefix_lock: ?sys.fd_t = blk: {
+        var lock_err: []const u8 = "";
+        const timeout_ms = storage.lockTimeoutMs(c.env, &lock_err) orelse {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("{s}", .{lock_err});
+        };
+        const dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        common.atomic.makedirs(dir) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
+        };
+        const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+        break :blk switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &lock_err)) {
+            .held => |fd| fd,
+            .unlocked => null,
+            .failed => {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("{s}", .{lock_err});
+            },
+        };
+    };
+    defer storage.releaseLock(&prefix_lock);
+    const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
+    var ws_lock: ?sys.fd_t = storage.acquireOptionalLock(ws_lock_path);
+    defer storage.releaseLock(&ws_lock);
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -2712,6 +2762,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
     guard.release();
+    storage.releaseLock(&ws_lock);
+    storage.releaseLock(&prefix_lock);
     return stop(ended);
 }
 
@@ -3924,6 +3976,8 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
     } else |_| die("nothing is installed in {s}", .{p.prefix});
+    var prefix_lock: ?sys.fd_t = if (o.dry_run) null else acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
     if (o.target) |raw_target| {
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -4002,7 +4056,10 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
             const run = runAttached(a, argv.items, c.envp);
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc}),
-                .signal => return stop(run),
+                .signal => {
+                    storage.releaseLock(&prefix_lock);
+                    return stop(run);
+                },
             }
         }
         say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
@@ -4086,6 +4143,8 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
     } else |_| die("nothing was installed in {s}", .{p.prefix});
+    var prefix_lock: ?sys.fd_t = if (dry_run) null else acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
     const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
         die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
@@ -4135,7 +4194,10 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
         const run = runAttached(a, &.{ rtrash, "restore", str(a, "--trash-dir={s}", .{e.trash_dir}), e.original }, c.envp);
         switch (run) {
             .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
-            .signal => return stop(run),
+            .signal => {
+                storage.releaseLock(&prefix_lock);
+                return stop(run);
+            },
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
@@ -4164,6 +4226,15 @@ pub fn main(init: std.process.Init) u8 {
     const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FLOCK_ERRNO"))) |v| {
+            if (std.mem.eql(u8, v, "ENOLCK")) {
+                storage.test_flock_errno = .NOLCK;
+            } else if (std.mem.eql(u8, v, "ENOTSUP") or std.mem.eql(u8, v, "EOPNOTSUPP")) {
+                storage.test_flock_errno = .OPNOTSUPP;
+            } else if (std.mem.eql(u8, v, "ENOSYS")) {
+                storage.test_flock_errno = .NOSYS;
+            }
+        }
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
