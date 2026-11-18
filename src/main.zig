@@ -846,11 +846,10 @@ const Check = struct {
     }
 
     fn isAudited(k: *Check, a: Allocator, path: []const u8) bool {
-        return k.recursive and k.audited.contains(canonicalKey(a, path));
+        return k.audited.contains(canonicalKey(a, path));
     }
 
     fn markAudited(k: *Check, a: Allocator, path: []const u8) void {
-        if (!k.recursive) return;
         k.audited.put(a, canonicalKey(a, path), {}) catch oom();
     }
 
@@ -1138,6 +1137,7 @@ fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursiv
     var unreadable = false;
     var elfs: usize = 0;
     for (files) |f| {
+        if (k.isAudited(c.a, f)) continue;
         if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
     }
     drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
