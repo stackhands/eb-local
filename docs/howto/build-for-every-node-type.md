@@ -58,6 +58,7 @@ eb-local: done. To use the modules in a new shell or job:
 ```
 
 `eb-local list` then shows the module in the column of each CPU target.
+With EESSI loaded on a node type, `eb-local list --missing` prints only the `NAME/VERSION` modules missing on that target.
 
 ## With eb-local submit, until 4.0.0
 

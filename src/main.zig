@@ -88,10 +88,11 @@ const usage_text =
     \\                                       its CPU target; --print shows the jobs instead.
     \\                                       Deprecated, and removed in 4.0.0: --explain
     \\                                       prints an sbatch line for each node type
-    \\  eb-local list [--json] [NAME[/VERSION]...]
+    \\  eb-local list [--json | --missing] [NAME[/VERSION]...]
     \\                                       what you installed, for which CPU targets, and
     \\                                       what this node's target lacks; --json prints one
-    \\                                       line of JSON with schema_version 1
+    \\                                       line of JSON with schema_version 1; --missing
+    \\                                       lists only modules missing on this node's target
     \\  eb-local doctor [--json] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing;
@@ -2563,7 +2564,7 @@ const ListReport = struct {
 
 /// What is installed in the prefix, for which CPU targets, and what the
 /// target of this node lacks.
-fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool) u8 {
+fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, missing_only: bool) u8 {
     const a = c.a;
     const p = place(c, s);
     const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
@@ -2615,6 +2616,19 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool) 
         if (here_version) |hv| if (!std.mem.eql(u8, treeVersion(versions, t), hv)) continue;
         here = ti;
     };
+
+    if (missing_only) {
+        if (here_target == null) die("list --missing needs EESSI loaded (eval \"$(eb-local env)\") to know this node's CPU target", .{});
+        var out: std.ArrayList(u8) = .empty;
+        for (rows.items) |r| {
+            if (here == null or std.mem.indexOfScalar(usize, r.at.items, here.?) == null) {
+                out.appendSlice(a, r.module) catch oom();
+                out.append(a, '\n') catch oom();
+            }
+        }
+        cli.put(1, out.items);
+        return 0;
+    }
 
     if (json) {
         var missing_on_node: std.ArrayList([]const u8) = .empty;
@@ -3867,6 +3881,7 @@ pub fn main(init: std.process.Init) u8 {
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
     var doctor_workspace: ?[]const u8 = null;
+    var list_missing = false;
     var overlay_action: []const u8 = "";
     var overlay_materialize: recipe_overlay.MaterializeOptions = .{};
     var overlay_eb_stack: []const u8 = "";
@@ -4077,11 +4092,15 @@ pub fn main(init: std.process.Init) u8 {
                 } else rest.append(a, x) catch oom();
             },
             .list => {
-                if (std.mem.eql(u8, x, "--json")) {
-                    g.json_out = true;
-                } else if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
-                if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
-                rest.append(a, x) catch oom();
+                if (std.mem.eql(u8, x, "--missing")) {
+                    list_missing = true;
+                } else {
+                    if (std.mem.eql(u8, x, "--json")) {
+                        g.json_out = true;
+                    } else if (x.len > 0 and x[0] == '-') die("list does not know '{s}'", .{x});
+                    if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
+                    rest.append(a, x) catch oom();
+                }
             },
             .config => {
                 if (std.mem.eql(u8, x, "--check")) {
@@ -4226,7 +4245,10 @@ pub fn main(init: std.process.Init) u8 {
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),
-        .list => cmdList(c, s, rest.items, g.json_out),
+        .list => blk: {
+            if (list_missing and g.json_out) die("list takes --missing or --json, not both", .{});
+            break :blk cmdList(c, s, rest.items, g.json_out, list_missing);
+        },
         .doctor => cmdDoctor(c, s, g, .{ .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,

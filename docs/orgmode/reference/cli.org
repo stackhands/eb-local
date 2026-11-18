@@ -17,7 +17,7 @@ eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
-eb-local [OPTION]... list [--json] [NAME[/VERSION]...]
+eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
 eb-local [OPTION]... doctor [--json] [--workspace PATH]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
@@ -83,10 +83,11 @@ directory you own.
                                        its CPU target; --print shows the jobs instead.
                                        Deprecated, and removed in 4.0.0: --explain
                                        prints an sbatch line for each node type
-  eb-local list [--json] [NAME[/VERSION]...]
+  eb-local list [--json | --missing] [NAME[/VERSION]...]
                                        what you installed, for which CPU targets, and
                                        what this node's target lacks; --json prints one
-                                       line of JSON with schema_version 1
+                                       line of JSON with schema_version 1; --missing
+                                       lists only modules missing on this node's target
   eb-local doctor [--json] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing;
@@ -362,6 +363,8 @@ Print each module installed in the prefix, or the project directory, with a colu
 With EESSI loaded, the column of this node's target is marked =*=, and the modules it lacks are named.
 A =NAME= keeps the modules of that name, and a =NAME/VERSION= that module.
 
+=--missing= prints only the sorted =NAME/VERSION= lines missing on the loaded CPU target, or nothing when every matching module is built there, and exits 2 when EESSI is not loaded.
+=--missing= and =--json= cannot be used together.
 =--json= prints one line of JSON with =schema_version= 1, =kind= =list=, the =prefix=, =filters=, CPU =targets=, =modules= with a =built= boolean per target, =missing_on_node=, and optional =node_target= and =hint=.
 The shape is in [[file:json/list.schema.json][list.schema.json]].
 
