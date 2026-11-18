@@ -82,6 +82,28 @@ class EessiLmod(StorageFixture):
         run = self.run_wrapper(["doctor"], EB_LOCAL_CONFIG="", XDG_CONFIG_HOME=str(self.root / "xdg"), SLURM_JOB_ID="")
         self.assertIn(f"warn no module command in this shell, and none of {self.tried} can be read", run.stdout)
 
+    def test_directory_at_earlier_lmod_init_falls_through_to_eessi_init(self):
+        self.eessi_init()
+        dir_init = self.root / "no-lmod" / "init" / "bash"
+        dir_init.mkdir(parents=True)
+
+        doc = self.run_wrapper(["doctor"])
+        self.assertEqual(doc.returncode, 0, doc.stdout + doc.stderr)
+        self.assertIn(f"info no module command in this shell; builds, env and dev source {self.init}\n", doc.stdout)
+        self.assertNotIn(f"source {dir_init}", doc.stdout)
+
+        env_run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+        self.assertEqual(env_run.returncode, 0, env_run.stderr)
+        shell = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", env_run.stdout + 'printf %s "$EESSI_SOFTWARE_SUBDIR"'],
+            env=self.env,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertEqual(shell.stdout, "x86_64/amd/zen4")
+
 
 if __name__ == "__main__":
     unittest.main()
