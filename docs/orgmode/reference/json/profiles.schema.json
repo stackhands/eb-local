@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local profiles --json",
+  "type": "object",
+  "required": ["schema_version", "kind", "profiles"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "profiles" },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "layer", "path"],
+        "properties": {
+          "name": { "type": "string" },
+          "layer": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

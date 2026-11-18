@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local config --json",
+  "type": "object",
+  "required": ["schema_version", "kind", "profile", "check", "settings", "secrets", "check_failed"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "config" },
+    "profile": { "type": "string" },
+    "check": { "type": "boolean" },
+    "check_failed": { "type": "boolean" },
+    "settings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "value", "from"],
+        "properties": {
+          "key": { "type": "string" },
+          "value": { "type": "string" },
+          "from": { "type": "string" }
+        }
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "source", "from", "status"],
+        "properties": {
+          "name": { "type": "string" },
+          "source": { "type": "string" },
+          "from": { "type": "string" },
+          "status": { "enum": ["listed", "ok", "failed"] },
+          "detail": { "type": ["string", "null"] }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

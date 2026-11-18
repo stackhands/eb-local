@@ -14,19 +14,19 @@ eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env
 eb-local [OPTION]... dev [--buildenv MODULE] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
-eb-local check FILE...
-eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
+eb-local check [--json] FILE...
+eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
-eb-local [OPTION]... list [NAME[/VERSION]...]
-eb-local [OPTION]... doctor
+eb-local [OPTION]... list [--json] [NAME[/VERSION]...]
+eb-local [OPTION]... doctor [--json]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
                    [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
 eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
                            [--dry-run] [--delete]
-eb-local [OPTION]... config [--check | --env]
-eb-local [OPTION]... profiles
+eb-local [OPTION]... config [--check | --env] [--json]
+eb-local [OPTION]... profiles [--json]
 eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
 eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -71,9 +71,9 @@ directory you own.
                                        --unwrapped: only clang, clang++, flang,
                                        flang-new and ld.lld, where no wrapper comes
                                        first; dev adds them after a build environment
-  eb-local check FILE...               whether a program or library built here runs here:
+  eb-local check [--json] FILE...      whether a program or library built here runs here:
                                        its architecture, loader, run paths and libraries
-  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet]
+  eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
                                        the same for every ELF file in those installations,
                                        the dev tree, or DIR; a file that is not ELF is skipped.
                                        --quiet prints a file only when it has a problem
@@ -83,11 +83,14 @@ directory you own.
                                        its CPU target; --print shows the jobs instead.
                                        Deprecated, and removed in 4.0.0: --explain
                                        prints an sbatch line for each node type
-  eb-local list [NAME[/VERSION]...]    what you installed, for which CPU targets, and
-                                       what this node's target lacks
-  eb-local doctor [--cvmfs] [--cvmfs-parallel N] [--mpi]
+  eb-local list [--json] [NAME[/VERSION]...]
+                                       what you installed, for which CPU targets, and
+                                       what this node's target lacks; --json prints one
+                                       line of JSON with schema_version 1
+  eb-local doctor [--json] [--cvmfs] [--cvmfs-parallel N] [--mpi]
                                        what in this shell, node or configuration would
-                                       stop a build or a module load; changes nothing.
+                                       stop a build or a module load; changes nothing;
+                                       --json prints one line of JSON with schema_version 1.
                                        --cvmfs checks the CernVM-FS client.
                                        --cvmfs-parallel N (1 to 8) reads repository
                                        metadata from N tasks inside an allocation.
@@ -117,10 +120,13 @@ directory you own.
                  [--dry-run] [--delete]
                                        remove what eb-local left behind; --no-logs
                                        leaves the logs
-  eb-local config [--check | --env]    the settings in force and where each came from;
+  eb-local config [--check | --env] [--json]
+                                       the settings in force and where each came from;
                                        --check also reads every secret (values not shown);
-                                       --env prints them as EB_LOCAL_* lines for export
-  eb-local profiles                    the profiles the configuration defines
+                                       --env prints them as EB_LOCAL_* lines for export;
+                                       --json is for the default output or --check, not --env
+  eb-local profiles [--json]           the profiles the configuration defines; --json
+                                       prints one line of JSON with schema_version 1
   eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
                                        remove an installation and its module file, for
                                        every CPU target, to the trash with rtrash.
@@ -131,7 +137,8 @@ directory you own.
   eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
                                        a site file from a template built in, or from a
                                        template file (a NAME with a slash); install
-                                       writes config.toml beside this program, mode 644
+                                       writes config.toml beside this program, mode 644;
+                                       site list takes --json for machine-readable output
   eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR]
                                        apply a digest-pinned overlay; writes a materialized
                                        easyconfig and provenance.toml, or refuses when the
@@ -181,6 +188,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 | =--explain=            | Before an easyconfig, or before =eb=: print what would run, and create and run nothing.                                                                                        |
 | =-h=, =--help=, =help= | Print the usage on stdout and exit 0.                                                                                                                                          |
 | =--version=            | Print the version line on stdout and exit 0.                                                                                                                                   |
+| =--json=                | On =list=, =check=, =doctor=, =config=, =profiles=, and =site list=: print one line of JSON with =schema_version= 1 on stdout instead of the text report. Not with =config --env=. |
 
 Each option that takes a value also takes it after an equals sign, as in =--profile=gpu=.
 An empty value is refused either way, with =OPTION needs a value=.
@@ -323,8 +331,12 @@ The three are alternatives to naming files, and to each other.
 =--quiet= prints a file only when it has a problem, and still ends with the summary line.
 With no ELF file in the tree, and without =--quiet=, =check= says =eb-local check: no ELF files= and then =eb-local check: no problems=.
 
+=--json= prints one line of JSON with =schema_version= 1, =kind= =check=, =problem_count=, =unreadable=, =elf_count=, and a =files= array of =path=, =machine= and =problems=.
+The shape is in [[file:json/check.schema.json][check.schema.json]].
+
 It exits 0 when there are no problems, 1 when there are, and 2 when a named file cannot be read or is not ELF, or when a file in a tree cannot be read.
 A file that is not ELF is not a failure of a tree audit.
+With =--json=, these codes are unchanged; only the summary on stdout is JSON.
 
 ** submit
 
@@ -344,6 +356,9 @@ It exits 1 when =sbatch= refuses a job, and 2 when the site file has no =build.n
 Print each module installed in the prefix, or the project directory, with a column for each CPU target it has a tree for, =x= where the module is built for that target and =-= where it is not.
 With EESSI loaded, the column of this node's target is marked =*=, and the modules it lacks are named.
 A =NAME= keeps the modules of that name, and a =NAME/VERSION= that module.
+
+=--json= prints one line of JSON with =schema_version= 1, =kind= =list=, the =prefix=, =filters=, CPU =targets=, =modules= with a =built= boolean per target, =missing_on_node=, and optional =node_target= and =hint=.
+The shape is in [[file:json/list.schema.json][list.schema.json]].
 
 ** doctor
 
@@ -373,9 +388,14 @@ It changes nothing, and exits 1 when a line says =FAIL=.
 
 | Option | Meaning |
 |--------+---------|
+| =--json= | Print one JSON document instead of human-readable lines. |
 | =--cvmfs= | Check the CernVM-FS client. Off unless this flag, or =--cvmfs-parallel=, is given. |
 | =--cvmfs-parallel N= | Also read repository metadata from N tasks, 1 to 8, inside an allocation. Implies =--cvmfs=. |
 | =--mpi= | Report libfabric, UCX and Slurm binding, and run a two-rank hello per site-approved transport inside an allocation. Off unless this flag is given. |
+
+=--json= prints one line of JSON with =schema_version= 1, =kind= =doctor=, =site_file=, =failed=, =lines= (=level= and =text=), and =summary=.
+The shape is in [[file:json/doctor.schema.json][doctor.schema.json]].
+With =--json=, exit 1 still means a =FAIL= line appeared; scripts read =failed= in the document.
 
 ** lmod-cache
 
@@ -460,12 +480,21 @@ Print every setting in force, with where its value came from: =default=, a file 
 |-----------+-------------------------------------------------------------------------------------------------------------|
 | =--check= | Also read each secret, and print =ok=, or =FAILED:= and why, where the file that set it would be; never the value. |
 | =--env=   | Print the settings as =export EB_LOCAL_...= lines for a shell, with each secret's source and never its value. |
+| =--json=  | Print one line of JSON instead of the table; with =--check=, secret rows include =status= (=listed=, =ok=, or =failed= with optional =detail=). Not with =--env=. |
 
 It exits 1 with =--check= when a secret cannot be read or the project directory cannot be used.
+With =--json=, the same holds; the document has =check_failed= =true=.
+
+=--json= without =--check= prints =kind= =config=, =profile=, =settings=, and =secrets= listed only.
+With =--check=, =check= is =true= and each secret row records whether it could be read.
+The shape is in [[file:json/config.schema.json][config.schema.json]].
 
 ** profiles
 
 Print each profile the configuration files define, with the layer and the file that define it, or =no profiles are defined=.
+
+=--json= prints =schema_version= 1, =kind= =profiles=, and a =profiles= array of =name=, =layer= and =path=.
+The shape is in [[file:json/profiles.schema.json][profiles.schema.json]].
 
 ** uninstall
 
@@ -506,7 +535,7 @@ Print or write a site file from a template: =slurm=, built in, or a template fil
 
 | Word or option     | Meaning                                                                                                     |
 |--------------------+-------------------------------------------------------------------------------------------------------------|
-| =list=             | Print each built-in template and its placeholders; =site= alone does the same.                              |
+| =list=             | Print each built-in template and its placeholders; =site= alone does the same. =--json= prints one line of JSON; see [[file:json/site_list.schema.json][site_list.schema.json]]. |
 | =show NAME=        | Print the site file the template NAME makes.                                                                |
 | =install NAME=     | Write that site file to =config.toml= beside this program, mode 644.                                        |
 | =--set KEY=VALUE=  | Fill the placeholder KEY; may be given more than once.                                                      |
@@ -525,6 +554,10 @@ A value with a quote, a backslash or a control character is refused.
 | 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file. |
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |
+
+Commands that take =--json= use the same exit codes as their text output.
+Refusals and usage errors still print on stderr; only the report on stdout becomes one JSON line.
+With =--json=, =check= still exits 1 for problems and 2 when a file cannot be read; =doctor= still exits 1 when =failed= is true in the document; =config --check --json= still exits 1 when =check_failed= is true.
 
 * The 1.x Bash script
 

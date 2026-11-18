@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local site list --json",
+  "type": "object",
+  "required": ["schema_version", "kind", "templates"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "site_list" },
+    "templates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "placeholders"],
+        "properties": {
+          "name": { "type": "string" },
+          "placeholders": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

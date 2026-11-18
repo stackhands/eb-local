@@ -1,0 +1,1 @@
+slurm        placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition

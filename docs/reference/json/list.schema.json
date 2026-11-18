@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local list --json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind",
+    "prefix",
+    "filters",
+    "empty",
+    "targets",
+    "modules",
+    "missing_on_node"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "list" },
+    "prefix": { "type": "string" },
+    "filters": { "type": "array", "items": { "type": "string" } },
+    "empty": { "type": "boolean" },
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "here"],
+        "properties": {
+          "label": { "type": "string" },
+          "here": { "type": "boolean" }
+        }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "built"],
+        "properties": {
+          "name": { "type": "string" },
+          "built": { "type": "array", "items": { "type": "boolean" } }
+        }
+      }
+    },
+    "node_target": { "type": ["string", "null"] },
+    "missing_on_node": { "type": "array", "items": { "type": "string" } },
+    "hint": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}
