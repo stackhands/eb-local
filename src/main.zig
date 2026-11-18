@@ -3926,6 +3926,8 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
     } else |_| die("nothing is installed in {s}", .{p.prefix});
+    var prefix_lock: ?sys.fd_t = if (o.dry_run) null else acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
     if (o.target) |raw_target| {
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -4004,7 +4006,10 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
             const run = runAttached(a, argv.items, c.envp);
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc}),
-                .signal => return stop(run),
+                .signal => {
+                    storage.releaseLock(&prefix_lock);
+                    return stop(run);
+                },
             }
         }
         say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
@@ -4088,6 +4093,8 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
     } else |_| die("nothing was installed in {s}", .{p.prefix});
+    var prefix_lock: ?sys.fd_t = if (dry_run) null else acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
     const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
         die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
@@ -4137,7 +4144,10 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
         const run = runAttached(a, &.{ rtrash, "restore", str(a, "--trash-dir={s}", .{e.trash_dir}), e.original }, c.envp);
         switch (run) {
             .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
-            .signal => return stop(run),
+            .signal => {
+                storage.releaseLock(&prefix_lock);
+                return stop(run);
+            },
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
