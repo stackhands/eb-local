@@ -42,6 +42,7 @@ These steps run them and read what they say.
     `doctor` changes nothing, and exits 1 when a line says `FAIL` (or `warn` with `--strict`).
     With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
     Here `EESSI_PROJECT_INSTALL` would send EESSI-extend, loaded by hand or by `eb-local eb`, to a project directory that is not there; `unset EESSI_PROJECT_INSTALL LD_LIBRARY_PATH` clears both warnings.
+    A site that preloads XALT's `libxalt_init.so` for every login gets an `info` line for `LD_PRELOAD` instead of a `warn`: builds leave it out, and `--strict` does not fail on it.
 
 2.  With EESSI loaded, see which CPU targets the module is built for:
 

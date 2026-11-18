@@ -293,6 +293,16 @@ class ListAndDoctor(StorageFixture):
             self.assertIn(f"FAIL workspace {mountpoint}: mount {mountpoint} has noexec\n", run.stdout)
             self.assertEqual(list(mountpoint.iterdir()), [])
 
+    def test_doctor_reports_an_xalt_only_preload_as_info(self):
+        xalt = "/opt/xalt/current/lib64/libxalt_init.so:"
+        run = self.run_tool(["doctor"], LD_PRELOAD=xalt)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("info LD_PRELOAD loads only XALT's libxalt_init.so", run.stdout)
+        self.assertNotIn("warn LD_PRELOAD is set", run.stdout)
+        run = self.run_tool(["doctor"], LD_PRELOAD=xalt + "/home/u/other.so")
+        self.assertIn("warn LD_PRELOAD is set", run.stdout)
+        self.assertNotIn("XALT", run.stdout)
+
     def test_doctor_names_variables_left_in_the_shell(self):
         run = self.run_tool(["doctor"], EASYBUILD_INSTALLPATH="/elsewhere", LD_LIBRARY_PATH="/host/lib",
                             EESSI_USER_INSTALL=str(self.prefix))
