@@ -197,7 +197,9 @@ const Parser = struct {
                         'u', 'U' => {
                             const n: usize = if (e == 'u') 4 else 8;
                             if (p.pos + n > p.src.len) return p.fail("a \\{c} escape is cut short", .{e});
-                            const cp = std.fmt.parseInt(u21, p.src[p.pos .. p.pos + n], 16) catch
+                            const digits = p.src[p.pos .. p.pos + n];
+                            for (digits) |hd| if (!std.ascii.isHex(hd)) return p.fail("a \\{c} escape is not hexadecimal", .{e});
+                            const cp = std.fmt.parseInt(u21, digits, 16) catch
                                 return p.fail("a \\{c} escape is not hexadecimal", .{e});
                             p.pos += n;
                             var buf: [4]u8 = undefined;
@@ -466,6 +468,8 @@ test "every refusal names its line" {
     try expectInvalid("x = bare\n", 1, "strings are quoted");
     try expectInvalid("x = \"open\n", 1, "not closed");
     try expectInvalid("x = \"a\\q\"\n", 1, "escape");
+    try expectInvalid("x = \"\\u+041\"\n", 1, "not hexadecimal");
+    try expectInvalid("x = \"\\u0_41\"\n", 1, "not hexadecimal");
     try expectInvalid("x = 1 2\n", 1, "after the value");
     try expectInvalid("ok = 1\nx = [1 2]\n", 2, "commas");
     try expectInvalid("x = 012\n", 1, "not a value");
