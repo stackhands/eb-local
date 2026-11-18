@@ -126,6 +126,52 @@ class ForeignPrefixes(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertNotIn("warn CC resolves", run.stdout)
 
+    def test_symlinked_approved_prefix_is_kept_and_escape_symlink_is_flagged_and_scrubbed(self):
+        target = self.root / "sym-target"
+        (target / "lib").mkdir(parents=True)
+        sym_approved = self.root / "sym-approved"
+        sym_approved.symlink_to(target)
+        outside = self.root / "outside-host"
+        outside.mkdir()
+        escape = target / "ext"
+        escape.symlink_to(outside)
+
+        site = self.root / "site.toml"
+        site.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "%u.%j"\n'
+            'node_local_fstype = "xfs"\nshared_scratch = ["/scratch"]\n'
+            f'[doctor]\napproved_prefixes = ["{sym_approved}"]\n')
+        site.chmod(0o644)
+
+        sym_lib = f"{sym_approved}/lib"
+        real_lib = f"{target}/lib"
+        sym_ext = f"{sym_approved}/ext"
+        py_val = f"{sym_lib}:{real_lib}:{sym_ext}"
+
+        doctor = self.run_tool(["--config", str(site), "doctor"], PYTHONPATH=py_val)
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertNotIn(f"warn PYTHONPATH entry {sym_lib}", doctor.stdout)
+        self.assertNotIn(f"warn PYTHONPATH entry {real_lib}", doctor.stdout)
+        self.assertIn(f"warn PYTHONPATH entry {sym_ext} is outside the approved prefixes; "
+                      "a build keeps it until build.clear_foreign_prefixes is set", doctor.stdout)
+
+        self.env["PYTHONPATH"] = py_val
+        self.env["CONTROL_PATH_NAMES"] = "PYTHONPATH"
+
+        kept = self.run_wrapper(["--config", str(site), "recipe.eb"])
+        self.assertEqual(kept.returncode, 0, kept.stdout + kept.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(seen["paths"]["PYTHONPATH"], py_val)
+        (self.root / "eb.json").unlink()
+
+        cleared = self.run_wrapper(
+            ["--config", str(site), "recipe.eb"],
+            EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES="true",
+        )
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(seen["paths"]["PYTHONPATH"], f"{sym_lib}:{real_lib}")
+
 
 if __name__ == "__main__":
     unittest.main()
