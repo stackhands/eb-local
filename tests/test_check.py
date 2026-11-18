@@ -4,6 +4,7 @@
 The programs are built here with the host's gcc into fake EESSI trees, so
 the tests skip without gcc and for the Bash 1.x script, which has no check.
 """
+import json
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +13,7 @@ import tempfile
 import unittest
 
 import binary
+from test_json_cli import load_schema, validate
 
 GCC = shutil.which("gcc")
 
@@ -223,6 +225,195 @@ class Check(unittest.TestCase):
         run = self.check(self.root / "notes.txt", "--dev")
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("one of --module, --dev and --prefix", run.stderr)
+
+    def _build_transitive_chain(self, lib_flags=("-Wl,--disable-new-dtags",), drop_sub=False):
+        """Build prog -> libdemo.so -> libsub.so in separate software directories."""
+        base = self.root / "versions/2026.06/software/linux/x86_64/amd/zen4/software"
+        sub_dir = base / "libsub/1.0/lib"
+        demo_dir = base / "libdemo/1.0/lib"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        demo_dir.mkdir(parents=True, exist_ok=True)
+
+        (self.root / "sub.c").write_text("int sub(void) { return 3; }\n")
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-o", str(sub_dir / "libsub.so"), str(self.root / "sub.c")],
+            check=True,
+        )
+
+        (self.root / "demo.c").write_text("int sub(void);\nint demo(void) { return 4 + sub(); }\n")
+        subprocess.run(
+            [
+                GCC,
+                "-shared",
+                "-fPIC",
+                "-o",
+                str(demo_dir / "libdemo.so"),
+                str(self.root / "demo.c"),
+                f"-L{sub_dir}",
+                "-lsub",
+                f"-Wl,-rpath,{sub_dir}",
+                *lib_flags,
+            ],
+            check=True,
+        )
+
+        prog = self.program(demo_dir, f"-Wl,-rpath,{demo_dir}", "-Wl,--disable-new-dtags")
+        if drop_sub:
+            (sub_dir / "libsub.so").unlink()
+        return prog, demo_dir / "libdemo.so", sub_dir / "libsub.so"
+
+    def test_default_check_bytes_unchanged_with_transitive_dependencies(self):
+        prog, _, _ = self._build_transitive_chain(lib_flags=("-Wl,--enable-new-dtags",), drop_sub=True)
+
+        raw = subprocess.run(
+            [binary.BIN, "check", str(prog)],
+            env=dict(self.env, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4"),
+            capture_output=True,
+            text=False,
+        )
+        self.assertEqual(raw.returncode, 0, raw.stderr)
+        self.assertEqual(raw.stderr, b"")
+        self.assertTrue(raw.stdout.endswith(b"eb-local check: no problems\n"))
+        self.assertNotIn(b"libsub.so", raw.stdout)
+
+        quiet = subprocess.run(
+            [binary.BIN, "check", "--quiet", str(prog)],
+            env=dict(self.env, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4"),
+            capture_output=True,
+            text=False,
+        )
+        self.assertEqual((quiet.returncode, quiet.stdout, quiet.stderr), (0, b"eb-local check: no problems\n", b""))
+
+    def test_recursive_catches_transitive_runpath_and_missing_library(self):
+        prog, libdemo, _ = self._build_transitive_chain(lib_flags=("-Wl,--enable-new-dtags",), drop_sub=True)
+
+        default_run = self.check(prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(default_run.returncode, 0, default_run.stdout + default_run.stderr)
+
+        rec = self.check("--recursive", prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(rec.returncode, 1, rec.stdout + rec.stderr)
+        self.assertIn(str(libdemo), rec.stdout)
+        self.assertIn("RUNPATH", rec.stdout)
+        self.assertIn("libsub.so is not found", rec.stdout)
+
+        quiet = self.check("--recursive", "--quiet", prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(quiet.returncode, 1, quiet.stdout + quiet.stderr)
+        self.assertNotIn(str(prog), quiet.stdout)
+        self.assertIn(str(libdemo), quiet.stdout)
+        self.assertIn("problem:", quiet.stdout)
+
+    def test_recursive_handles_cycles_and_symlinks_without_repeating(self):
+        cyc_dir = self.root / "cycle"
+        cyc_dir.mkdir()
+        (self.root / "a.c").write_text("int b_fn(void);\nint a_fn(void) { return 1 + b_fn(); }\n")
+        (self.root / "b.c").write_text("int a_fn(void);\nint b_fn(void) { return 2; }\n")
+
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-Wl,-soname,libb.so", "-o", str(cyc_dir / "libb.so"), str(self.root / "b.c")],
+            check=True,
+        )
+        subprocess.run(
+            [
+                GCC,
+                "-shared",
+                "-fPIC",
+                "-Wl,-soname,liba.so.1",
+                "-o",
+                str(cyc_dir / "liba.so.1.0"),
+                str(self.root / "a.c"),
+                f"-L{cyc_dir}",
+                "-lb",
+                f"-Wl,-rpath,{cyc_dir}",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+        (cyc_dir / "liba.so.1").symlink_to("liba.so.1.0")
+        (cyc_dir / "liba.so").symlink_to("liba.so.1")
+        subprocess.run(
+            [
+                GCC,
+                "-shared",
+                "-fPIC",
+                "-Wl,-soname,libb.so",
+                "-o",
+                str(cyc_dir / "libb.so"),
+                str(self.root / "b.c"),
+                f"-L{cyc_dir}",
+                "-la",
+                f"-Wl,-rpath,{cyc_dir}",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+
+        (self.root / "main_cyc.c").write_text("int a_fn(void);\nint main(void) { return a_fn() == 3 ? 0 : 1; }\n")
+        prog = self.root / "prog_cyc"
+        subprocess.run(
+            [
+                GCC,
+                "-o",
+                str(prog),
+                str(self.root / "main_cyc.c"),
+                f"-L{cyc_dir}",
+                "-la",
+                f"-Wl,-rpath,{cyc_dir}",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+
+        run = self.check("--recursive", "--quiet", "--json", prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        doc = json.loads(run.stdout)
+        validate(doc, load_schema("check.schema.json"))
+        self.assertEqual(doc["problem_count"], 0)
+        paths = [f["path"] for f in doc["files"]]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertIn(str(prog), paths)
+        self.assertTrue(any(p.endswith("liba.so.1") for p in paths), paths)
+        self.assertIn(str(cyc_dir / "libb.so"), paths)
+
+    def test_recursive_with_prefix_and_json(self):
+        prog, libdemo, libsub = self._build_transitive_chain()
+        tree = self.root / "prefix-tree"
+        (tree / "bin").mkdir(parents=True)
+        (tree / "bin" / "prog").write_bytes(prog.read_bytes())
+
+        run = self.check("--prefix", tree, "--recursive", "--json", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        doc = json.loads(run.stdout.splitlines()[-1])
+        validate(doc, load_schema("check.schema.json"))
+        paths = [f["path"] for f in doc["files"]]
+        self.assertEqual(paths.count(str(tree / "bin" / "prog")), 1)
+        self.assertEqual(paths.count(str(libdemo)), 1)
+        self.assertEqual(paths.count(str(libsub)), 1)
+        self.assertEqual(doc["elf_count"], len(paths))
+
+        # Also when a needed library lives inside the audited prefix tree, audit it once.
+        (tree / "lib").mkdir()
+        (tree / "lib" / "libdemo.so").write_bytes(libdemo.read_bytes())
+        (self.root / "local_prog.c").write_text("int demo(void);\nint main(void) { return demo() == 7 ? 0 : 1; }\n")
+        subprocess.run(
+            [
+                GCC,
+                "-o",
+                str(tree / "bin" / "local_prog"),
+                str(self.root / "local_prog.c"),
+                f"-L{tree / 'lib'}",
+                "-ldemo",
+                f"-Wl,-rpath,{tree / 'lib'}",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+        run2 = self.check("--prefix", tree, "--recursive", "--quiet", "--json", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run2.returncode, 0, run2.stdout + run2.stderr)
+        doc2 = json.loads(run2.stdout)
+        validate(doc2, load_schema("check.schema.json"))
+        paths2 = [f["path"] for f in doc2["files"]]
+        self.assertEqual(paths2.count(str(tree / "lib" / "libdemo.so")), 1)
+        self.assertEqual(doc2["elf_count"], len(paths2))
 
 
 if __name__ == "__main__":
