@@ -18,6 +18,7 @@ A FILE that does not exist, or that someone else owns, stops eb-local.
 
 eb-local reads a file only when it is a regular file, not a symbolic link, not writable by group or others, and at most 1 MiB; a site file must belong to root or to the owner of the program, and a user file to you.
 A file that fails any of these stops eb-local; none is skipped.
+Run `eb-local site check FILE` to validate a staged site file as a site layer before installing it.
 
 A file whose name does not end in `.toml` is a 1.x `eb-local.conf`: one `key = value` line per setting, with `#` starting a comment.
 

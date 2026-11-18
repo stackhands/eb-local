@@ -29,7 +29,7 @@ eb-local [OPTION]... config [--check | --env | --get KEY] [--json]
 eb-local [OPTION]... profiles [--json]
 eb-local [OPTION]... uninstall NAME/VERSION... [--target TARGET] [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
-eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
+eb-local site [list | show NAME | install NAME | check FILE] [--set KEY=VALUE]... [--to FILE] [--force]
 eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run | --check]
 eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
 eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
@@ -146,7 +146,7 @@ directory you own.
                                        prefix is in FILE, and removes nothing when that exits 2
   eb-local restore NAME/VERSION... [--dry-run]
                                        bring them back from the trash, read-only again
-  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
+  eb-local site [list | show NAME | install NAME | check FILE] [--set KEY=VALUE]... [--to FILE] [--force]
                                        a site file from a template built in, or from a
                                        template file (a NAME with a slash); install
                                        writes config.toml beside this program, mode 644;
@@ -572,6 +572,7 @@ Print or write a site file from a template: =slurm=, built in, or a template fil
 | =list=             | Print each built-in template and its placeholders; =site= alone does the same. =--json= prints one line of JSON; see [[file:json/site_list.schema.json][site_list.schema.json]]. |
 | =show NAME=        | Print the site file the template NAME makes.                                                                |
 | =install NAME=     | Write that site file to =config.toml= beside this program, mode 644.                                        |
+| =check FILE=       | Validate an existing site file as a site configuration layer without installing it.                         |
 | =--set KEY=VALUE=  | Fill the placeholder KEY; may be given more than once.                                                      |
 | =--to FILE=        | With =install=: write FILE instead.                                                                         |
 | =--force=          | With =install=: replace a file that exists.                                                                 |

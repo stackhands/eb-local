@@ -151,7 +151,7 @@ const usage_text =
     \\                                       prefix is in FILE, and removes nothing when that exits 2
     \\  eb-local restore NAME/VERSION... [--dry-run]
     \\                                       bring them back from the trash, read-only again
-    \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
+    \\  eb-local site [list | show NAME | install NAME | check FILE] [--set KEY=VALUE]... [--to FILE] [--force]
     \\                                       a site file from a template built in, or from a
     \\                                       template file (a NAME with a slash); install
     \\                                       writes config.toml beside this program, mode 644;
@@ -1541,6 +1541,15 @@ fn siteTemplate(c: Ctx, name: []const u8) sites.Template {
     return .{ .name = name, .text = text };
 }
 
+fn checkSiteConfig(a: Allocator, path: []const u8, text: []const u8) void {
+    var empty = std.process.Environ.Map.init(a);
+    var cd: config.Diagnostic = .{};
+    _ = config.load(a, &.{.{ .path = path, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
+        error.Invalid => die("{s}", .{cd.message}),
+        error.OutOfMemory => oom(),
+    };
+}
+
 fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const a = c.a;
     const w = o.words.items;
@@ -1562,8 +1571,27 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         }
         return 0;
     }
+    if (std.mem.eql(u8, action, "check")) {
+        if (w.len != 2) die("site check takes one configuration file", .{});
+        if (o.sets.items.len > 0 or o.to != null or o.force)
+            die("site check takes only a configuration file", .{});
+        const path = w[1];
+        const opened = openConfig(path);
+        defer sys.close(opened.fd);
+        const raw = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, @errorName(e) });
+        const text = if (std.mem.endsWith(u8, path, ".toml")) raw else blk: {
+            var ld: config.Diagnostic = .{};
+            break :blk config.legacyToToml(a, raw, &ld) catch |e| switch (e) {
+                error.Invalid => die("{s}: {s}", .{ path, ld.message }),
+                error.OutOfMemory => oom(),
+            };
+        };
+        checkSiteConfig(a, path, text);
+        say("site file {s} is valid", .{path});
+        return 0;
+    }
     const show = std.mem.eql(u8, action, "show");
-    if (!show and !std.mem.eql(u8, action, "install")) die("site takes list, show NAME or install NAME; got '{s}'", .{action});
+    if (!show and !std.mem.eql(u8, action, "install")) die("site takes list, show NAME or install NAME (or check FILE); got '{s}'", .{action});
     if (w.len != 2) die("site {s} takes one template, a name (eb-local site list shows them) or a file", .{action});
     if (show and (o.to != null or o.force)) die("site show prints the file; --to and --force are for install", .{});
     const t = siteTemplate(c, w[1]);
@@ -1576,13 +1604,8 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     // The file must load as the site file it is about to become. A refusal
     // names the template's line, which is the rendered file's: no value
     // holds a newline, and the target is not written yet.
-    var empty = std.process.Environ.Map.init(a);
-    var cd: config.Diagnostic = .{};
     const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
-    _ = config.load(a, &.{.{ .path = label, .text = text, .layer = .site }}, &empty, .{}, &cd) catch |e| switch (e) {
-        error.Invalid => die("{s}", .{cd.message}),
-        error.OutOfMemory => oom(),
-    };
+    checkSiteConfig(a, label, text);
     if (show) {
         cli.put(1, text);
         return 0;
