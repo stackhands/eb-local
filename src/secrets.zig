@@ -12,6 +12,7 @@ const sys = common.sys;
 const fsx = common.fsx;
 const proc = common.proc;
 const config = @import("config.zig");
+const storage = @import("storage.zig");
 const Allocator = std.mem.Allocator;
 
 /// Largest secret accepted from any source.
@@ -392,11 +393,11 @@ fn replace(a: Allocator, dir: sys.fd_t, name: []const u8, bytes: []const u8) (fs
 
 fn redactFile(a: Allocator, dir: sys.fd_t, name: []const u8, path: []const u8, values: []const Resolved, tools: Tools, report: *RedactReport) Allocator.Error!void {
     const opened = fsx.openRegular(dir, name, false) catch |e|
-        return report.unchecked.append(a, .{ .path = path, .why = @errorName(e) });
+        return report.unchecked.append(a, .{ .path = path, .why = storage.describeError(e) });
     const bytes = fsx.readAll(a, opened.fd, log_limit) catch |e| {
         sys.close(opened.fd);
         if (e == error.OutOfMemory) return error.OutOfMemory;
-        return report.unchecked.append(a, .{ .path = path, .why = @errorName(e) });
+        return report.unchecked.append(a, .{ .path = path, .why = storage.describeError(e) });
     };
     sys.close(opened.fd);
     const program = codecOf(name);
@@ -415,7 +416,7 @@ fn redactFile(a: Allocator, dir: sys.fd_t, name: []const u8, path: []const u8, v
     };
     replace(a, dir, name, out) catch |e| {
         if (e == error.OutOfMemory) return error.OutOfMemory;
-        return report.unchanged.append(a, .{ .path = path, .why = @errorName(e) });
+        return report.unchanged.append(a, .{ .path = path, .why = storage.describeError(e) });
     };
     report.files += 1;
 }
@@ -449,23 +450,39 @@ fn redactDir(a: Allocator, dir: sys.fd_t, path: []const u8, since: i64, values: 
         // not the installed software beside it.
         const is_root = if (fsx.statAt(dir, "easybuild", false)) |st| st.isDir() else |_| false;
         if (is_root) {
-            const sub = fsx.openDir(dir, "easybuild", false) catch return;
+            const eb_path = try std.fs.path.join(a, &.{ path, "easybuild" });
+            const sub = fsx.openDir(dir, "easybuild", false) catch |e| {
+                return report.unchecked.append(a, .{ .path = eb_path, .why = storage.describeError(e) });
+            };
             defer sys.close(sub);
-            return redactDir(a, sub, try std.fs.path.join(a, &.{ path, "easybuild" }), since, values, filter, tools, report, depth + 1);
+            return redactDir(a, sub, eb_path, since, values, filter, tools, report, depth + 1);
         }
     }
     var it = try fsx.DirIter.init(a, dir);
-    while (try it.next()) |e| {
-        const st = fsx.statAt(dir, e.name, false) catch continue;
+    while (true) {
+        const e = (it.next() catch |err| {
+            try report.unchecked.append(a, .{ .path = path, .why = storage.describeError(err) });
+            break;
+        }) orelse break;
         const child = try std.fs.path.join(a, &.{ path, e.name });
+        const st = fsx.statAt(dir, e.name, false) catch |err| {
+            try report.unchecked.append(a, .{ .path = child, .why = storage.describeError(err) });
+            continue;
+        };
         if (st.isDir()) {
             if (depth >= max_depth) {
                 try report.too_deep.append(a, child);
                 continue;
             }
-            const sub = fsx.openDir(dir, e.name, false) catch continue;
+            const sub = fsx.openDir(dir, e.name, false) catch |err| {
+                try report.unchecked.append(a, .{ .path = child, .why = storage.describeError(err) });
+                continue;
+            };
             defer sys.close(sub);
-            try redactDir(a, sub, child, since, values, filter, tools, report, depth + 1);
+            redactDir(a, sub, child, since, values, filter, tools, report, depth + 1) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => try report.unchecked.append(a, .{ .path = child, .why = storage.describeError(err) }),
+            };
             continue;
         }
         if (!st.isReg() or st.mtime.sec < since) continue;
@@ -700,4 +717,57 @@ test "an installation log nested past the search depth is reported" {
     defer sys.close(opened.fd);
     const text = try fsx.readAll(a, opened.fd, 4096);
     try testing.expect(std.mem.indexOf(u8, text, "s3cret-value") != null);
+}
+
+test "unreadable subdirectories and full writes are reported while sibling logs are redacted" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const a = s.arena.allocator();
+    const logs = try std.fs.path.join(a, &.{ s.root, "logs" });
+    const locked = try std.fs.path.join(a, &.{ logs, "locked" });
+    try common.atomic.makedirs(locked);
+    _ = try s.write("logs/locked/hidden.log", "secret s3cret-value\n", 0o644);
+    const sibling = try s.write("logs/sibling.log", "sibling s3cret-value\n", 0o644);
+    const lfd = try fsx.openDir(fsx.cwd, locked, false);
+    defer {
+        sys.fchmod(lfd, 0o755) catch {};
+        sys.close(lfd);
+    }
+    try sys.fchmod(lfd, 0o000);
+
+    const values = [_]Resolved{.{ .name = "TOKEN", .value = "s3cret-value" }};
+    var report: RedactReport = .{};
+    try redactTree(a, logs, 0, &values, .all, .{ .path = "", .envp = no_env }, &report);
+    try testing.expectEqual(@as(usize, 1), report.files);
+    try testing.expectEqual(@as(usize, 1), report.unchecked.items.len);
+    try testing.expectEqualStrings(locked, report.unchecked.items[0].path);
+    try testing.expect(std.mem.indexOf(u8, report.unchecked.items[0].why, "Permission denied") != null);
+    const sib_fd = try fsx.openRegular(fsx.cwd, sibling, false);
+    defer sys.close(sib_fd.fd);
+    try testing.expectEqualStrings("sibling <secret TOKEN removed by eb-local>\n", try fsx.readAll(a, sib_fd.fd, 4096));
+
+    // When writing the redacted replacement hits the file-size limit, the log is reported unchanged.
+    const inst_eb = try std.fs.path.join(a, &.{ s.root, "inst", "easybuild" });
+    try common.atomic.makedirs(inst_eb);
+    const eb_log = try s.write("inst/easybuild/build.log", "x s3cret-value\n", 0o644);
+    var old: linux.rlimit = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.prlimit(0, .FSIZE, null, &old)));
+    const lim: linux.rlimit = .{ .cur = 4, .max = old.max };
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.prlimit(0, .FSIZE, &lim, null)));
+    const ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+    var prev: linux.Sigaction = undefined;
+    _ = linux.sigaction(.XFSZ, &ign, &prev);
+    var full_report: RedactReport = .{};
+    {
+        defer {
+            _ = linux.sigaction(.XFSZ, &prev, null);
+            _ = linux.prlimit(0, .FSIZE, &old, null);
+        }
+        try redactTree(a, try std.fs.path.join(a, &.{ s.root, "inst" }), 0, &values, .easybuild_dirs, .{ .path = "", .envp = no_env }, &full_report);
+    }
+    try testing.expectEqual(@as(usize, 1), full_report.unchanged.items.len);
+    try testing.expectEqualStrings(eb_log, full_report.unchanged.items[0].path);
+    const orig_fd = try fsx.openRegular(fsx.cwd, eb_log, false);
+    defer sys.close(orig_fd.fd);
+    try testing.expectEqualStrings("x s3cret-value\n", try fsx.readAll(a, orig_fd.fd, 4096));
 }

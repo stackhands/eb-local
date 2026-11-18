@@ -31,6 +31,12 @@ fn refuse(a: Allocator, r: *Refusal, comptime what: []const u8, what_args: anyty
     return error.Refused;
 }
 
+/// Format `e` with its kernel errno when it maps to `sys.Error`, otherwise
+/// return the Zig error name.
+pub fn describeError(e: anyerror) []const u8 {
+    return if (sys.asError(e)) |se| sys.describe(se) else @errorName(e);
+}
+
 /// A line of `/proc/self/mountinfo`: where the file system is mounted, its
 /// type, and its mount options.
 pub const Mount = struct {
@@ -551,6 +557,12 @@ test "the mount a path lies on" {
     try testing.expectEqualStrings("gpfs", (try mountOf(a, info, "/home/u/x")).?.fstype);
     try testing.expectEqualStrings("/mnt/with space", (try mountOf(a, info, "/mnt/with space/a")).?.target);
     try testing.expectEqualStrings("/", (try mountOf(a, info, "/etc")).?.target);
+}
+
+test "describeError preserves sys.Error text and falls back to error name" {
+    sys.last_errno = .SUCCESS;
+    try testing.expectEqualStrings("[Errno 2] No such file or directory", describeError(error.NotFound));
+    try testing.expectEqualStrings("OutOfMemory", describeError(error.OutOfMemory));
 }
 
 test "canonical paths" {
