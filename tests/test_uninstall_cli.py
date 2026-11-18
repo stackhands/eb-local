@@ -573,6 +573,16 @@ sys.exit(int(os.environ["CONTROL_USED_STATUS"]))
         self.assertEqual(delete_dup.returncode, 0, delete_dup.stdout + delete_dup.stderr)
         self.assertFalse(any(p.exists() for p in self.installs + self.modules))
 
+    def test_single_quoted_dependents_block_uninstall(self):
+        dep = self.dependent("depends_on('pigz/2.8-GCCcore-15.2.0')\n")
+        for stmt in ("depends_on('pigz/2.8-GCCcore-15.2.0')\n", "load('pigz/2.8-GCCcore-15.2.0')\n"):
+            with self.subTest(stmt=stmt.strip()):
+                dep.write_text(stmt)
+                blocked = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
+                self.assertEqual(blocked.returncode, 2, blocked.stdout + blocked.stderr)
+                self.assertIn("same command", blocked.stderr)
+                self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+
 
 if __name__ == "__main__":
     unittest.main()

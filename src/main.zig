@@ -3814,10 +3814,13 @@ fn loadsAny(text: []const u8, wanted: []const []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
-        for ([_][]const u8{ "depends_on(\"", "load(\"" }) |call| {
+        for ([_][]const u8{ "depends_on(", "load(" }) |call| {
             if (!std.mem.startsWith(u8, line, call)) continue;
-            const rest = line[call.len..];
-            const end = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+            const after = line[call.len..];
+            if (after.len < 2 or (after[0] != '"' and after[0] != '\'')) continue;
+            const quote = after[0];
+            const rest = after[1..];
+            const end = std.mem.indexOfScalar(u8, rest, quote) orelse continue;
             if (listed(wanted, rest[0..end])) return true;
         }
     }
