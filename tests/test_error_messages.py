@@ -55,6 +55,19 @@ class ErrorPathAndErrno(StorageFixture):
         self.assertIn(str(missing_mi), run.stderr)
         self.assertIn("[Errno 2] No such file or directory", run.stderr)
 
+    def test_unreadable_config_file_names_path_and_errno(self):
+        unreadable = self.root / "unreadable.toml"
+        unreadable.write_text('prefix = "/tmp/eessi"\n')
+        unreadable.chmod(0o000)
+        try:
+            argv, env = binary.command(self.script, ["--config", str(unreadable), "config"], dict(self.env))
+            run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertIn(str(unreadable), run.stderr)
+            self.assertIn("[Errno 13] Permission denied", run.stderr)
+        finally:
+            unreadable.chmod(0o600)
+
     def test_durable_sources_failure_names_path_and_errno(self):
         meta = self.prefix / ".eb-local"
         meta.mkdir(parents=True)

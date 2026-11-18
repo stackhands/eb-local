@@ -425,9 +425,9 @@ const Opened = struct { fd: sys.fd_t, stat: fsx.Stat };
 /// A configuration file: a regular file, not a symbolic link, not writable
 /// by group or others. A file that fails is an error, never skipped.
 fn openConfig(path: []const u8) Opened {
-    const lst = fsx.statAt(fsx.cwd, path, false) catch |e| die("cannot open {s} ({s})", .{ path, @errorName(e) });
+    const lst = fsx.statAt(fsx.cwd, path, false) catch |e| die("cannot open {s} ({s})", .{ path, storage.describeError(e) });
     if (lst.isLink()) die("{s} is a symbolic link; a configuration file must be a regular file", .{path});
-    const opened = fsx.openRegular(fsx.cwd, path, false) catch |e| die("cannot open {s} ({s})", .{ path, @errorName(e) });
+    const opened = fsx.openRegular(fsx.cwd, path, false) catch |e| die("cannot open {s} ({s})", .{ path, storage.describeError(e) });
     if (opened.stat.mode & 0o022 != 0) die("{s} is writable by group or others and is not used; chmod go-w it", .{path});
     return .{ .fd = opened.fd, .stat = opened.stat };
 }
