@@ -11,6 +11,11 @@ from test_storage import StorageFixture
 
 @unittest.skipUnless(binary.BIN, "diagnostic path and errno checks target the Zig build")
 class ErrorPathAndErrno(StorageFixture):
+    def setUp(self):
+        super().setUp()
+        for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
+            self.env.pop(name, None)
+
     def test_clean_build_output_bytes_stay_unchanged(self):
         argv, env = binary.command(self.script, ["demo.eb"], dict(self.env))
         run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
