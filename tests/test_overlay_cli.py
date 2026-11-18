@@ -439,6 +439,56 @@ class OverlayMaterialize(unittest.TestCase):
                 b"eb-local: cannot read missing.eb: FileNotFound\n",
             )
 
+    def test_materialize_leaves_no_partial_outputs_when_provenance_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_bytes = b"name = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                '[replace]\nversion = "\'2.0\'"\n',
+                encoding="utf-8",
+            )
+
+            out_dir = root / "out"
+            out_dir.mkdir()
+            prev_recipe = out_dir / "materialized-base.eb"
+            prev_recipe.write_text("previous\n", encoding="utf-8")
+            (out_dir / "provenance.toml").mkdir()
+
+            got = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "out",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertEqual(prev_recipe.read_text(encoding="utf-8"), "previous\n")
+
+            fresh_dir = root / "fresh-out"
+            fresh_dir.mkdir()
+            (fresh_dir / "provenance.toml").mkdir()
+            got_fresh = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "fresh-out",
+                ],
+                cwd=root,
+            )
+            self.assertEqual(got_fresh.returncode, 1, got_fresh.stdout + got_fresh.stderr)
+            self.assertFalse((fresh_dir / "materialized-base.eb").exists())
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
