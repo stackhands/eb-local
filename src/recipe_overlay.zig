@@ -175,7 +175,7 @@ fn lineSetsParameter(line: []const u8, name: []const u8) bool {
     if (t.len <= name.len) return false;
     if (!std.mem.startsWith(u8, t, name)) return false;
     const rest = std.mem.trimStart(u8, t[name.len..], " \t");
-    return std.mem.startsWith(u8, rest, "=");
+    return rest.len > 0 and rest[0] == '=' and (rest.len == 1 or rest[1] != '=');
 }
 
 const PyLineState = struct {
@@ -348,28 +348,61 @@ fn findMatchingBracket(text: []const u8, open: usize) ?usize {
     return null;
 }
 
+fn lastArrayCodePos(slice: []const u8) ?usize {
+    var last: ?usize = null;
+    var i: usize = 0;
+    while (i < slice.len) {
+        const ch = slice[i];
+        if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+            i += 1;
+        } else if (ch == '#') {
+            i += 1;
+            while (i < slice.len and slice[i] != '\n') : (i += 1) {}
+        } else if (ch == '\'' or ch == '"') {
+            const end = @min(slice.len, skipPyString(slice, i));
+            last = end - 1;
+            i = end;
+        } else {
+            last = i;
+            i += 1;
+        }
+    }
+    return last;
+}
+
 fn appendToArray(a: Allocator, text: []const u8, key: []const u8, entry: []const u8, d: *Diagnostic) Error![]u8 {
     if (findArrayStart(text, key)) |start| {
         const close = findMatchingBracket(text, start) orelse
             return fail(a, d, "easyconfig {s} list has no closing bracket", .{key});
         var out: std.ArrayList(u8) = .empty;
-        try out.appendSlice(a, text[0..close]);
-        const inner = std.mem.trim(u8, text[start + 1 .. close], " \t\n\r");
-        if (inner.len > 0) {
-            if (inner[inner.len - 1] == ',') {
-                if (close > 0 and text[close - 1] == '\n') {
-                    try out.appendSlice(a, "    ");
-                } else {
-                    try out.appendSlice(a, "\n    ");
-                }
+        if (lastArrayCodePos(text[start + 1 .. close])) |rel_last| {
+            const abs_last = start + 1 + rel_last;
+            if (text[abs_last] == ',') {
+                try out.appendSlice(a, text[0..close]);
+            } else {
+                try out.appendSlice(a, text[0 .. abs_last + 1]);
+                try out.append(a, ',');
+                try out.appendSlice(a, text[abs_last + 1 .. close]);
+            }
+            if (close > 0 and text[close - 1] == '\n') {
+                try out.appendSlice(a, "    ");
                 try out.appendSlice(a, entry);
                 try out.appendSlice(a, ",\n");
-                try out.appendSlice(a, text[close..]);
-                return out.toOwnedSlice(a);
+            } else {
+                try out.appendSlice(a, "\n    ");
+                try out.appendSlice(a, entry);
             }
-            try out.appendSlice(a, ",\n    ");
+            try out.appendSlice(a, text[close..]);
+            return out.toOwnedSlice(a);
         }
-        try out.appendSlice(a, entry);
+        try out.appendSlice(a, text[0..close]);
+        if (close > 0 and text[close - 1] == '\n') {
+            try out.appendSlice(a, "    ");
+            try out.appendSlice(a, entry);
+            try out.appendSlice(a, ",\n");
+        } else {
+            try out.appendSlice(a, entry);
+        }
         try out.appendSlice(a, text[close..]);
         return out.toOwnedSlice(a);
     }
