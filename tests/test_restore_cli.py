@@ -119,6 +119,28 @@ class RestoreCli(unittest.TestCase):
         self.assertIn("exists; restore replaces nothing", exists_err.stderr)
         self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["list --json"])
 
+    def test_duplicate_trash_entries_exit_two_without_invoking_restore(self):
+        tree = self.versions / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+        (tree / "software").mkdir(parents=True)
+        (tree / "modules" / "all").mkdir(parents=True)
+        inst = tree / "software" / "Demo" / "1.0"
+        mod = tree / "modules" / "all" / "Demo" / "1.0.lua"
+        calls = self.root / "rtrash-dup.log"
+        payload = json.dumps(
+            [
+                {"original": str(inst), "trash_dir": "/tmp/trash/1"},
+                {"original": str(inst), "trash_dir": "/tmp/trash/2"},
+                {"original": str(mod), "trash_dir": "/tmp/trash/1"},
+            ]
+        )
+        self.install_rtrash(list_json=payload, log_file=calls)
+
+        dup = self.run_restore(["Demo/1.0"])
+        self.assertEqual(dup.returncode, 2, dup.stdout + dup.stderr)
+        self.assertEqual(dup.stdout, "")
+        self.assertIn("is in the trash more than once; restore the one you want with: rtrash restore", dup.stderr)
+        self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["list --json"])
+
 
 if __name__ == "__main__":
     unittest.main()
