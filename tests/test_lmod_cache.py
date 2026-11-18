@@ -457,6 +457,37 @@ class LmodCache(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(target.read_text(), "outside\n")
 
+    def test_eessi_version_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prefix = root / "prefix"
+            (prefix / "versions").mkdir(parents=True)
+            escaped = root / "escape" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+            (escaped / "modules" / "all").mkdir(parents=True)
+            log = root / "calls.log"
+            updater = root / "update_lmod_system_cache_files"
+            updater.write_text(UPDATE)
+            updater.chmod(updater.stat().st_mode | stat.S_IEXEC)
+            env = {**os.environ, "EB_LOCAL_UPDATE_LOG": str(log)}
+
+            for bad in ("../../escape", "2026.06/extra", ".", ".."):
+                with self.subTest(eessi_version=bad):
+                    got = run(
+                        [
+                            "--prefix",
+                            str(prefix),
+                            "--eessi-version",
+                            bad,
+                            "--update-cmd",
+                            str(updater),
+                        ],
+                        env=env,
+                    )
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertIn("--eessi-version", got.stderr)
+                    self.assertFalse(log.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

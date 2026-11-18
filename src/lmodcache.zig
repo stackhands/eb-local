@@ -148,6 +148,11 @@ fn lessThanStr(_: void, x: []const u8, y: []const u8) bool {
     return std.mem.lessThan(u8, x, y);
 }
 
+fn validEessiVersion(v: []const u8) bool {
+    if (v.len == 0 or std.mem.eql(u8, v, ".") or std.mem.eql(u8, v, "..")) return false;
+    return std.mem.indexOfAny(u8, v, "/\\\x00") == null;
+}
+
 fn softwareRoots(a: std.mem.Allocator, prefix: []const u8, version: []const u8) ![]const []const u8 {
     const versions = try std.fs.path.join(a, &.{ prefix, "versions" });
     defer a.free(versions);
@@ -291,6 +296,10 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     }
     if (!isDir(opts.prefix)) {
         fail("{s} does not point to an existing directory", .{opts.prefix});
+        return 2;
+    }
+    if (opts.eessi_version.len > 0 and !validEessiVersion(opts.eessi_version)) {
+        fail("--eessi-version '{s}' must be a single version directory name", .{opts.eessi_version});
         return 2;
     }
     const targets = discoverTargets(a, opts) catch |err| {
