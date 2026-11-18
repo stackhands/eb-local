@@ -255,6 +255,49 @@ class LmodCache(unittest.TestCase):
         self.assertEqual(got.returncode, 2, got.stderr)
         self.assertIn("not an absolute path", got.stderr)
 
+    def test_prefix_cannot_be_combined_with_single_target_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "calls.log"
+            updater = root / "update_lmod_system_cache_files"
+            updater.write_text(UPDATE)
+            updater.chmod(updater.stat().st_mode | stat.S_IEXEC)
+            cpu = root / "versions/2026.06/software/linux/x86_64/amd/zen4"
+            (cpu / "modules/all").mkdir(parents=True)
+            cache = cpu / ".lmod/cache"
+            cache.mkdir(parents=True)
+            previous = cache / "spiderT.lua"
+            previous.write_text("previous\n")
+            stamp = cache / "timestamp"
+            stamp.write_text("old\n")
+            env = {**os.environ, "EB_LOCAL_UPDATE_LOG": str(log)}
+            for flag, val in (
+                ("--modulepath", str(cpu / "modules/all")),
+                ("--cache-dir", str(cache)),
+                ("--timestamp", str(stamp)),
+            ):
+                with self.subTest(flag=flag):
+                    got = run(
+                        [
+                            "--prefix",
+                            str(root),
+                            flag,
+                            val,
+                            "--update-cmd",
+                            str(updater),
+                        ],
+                        env=env,
+                    )
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertEqual(
+                        got.stderr,
+                        "eb-local: lmod-cache takes either --prefix or --modulepath, --cache-dir and --timestamp\n",
+                    )
+                    self.assertFalse(log.exists())
+                    self.assertEqual(previous.read_text(), "previous\n")
+                    self.assertEqual(stamp.read_text(), "old\n")
+
     def test_prefix_dry_run_lists_cpu_and_accelerator_module_trees(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
