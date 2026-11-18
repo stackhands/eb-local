@@ -45,7 +45,9 @@ pub fn moduleDirs(a: std.mem.Allocator, spec: []const u8) ![]const []const u8 {
     var it = std.mem.splitScalar(u8, spec, ':');
     while (it.next()) |part| {
         if (part.len == 0) continue;
-        try list.append(a, part);
+        for (list.items) |seen| {
+            if (std.mem.eql(u8, seen, part)) break;
+        } else try list.append(a, part);
     }
     return try list.toOwnedSlice(a);
 }
@@ -730,7 +732,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
 }
 
 test "a colon-separated module path drops empty segments" {
-    const dirs = try moduleDirs(std.testing.allocator, ":/mod/a::/mod/b:");
+    const dirs = try moduleDirs(std.testing.allocator, ":/mod/a::/mod/b:/mod/a:");
     defer std.testing.allocator.free(dirs);
     try std.testing.expectEqual(@as(usize, 2), dirs.len);
     try std.testing.expectEqualStrings("/mod/a", dirs[0]);
