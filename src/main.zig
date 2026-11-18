@@ -2566,6 +2566,23 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     return 0;
 }
 
+fn prefixCapacityOverride(c: Ctx) ?storage.Capacity {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| {
+            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+            return .{
+                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
+                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
+            };
+        }
+    }
+    return null;
+}
+
+fn prefixCapacity(c: Ctx, path: []const u8) ?storage.Capacity {
+    return prefixCapacityOverride(c) orelse (storage.capacity(path) catch null);
+}
+
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     if (args.len == 0) {
@@ -2602,6 +2619,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
         var buf: [sys.path_max]u8 = undefined;
         p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch |e| die("cannot resolve installation prefix {s} ({s})", .{ p.prefix, storage.describeError(e) })) catch oom();
+    }
+    if (prefixCapacity(c, p.prefix)) |cap| {
+        if (cap.bytes == 0 or cap.inodes == 0)
+            die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
     const d = durableDirs(c, p.prefix, "nothing was built");
     // The trees a build writes below the prefix must not lead onto refused
