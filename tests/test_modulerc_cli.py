@@ -169,6 +169,23 @@ class Modulerc(unittest.TestCase):
             )
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
+    def test_invalid_module_names_are_rejected_with_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_cases = (
+                ["--default", "foo bar"],
+                ["--default", "../escape"],
+                ["--hide", "Example/1.0/"],
+                ["--alias", "bad name=Example/2.0"],
+                ["--alias", "latest=Example 2.0"],
+            )
+            for extra in bad_cases:
+                with self.subTest(extra=extra):
+                    got = run(["--module-tree", tmp, *extra])
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertIn("is not a module name", got.stderr)
+            self.assertFalse((Path(tmp) / ".modulerc.lua").exists())
+
     def test_never_selects_a_default_without_one_on_the_command_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             got = run(["--module-tree", tmp, "--hide", "Example/1.0"])
