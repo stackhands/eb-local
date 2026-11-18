@@ -1638,6 +1638,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
             const clean = std.mem.trimEnd(u8, target, "/");
             die("{s} is a directory; pass a file path such as {s}/config.toml", .{ target, if (clean.len > 0) clean else "" });
         }
+        if (st.isLink()) die("{s} is a symbolic link; pass a regular file path", .{target});
     } else |_| {}
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
