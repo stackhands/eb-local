@@ -12,22 +12,7 @@ fn oom() noreturn {
 
 fn lossyUtf8(a: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]const u8 {
     if (std.unicode.utf8ValidateSlice(bytes)) return bytes;
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (std.unicode.utf8ByteSequenceLength(bytes[i])) |len| {
-            if (i + len <= bytes.len) {
-                if (std.unicode.utf8Decode(bytes[i..][0..len])) |_| {
-                    try out.appendSlice(a, bytes[i..][0..len]);
-                    i += len;
-                    continue;
-                } else |_| {}
-            }
-        } else |_| {}
-        try out.appendSlice(a, "\u{FFFD}");
-        i += 1;
-    }
-    return out.toOwnedSlice(a);
+    return try common.pytext.decodeReplace(a, bytes);
 }
 
 fn utf8Safe(a: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!@TypeOf(value) {
@@ -100,4 +85,11 @@ test "renderLine replaces non-UTF-8 bytes in nested strings without emitting byt
         "{\"path\":\"/tmp/tree-\u{FFFD}\",\"items\":[{\"path\":\"/tmp/bad-\u{FFFD}-0.log\"}],\"tags\":[\"ok\",\"bad-\u{FFFD}(\"],\"note\":\"hi-\u{FFFD}\"}\n",
         line,
     );
+}
+
+test "renderLine replaces truncated multi-byte UTF-8 sequences with one U+FFFD per maximal subpart" {
+    const Doc = struct { path: []const u8 };
+    const line = try renderLine(std.testing.allocator, Doc{ .path = "a\xe2\x82b\xff\xf0\x9f\x98" });
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings("{\"path\":\"a\u{FFFD}b\u{FFFD}\u{FFFD}\"}\n", line);
 }
