@@ -551,6 +551,10 @@ pub fn lockTimeoutMs(env: ?*const std.process.Environ.Map, err_msg: *[]const u8)
     const map = env orelse return default_lock_timeout_ms;
     const raw = map.get("EB_LOCAL_LOCK_TIMEOUT_MS") orelse return default_lock_timeout_ms;
     if (raw.len == 0) return default_lock_timeout_ms;
+    for (raw) |ch| if (!std.ascii.isDigit(ch)) {
+        err_msg.* = "EB_LOCAL_LOCK_TIMEOUT_MS must be a positive integer of milliseconds";
+        return null;
+    };
     const ms = std.fmt.parseInt(u32, raw, 10) catch {
         err_msg.* = "EB_LOCAL_LOCK_TIMEOUT_MS must be a positive integer of milliseconds";
         return null;
@@ -713,6 +717,12 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
     try testing.expect(flockUnsupported(error.Unexpected));
     sys.last_errno = .OPNOTSUPP;
     try testing.expect(flockUnsupported(error.Unsupported));
+
+    var bad_env = std.process.Environ.Map.init(a);
+    try bad_env.put("EB_LOCAL_LOCK_TIMEOUT_MS", "+100");
+    try testing.expect(lockTimeoutMs(&bad_env, &msg) == null);
+    try bad_env.put("EB_LOCAL_LOCK_TIMEOUT_MS", "1_000");
+    try testing.expect(lockTimeoutMs(&bad_env, &msg) == null);
 }
 
 test "the mount a path lies on" {

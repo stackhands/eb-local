@@ -583,6 +583,17 @@ sys.exit(int(os.environ["CONTROL_USED_STATUS"]))
                 self.assertIn("same command", blocked.stderr)
                 self.assertTrue(all(p.exists() for p in self.installs + self.modules))
 
+    def test_uninstall_delete_permission_error_names_path_and_errno(self):
+        mod_parent = self.modules[0].parent
+        mod_parent.chmod(0o555)
+        try:
+            got = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
+            self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+            self.assertIn(str(self.modules[0]), got.stderr)
+            self.assertIn("[Errno 13] Permission denied", got.stderr)
+        finally:
+            mod_parent.chmod(0o755)
+
 
 if __name__ == "__main__":
     unittest.main()

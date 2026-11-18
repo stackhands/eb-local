@@ -72,7 +72,7 @@ fn fromFile(a: Allocator, f: *Failure, s: config.Secret, raw_path: []const u8, h
         break :blk try std.fs.path.join(a, &.{ h, raw_path[2..] });
     } else raw_path;
     const opened = fsx.openRegular(fsx.cwd, path, false) catch |e|
-        return fail(a, f, "secret {s}: cannot open {s} ({s}); a symbolic link is not followed", .{ s.name, path, @errorName(e) });
+        return fail(a, f, "secret {s}: cannot open {s} ({s}); a symbolic link is not followed", .{ s.name, path, storage.describeError(e) });
     defer sys.close(opened.fd);
     const st = opened.stat;
     if (st.uid != linux.getuid()) return fail(a, f, "secret {s}: {s} is not owned by you", .{ s.name, path });
@@ -81,7 +81,7 @@ fn fromFile(a: Allocator, f: *Failure, s: config.Secret, raw_path: []const u8, h
     const bytes = fsx.readAll(a, opened.fd, value_limit) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.StreamTooLong => return fail(a, f, "secret {s}: {s} is larger than {d} bytes", .{ s.name, path, value_limit }),
-        else => return fail(a, f, "secret {s}: cannot read {s} ({s})", .{ s.name, path, @errorName(e) }),
+        else => return fail(a, f, "secret {s}: cannot read {s} ({s})", .{ s.name, path, storage.describeError(e) }),
     };
     return checked(a, f, s, trimNewline(bytes));
 }
@@ -109,7 +109,7 @@ fn fromNimvault(a: Allocator, f: *Failure, s: config.Secret, entry: []const u8, 
         error.OutOfMemory => return error.OutOfMemory,
         error.TimedOut => return fail(a, f, "secret {s}: nimvault get {s} took longer than {d} s (is the GPG agent waiting for a passphrase?)", .{ s.name, entry, nimvault_timeout_ms / 1000 }),
         error.StreamTooLong => return fail(a, f, "secret {s}: nimvault get {s} printed more than {d} bytes", .{ s.name, entry, value_limit }),
-        else => return fail(a, f, "secret {s}: cannot run {s} ({s})", .{ s.name, exe, @errorName(e) }),
+        else => return fail(a, f, "secret {s}: cannot run {s} ({s})", .{ s.name, exe, storage.describeError(e) }),
     };
     if (r.term.code() != 0) {
         // Its stderr, never its stdout: a partial value must not be shown.
@@ -588,6 +588,23 @@ test "env and file sources, and why a file is refused" {
     var zl: [sys.path_max:0]u8 = undefined;
     _ = linux.symlinkat((try sys.z(&zt, good)).ptr, linux.AT.FDCWD, (try sys.z(&zl, link)).ptr);
     try testing.expect((try resolveOne(&s, try std.fmt.allocPrint(s.arena.allocator(), "file:{s}", .{link}))).value == null);
+
+    const absent_path = try std.fs.path.join(s.arena.allocator(), &.{ s.root, "absent-secret" });
+    const absent_res = try resolveOne(&s, try std.fmt.allocPrint(s.arena.allocator(), "file:{s}", .{absent_path}));
+    try testing.expect(absent_res.value == null);
+    try testing.expect(std.mem.indexOf(u8, absent_res.message, "[Errno 2] No such file or directory") != null);
+
+    const no_perm = try s.write("no-perm", "hidden-val\n", 0o600);
+    const dir_fd = try fsx.openDir(fsx.cwd, s.root, false);
+    defer {
+        sys.fchmod(dir_fd, 0o755) catch {};
+        sys.close(dir_fd);
+    }
+    try sys.fchmod(dir_fd, 0o000);
+    const perm_res = try resolveOne(&s, try std.fmt.allocPrint(s.arena.allocator(), "file:{s}", .{no_perm}));
+    try testing.expect(perm_res.value == null);
+    try testing.expect(std.mem.indexOf(u8, perm_res.message, "[Errno 13] Permission denied") != null);
+    try testing.expect(std.mem.indexOf(u8, perm_res.message, "hidden-val") == null);
 }
 
 test "nimvault: the value from stdout, the reason from stderr only" {
