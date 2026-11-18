@@ -1065,11 +1065,17 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
 
     for (elf.needed) |n| {
         if (std.mem.indexOfScalar(u8, n, '/') != null) {
-            if (!quiet) say("  needs    {s}", .{n});
-            if (!isFile(n)) {
+            const needed_path = elfcheck.expandOrigin(a, n, origin) catch oom();
+            if (!quiet) {
+                if (std.mem.eql(u8, needed_path, n))
+                    say("  needs    {s}", .{n})
+                else
+                    say("  needs    {s} => {s}", .{ n, needed_path });
+            }
+            if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{n});
-            } else k.enqueue(a, n);
+                k.problem(a, "{s} does not exist", .{needed_path});
+            } else k.enqueue(a, needed_path);
             continue;
         }
         // The job may run without this shell's LD_LIBRARY_PATH, so the
