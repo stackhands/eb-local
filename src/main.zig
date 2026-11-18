@@ -4568,8 +4568,10 @@ pub fn main(init: std.process.Init) u8 {
                     };
                     site.sets.append(a, set) catch oom();
                 } else if (std.mem.eql(u8, x, "--to")) {
+                    if (site.to != null) die("site takes one --to", .{});
                     site.to = value(args, &i, "--to");
                 } else if (joined(x, "--to")) |v| {
+                    if (site.to != null) die("site takes one --to", .{});
                     site.to = v;
                 } else if (std.mem.eql(u8, x, "--force")) {
                     site.force = true;

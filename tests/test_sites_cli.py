@@ -407,6 +407,30 @@ class SitesCli(StorageFixture):
                 self.assertIn(f"{target_dir}/config.toml", got.stderr)
                 self.assertTrue(target_dir.is_dir())
 
+    def test_site_rejects_duplicate_to_flag(self):
+        p1 = self.root / "site1.toml"
+        p2 = self.root / "site2.toml"
+        got = self.run_tool(
+            [
+                "site",
+                "install",
+                "slurm",
+                "--set",
+                "node_local_root=/local",
+                "--set",
+                "shared_scratch=/scratch",
+                "--to",
+                str(p1),
+                "--to",
+                str(p2),
+            ]
+        )
+        self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("site takes one --to", got.stderr)
+        self.assertFalse(p1.exists())
+        self.assertFalse(p2.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
