@@ -2556,6 +2556,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     // the build with nothing but the installation directory made.
     var failure: secrets.Failure = .{};
     const wanted = config.buildSecrets(a, s) catch oom();
+    for (wanted) |w| if (std.mem.startsWith(u8, w.source, "nimvault:"))
+        warn("secret {s}: the nimvault: source is deprecated and is removed in 4.0.0; use file: or env:", .{w.name});
     const values = secrets.resolve(a, wanted, c.env, c.envp, nimvaultOf(s), &failure) catch |e| switch (e) {
         error.Unavailable => die("{s}", .{failure.message}),
         error.OutOfMemory => oom(),

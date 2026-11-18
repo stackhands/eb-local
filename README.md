@@ -94,7 +94,7 @@ Settings come from, lowest first: built-in defaults, the site file, a site profi
 
 ## Secrets
 
-A build that needs a credential, such as a licence server or a token for a private source mirror, names in `[secrets]` where its value comes from, `env:VARIABLE`, `file:PATH` or `nimvault:ENTRY`, and never the value.
+A build that needs a credential, such as a licence server or a token for a private source mirror, names in `[secrets]` where its value comes from, `env:VARIABLE` or `file:PATH` (`nimvault:ENTRY` is deprecated and is removed in 4.0.0), and never the value.
 A build gets every secret unless `build.secrets` names the ones it gets, and the logs written during it are cleaned of each value it gets.
 [Give a secret only to the builds that need it](docs/howto/scope-secrets.md) has the steps, and [What happens to a secret](docs/explanation/secrets.md) says when a value is read, where it goes and what is cleaned.
 
