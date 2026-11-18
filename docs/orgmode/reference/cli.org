@@ -18,7 +18,7 @@ eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
-eb-local [OPTION]... doctor [--json] [--workspace PATH]
+eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
@@ -92,10 +92,11 @@ directory you own.
                                        what this node's target lacks; --json prints one
                                        line of JSON with schema_version 1; --missing
                                        lists only modules missing on this node's target
-  eb-local doctor [--json] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing;
                                        --json prints one line of JSON with schema_version 1.
+                                       --strict exits 1 on warn lines as well as FAIL.
                                        --workspace probes PATH without starting a build.
                                        --cvmfs checks the CernVM-FS client.
                                        --cvmfs-parallel N (1 to 8) reads repository
@@ -409,6 +410,7 @@ It changes nothing, and exits 1 when a line says =FAIL=.
 | Option | Meaning |
 |--------+---------|
 | =--json= | Print one JSON document instead of human-readable lines. |
+| =--strict= | Exit 1 whenever a =warn= line appears as well as =FAIL=, setting =failed= to =true= in =--json=. |
 | =--workspace PATH= | Probe the existing absolute directory PATH and report its storage and cache isolation. |
 | =--cvmfs= | Check the CernVM-FS client. Off unless this flag, or =--cvmfs-parallel=, is given. |
 | =--cvmfs-parallel N= | Also read repository metadata from N tasks, 1 to 8, inside an allocation. Implies =--cvmfs=. |
