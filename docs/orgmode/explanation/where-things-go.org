@@ -43,12 +43,14 @@ eb-local's default is the same directory, so the modules installed with a build,
 Any other default would split one user's modules into two trees, of which =eb-local env= loads one.
 
 Before eb-local 3.0 the default was =$HOME/.local/eessi=.
-Where that directory exists and =$HOME/eessi= does not, eb-local keeps using it, and =env=, =config= and =doctor= say so first:
+Where that directory holds an install (a =versions= tree, or eb-local's own =.eb-local=) and =$HOME/eessi= does not exist, eb-local keeps using it, and =env=, =config= and =doctor= say so first:
 
 #+begin_example
 eb-local: using /home/alice/.local/eessi, the default before eb-local 3.0; EESSI-extend and `eb-local eb` use /home/alice/eessi.
   Keep it with prefix = "~/.local/eessi" in ~/.config/eb-local/config.toml, or move it to /home/alice/eessi.
 #+end_example
+
+An empty =$HOME/.local/eessi= holds nothing to keep, so the default stays =$HOME/eessi= and nothing is said.
 
 =prefix= chooses either for good.
 A site that wants another default for everyone sets it where EESSI-extend reads it too, as [[file:../howto/set-site-defaults.org][Set a site's EasyBuild defaults and default prefix]] shows.
