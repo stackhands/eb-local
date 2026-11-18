@@ -240,7 +240,8 @@ pub fn parseLdSoConf(a: Allocator, text: []const u8, dirs: *std.ArrayList([]cons
         const line = std.mem.trim(u8, raw[0 .. std.mem.indexOfScalar(u8, raw, '#') orelse raw.len], " \t\r");
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "include") and line.len > 7 and (line[7] == ' ' or line[7] == '\t')) {
-            try includes.append(a, std.mem.trim(u8, line[7..], " \t"));
+            var pats = std.mem.tokenizeAny(u8, line[7..], " \t");
+            while (pats.next()) |pat| try includes.append(a, pat);
         } else if (line[0] == '/') {
             try dirs.append(a, line);
         }
@@ -257,6 +258,12 @@ test "parseLdSoConf" {
     try std.testing.expectEqual(@as(usize, 1), dirs.items.len);
     try std.testing.expectEqualStrings("/usr/local/lib", dirs.items[0]);
     try std.testing.expectEqualStrings("/etc/ld.so.conf.d/*.conf", inc.items[0]);
+
+    inc.clearRetainingCapacity();
+    try parseLdSoConf(a, "include /etc/ld.so.conf.d/*.conf\t /opt/ld/*.conf\n", &dirs, &inc);
+    try std.testing.expectEqual(@as(usize, 2), inc.items.len);
+    try std.testing.expectEqualStrings("/etc/ld.so.conf.d/*.conf", inc.items[0]);
+    try std.testing.expectEqualStrings("/opt/ld/*.conf", inc.items[1]);
 }
 
 test "targetOf reads EESSI and EESSI-extend trees" {
