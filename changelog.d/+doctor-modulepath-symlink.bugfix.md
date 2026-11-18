@@ -1,0 +1,1 @@
+`eb-local doctor` now canonicalizes `MODULEPATH` entries before checking whether they live under the resolved installation prefix, avoiding false warnings when the prefix is reached through a symbolic link.

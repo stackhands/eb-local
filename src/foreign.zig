@@ -76,12 +76,7 @@ pub fn approvedPrefixes(a: Allocator, env: *const std.process.Environ.Map, extra
 fn addPrefix(a: Allocator, list: *std.ArrayList([]const u8), path: []const u8) Allocator.Error!void {
     const norm = lexical(a, path, false) orelse return;
     try pushUnique(a, list, norm);
-    if (fsx.statAt(fsx.cwd, norm, false)) |_| {
-        var buf: [sys.path_max]u8 = undefined;
-        if (fsx.realpath(fsx.cwd, norm, &buf)) |real| {
-            if (lexical(a, real, false)) |again| try pushUnique(a, list, again);
-        } else |_| {}
-    } else |_| {}
+    if (resolve(a, norm)) |real| try pushUnique(a, list, real);
 }
 
 fn pushUnique(a: Allocator, list: *std.ArrayList([]const u8), path: []const u8) Allocator.Error!void {
@@ -110,11 +105,43 @@ fn lexical(a: Allocator, path: []const u8, fold: bool) ?[]const u8 {
     return std.fmt.allocPrint(a, "/{s}", .{body}) catch null;
 }
 
+/// Resolve existing components with realpath while keeping any non-existent
+/// suffix, falling back to `norm` when no component exists on disk.
+/// Stops rather than climbing past an unresolvable symlink.
+fn resolve(a: Allocator, path: []const u8) ?[]const u8 {
+    const norm = lexical(a, path, false) orelse return null;
+    var cur: []const u8 = norm;
+    var buf: [sys.path_max]u8 = undefined;
+    while (cur.len > 1) {
+        if (fsx.realpath(fsx.cwd, cur, &buf)) |real| {
+            const suffix = norm[cur.len..];
+            const joined = if (suffix.len == 0)
+                real
+            else if (std.mem.eql(u8, real, "/"))
+                suffix
+            else
+                std.fmt.allocPrint(a, "{s}{s}", .{ real, suffix }) catch return null;
+            return lexical(a, joined, false);
+        } else |_| {
+            if (fsx.statAt(fsx.cwd, cur, false)) |st| {
+                if (st.isLink()) return null;
+            } else |_| {}
+        }
+        cur = std.fs.path.dirname(cur) orelse break;
+    }
+    return norm;
+}
+
+fn under(path: []const u8, prefix: []const u8) bool {
+    if (std.mem.eql(u8, path, prefix)) return true;
+    return path.len > prefix.len and path[prefix.len] == '/' and std.mem.startsWith(u8, path, prefix);
+}
+
 fn inside(a: Allocator, path: []const u8, prefixes: []const []const u8) bool {
-    const norm = lexical(a, path, false) orelse return false;
+    const real_path = resolve(a, path) orelse return false;
     for (prefixes) |p| {
-        if (std.mem.eql(u8, norm, p)) return true;
-        if (norm.len > p.len and norm[p.len] == '/' and std.mem.startsWith(u8, norm, p)) return true;
+        const real_p = resolve(a, p) orelse lexical(a, p, false) orelse continue;
+        if (under(real_path, real_p)) return true;
     }
     return false;
 }
@@ -516,4 +543,94 @@ test "XDG_CACHE_HOME eb-local cache is approved even when HOME is unset" {
     try testing.expect(inside(a, "/xdg/cache/eb-local/rpath-1234/gcc", prefixes));
     try scrub(a, &s.env, prefixes);
     try testing.expectEqualStrings("/xdg/cache/eb-local/rpath-1234/gcc", s.env.get("CC").?);
+}
+
+test "a symlink inside an approved prefix pointing outside is rejected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/foreign-sym-{d}", .{ cwd, linux.getpid() });
+    const approved = try std.fs.path.join(a, &.{ root, "approved" });
+    const real_sub = try std.fs.path.join(a, &.{ approved, "real" });
+    const outside = try std.fs.path.join(a, &.{ root, "outside" });
+    try common.atomic.makedirs(real_sub);
+    try common.atomic.makedirs(outside);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+
+    const escape = try std.fs.path.join(a, &.{ approved, "ext" });
+    var z_out: [sys.path_max:0]u8 = undefined;
+    var z_esc: [sys.path_max:0]u8 = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlinkat((try sys.z(&z_out, outside)).ptr, linux.AT.FDCWD, (try sys.z(&z_esc, escape)).ptr)));
+
+    var s = try Scratch.init(&.{
+        .{ "PYTHONPATH", try std.fmt.allocPrint(a, "{s}:{s}", .{ escape, real_sub }) },
+    });
+    defer s.deinit();
+    const prefixes = try approvedPrefixes(a, &s.env, &.{}, approved);
+    try testing.expect(!inside(a, escape, prefixes));
+    try testing.expect(!inside(a, try std.fs.path.join(a, &.{ escape, "sub" }), prefixes));
+    try testing.expect(inside(a, real_sub, prefixes));
+    try scrub(a, &s.env, prefixes);
+    try testing.expectEqualStrings(real_sub, s.env.get("PYTHONPATH").?);
+}
+
+test "an approved symlink prefix keeps its contents and rejects escapes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/foreign-sym-prefix-{d}", .{ cwd, linux.getpid() });
+    const real_target = try std.fs.path.join(a, &.{ root, "target" });
+    const real_lib = try std.fs.path.join(a, &.{ real_target, "lib" });
+    const outside = try std.fs.path.join(a, &.{ root, "outside" });
+    try common.atomic.makedirs(real_lib);
+    try common.atomic.makedirs(outside);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+
+    const sym_prefix = try std.fs.path.join(a, &.{ root, "sym_prefix" });
+    var z_target: [sys.path_max:0]u8 = undefined;
+    var z_sym: [sys.path_max:0]u8 = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlinkat((try sys.z(&z_target, real_target)).ptr, linux.AT.FDCWD, (try sys.z(&z_sym, sym_prefix)).ptr)));
+
+    const escape = try std.fs.path.join(a, &.{ real_target, "ext" });
+    var z_out: [sys.path_max:0]u8 = undefined;
+    var z_esc: [sys.path_max:0]u8 = undefined;
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlinkat((try sys.z(&z_out, outside)).ptr, linux.AT.FDCWD, (try sys.z(&z_esc, escape)).ptr)));
+
+    const sym_lib = try std.fs.path.join(a, &.{ sym_prefix, "lib" });
+    const sym_future = try std.fs.path.join(a, &.{ sym_prefix, "future" });
+    const sym_escape = try std.fs.path.join(a, &.{ sym_prefix, "ext" });
+
+    // Direct prefixes slice containing the symlinked prefix itself.
+    const direct = [_][]const u8{sym_prefix};
+    try testing.expect(inside(a, sym_lib, &direct));
+    try testing.expect(inside(a, real_lib, &direct));
+    try testing.expect(inside(a, sym_future, &direct));
+    try testing.expect(!inside(a, sym_escape, &direct));
+
+    // A non-existent install prefix under a symlinked parent also resolves through the parent.
+    const future_under_sym = try std.fs.path.join(a, &.{ sym_prefix, "nested", "eessi" });
+    const future_under_real = try std.fs.path.join(a, &.{ real_target, "nested", "eessi", "lib" });
+    var s = try Scratch.init(&.{
+        .{ "PYTHONPATH", try std.fmt.allocPrint(a, "{s}:{s}:{s}", .{ sym_lib, sym_escape, future_under_real }) },
+    });
+    defer s.deinit();
+    const prefixes = try approvedPrefixes(a, &s.env, &.{sym_prefix}, future_under_sym);
+    try testing.expect(inside(a, sym_lib, prefixes));
+    try testing.expect(inside(a, future_under_real, prefixes));
+    try testing.expect(!inside(a, sym_escape, prefixes));
+
+    const found = try scan(a, &s.env, prefixes, false, "");
+    var kept_warn = false;
+    for (found) |f| if (f.code == .list_keep) {
+        try testing.expectEqualStrings(sym_escape, f.path);
+        kept_warn = true;
+    };
+    try testing.expect(kept_warn);
+
+    try scrub(a, &s.env, prefixes);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}:{s}", .{ sym_lib, future_under_real }), s.env.get("PYTHONPATH").?);
 }

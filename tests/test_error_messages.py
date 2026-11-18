@@ -91,6 +91,40 @@ class ErrorPathAndErrno(StorageFixture):
         finally:
             jobs.chmod(0o755)
 
+    def test_rpath_wrappers_write_failure_names_path_and_errno(self):
+        fake_bin = self.root / "rw-bin"
+        fake_bin.mkdir(exist_ok=True)
+        (fake_bin / "gcc").write_text("#!/bin/sh\nexit 0\n")
+        (fake_bin / "gcc").chmod(0o755)
+
+        ro_cache = self.root / "ro-cache"
+        ro_cache.mkdir()
+        ro_cache.chmod(0o555)
+        try:
+            argv_ro, env_ro = binary.command(
+                self.script,
+                ["rpath-wrappers", "--for", "gcc"],
+                dict(self.env, XDG_CACHE_HOME=str(ro_cache), PATH=str(fake_bin)),
+            )
+            run_ro = subprocess.run(argv_ro, env=env_ro, cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(run_ro.returncode, 2, run_ro.stdout + run_ro.stderr)
+            self.assertIn(str(ro_cache), run_ro.stderr)
+            self.assertIn("[Errno 13] Permission denied", run_ro.stderr)
+        finally:
+            ro_cache.chmod(0o755)
+
+        file_cache = self.root / "file-cache"
+        file_cache.write_text("x\n")
+        argv_f, env_f = binary.command(
+            self.script,
+            ["rpath-wrappers", "--for", "gcc"],
+            dict(self.env, XDG_CACHE_HOME=str(file_cache), PATH=str(fake_bin)),
+        )
+        run_f = subprocess.run(argv_f, env=env_f, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run_f.returncode, 2, run_f.stdout + run_f.stderr)
+        self.assertIn(str(file_cache), run_f.stderr)
+        self.assertIn("[Errno 20] Not a directory", run_f.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

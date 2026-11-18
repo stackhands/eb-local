@@ -56,6 +56,10 @@ class Check(unittest.TestCase):
         self.assertIn(f"libdemo.so => {lib}/libdemo.so   [RPATH]", run.stdout)
         self.assertIn("no problems", run.stdout)
 
+        trailing = self.check(prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/")
+        self.assertEqual(trailing.returncode, 0, trailing.stdout + trailing.stderr)
+        self.assertIn("no problems", trailing.stdout)
+
     def test_a_run_path_into_another_target_is_a_problem(self):
         lib = self.tree("x86_64/amd/zen2")
         prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
@@ -78,6 +82,25 @@ class Check(unittest.TestCase):
         run = self.check(prog)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f"=> {lib}/libdemo.so   [RPATH]", run.stdout)
+
+    def test_needed_origin_is_expanded_for_plain_and_recursive_checks(self):
+        (self.root / "lib.c").write_text("int f(void) { return 7; }\n")
+        (self.root / "main.c").write_text("int f(void);\nint main(void) { return f() == 7 ? 0 : 1; }\n")
+        lib = self.root / "liborigin.so"
+        prog = self.root / "origin_prog"
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-Wl,-soname,$ORIGIN/liborigin.so", "-o", str(lib), str(self.root / "lib.c")],
+            check=True,
+        )
+        subprocess.run(
+            [GCC, "-o", str(prog), str(self.root / "main.c"), str(lib), "-Wl,-rpath,$ORIGIN", "-Wl,--disable-new-dtags"],
+            check=True,
+        )
+        run = self.check("--recursive", "--quiet", "--json", prog)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        doc = json.loads(run.stdout)
+        paths = [f["path"] for f in doc["files"]]
+        self.assertIn(str(lib), paths)
 
     def test_a_library_found_only_through_ld_library_path_is_a_problem(self):
         lib = self.tree("x86_64/amd/zen4")
@@ -196,6 +219,29 @@ class Check(unittest.TestCase):
         missing = self.check("--module", "missing/1.0", EB_LOCAL_PREFIX=str(prefix))
         self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
         self.assertIn("is not installed", missing.stderr)
+
+    def test_duplicate_module_arguments_are_checked_once(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--enable-new-dtags")
+        prefix = self.root / "eessi-dup"
+        install = prefix / "versions/2026.06/software/linux/x86_64/amd/zen4/software/demo/1.0"
+        (install / "bin").mkdir(parents=True)
+        (install.parent.parent.parent / "modules").mkdir(parents=True)
+        (install / "bin" / "demo").write_bytes(prog.read_bytes())
+        run = self.check(
+            "--module",
+            "demo/1.0",
+            "demo/1.0",
+            "--quiet",
+            "--json",
+            EB_LOCAL_PREFIX=str(prefix),
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+        )
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        doc = json.loads(run.stdout.splitlines()[-1])
+        self.assertEqual(doc["elf_count"], 1, doc)
+        self.assertEqual(len(doc["files"]), 1, doc)
+        self.assertEqual(doc["problem_count"], 1, doc)
 
     def test_dev_uses_the_dev_prefix_or_the_eessi_target(self):
         lib = self.tree("x86_64/amd/zen4")
@@ -414,6 +460,82 @@ class Check(unittest.TestCase):
         paths2 = [f["path"] for f in doc2["files"]]
         self.assertEqual(paths2.count(str(tree / "lib" / "libdemo.so")), 1)
         self.assertEqual(doc2["elf_count"], len(paths2))
+
+    def test_compat_ld_so_conf_resolves_relative_and_root_includes_under_loader_root(self):
+        compat = self.root / "compat"
+        (compat / "etc" / "ld.so.conf.d").mkdir(parents=True)
+        (compat / "etc" / "extra.conf.d").mkdir(parents=True)
+        custom_rel = compat / "custom-rel" / "lib"
+        custom_abs = compat / "custom-abs" / "lib"
+        custom_rel.mkdir(parents=True)
+        custom_abs.mkdir(parents=True)
+
+        (self.root / "demo.c").write_text("int demo(void) { return 7; }\n")
+        (self.root / "extra.c").write_text("int extra(void) { return 5; }\n")
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-o", str(custom_rel / "libdemo.so"), str(self.root / "demo.c")],
+            check=True,
+        )
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-o", str(custom_abs / "libextra.so"), str(self.root / "extra.c")],
+            check=True,
+        )
+
+        (compat / "etc" / "ld.so.conf").write_text(
+            "include ld.so.conf.d/*.conf\ninclude /etc/extra.conf.d/*.conf\n",
+            encoding="utf-8",
+        )
+        (compat / "etc" / "ld.so.conf.d" / "rel.conf").write_text(f"{custom_rel}\n", encoding="utf-8")
+        (compat / "etc" / "extra.conf.d" / "abs.conf").write_text(f"{custom_abs}\n", encoding="utf-8")
+
+        (self.root / "compat_prog.c").write_text(
+            "int demo(void);\nint extra(void);\nvoid _start(void) { (void)demo(); (void)extra(); }\n"
+        )
+        prog = self.root / "compat_prog"
+        interp = compat / "lib64" / "ld-linux-x86-64.so.2"
+        subprocess.run(
+            [
+                GCC,
+                "-nostdlib",
+                "-e",
+                "_start",
+                "-o",
+                str(prog),
+                str(self.root / "compat_prog.c"),
+                f"-L{custom_rel}",
+                "-ldemo",
+                f"-L{custom_abs}",
+                "-lextra",
+                f"-Wl,--dynamic-linker={interp}",
+            ],
+            check=True,
+        )
+        run = self.check(prog)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"libdemo.so => {custom_rel}/libdemo.so   [the loader's directories]", run.stdout)
+        self.assertIn(f"libextra.so => {custom_abs}/libextra.so   [the loader's directories]", run.stdout)
+
+    def test_duplicate_file_arguments_are_checked_once(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--enable-new-dtags")
+        link = self.root / "prog-link"
+        link.symlink_to(prog)
+
+        plain = self.check(prog, prog, "--quiet", "--json", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(plain.returncode, 1, plain.stdout + plain.stderr)
+        doc_plain = json.loads(plain.stdout.splitlines()[-1])
+        self.assertEqual(doc_plain["elf_count"], 1, doc_plain)
+        self.assertEqual(len(doc_plain["files"]), 1, doc_plain)
+        self.assertEqual(doc_plain["problem_count"], 1, doc_plain)
+
+        rec = self.check("--recursive", prog, link, "--quiet", "--json", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(rec.returncode, 1, rec.stdout + rec.stderr)
+        doc_rec = json.loads(rec.stdout.splitlines()[-1])
+        paths = [f["path"] for f in doc_rec["files"]]
+        self.assertEqual(len(paths), len(set(paths)), doc_rec)
+        self.assertNotIn(str(link), paths)
+        self.assertEqual(doc_rec["elf_count"], len(paths), doc_rec)
+        self.assertEqual(doc_rec["problem_count"], 1, doc_rec)
 
 
 if __name__ == "__main__":

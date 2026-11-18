@@ -1,0 +1,1 @@
+`eb-local overlay materialize` now exits 2 when an overlay file contains unknown top-level keys or unknown subkeys under `[dependencies]`, catching typos instead of silently writing an unedited easyconfig.

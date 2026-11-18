@@ -1,0 +1,1 @@
+`eb-local site show` and `eb-local site install` now exit 2 when a site template contains an unclosed or invalid `{{...}}` placeholder instead of silently writing literal `{{...` into the output configuration.
