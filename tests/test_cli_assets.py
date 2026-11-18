@@ -84,6 +84,25 @@ class CliAssets(unittest.TestCase):
             self.assertIn(r"\&.modulerc.lua", man)
             self.assertIn(r"\&'quoted", man)
 
+    def test_bash_completion_loads_under_posix_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "share"
+            cp = subprocess.run(
+                ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.BIN}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            bash_comp = out / "completions" / "eb-local.bash"
+            posix = subprocess.run(
+                ["/bin/bash", "--posix", "-c", '. "$1"', "_", str(bash_comp)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(posix.returncode, 0, posix.stdout + posix.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
