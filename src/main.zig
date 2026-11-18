@@ -1744,6 +1744,10 @@ const Guard = struct {
         for (passed_on) |sig| linux.sigaddset(&block, sig);
         var mask: linux.sigset_t = undefined;
         _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &mask);
+        if (g.received()) |sig| {
+            _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
+            return .{ .signal = sig };
+        }
         const pid: isize = @bitCast(linux.fork());
         if (pid == 0) {
             for (passed_on, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
@@ -2572,6 +2576,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     for (values) |v| if (v.value.len < secrets.min_redacted_len)
         warn("secret {s} is shorter than {d} bytes and is not removed from logs", .{ v.name, secrets.min_redacted_len });
 
+    const guard = Guard.hold();
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
         common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
@@ -2617,9 +2622,13 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     for (s.eessi.items) |v| env.put(v.name, v.value) catch oom();
     for (values) |v| env.put(v.name, v.value) catch oom();
 
+    if (guard.received()) |sig| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        guard.release();
+        return stop(.{ .signal = sig });
+    }
     // The guard stays until the logs are clean: a signal stops the build, but
     // eb-local first waits for EasyBuild, which writes them, to exit.
-    const guard = Guard.hold();
     const ran = guard.run(a, buildCommand(a, c, s, p, args), envpOf(a, &env));
     const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
@@ -4701,6 +4710,32 @@ test "a signal that killed the child kills this process, and an ignored one does
     const status2: u32 = @bitCast(raw);
     try std.testing.expect(linux.W.IFEXITED(status2));
     try std.testing.expectEqual(@as(u8, 129), linux.W.EXITSTATUS(status2));
+}
+
+test "Guard.run does not launch child when a guarded signal already arrived" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/guard-prefork-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const marker = try std.fs.path.join(a, &.{ root, "ran" });
+
+    for ([_]linux.SIG{ .TERM, .INT }) |sig| {
+        const guard = Guard.hold();
+        defer guard.release();
+        _ = linux.kill(linux.getpid(), sig);
+        const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
+        const cmd = try std.fmt.allocPrint(a, "echo ran > '{s}'", .{marker});
+        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env);
+        switch (ran) {
+            .signal => |got| try std.testing.expectEqual(sig, got),
+            .exit => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, marker, false));
+    }
 }
 
 test "shell quoting reads back as the same word" {
