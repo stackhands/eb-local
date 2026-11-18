@@ -94,6 +94,19 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
         d.message = std.fmt.allocPrint(a, "{s}", .{td.message}) catch return error.OutOfMemory;
         return error.Invalid;
     };
+    for (root.entries.items) |*e| {
+        if (!std.mem.eql(u8, e.key, "overlay_version") and
+            !std.mem.eql(u8, e.key, "base_easyconfig") and
+            !std.mem.eql(u8, e.key, "base_digest") and
+            !std.mem.eql(u8, e.key, "rationale") and
+            !std.mem.eql(u8, e.key, "replace") and
+            !std.mem.eql(u8, e.key, "patches") and
+            !std.mem.eql(u8, e.key, "dependencies"))
+        {
+            d.line = e.line;
+            return fail(a, d, "unknown key {s}", .{e.key});
+        }
+    }
     const digest = (try tableString(a, root, "base_digest", d)) orelse return fail(a, d, "base_digest is required", .{});
     if (digest.len != 64) return fail(a, d, "base_digest must be a SHA-256 hex digest (64 characters)", .{});
     for (digest) |ch| if (!std.ascii.isHex(ch)) return fail(a, d, "base_digest must be a SHA-256 hex digest", .{});
@@ -122,6 +135,12 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     };
     if (root.get("dependencies")) |e| switch (e.value) {
         .table => |deps| {
+            for (deps.entries.items) |*de| {
+                if (!std.mem.eql(u8, de.key, "add") and !std.mem.eql(u8, de.key, "replace")) {
+                    d.line = de.line;
+                    return fail(a, d, "unknown key dependencies.{s}", .{de.key});
+                }
+            }
             if (deps.get("add")) |add| switch (add.value) {
                 .table => |t| try walkDependencies(a, t, "add", d, &dependencies),
                 else => return fail(a, d, "[dependencies.add] must be a table", .{}),
