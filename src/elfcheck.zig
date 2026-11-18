@@ -95,7 +95,9 @@ pub fn parse(a: Allocator, fd: sys.fd_t) ParseError!Elf {
             const buf = try a.alloc(u8, p.filesz);
             errdefer a.free(buf);
             try readAt(fd, buf, p.offset);
-            elf.interp = std.mem.sliceTo(buf, 0);
+            const interp = std.mem.sliceTo(buf, 0);
+            if (interp.len == buf.len) return error.Damaged;
+            elf.interp = interp;
         },
         pt_dynamic => dyn = p,
         else => {},
@@ -323,6 +325,38 @@ test "parse rejects wrapping DT_STRTAB bounds instead of saturating" {
     std.mem.writeInt(i64, buf[208..216], dt_null, .little);
 
     const tmp_path = try std.fmt.allocPrint(a, ".zig-cache/elf-wrap-{d}.bin", .{linux.getpid()});
+    {
+        const wfd = try sys.openat(fsx.cwd, tmp_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+        defer sys.close(wfd);
+        try sys.writeAll(wfd, &buf);
+    }
+    var zb: [sys.path_max:0]u8 = undefined;
+    const ztmp = try sys.z(&zb, tmp_path);
+    defer _ = linux.unlinkat(linux.AT.FDCWD, ztmp.ptr, 0);
+    const fd = try sys.openat(fsx.cwd, tmp_path, .{}, 0);
+    defer sys.close(fd);
+    try std.testing.expectError(error.Damaged, parse(a, fd));
+}
+
+test "parse rejects PT_INTERP without a terminating NUL byte" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf = std.mem.zeroes([160]u8);
+    @memcpy(buf[0..4], "\x7fELF");
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // ELFDATA2LSB
+    std.mem.writeInt(u16, buf[18..20], 62, .little); // x86_64
+    std.mem.writeInt(u64, buf[32..40], 64, .little); // phoff
+    std.mem.writeInt(u16, buf[54..56], 56, .little); // phentsize
+    std.mem.writeInt(u16, buf[56..58], 1, .little); // phnum
+
+    std.mem.writeInt(u32, buf[64..68], pt_interp, .little);
+    std.mem.writeInt(u64, buf[64 + 8 ..][0..8], 128, .little); // offset
+    std.mem.writeInt(u64, buf[64 + 32 ..][0..8], 6, .little); // filesz
+    @memcpy(buf[128..134], "no-nul");
+
+    const tmp_path = try std.fmt.allocPrint(a, ".zig-cache/elf-interp-{d}.bin", .{linux.getpid()});
     {
         const wfd = try sys.openat(fsx.cwd, tmp_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
         defer sys.close(wfd);
