@@ -6,6 +6,7 @@
 //! older than the cache file.
 const std = @import("std");
 const linux = std.os.linux;
+const build_options = @import("build_options");
 const common = @import("zig_common");
 const fsx = common.fsx;
 const sys = common.sys;
@@ -75,6 +76,23 @@ fn absolute(path: []const u8) bool {
 const walk_max = 5;
 const accel_walk_max = 3;
 
+var test_force_dt_unknown: bool = false;
+
+fn effectiveType(raw_type: u8) u8 {
+    if (comptime build_options.test_ops) {
+        if (test_force_dt_unknown) return fsx.DT.UNKNOWN;
+    }
+    return raw_type;
+}
+
+fn isDirEntry(dir: sys.fd_t, entry_name: []const u8, raw_type: u8) bool {
+    const t = effectiveType(raw_type);
+    if (t == fsx.DT.DIR) return true;
+    if (t != fsx.DT.UNKNOWN) return false;
+    const st = fsx.statAt(dir, entry_name, false) catch return false;
+    return st.isDir();
+}
+
 fn isDir(path: []const u8) bool {
     return if (fsx.statAt(fsx.cwd, path, true)) |st| st.isDir() else |_| false;
 }
@@ -104,7 +122,7 @@ fn findAccelModuleAll(a: std.mem.Allocator, root: []const u8, depth: usize, out:
     var it = fsx.DirIter.init(a, fd) catch return;
     defer it.deinit(a);
     while (it.next() catch null) |e| {
-        if (e.type != fsx.DT.DIR) continue;
+        if (!isDirEntry(fd, e.name, e.type)) continue;
         if (std.mem.eql(u8, e.name, "modules")) {
             const all = try std.fs.path.join(a, &.{ root, e.name, "all" });
             defer a.free(all);
@@ -124,7 +142,7 @@ fn findArchdirs(a: std.mem.Allocator, root: []const u8, depth: usize, out: *std.
     var it = fsx.DirIter.init(a, fd) catch return;
     defer it.deinit(a);
     while (it.next() catch null) |e| {
-        if (e.type != fsx.DT.DIR) continue;
+        if (!isDirEntry(fd, e.name, e.type)) continue;
         if (std.mem.eql(u8, e.name, "modules")) {
             const archdir = root;
             if (!dirHasAll(archdir)) continue;
@@ -777,6 +795,22 @@ test "discovering targets under a versioned prefix" {
     try std.testing.expectEqualStrings(cpu, targets[0].archdir);
     try std.testing.expect(std.mem.indexOf(u8, targets[0].modulepath, accel) != null);
     try std.testing.expect(std.mem.indexOf(u8, targets[0].modulepath, all) != null);
+
+    test_force_dt_unknown = true;
+    defer test_force_dt_unknown = false;
+    const unknown_targets = try discoverTargets(a, opts);
+    defer {
+        for (unknown_targets) |t| {
+            a.free(t.archdir);
+            a.free(t.modulepath);
+            a.free(t.cache_dir);
+            a.free(t.timestamp);
+        }
+        a.free(unknown_targets);
+    }
+    try std.testing.expectEqual(@as(usize, 1), unknown_targets.len);
+    try std.testing.expectEqualStrings(cpu, unknown_targets[0].archdir);
+    try std.testing.expect(std.mem.indexOf(u8, unknown_targets[0].modulepath, accel) != null);
 }
 
 test "normalizeInventory skips directory headers and accepts loaded and alias lines" {

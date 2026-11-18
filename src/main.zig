@@ -3714,6 +3714,21 @@ fn nodeTypes(s: config.Settings) []const config.NodeType {
     return s.node_types.value;
 }
 
+fn sbatchValue(a: Allocator, v: []const u8) []const u8 {
+    if (std.mem.indexOfAny(u8, v, " \t\n\r\"\\") == null) return v;
+    var out: std.ArrayList(u8) = .empty;
+    out.append(a, '"') catch oom();
+    for (v) |ch| switch (ch) {
+        '"', '\\' => {
+            out.append(a, '\\') catch oom();
+            out.append(a, ch) catch oom();
+        },
+        else => out.append(a, ch) catch oom(),
+    };
+    out.append(a, '"') catch oom();
+    return out.items;
+}
+
 /// One batch job per configured node type, each running this eb-local with
 /// the same recipe, options and configuration inside its own allocation, so
 /// a module is built for every CPU target the site has.
@@ -3757,14 +3772,16 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const stamp = nowSecs();
     var failed = false;
     for (chosen.items) |t| {
+        const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
+        const chdir_val = sbatchValue(a, c.cwd);
         const script = str(a,
             \\#!/bin/bash
             \\#SBATCH --job-name=eb-local-{s}-{s}
-            \\#SBATCH --output={s}/submit-{s}-%j.out
+            \\#SBATCH --output={s}
             \\#SBATCH --chdir={s}
             \\{s}
             \\
-        , .{ t.name, recipe, logs, t.name, c.cwd, command });
+        , .{ t.name, recipe, log_out, chdir_val, command });
         const path = std.fs.path.join(a, &.{ jobs, str(a, "{d}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
         var argv: std.ArrayList([]const u8) = .empty;
         argv.append(a, sbatch) catch oom();
