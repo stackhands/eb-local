@@ -424,7 +424,7 @@ It changes nothing, and exits 1 when a line says `FAIL`.
 
 `--json` prints one line of JSON with `schema_version` 1, `kind` `doctor`, `site_file`, `failed`, `lines` (`level` and `text`), and `summary`.
 The shape is in [doctor.schema.json](json/doctor.schema.json).
-With `--json`, exit 1 still means a `FAIL` line appeared; scripts read `failed` in the document.
+With `--json`, exit 1 still means `failed` is `true` (a `FAIL` line, or a `warn` line under `--strict`); scripts read `failed` in the document.
 
 ### lmod-cache
 

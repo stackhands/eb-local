@@ -74,6 +74,12 @@ class CliReference(unittest.TestCase):
         sections = re.findall(r"^\*\* (.+)$", PAGE.read_text(), re.M)
         self.assertEqual([name for name in names if name not in sections], [])
 
+    def test_doctor_json_exit_note_includes_strict(self):
+        page = PAGE.read_text()
+        doctor = page.split("\n** doctor\n", 1)[1].split("\n** ", 1)[0]
+        note = next(line for line in doctor.splitlines() if line.startswith("With =--json=, exit 1"))
+        self.assertIn("--strict", note)
+
 
 if __name__ == "__main__":
     unittest.main()
