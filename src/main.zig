@@ -120,10 +120,11 @@ const usage_text =
     \\                                       --dry-run lists targets; existing
     \\                                       --modulepath mode is unchanged
     \\  eb-local modulerc --module-tree DIR [--default MODULE]...
-    \\                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
+    \\                     [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run | --check]
     \\                                       write DIR/.modulerc.lua with the
     \\                                       defaults, aliases and hidden versions named;
-    \\                                       preserve other lines. --dry-run prints the file
+    \\                                       preserve other lines. --dry-run prints the file;
+    \\                                       --check reports drift and writes nothing
     \\  eb-local clean [--logs-older-than DAYS] [--no-logs] [--sources] [--workspaces]
     \\                 [--dry-run] [--delete]
     \\                                       remove what eb-local left behind; --no-logs
@@ -3808,6 +3809,7 @@ pub fn main(init: std.process.Init) u8 {
     var module_aliases: std.ArrayList(modulerc.Alias) = .empty;
     var module_hidden: std.ArrayList([]const u8) = .empty;
     var modulerc_dry_run = false;
+    var modulerc_check = false;
     var doctor_cvmfs = false;
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
@@ -3977,6 +3979,8 @@ pub fn main(init: std.process.Init) u8 {
                     module_hidden.append(a, v) catch oom();
                 } else if (std.mem.eql(u8, x, "--dry-run")) {
                     modulerc_dry_run = true;
+                } else if (std.mem.eql(u8, x, "--check")) {
+                    modulerc_check = true;
                 } else die("modulerc does not know '{s}'", .{x});
             },
             .overlay => {
@@ -4117,13 +4121,17 @@ pub fn main(init: std.process.Init) u8 {
         die("overlay takes materialize, bump or plan; got '{s}'", .{overlay_action});
     }
     // A module tree's control file does not depend on eb-local configuration.
-    if (command == .modulerc) return modulerc.run(init.io, a, .{
-        .tree = module_tree,
-        .defaults = module_defaults.items,
-        .aliases = module_aliases.items,
-        .hidden = module_hidden.items,
-        .dry_run = modulerc_dry_run,
-    });
+    if (command == .modulerc) {
+        if (modulerc_dry_run and modulerc_check) die("modulerc takes --dry-run or --check, not both", .{});
+        return modulerc.run(init.io, a, .{
+            .tree = module_tree,
+            .defaults = module_defaults.items,
+            .aliases = module_aliases.items,
+            .hidden = module_hidden.items,
+            .dry_run = modulerc_dry_run,
+            .check = modulerc_check,
+        });
+    }
     if (command == .profiles) return cmdProfiles(c, g);
     // A site file can be written while the configuration in force is broken.
     if (command == .site) {

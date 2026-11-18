@@ -31,6 +31,27 @@ eb-local modulerc \
   --dry-run
 ```
 
+## Check for drift
+
+Use `--check` in site automation to test whether applying the requested directives would change the file.
+Set `MODULE_TREE` to the absolute module tree directory first.
+
+```bash
+eb-local modulerc \
+  --module-tree "$MODULE_TREE" \
+  --default Example/2.0 \
+  --check
+```
+
+When the file needs the directive, the command writes nothing, prints:
+
+```text
+would update MODULE_TREE/.modulerc.lua
+```
+
+and exits 1.
+After the directive is present, it prints `up to date MODULE_TREE/.modulerc.lua` and exits 0.
+
 Existing lines stay in the file.
 Repeating the same command leaves the bytes unchanged.
 The command never scans installed versions or chooses a default.
