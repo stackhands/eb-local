@@ -577,6 +577,23 @@ class ConfigCli(StorageFixture):
         self.assertEqual(dup.stdout, "")
         self.assertIn("config takes one --get", dup.stderr)
 
+    def test_config_get_rejects_malformed_dynamic_keys(self):
+        for bad_key in (
+            "build.node_types.",
+            "build.node_types.bad!name",
+            "build.node_types." + ("x" * 33),
+            "secrets.",
+            "secrets.1BAD",
+            "secrets.PATH",
+            "secrets.LD_PRELOAD",
+            "secrets.a-b",
+        ):
+            with self.subTest(bad_key=bad_key):
+                got = self.run_tool(["config", "--config", str(self.site), "--get", bad_key])
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(f"unknown configuration key '{bad_key}'", got.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
