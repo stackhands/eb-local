@@ -18,7 +18,7 @@ eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
-eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH]
+eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
@@ -217,7 +217,7 @@ eb-local 3.1.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 #+end_example
 
 Since =v3.1.0=, no CLI flag was removed or renamed on =main=.
-The command line added =--strict= on =env=, =--unwrapped= on =rpath-wrappers=, and =lmod-cache= with =--modulepath=, =--cache-dir=, =--timestamp= and =--spider=.
+The command line added =--strict= on =env=, =--unwrapped= on =rpath-wrappers=, =--recursive= on =check=, =--cvmfs=, =--cvmfs-parallel= and =--mpi= on =doctor=, =lmod-cache= (single-target and =--prefix= modes, with =--verify=), =modulerc=, =overlay=, =site check=, and =--target= and =--usage-log= on =uninstall=.
 
 * Commands
 
@@ -590,7 +590,7 @@ A value with a quote, a backslash or a control character is refused.
 | Status  | Meaning                                                                                                                                         |
 |---------+-------------------------------------------------------------------------------------------------------------------------------------------------|
 | 0       | Done, or nothing to do.                                                                                                                         |
-| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to, or =clean= failed to remove some items or build workspaces; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
+| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =lmod-cache --verify= failed or =lmod-cache --prefix= found no target; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to, or =clean= failed to remove some items or build workspaces; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
 | 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file. |
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |

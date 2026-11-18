@@ -46,7 +46,7 @@ This page writes both, with the timestamp one second older.
 
 | Message | Cause | What to do |
 |---------+-------+------------|
-| =lmod-cache needs --modulepath, --cache-dir and --timestamp= | Single-target mode without one of the three. | Pass all three, or use =--prefix= instead. |
+| =lmod-cache needs --modulepath, --cache-dir and --timestamp, or --prefix= | Single-target mode without one of the three, and no =--prefix=. | Pass all three, or use =--prefix= instead. |
 | =under PREFIX found no CPU target with modules/all= | =--prefix= did not find =software/…/modules/all=. | Check the prefix or pass =--eessi-version=. |
 | =--cache-dir DIR is not an absolute path= | =DIR= is relative, as is a module directory or the timestamp. | Pass absolute paths. The cache is read later from another working directory. |
 | =cannot run spider: FileNotFound. Install Lmod and put spider on PATH, as https://lmod.readthedocs.io/en/latest/030_installing.html describes, or pass --spider with its path= | =spider= is not on =PATH=. | Install Lmod, or pass =--spider= with the program's path. |
