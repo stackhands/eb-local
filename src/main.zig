@@ -1006,7 +1006,11 @@ fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
 /// either way.
 fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool) void {
     const a = c.a;
-    const target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const target = if (raw_target) |rt| blk: {
+        const trimmed = std.mem.trimEnd(u8, rt, "/");
+        break :blk if (trimmed.len > 0) trimmed else rt;
+    } else null;
     const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
     const machine = elfcheck.machineName(elf.machine);
     if (k.json) k.beginFile(a, path, machine);
