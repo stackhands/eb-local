@@ -172,7 +172,17 @@ pub fn unwrapped(a: Allocator, path: []const u8, among: []const []const u8) Allo
 /// Write the wrappers for `found` into `dir`, a directory the caller owns
 /// and no one else can write; existing wrappers with the same bytes stay.
 pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!void {
+    var first_missing: ?[]const u8 = null;
+    {
+        var probe: []const u8 = dir;
+        while (probe.len > 1) {
+            if (fsx.statAt(fsx.cwd, probe, true)) |_| break else |_| {}
+            first_missing = probe;
+            probe = std.fs.path.dirname(probe) orelse break;
+        }
+    }
     common.atomic.makedirs(dir) catch |e| return e;
+    errdefer if (first_missing) |missing| fsx.deleteTree(a, fsx.cwd, missing) catch {};
     const st = try fsx.statAt(fsx.cwd, dir, false);
     if (!st.isDir() or st.uid != linux.getuid()) return error.Unsafe;
     {
@@ -180,8 +190,8 @@ pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!voi
         const zp = try sys.z(&zb, dir);
         if (linux.errno(linux.fchmodat(linux.AT.FDCWD, zp.ptr, 0o700)) != .SUCCESS) return error.Unsafe;
     }
-    try put(a, try std.fs.path.join(a, &.{ dir, marker }), "", 0o600);
     for (found) |n| try put(a, try std.fs.path.join(a, &.{ dir, n }), script, 0o700);
+    try put(a, try std.fs.path.join(a, &.{ dir, marker }), "", 0o600);
 }
 
 fn put(a: Allocator, path: []const u8, bytes: []const u8, mode: u32) Error!void {
@@ -230,6 +240,29 @@ test "a wrapper that cannot be written frees the reason" {
     var lb: [sys.path_max:0]u8 = undefined;
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlink((try sys.z(&tb, root)).ptr, (try sys.z(&lb, link)).ptr)));
     try std.testing.expectError(error.Unsafe, put(std.testing.allocator, link, script, 0o700));
+}
+
+test "failed wrapper write leaves no marker or newly created directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/rpath-clean-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+
+    // Pre-existing symlink at clang makes write() fail after makedirs:
+    // marker must not be left behind to poison present/unwrapped.
+    const bad_dir = try std.fs.path.join(a, &.{ root, "bad" });
+    try common.atomic.makedirs(bad_dir);
+    const link = try std.fs.path.join(a, &.{ bad_dir, "clang" });
+    var tb: [sys.path_max:0]u8 = undefined;
+    var lb: [sys.path_max:0]u8 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlink((try sys.z(&tb, bad_dir)).ptr, (try sys.z(&lb, link)).ptr)));
+    try std.testing.expectError(error.Unsafe, write(a, bad_dir, &.{"clang"}));
+    const m = try std.fs.path.join(a, &.{ bad_dir, marker });
+    try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, m, false));
 }
 
 test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's comes first" {
