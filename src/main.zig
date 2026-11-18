@@ -4066,6 +4066,15 @@ pub fn main(init: std.process.Init) u8 {
     const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FLOCK_ERRNO"))) |v| {
+            if (std.mem.eql(u8, v, "ENOLCK")) {
+                storage.test_flock_errno = .NOLCK;
+            } else if (std.mem.eql(u8, v, "ENOTSUP") or std.mem.eql(u8, v, "EOPNOTSUPP")) {
+                storage.test_flock_errno = .OPNOTSUPP;
+            } else if (std.mem.eql(u8, v, "ENOSYS")) {
+                storage.test_flock_errno = .NOSYS;
+            }
+        }
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
