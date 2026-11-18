@@ -3191,11 +3191,10 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         note(a, out, json_lines, "info", "mpicc is not on PATH, so the MPI hello was not compiled", .{});
         return;
     }
-    var cwd_buf: [sys.path_max]u8 = undefined;
-    const cwd = fsx.realpath(fsx.cwd, ".", &cwd_buf) catch ".";
-    const work = std.fmt.allocPrint(a, "{s}/.zig-cache/mpi-hello-{d}", .{ cwd, linux.getpid() }) catch oom();
-    common.atomic.makedirs(work) catch {
-        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{work});
+    const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
+    const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
+    const work = storage.makeWorkspace(a, base) catch {
+        note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{base});
         return;
     };
     defer fsx.deleteTree(a, fsx.cwd, work) catch {};
