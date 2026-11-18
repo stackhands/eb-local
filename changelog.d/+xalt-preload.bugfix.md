@@ -1,0 +1,1 @@
+A site-wide XALT preload (`LD_PRELOAD` naming only `libxalt_init.so`) is an `info` line in `doctor`, not a `warn`, and a build drops it without a warning, so `doctor --strict` no longer fails for every user of such a site.

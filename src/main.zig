@@ -680,6 +680,15 @@ fn llvmToolchain(module: []const u8) ?[]const u8 {
     return null;
 }
 
+test "onlyXalt is XALT's init library and nothing else" {
+    try std.testing.expect(onlyXalt("/opt/xalt/current/lib64/libxalt_init.so:"));
+    try std.testing.expect(onlyXalt("/opt/xalt/lib64/libxalt_init.so /usr/lib/xalt/libxalt_init.so.1"));
+    try std.testing.expect(!onlyXalt(""));
+    try std.testing.expect(!onlyXalt(":"));
+    try std.testing.expect(!onlyXalt("/opt/xalt/lib64/libxalt_init.so:/home/u/hack.so"));
+    try std.testing.expect(!onlyXalt("/home/u/libxalt.so"));
+}
+
 test "llvmToolchain names the lfoss hierarchy and nothing else" {
     try std.testing.expectEqualStrings("lfoss", llvmToolchain("ScaLAPACK/2.2.2-lfoss-2026.1-fb").?);
     try std.testing.expectEqualStrings("lompi", llvmToolchain("FFTW.MPI/3.3.10-lompi-2026.1").?);
@@ -2378,6 +2387,19 @@ const shell_startup = [_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" 
 /// RPATH.
 const host_loader = [_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" };
 
+/// Whether `value`, an LD_PRELOAD list split on ':' or ' ', names only
+/// XALT's libxalt_init.so: the usage tracker sites preload for every
+/// login. A build leaves it out like any preload, without a warning.
+fn onlyXalt(value: []const u8) bool {
+    var seen = false;
+    var it = std.mem.tokenizeAny(u8, value, ": ");
+    while (it.next()) |entry| {
+        if (!std.mem.startsWith(u8, std.fs.path.basename(entry), "libxalt_init.")) return false;
+        seen = true;
+    }
+    return seen;
+}
+
 /// The variables a build sets for its script: build and temporary space in
 /// the workspace `work`, sources and logs beside the install.
 fn buildVariables(a: Allocator, work: []const u8, d: Durable) [11][2][]const u8 {
@@ -2573,7 +2595,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     };
     var dropped_loader = false;
     for (host_loader) |name| {
-        if (env.swapRemove(name)) dropped_loader = true;
+        const quiet = std.mem.eql(u8, name, "LD_PRELOAD") and onlyXalt(env.get(name) orelse "");
+        if (env.swapRemove(name) and !quiet) dropped_loader = true;
     }
     if (dropped_loader) {
         warn("LD_LIBRARY_PATH, LD_PRELOAD or LD_AUDIT was set; a build does not pass them to eb,", .{});
@@ -3345,8 +3368,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         note(a, &out, lines_ptr, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
         if (!site) failed = true;
     }
-    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v)) != null)
-        note(a, &out, lines_ptr, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    for ([_][]const u8{ "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |v| if (nonEmpty(c.env.get(v))) |value| {
+        if (std.mem.eql(u8, v, "LD_PRELOAD") and onlyXalt(value))
+            note(a, &out, lines_ptr, "info", "LD_PRELOAD loads only XALT's libxalt_init.so, the site's usage tracker; builds leave it out", .{})
+        else
+            note(a, &out, lines_ptr, "warn", "{s} is set; programs built with eb-local dev do not need it, and it can mix host libraries into EESSI's", .{v});
+    };
     reportForeign(c, s, p.prefix, &out, lines_ptr);
 
     // The allocation.
