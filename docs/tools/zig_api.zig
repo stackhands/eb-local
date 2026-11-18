@@ -93,6 +93,11 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(2);
 }
 
+fn nonEmpty(v: ?[]const u8) ?[]const u8 {
+    const s = v orelse return null;
+    return if (s.len > 0) s else null;
+}
+
 /// Read the options, empty the --out directory, and write there one page
 /// per file reached from --root, and the index.
 pub fn main(init: std.process.Init) !void {
@@ -128,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (opts.module.len == 0 or opts.root.len == 0 or opts.out.len == 0) fail("{s}", .{usage});
-    const ref = init.environ_map.get("DOCS_SOURCE_REF") orelse init.environ_map.get("GITHUB_SHA") orelse "main";
+    const ref = nonEmpty(init.environ_map.get("DOCS_SOURCE_REF")) orelse nonEmpty(init.environ_map.get("GITHUB_SHA")) orelse "main";
     opts.source_url = try std.mem.replaceOwned(u8, arena, opts.source_url, "{ref}", ref);
 
     var ctx: Ctx = .{ .gpa = arena, .io = init.io, .opts = opts };
