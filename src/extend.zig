@@ -167,6 +167,7 @@ pub const script =
     \\mode=$2
     \\shift 2
     \\repo=${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}
+    \\while [[ $repo == */ ]]; do repo=${repo%/}; done
     \\ver=${EESSI_VERSION:-2026.06}
     \\init=${repo}/versions/${ver}/init/lmod/bash
     \\if [[ ! -e $init ]]; then
@@ -797,6 +798,18 @@ test "the init path has the script's defaults" {
     try testing.expectEqualStrings("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash", trimmed);
     try testing.expect(std.mem.indexOf(u8, script, "repo=${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}\n") != null);
     try testing.expect(std.mem.indexOf(u8, script, "ver=${EESSI_VERSION:-2026.06}\n") != null);
+    var r = try Run.init();
+    defer r.deinit();
+    try r.fake("2026.06", null);
+    const repo_with_slash = try std.fmt.allocPrint(r.arena.allocator(), "{s}/repo///", .{r.root});
+    try r.env.put("EESSI_CVMFS_REPO", repo_with_slash);
+    try r.env.put("EESSI_VERSION", "2025.06");
+    const out = try r.launch(&.{});
+    try testing.expectEqual(@as(u32, 2), out.term.code());
+    const expected_init = try initPath(r.arena.allocator(), &r.env);
+    const said = try std.fmt.allocPrint(r.arena.allocator(), "eb-local: missing {s}, the EESSI init; eb was not run.\n" ++
+        "  Set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere.\n", .{expected_init});
+    try testing.expectEqualStrings(said, out.stderr);
 }
 
 test "the build directory is the caller's WORKING_DIR or one of the user's own" {
