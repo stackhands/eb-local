@@ -82,13 +82,15 @@ pub const script =
     \\fi
     \\extra=()
     \\seen=:
+    \\eprefix=${EESSI_EPREFIX-}
+    \\while [ "${eprefix%/}" != "$eprefix" ] && [ "$eprefix" != / ]; do eprefix=${eprefix%/}; done
     \\for d in "${dirs[@]}"; do
-    \\    d=${d%/}
+    \\    while [ "${d%/}" != "$d" ] && [ "$d" != / ]; do d=${d%/}; done
     \\    case $d in /?*) ;; *) continue ;; esac
     \\    case $d in *,* | *:*) continue ;; esac
     \\    case $d in /lib | /lib/* | /lib64 | /lib64/* | /usr | /usr/*) continue ;; esac
-    \\    if [ -n "${EESSI_EPREFIX-}" ]; then
-    \\        case $d in "$EESSI_EPREFIX" | "$EESSI_EPREFIX"/*) continue ;; esac
+    \\    if [ -n "$eprefix" ]; then
+    \\        case $d in "$eprefix" | "$eprefix"/*) continue ;; esac
     \\    fi
     \\    case $seen in *":$d:"*) continue ;; esac
     \\    seen=$seen$d:
