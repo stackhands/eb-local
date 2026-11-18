@@ -202,6 +202,13 @@ class Modulerc(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "-- external\n")
             self.assertEqual(sorted(p.name for p in tree.iterdir()), [".modulerc.lua"])
 
+            for flag in ("--check", "--dry-run"):
+                with self.subTest(flag=flag):
+                    ro = run(["--module-tree", str(tree), "--default", "Example/2.0", flag])
+                    self.assertEqual(ro.returncode, 2, ro.stdout + ro.stderr)
+                    self.assertEqual(ro.stdout, "")
+                    self.assertIn("symlink", ro.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
