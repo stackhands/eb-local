@@ -142,7 +142,8 @@ fn proxyLine(text: []const u8) ?[]const u8 {
     while (it.next()) |raw| {
         var line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
-        if (std.mem.startsWith(u8, line, "export ")) line = std.mem.trim(u8, line["export ".len..], " \t");
+        if (std.mem.startsWith(u8, line, "export") and line.len > 6 and (line[6] == ' ' or line[6] == '\t'))
+            line = std.mem.trim(u8, line[6..], " \t");
         const key = "CVMFS_HTTP_PROXY";
         if (!std.mem.startsWith(u8, line, key)) continue;
         var rest = std.mem.trim(u8, line[key.len..], " \t");
@@ -337,6 +338,20 @@ test "an empty CVMFS_HTTP_PROXY clears an earlier file assignment" {
     );
     const cleared_in_same_file = try readProxy(a, &env, root, "software.eessi.io");
     try testing.expectEqual(ProxyMode.unset, cleared_in_same_file.mode);
+}
+
+test "export with tab prefix sets CVMFS_HTTP_PROXY" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try scratch(a);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "export\tCVMFS_HTTP_PROXY=\"http://tab:3128\"\n");
+
+    var env = std.process.Environ.Map.init(a);
+    const got = try readProxy(a, &env, root, "software.eessi.io");
+    try testing.expectEqual(ProxyMode.proxy, got.mode);
+    try testing.expectEqualStrings("http://tab:3128", got.value);
 }
 
 test "a parallel read uses srun when it is on PATH, and forks when it is not" {
