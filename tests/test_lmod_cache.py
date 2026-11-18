@@ -14,6 +14,10 @@ SPIDER = """#!/bin/sh
 printf 'spider-cache\\n'
 """
 
+MALFORMED_SPIDER = """#!/bin/sh
+printf 'malformed candidate\\n'
+"""
+
 FAILING = """#!/bin/sh
 echo spider-failed >&2
 exit 9
@@ -24,17 +28,58 @@ echo "$0 $@" >>"$EB_LOCAL_UPDATE_LOG"
 exit 0
 """
 
+MODULE = r"""#!/bin/sh
+printf '%s|%s|%s\n' "${LMOD_IGNORE_CACHE-unset}" "$LMOD_RC" "$MODULEPATH" >>"$EB_LOCAL_MODULE_LOG"
+candidate="$(dirname "$LMOD_RC")/spiderT.lua"
+if [ "${LMOD_IGNORE_CACHE-}" = yes ]; then
+    printf '%s\n' "$EB_LOCAL_UNCACHED_INVENTORY" >&2
+else
+    test -s "$candidate" || exit 7
+    grep -q 'malformed candidate' "$candidate" && exit 8
+    printf '%s\n' "$EB_LOCAL_CACHED_INVENTORY" >&2
+fi
+"""
 
-def run(args):
+
+def run(args, env=None):
     return subprocess.run(
         [binary.BIN, "lmod-cache", *args],
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class LmodCache(unittest.TestCase):
+    def single_target(self, root, spider_body=SPIDER):
+        spider = root / "spider"
+        spider.write_text(spider_body)
+        spider.chmod(spider.stat().st_mode | stat.S_IEXEC)
+        modules = root / "modules"
+        modules.mkdir()
+        cache = root / "cache"
+        stamp = root / "system.txt"
+        args = [
+            "--modulepath", str(modules),
+            "--cache-dir", str(cache),
+            "--timestamp", str(stamp),
+            "--spider", str(spider),
+        ]
+        return args, cache, stamp
+
+    def verify_env(self, root, cached, uncached):
+        module = root / "module"
+        module.write_text(MODULE)
+        module.chmod(module.stat().st_mode | stat.S_IEXEC)
+        return {
+            **os.environ,
+            "PATH": f"{root}:{os.environ['PATH']}",
+            "EB_LOCAL_MODULE_LOG": str(root / "module.log"),
+            "EB_LOCAL_CACHED_INVENTORY": cached,
+            "EB_LOCAL_UNCACHED_INVENTORY": uncached,
+        }
+
     def test_a_successful_spider_leaves_the_timestamp_older_than_the_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -64,6 +109,74 @@ class LmodCache(unittest.TestCase):
             self.assertIn("spiderT.lua", got.stdout)
             self.assertIn("older than it", got.stdout)
             self.assertFalse((cache / "spiderT.lua.new").exists())
+
+    def test_without_verify_stdout_stderr_and_status_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root)
+            got = run(args)
+            expected = f"wrote {cache}/spiderT.lua; {stamp} is older than it\n"
+            self.assertEqual(
+                (got.returncode, got.stdout.encode(), got.stderr.encode()),
+                (0, expected.encode(), b""),
+            )
+
+    def test_verify_installs_a_candidate_with_the_same_normalized_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root)
+            env = self.verify_env(
+                root,
+                "/modules:\nGSL/2.8 (D)\npigz/2.8\n",
+                "pigz/2.8\nGSL/2.8\n",
+            )
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertEqual((cache / "spiderT.lua").read_text(), "spider-cache\n")
+            calls = (root / "module.log").read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(calls[0].startswith("unset|"))
+            self.assertTrue(calls[1].startswith("yes|"))
+            cached_call = calls[0].split("|")
+            uncached_call = calls[1].split("|")
+            self.assertEqual(cached_call[1], uncached_call[1])
+            self.assertEqual(cached_call[2], uncached_call[2])
+            self.assertEqual(cached_call[2], str(root / "modules"))
+            self.assertFalse(any(path.name.startswith(".eb-local-verify-") for path in cache.iterdir()))
+            self.assertLess(stamp.stat().st_mtime, (cache / "spiderT.lua").stat().st_mtime)
+
+    def test_verify_refuses_a_candidate_that_hides_a_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root)
+            cache.mkdir()
+            previous = cache / "spiderT.lua"
+            previous.write_text("previous\n")
+            stamp.write_text("old\n")
+            before_stamp = stamp.stat().st_mtime_ns
+            env = self.verify_env(root, "GSL/2.7\n", "GSL/2.7\nGSL/2.8\n")
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 1, got.stderr)
+            self.assertIn("inventories differ; the cache was not changed", got.stderr)
+            self.assertEqual(previous.read_text(), "previous\n")
+            self.assertEqual(stamp.stat().st_mtime_ns, before_stamp)
+            self.assertEqual(sorted(path.name for path in cache.iterdir()), ["spiderT.lua"])
+
+    def test_verify_refuses_a_candidate_lmod_cannot_parse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root, MALFORMED_SPIDER)
+            cache.mkdir()
+            previous = cache / "spiderT.lua"
+            previous.write_text("previous\n")
+            stamp.write_text("old\n")
+            env = self.verify_env(root, "ignored\n", "ignored\n")
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 1, got.stderr)
+            self.assertIn("cannot parse the candidate cache inventory", got.stderr)
+            self.assertEqual(previous.read_text(), "previous\n")
+            self.assertEqual(stamp.read_text(), "old\n")
+            self.assertEqual(sorted(path.name for path in cache.iterdir()), ["spiderT.lua"])
 
     def test_a_failed_spider_leaves_the_previous_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

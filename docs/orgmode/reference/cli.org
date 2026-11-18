@@ -19,7 +19,7 @@ eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--js
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json] [NAME[/VERSION]...]
 eb-local [OPTION]... doctor [--json] [--workspace PATH]
-eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD]
+eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
                    [--alias NAME=MODULE]... [--hide MODULE]... [--dry-run]
@@ -98,13 +98,15 @@ directory you own.
                                        --mpi reports libfabric and UCX, and inside an
                                        allocation runs a two-rank hello per approved transport
   eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
-                      --timestamp FILE [--spider CMD]
+                      --timestamp FILE [--spider CMD] [--verify]
                                        write Lmod's spiderT.lua for those module
                                        directories, and a timestamp one second
                                        older, so Lmod trusts the cache. A spider
                                        that fails leaves both files unchanged.
                                        --spider names the spider program;
-                                       default: spider. Does not read the site file
+                                       default: spider. --verify compares
+                                       cached and uncached module inventories.
+                                       Does not read the site file
   eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD]
                       [--dry-run]
                                        for every CPU target under DIR, refresh
@@ -407,6 +409,10 @@ With =--json=, exit 1 still means a =FAIL= line appeared; scripts read =failed= 
 Write =spiderT.lua= in =--cache-dir= from Lmod's =spider -o spiderT=, for every directory in =--modulepath=, then set =--timestamp= one second older than that file.
 Lmod treats a newer timestamp as a stale cache and does not show the modules the cache names.
 A =spider= that cannot start, exits non-zero, or writes nothing leaves the cache and the timestamp as they were.
+With =--verify=, the command first writes the candidate to a temporary directory beside the cache.
+It points a temporary =LMOD_RC= at the candidate and compares normalized output from =module --terse avail= with and without =LMOD_IGNORE_CACHE=yes=.
+It atomically replaces =spiderT.lua= only when both inventories parse and match.
+An inventory mismatch or parsing failure leaves the previous cache and timestamp unchanged.
 
 With =--prefix=, the command walks every CPU target under the prefix (=versions/*/software/…= or =software/…=), prepends each accelerator's =modules/all= directory on that CPU (as EESSI's filesystem-layer =update_lmod_caches.sh= does), and runs Lmod's =update_lmod_system_cache_files= into =<cpu>/.lmod/cache=.
 =--dry-run= lists each target, cache directory and colon-separated =MODULEPATH=; it changes no file.
@@ -419,6 +425,7 @@ It does not read the site file. =--profile=, =--project= and =--config= are acce
 | =--cache-dir DIR= | The directory that receives =spiderT.lua=. Absolute. Required without =--prefix=. Created if it is missing. |
 | =--timestamp FILE= | The timestamp file Lmod compares with the cache. Absolute. Required without =--prefix=. |
 | =--spider CMD= | The =spider= program for single-target mode. Default: =spider= on =PATH=. |
+| =--verify= | In single-target mode, compare the candidate cache inventory with uncached module discovery before replacing the cache. |
 | =--prefix DIR= | Walk =DIR= for CPU targets and refresh each =.lmod/cache= with Lmod's cache updater. Absolute. |
 | =--eessi-version VER= | With =--prefix=, only =DIR/versions/VER/software=; default is every =versions/*/software=. |
 | =--update-cmd CMD= | Lmod's =update_lmod_system_cache_files= program. Default: =DIR/compat/linux/$(uname -m)/usr/share/Lmod/libexec/update_lmod_system_cache_files=. |

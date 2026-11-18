@@ -9,6 +9,7 @@ const linux = std.os.linux;
 const common = @import("zig_common");
 const fsx = common.fsx;
 const sys = common.sys;
+const config = @import("config.zig");
 
 const tool = "eb-local";
 
@@ -34,6 +35,7 @@ pub const Options = struct {
     /// Path to Lmod's `update_lmod_system_cache_files`; resolved from `prefix` when empty.
     update_cmd: []const u8 = "",
     dry_run: bool = false,
+    verify: bool = false,
 };
 
 /// Directories in a colon-separated module path, empty segments dropped.
@@ -279,6 +281,10 @@ pub fn runUpdate(io: std.Io, a: std.mem.Allocator, update_cmd: []const u8, targe
 }
 
 fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
+    if (opts.verify) {
+        fail("--verify applies only with --modulepath, --cache-dir and --timestamp", .{});
+        return 2;
+    }
     if (!absolute(opts.prefix)) {
         fail("--prefix {s} is not an absolute path", .{opts.prefix});
         return 2;
@@ -330,10 +336,183 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     return 0;
 }
 
+const InventoryError = error{InvalidInventory} || std.mem.Allocator.Error;
+
+fn inventoryLess(_: void, left: []const u8, right: []const u8) bool {
+    return std.mem.lessThan(u8, left, right);
+}
+
+/// Module names from `module --terse avail`, sorted and deduplicated.
+fn normalizeInventory(a: std.mem.Allocator, text: []const u8) InventoryError![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        if (line[0] == '/' and line[line.len - 1] == ':') continue;
+        if (std.mem.eql(u8, line, "No module(s) or extension(s) found!")) continue;
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const name = fields.next() orelse continue;
+        if (!config.validModule(name)) return error.InvalidInventory;
+        while (fields.next()) |marker| {
+            if (!(std.mem.eql(u8, marker, "(D)") or std.mem.eql(u8, marker, "(H)")))
+                return error.InvalidInventory;
+        }
+        try names.append(a, try a.dupe(u8, name));
+    }
+    std.mem.sort([]const u8, names.items, {}, inventoryLess);
+    var write: usize = 0;
+    for (names.items) |name| {
+        if (write > 0 and std.mem.eql(u8, names.items[write - 1], name)) continue;
+        names.items[write] = name;
+        write += 1;
+    }
+    names.shrinkRetainingCapacity(write);
+    return names.toOwnedSlice(a);
+}
+
+fn sameInventory(left: []const []const u8, right: []const []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| if (!std.mem.eql(u8, a, b)) return false;
+    return true;
+}
+
+const avail_script =
+    \\if command -v module >/dev/null 2>&1; then
+    \\    module --terse avail
+    \\elif [ -n "${LMOD_CMD:-}" ]; then
+    \\    "$LMOD_CMD" bash --terse avail
+    \\else
+    \\    echo "module command and LMOD_CMD are unavailable" >&2
+    \\    exit 127
+    \\fi
+;
+
+fn readInventory(
+    io: std.Io,
+    a: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    rc_path: []const u8,
+    modulepath: []const u8,
+    ignore_cache: bool,
+) ![]const []const u8 {
+    var child_env = try env.clone(a);
+    defer child_env.deinit();
+    try child_env.put("LMOD_RC", rc_path);
+    try child_env.put("MODULEPATH", modulepath);
+    if (ignore_cache) {
+        try child_env.put("LMOD_IGNORE_CACHE", "yes");
+    } else {
+        _ = child_env.swapRemove("LMOD_IGNORE_CACHE");
+    }
+    const ran = try std.process.run(a, io, .{
+        .argv = &.{ "bash", "--noprofile", "--norc", "-c", avail_script },
+        .environ_map = &child_env,
+        .stdout_limit = .limited(8 * 1024 * 1024),
+        .stderr_limit = .limited(8 * 1024 * 1024),
+    });
+    if (!ran.term.success()) return error.InvalidInventory;
+    const combined = try std.mem.concat(a, u8, &.{ ran.stdout, ran.stderr });
+    return normalizeInventory(a, combined);
+}
+
+fn luaQuote(a: std.mem.Allocator, value: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, '"');
+    for (value) |byte| switch (byte) {
+        '\\', '"' => {
+            try out.append(a, '\\');
+            try out.append(a, byte);
+        },
+        '\n' => try out.appendSlice(a, "\\n"),
+        '\r' => try out.appendSlice(a, "\\r"),
+        else => {
+            if (byte < 0x20 or byte == 0x7f) return error.InvalidArgument;
+            try out.append(a, byte);
+        },
+    };
+    try out.append(a, '"');
+    return out.toOwnedSlice(a);
+}
+
+fn installVerified(
+    io: std.Io,
+    a: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    opts: Options,
+    cache_path: []const u8,
+    candidate: []const u8,
+) u8 {
+    var random: [8]u8 = undefined;
+    if (linux.getrandom(&random, random.len, 0) != random.len) {
+        fail("cannot name a temporary cache; the cache was not changed", .{});
+        return 1;
+    }
+    const tmp_dir = std.fmt.allocPrint(a, "{s}/.eb-local-verify-{x}", .{
+        opts.cache_dir,
+        std.mem.readInt(u64, &random, .little),
+    }) catch return 1;
+    common.atomic.makedirs(tmp_dir) catch |err| {
+        fail("cannot create {s}: {s}", .{ tmp_dir, @errorName(err) });
+        return 1;
+    };
+    defer fsx.deleteTree(a, fsx.cwd, tmp_dir) catch {};
+    const candidate_path = std.fs.path.join(a, &.{ tmp_dir, "spiderT.lua" }) catch return 1;
+    const candidate_stamp = std.fs.path.join(a, &.{ tmp_dir, "timestamp" }) catch return 1;
+    const rc_path = std.fs.path.join(a, &.{ tmp_dir, "lmodrc.lua" }) catch return 1;
+    const cwd = std.Io.Dir.cwd();
+    cwd.writeFile(io, .{ .sub_path = candidate_path, .data = candidate }) catch |err| {
+        fail("cannot write {s}: {s}", .{ candidate_path, @errorName(err) });
+        return 1;
+    };
+    const stat = cwd.statFile(io, candidate_path, .{}) catch return 1;
+    const stamp = std.Io.Dir.createFileAbsolute(io, candidate_stamp, .{}) catch return 1;
+    stamp.setTimestamps(io, .{
+        .access_timestamp = .{ .new = olderThan(stat.mtime) },
+        .modify_timestamp = .{ .new = olderThan(stat.mtime) },
+    }) catch {
+        stamp.close(io);
+        return 1;
+    };
+    stamp.close(io);
+    const quoted_dir = luaQuote(a, tmp_dir) catch {
+        fail("cannot write a temporary LMOD_RC; the cache was not changed", .{});
+        return 1;
+    };
+    const quoted_stamp = luaQuote(a, candidate_stamp) catch return 1;
+    const rc = std.fmt.allocPrint(a,
+        \\scDescriptT = {{
+        \\  {{ ["dir"] = {s}, ["timestamp"] = {s} }},
+        \\}}
+        \\
+    , .{ quoted_dir, quoted_stamp }) catch return 1;
+    cwd.writeFile(io, .{ .sub_path = rc_path, .data = rc }) catch |err| {
+        fail("cannot write {s}: {s}", .{ rc_path, @errorName(err) });
+        return 1;
+    };
+    const cached = readInventory(io, a, env, rc_path, opts.modulepath, false) catch {
+        fail("cannot parse the candidate cache inventory; the cache was not changed", .{});
+        return 1;
+    };
+    const uncached = readInventory(io, a, env, rc_path, opts.modulepath, true) catch {
+        fail("cannot parse the uncached module inventory; the cache was not changed", .{});
+        return 1;
+    };
+    if (!sameInventory(cached, uncached)) {
+        fail("candidate and uncached module inventories differ; the cache was not changed", .{});
+        return 1;
+    }
+    std.Io.Dir.renameAbsolute(candidate_path, cache_path, io) catch |err| {
+        fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
+        return 1;
+    };
+    return 0;
+}
+
 /// Write `cache_dir/spiderT.lua` from spider's stdout, then the timestamp.
 /// A spider that cannot start, exits non-zero, or writes nothing leaves
 /// both files as they were. Returns the process exit status.
-pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
+pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, opts: Options) u8 {
     if (opts.prefix.len != 0) {
         if (opts.modulepath.len != 0 or opts.cache_dir.len != 0 or opts.timestamp.len != 0)
             fail("lmod-cache takes either --prefix or --modulepath, --cache-dir and --timestamp", .{});
@@ -395,14 +574,19 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     };
     const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
     const tmp_path = std.fmt.allocPrint(a, "{s}.new", .{cache_path}) catch return 1;
-    cwd.writeFile(io, .{ .sub_path = tmp_path, .data = ran.stdout }) catch |err| {
-        fail("cannot write {s}: {s}", .{ tmp_path, @errorName(err) });
-        return 1;
-    };
-    std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch |err| {
-        fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
-        return 1;
-    };
+    if (opts.verify) {
+        const code = installVerified(io, a, env, opts, cache_path, ran.stdout);
+        if (code != 0) return code;
+    } else {
+        cwd.writeFile(io, .{ .sub_path = tmp_path, .data = ran.stdout }) catch |err| {
+            fail("cannot write {s}: {s}", .{ tmp_path, @errorName(err) });
+            return 1;
+        };
+        std.Io.Dir.renameAbsolute(tmp_path, cache_path, io) catch |err| {
+            fail("cannot write {s}: {s}", .{ cache_path, @errorName(err) });
+            return 1;
+        };
+    }
     const stat = cwd.statFile(io, cache_path, .{}) catch |err| {
         fail("cannot stat {s}: {s}", .{ cache_path, @errorName(err) });
         return 1;
