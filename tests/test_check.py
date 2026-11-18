@@ -56,6 +56,10 @@ class Check(unittest.TestCase):
         self.assertIn(f"libdemo.so => {lib}/libdemo.so   [RPATH]", run.stdout)
         self.assertIn("no problems", run.stdout)
 
+        trailing = self.check(prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/")
+        self.assertEqual(trailing.returncode, 0, trailing.stdout + trailing.stderr)
+        self.assertIn("no problems", trailing.stdout)
+
     def test_a_run_path_into_another_target_is_a_problem(self):
         lib = self.tree("x86_64/amd/zen2")
         prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
