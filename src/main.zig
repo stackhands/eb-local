@@ -2319,7 +2319,7 @@ const lmod_init =
     \\if ! type module >/dev/null 2>&1; then
     \\    for eb_local_init in "${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash" /etc/profile.d/lmod.sh \
     \\        "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash"; do
-    \\        [ -r "$eb_local_init" ] && { . "$eb_local_init" >/dev/null; break; }
+    \\        [ -f "$eb_local_init" ] && [ -r "$eb_local_init" ] && { . "$eb_local_init" >/dev/null; break; }
     \\    done
     \\    unset eb_local_init
     \\fi
@@ -2350,6 +2350,8 @@ fn onModulePath(a: Allocator, modulepath: []const u8, name: []const u8) bool {
 }
 
 fn readable(path: []const u8) bool {
+    const st = fsx.statAt(fsx.cwd, path, true) catch return false;
+    if (!st.isReg()) return false;
     var zb: [sys.path_max:0]u8 = undefined;
     const zp = sys.z(&zb, path) catch return false;
     return linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.R_OK, 0)) == .SUCCESS;
