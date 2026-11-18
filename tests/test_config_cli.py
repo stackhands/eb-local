@@ -572,6 +572,11 @@ class ConfigCli(StorageFixture):
             self.assertEqual(bad.returncode, 2, bad.stdout + bad.stderr)
             self.assertEqual(bad.stdout, "")
 
+        dup = self.run_tool(["config", "--config", str(self.site), "--get", "prefix", "--get", "stack.module"])
+        self.assertEqual(dup.returncode, 2, dup.stdout + dup.stderr)
+        self.assertEqual(dup.stdout, "")
+        self.assertIn("config takes one --get", dup.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

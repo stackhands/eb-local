@@ -1560,7 +1560,7 @@ fn siteTemplate(c: Ctx, name: []const u8) sites.Template {
         return sites.find(name) orelse die("no site template '{s}' (eb-local site list shows them; a template file is named with a slash, as ./{s})", .{ name, name });
     const opened = openConfig(name);
     defer sys.close(opened.fd);
-    const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ name, @errorName(e) });
+    const text = fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ name, storage.describeError(e) });
     return .{ .name = name, .text = text };
 }
 
@@ -1601,7 +1601,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
         const path = w[1];
         const opened = openConfig(path);
         defer sys.close(opened.fd);
-        const raw = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, @errorName(e) });
+        const raw = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, storage.describeError(e) });
         const text = if (std.mem.endsWith(u8, path, ".toml")) raw else blk: {
             var ld: config.Diagnostic = .{};
             break :blk config.legacyToToml(a, raw, &ld) catch |e| switch (e) {
@@ -1643,7 +1643,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
     common.atomic.atomicWrite(a, target, text, .{ .mode = 0o644 }, &why) catch |e|
-        die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else @errorName(e) });
+        die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else storage.describeError(e) });
     say("wrote {s} from template {s}; eb-local config shows what it sets", .{ target, t.name });
     return 0;
 }
@@ -2570,6 +2570,23 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     return 0;
 }
 
+fn prefixCapacityOverride(c: Ctx) ?storage.Capacity {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| {
+            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
+            return .{
+                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
+                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
+            };
+        }
+    }
+    return null;
+}
+
+fn prefixCapacity(c: Ctx, path: []const u8) ?storage.Capacity {
+    return prefixCapacityOverride(c) orelse (storage.capacity(path) catch null);
+}
+
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     if (args.len == 0) {
@@ -2606,6 +2623,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
         var buf: [sys.path_max]u8 = undefined;
         p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch |e| die("cannot resolve installation prefix {s} ({s})", .{ p.prefix, storage.describeError(e) })) catch oom();
+    }
+    if (prefixCapacity(c, p.prefix)) |cap| {
+        if (cap.bytes == 0 or cap.inodes == 0)
+            die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
     const d = durableDirs(c, p.prefix, "nothing was built");
     // The trees a build writes below the prefix must not lead onto refused
@@ -3445,16 +3466,21 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     };
     if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| {
         var zb: [sys.path_max:0]u8 = undefined;
-        const writable = if (sys.z(&zb, p.prefix)) |zp|
-            linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0)) == .SUCCESS
-        else |_|
-            false;
+        const acc_err: ?linux.E = if (sys.z(&zb, p.prefix)) |zp| blk: {
+            const err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+            break :blk if (err == .SUCCESS) null else err;
+        } else |_| .NAMETOOLONG;
         if (!st.isDir()) {
             note(a, &out, lines_ptr, "FAIL", "{s} is not a directory", .{p.prefix});
             failed = true;
-        } else if (!writable) {
-            note(a, &out, lines_ptr, "FAIL", "you cannot write to {s}", .{p.prefix});
+        } else if (acc_err) |ae| {
+            note(a, &out, lines_ptr, "FAIL", "you cannot write to {s} ({s})", .{ p.prefix, sys.describeErrno(ae) });
             failed = true;
+        } else if (prefixCapacity(c, p.prefix)) |cap| {
+            if (cap.bytes == 0 or cap.inodes == 0) {
+                note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
+                failed = true;
+            }
         }
         if (p.project and st.isDir()) {
             if (st.mode & 0o002 != 0) {
@@ -3467,7 +3493,27 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         if (p.project) {
             note(a, &out, lines_ptr, "FAIL", "project directory {s} does not exist; the project owner creates it with the project group and chmod 2770", .{p.prefix});
             failed = true;
-        } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+        } else {
+            var ancestor: []const u8 = p.prefix;
+            while (ancestor.len > 1) {
+                if (fsx.statAt(fsx.cwd, ancestor, true)) |_| break else |_| {}
+                ancestor = std.fs.path.dirname(ancestor) orelse "/";
+            }
+            var zb: [sys.path_max:0]u8 = undefined;
+            const acc_err: ?linux.E = if (sys.z(&zb, ancestor)) |zp| blk: {
+                const err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+                break :blk if (err == .SUCCESS) null else err;
+            } else |_| .NAMETOOLONG;
+            if (acc_err) |ae| {
+                note(a, &out, lines_ptr, "FAIL", "installation prefix {s} cannot be created under {s} ({s})", .{ p.prefix, ancestor, sys.describeErrno(ae) });
+                failed = true;
+            } else if (prefixCapacity(c, ancestor)) |cap| {
+                if (cap.bytes == 0 or cap.inodes == 0) {
+                    note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
+                    failed = true;
+                } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+            } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
+        }
     }
 
     // What this shell carries.
@@ -4415,8 +4461,10 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (std.mem.eql(u8, x, "--mpi")) {
                     doctor_mpi = true;
                 } else if (std.mem.eql(u8, x, "--workspace")) {
+                    if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = value(args, &i, "--workspace");
                 } else if (joined(x, "--workspace")) |v| {
+                    if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = v;
                 } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
             },
@@ -4543,8 +4591,10 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (std.mem.eql(u8, x, "--env")) {
                     as_env = true;
                 } else if (std.mem.eql(u8, x, "--get")) {
+                    if (config_get != null) die("config takes one --get", .{});
                     config_get = value(args, &i, "--get");
                 } else if (joined(x, "--get")) |v| {
+                    if (config_get != null) die("config takes one --get", .{});
                     config_get = v;
                 } else if (std.mem.eql(u8, x, "--json")) {
                     g.json_out = true;
@@ -4564,8 +4614,10 @@ pub fn main(init: std.process.Init) u8 {
                     };
                     site.sets.append(a, set) catch oom();
                 } else if (std.mem.eql(u8, x, "--to")) {
+                    if (site.to != null) die("site takes one --to", .{});
                     site.to = value(args, &i, "--to");
                 } else if (joined(x, "--to")) |v| {
+                    if (site.to != null) die("site takes one --to", .{});
                     site.to = v;
                 } else if (std.mem.eql(u8, x, "--force")) {
                     site.force = true;
@@ -4588,6 +4640,7 @@ pub fn main(init: std.process.Init) u8 {
             },
             .clean => {
                 if (std.mem.eql(u8, x, "--logs-older-than") or joined(x, "--logs-older-than") != null) {
+                    if (clean.logs_days != null) die("clean takes one --logs-older-than", .{});
                     const v = if (joined(x, "--logs-older-than")) |got| got else value(args, &i, "--logs-older-than");
                     const n = std.fmt.parseInt(u32, v, 10) catch die("--logs-older-than needs a number of days", .{});
                     if (n > 99999) die("--logs-older-than needs a number of days", .{});
@@ -4704,7 +4757,10 @@ pub fn main(init: std.process.Init) u8 {
             if (config_get) |key| break :blk cmdConfigGet(c, s, key);
             break :blk if (as_env) cmdConfigEnv(c, s) else cmdConfig(c, s, check, g.json_out);
         },
-        .clean => cmdClean(c, s, clean, g.json_out),
+        .clean => blk: {
+            if (!clean.logs and clean.logs_days != null) die("clean takes --no-logs or --logs-older-than, not both", .{});
+            break :blk cmdClean(c, s, clean, g.json_out);
+        },
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
         .restore => cmdRestore(c, s, rest.items, uninstall.dry_run),

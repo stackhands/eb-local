@@ -113,6 +113,14 @@ class SubcommandFlags(StorageFixture):
         self.assertIn('"kind":"doctor"', doc.stdout)
         self.assertEqual(self.run_bin(["config", "--env"], SLURM_JOB_ID="").returncode, 0)
         self.assertEqual(self.run_bin(["clean", "--dry-run", "--no-logs"], SLURM_JOB_ID="").returncode, 0)
+        both_clean = self.run_bin(["clean", "--no-logs", "--logs-older-than", "7"], SLURM_JOB_ID="")
+        self.assertEqual(both_clean.returncode, 2, both_clean.stdout + both_clean.stderr)
+        self.assertEqual(both_clean.stdout, "")
+        self.assertIn("clean takes --no-logs or --logs-older-than, not both", both_clean.stderr)
+        dup_days = self.run_bin(["clean", "--logs-older-than", "7", "--logs-older-than", "14"], SLURM_JOB_ID="")
+        self.assertEqual(dup_days.returncode, 2, dup_days.stdout + dup_days.stderr)
+        self.assertEqual(dup_days.stdout, "")
+        self.assertIn("clean takes one --logs-older-than", dup_days.stderr)
         self.assertEqual(self.run_bin(["lmod-cache", "--prefix", str(self.prefix), "--dry-run"]).returncode, 0)
         self.assertEqual(
             self.run_bin(["modulerc", "--module-tree", str(tree / "modules/all"), "--default", "demo/1.0", "--dry-run"]).returncode,

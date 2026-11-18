@@ -336,6 +336,18 @@ class SitesCli(StorageFixture):
         expected_install = f"wrote {target} from template slurm; eb-local config shows what it sets\n".encode()
         self.assertEqual((installed.returncode, installed.stdout, installed.stderr), (0, expected_install, b""))
 
+        ro_parent = self.root / "ro-parent"
+        ro_parent.mkdir()
+        ro_parent.chmod(0o555)
+        try:
+            ro_target = ro_parent / "site.toml"
+            ro_err = self.run_tool(["site", "install", "slurm", "--to", str(ro_target)] + PATHS)
+            self.assertEqual(ro_err.returncode, 2, ro_err.stdout + ro_err.stderr)
+            self.assertIn(str(ro_target), ro_err.stderr)
+            self.assertIn("[Errno 13] Permission denied", ro_err.stderr)
+        finally:
+            ro_parent.chmod(0o755)
+
     def test_site_check_validates_toml_and_conf_files_as_site_layer(self):
         staged = self.root / "staged-site.toml"
         staged.write_text(
@@ -406,6 +418,30 @@ class SitesCli(StorageFixture):
                 self.assertIn("is a directory", got.stderr)
                 self.assertIn(f"{target_dir}/config.toml", got.stderr)
                 self.assertTrue(target_dir.is_dir())
+
+    def test_site_rejects_duplicate_to_flag(self):
+        p1 = self.root / "site1.toml"
+        p2 = self.root / "site2.toml"
+        got = self.run_tool(
+            [
+                "site",
+                "install",
+                "slurm",
+                "--set",
+                "node_local_root=/local",
+                "--set",
+                "shared_scratch=/scratch",
+                "--to",
+                str(p1),
+                "--to",
+                str(p2),
+            ]
+        )
+        self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("site takes one --to", got.stderr)
+        self.assertFalse(p1.exists())
+        self.assertFalse(p2.exists())
 
 
 if __name__ == "__main__":
