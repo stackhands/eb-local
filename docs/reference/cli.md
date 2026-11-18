@@ -13,8 +13,8 @@ eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
-eb-local [OPTION]... env
-eb-local [OPTION]... dev [--buildenv MODULE] [MODULE...]
+eb-local [OPTION]... env [--strict]
+eb-local [OPTION]... dev [--strict] [--buildenv MODULE] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--quiet] [--json]
@@ -62,9 +62,11 @@ directory you own.
   eb-local env [--strict]                lines that make your installed modules visible;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1)
-  eb-local dev [--buildenv MODULE] [MODULE...]
+  eb-local dev [--strict] [--buildenv MODULE] [MODULE...]
                                        the same, plus MODULEs and a build environment,
                                        so gcc, make, cmake and meson just work;
+                                       --strict exits when the EESSI init file is missing
+                                       (also when EB_LOCAL_ENV_STRICT=1);
                                        --buildenv names the build environment to load
   eb-local rpath-wrappers [--for FAMILY | --unwrapped]
                                        lines that put RPATH wrappers for the compilers
@@ -292,6 +294,7 @@ Print the lines `env` prints, then the lines that load the modules `dev.modules`
 
 | Option | Meaning |
 |---|---|
+| `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
 | `--buildenv MODULE` | Load MODULE as the build environment whatever the compilers, as `dev.buildenv` does. |
 
 A `MODULE` starts with a letter or digit and holds letters, digits, `.`, `_`, `+`, `-` and single slashes, with none at the end.

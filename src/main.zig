@@ -65,9 +65,11 @@ const usage_text =
     \\  eb-local env [--strict]                lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--buildenv MODULE] [MODULE...]
+    \\  eb-local dev [--strict] [--buildenv MODULE] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
+    \\                                       --strict exits when the EESSI init file is missing
+    \\                                       (also when EB_LOCAL_ENV_STRICT=1);
     \\                                       --buildenv names the build environment to load
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
@@ -4182,7 +4184,9 @@ pub fn main(init: std.process.Init) u8 {
                 } else site.words.append(a, x) catch oom();
             },
             .dev => {
-                if (std.mem.eql(u8, x, "--buildenv")) {
+                if (std.mem.eql(u8, x, "--strict")) {
+                    g.env_strict = true;
+                } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
                 } else if (joined(x, "--buildenv")) |v| {
                     g.buildenv = v;

@@ -31,6 +31,7 @@ These steps build a C program that uses FFTW and OpenMP for one node type, check
     ```
 
     Name every module you link against on this line, not after it: `dev` chooses the build environment from the compilers those modules bring in.
+    Add `--strict` (or set `EB_LOCAL_ENV_STRICT=1`) to verify that the EESSI init file exists before loading modules.
     The EESSI and EESSI-extend modules print lines of their own as they load.
 
 3.  Compile into the directory that `dev` names in `EB_LOCAL_DEV_PREFIX`:
