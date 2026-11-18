@@ -1010,7 +1010,11 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
         const trimmed = std.mem.trimEnd(u8, rt, "/");
         break :blk if (trimmed.len > 0) trimmed else rt;
     } else null;
-    const eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
+    const raw_eprefix = nonEmpty(c.env.get("EESSI_EPREFIX"));
+    const eprefix = if (raw_eprefix) |ep| blk: {
+        const trimmed = std.mem.trimEnd(u8, ep, "/");
+        break :blk if (trimmed.len > 0) trimmed else ep;
+    } else null;
     const machine = elfcheck.machineName(elf.machine);
     if (k.json) k.beginFile(a, path, machine);
     var shown = false;
