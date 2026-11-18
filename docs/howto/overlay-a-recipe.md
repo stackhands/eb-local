@@ -16,6 +16,15 @@ Use this when a site needs a small, durable difference from an upstream easyconf
 
 ## Materialize
 
+Preview the output paths and validate the overlay against the current easyconfig:
+
+```shell
+eb-local overlay materialize --overlay site/OpenMPI.overlay.toml --base easyconfigs/OpenMPI-4.1.6.eb --dry-run
+```
+
+The preview does not create the output directory or either output file.
+Then materialize:
+
 ```shell
 eb-local overlay materialize --overlay site/OpenMPI.overlay.toml --base easyconfigs/OpenMPI-4.1.6.eb
 ```

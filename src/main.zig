@@ -147,10 +147,11 @@ const usage_text =
     \\                                       template file (a NAME with a slash); install
     \\                                       writes config.toml beside this program, mode 644;
     \\                                       site list takes --json for machine-readable output
-    \\  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR]
+    \\  eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run]
     \\                                       apply a digest-pinned overlay; writes a materialized
     \\                                       easyconfig and provenance.toml, or refuses when the
-    \\                                       base digest changed
+    \\                                       base digest changed; --dry-run validates and lists
+    \\                                       the outputs without writing them
     \\  eb-local overlay bump [--eb-stack PATH] [--] [eb-stack package bump options...]
     \\  eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
     \\                                       run eb-stack package bump or plan by subprocess only
@@ -3995,6 +3996,8 @@ pub fn main(init: std.process.Init) u8 {
                     overlay_materialize.out_dir = value(args, &i, "--out-dir");
                 } else if (joined(x, "--out-dir")) |v| {
                     overlay_materialize.out_dir = v;
+                } else if (std.mem.eql(u8, x, "--dry-run")) {
+                    overlay_materialize.dry_run = true;
                 } else if (std.mem.eql(u8, x, "--eb-stack")) {
                     overlay_eb_stack = value(args, &i, "--eb-stack");
                 } else if (joined(x, "--eb-stack")) |v| {
