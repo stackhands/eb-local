@@ -146,9 +146,13 @@ fn proxyLine(text: []const u8) ?[]const u8 {
         var rest = std.mem.trim(u8, line[key.len..], " \t");
         if (rest.len == 0 or rest[0] != '=') continue;
         var value = std.mem.trim(u8, rest[1..], " \t");
-        if (value.len >= 2) {
+        if (value.len > 0 and (value[0] == '"' or value[0] == '\'')) {
             const q = value[0];
-            if ((q == '"' or q == '\'') and value[value.len - 1] == q) value = value[1 .. value.len - 1];
+            if (std.mem.indexOfScalarPos(u8, value, 1, q)) |end| {
+                value = value[1..end];
+            } else continue;
+        } else {
+            if (std.mem.indexOfScalar(u8, value, '#')) |hash| value = std.mem.trimEnd(u8, value[0..hash], " \t");
         }
         if (value.len == 0) continue;
         found = value;
