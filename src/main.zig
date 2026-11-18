@@ -3614,8 +3614,8 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
     const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
     if (!o.print) {
-        common.atomic.makedirs(jobs) catch die("cannot create {s}", .{jobs});
-        common.atomic.makedirs(logs) catch die("cannot create {s}", .{logs});
+        common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
+        common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
     }
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     const stamp = nowSecs();
