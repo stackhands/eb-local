@@ -88,6 +88,9 @@ pub fn render(a: Allocator, t: Template, sets: []const Set, d: *Diagnostic) Erro
         const colon = std.mem.indexOfScalar(u8, inner, ':');
         const name = inner[0 .. colon orelse inner.len];
         if (!validName(name)) return fail(a, d, "template {s}: invalid placeholder '{s}'", .{ t.name, name });
+        if (colon) |c| {
+            if (!validValue(inner[c + 1 ..])) return fail(a, d, "template {s}: invalid default for '{s}'", .{ t.name, name });
+        }
         check_i = close + 2;
     }
     const names = try placeholders(a, t.text);
@@ -192,6 +195,17 @@ test "a value cannot leave its TOML string" {
         try testing.expectError(error.Invalid, parseSet(arena.allocator(), bad, &d));
     const s = try parseSet(arena.allocator(), "partition=gpu", &d);
     try testing.expectEqualStrings("gpu", s.value);
+
+    const a = arena.allocator();
+    for ([_][]const u8{
+        "p = \"{{x:a\"b}}\"\n",
+        "p = \"{{x:a\\b}}\"\n",
+        "p = \"{{x:}}\"\n",
+    }) |bad_tmpl| {
+        const tmpl: Template = .{ .name = "./bad-default.toml", .text = bad_tmpl };
+        try testing.expectError(error.Invalid, render(a, tmpl, &.{}, &d));
+        try testing.expect(std.mem.indexOf(u8, d.message, "invalid default") != null);
+    }
 }
 
 test "every rendered template loads as a site file" {
