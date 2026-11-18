@@ -4606,6 +4606,7 @@ fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
     var env = c.env.clone(c.a) catch oom();
     defer env.deinit();
     extend.apply(&env);
+    for (shell_startup) |name| _ = env.swapRemove(name);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
     return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
 }
