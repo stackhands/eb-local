@@ -339,11 +339,11 @@ fn mounts(a: Allocator, mountinfo: []const u8) Allocator.Error![]const MountPoin
 
 fn bindSource(a: Allocator, mountinfo: []const u8) ?[]const u8 {
     const list = mounts(a, mountinfo) catch return null;
+    var best: ?[]const u8 = null;
     for (list) |m| if (std.mem.eql(u8, m.mount, "/etc/localtime")) {
-        if (m.root.len > 1) return m.root;
-        return m.source;
+        best = if (m.root.len > 1) m.root else m.source;
     };
-    return null;
+    return best;
 }
 
 fn hostLibs(a: Allocator, env: *const std.process.Environ.Map, mountinfo: []const u8) Allocator.Error![]const []const u8 {
@@ -633,4 +633,16 @@ test "an approved symlink prefix keeps its contents and rejects escapes" {
 
     try scrub(a, &s.env, prefixes);
     try testing.expectEqualStrings(try std.fmt.allocPrint(a, "{s}:{s}", .{ sym_lib, future_under_real }), s.env.get("PYTHONPATH").?);
+}
+
+test "bindSource uses the last covering mount entry for /etc/localtime" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const mountinfo =
+        \\80 1 0:80 /usr/share/zoneinfo/UTC /etc/localtime ro,relatime - tmpfs tmpfs rw
+        \\81 80 0:81 /usr/share/zoneinfo/Europe/Amsterdam /etc/localtime ro,relatime - tmpfs tmpfs rw
+        \\
+    ;
+    const src = bindSource(arena.allocator(), mountinfo) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("/usr/share/zoneinfo/Europe/Amsterdam", src);
 }
