@@ -145,6 +145,25 @@ class LmodCache(unittest.TestCase):
             self.assertFalse(any(path.name.startswith(".eb-local-verify-") for path in cache.iterdir()))
             self.assertLess(stamp.stat().st_mtime, (cache / "spiderT.lua").stat().st_mtime)
 
+    def test_verify_accepts_lmod_terse_category_headers_and_loaded_markers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root)
+            env = self.verify_env(
+                root,
+                "/modules:\nGSL/\nGSL/2.7\nGSL/2.8 (L,D)\nGSL/default -> GSL/2.8 (H)\npigz/\npigz/2.8 (L)\n",
+                "/modules:\nGSL/\nGSL/2.7\nGSL/2.8 (D)\nGSL/default -> GSL/2.8 (H)\npigz/\npigz/2.8\n",
+            )
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertEqual((cache / "spiderT.lua").read_text(), "spider-cache\n")
+            self.assertLess(stamp.stat().st_mtime, (cache / "spiderT.lua").stat().st_mtime)
+
+            bad_env = self.verify_env(root, "Lmod has detected the following error:\n", "GSL/2.8\n")
+            bad = run([*args, "--verify"], env=bad_env)
+            self.assertEqual(bad.returncode, 1, bad.stderr)
+            self.assertIn("cannot parse the candidate cache inventory", bad.stderr)
+
     def test_verify_refuses_a_candidate_that_hides_a_module(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
