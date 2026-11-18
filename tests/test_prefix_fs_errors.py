@@ -120,5 +120,42 @@ class PrefixFilesystemErrors(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
 
 
+    def test_doctor_reports_full_and_readonly_prefix_as_fail(self):
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        full = self.run_tool_doctor(EB_LOCAL_TEST_PREFIX_CAPACITY="0:100")
+        self.assertEqual(full.returncode, 1, full.stdout + full.stderr)
+        self.assertIn("FAIL installation prefix", full.stdout)
+        self.assertIn("no space left on device", full.stdout)
+
+        inodes = self.run_tool_doctor(EB_LOCAL_TEST_PREFIX_CAPACITY="4096:0")
+        self.assertEqual(inodes.returncode, 1, inodes.stdout + inodes.stderr)
+        self.assertIn("FAIL installation prefix", inodes.stdout)
+        self.assertIn("0 free inodes", inodes.stdout)
+
+        missing_prefix = self.prefix / "child" / "eessi"
+        full_missing = self.run_tool_doctor(
+            EB_LOCAL_PREFIX=str(missing_prefix),
+            EB_LOCAL_TEST_PREFIX_CAPACITY="0:100",
+        )
+        self.assertEqual(full_missing.returncode, 1, full_missing.stdout + full_missing.stderr)
+        self.assertIn("FAIL installation prefix", full_missing.stdout)
+        self.assertIn("no space left on device", full_missing.stdout)
+
+        ro_parent = self.root / "ro-parent"
+        ro_parent.mkdir()
+        ro_parent.chmod(0o555)
+        try:
+            ro_missing = self.run_tool_doctor(EB_LOCAL_PREFIX=str(ro_parent / "child" / "eessi"))
+            self.assertEqual(ro_missing.returncode, 1, ro_missing.stdout + ro_missing.stderr)
+            self.assertIn("FAIL", ro_missing.stdout)
+            self.assertIn("[Errno 13] Permission denied", ro_missing.stdout)
+        finally:
+            ro_parent.chmod(0o755)
+
+    def run_tool_doctor(self, **extra):
+        argv, env = binary.command(self.script, ["doctor"], dict(self.env, **extra))
+        return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+
+
 if __name__ == "__main__":
     unittest.main()

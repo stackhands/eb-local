@@ -1,0 +1,1 @@
+`eb-local doctor` now checks prefix free bytes and free inodes and inspects the nearest existing ancestor when a user prefix has not been created yet, reporting read-only, unwritable, and full filesystems as `FAIL`.
