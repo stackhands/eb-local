@@ -35,8 +35,9 @@ cd "$T"
 
 echo "== build pigz"
 check "$EL" pigz-2.8-GCCcore-15.2.0.eb --robot
-inst=$(ls -d "$T"/eessi/versions/2026.06/software/linux/*/*/*/software/pigz/2.8-GCCcore-15.2.0)
-mod=$(ls "$T"/eessi/versions/2026.06/software/linux/*/*/*/modules/all/pigz/2.8-GCCcore-15.2.0.lua)
+inst=$(find "$T/eessi/versions" -type d -path '*/software/pigz/2.8-GCCcore-15.2.0' -print -quit)
+mod=$(find "$T/eessi/versions" -type f -path '*/modules/all/pigz/2.8-GCCcore-15.2.0.lua' -print -quit)
+[ -n "$inst" ] && [ -n "$mod" ]
 check test ! -w "$inst"
 
 echo "== clean of an old log, and of a directory with nothing newer, goes to the trash"
