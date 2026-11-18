@@ -1,0 +1,1 @@
+`eb-local --explain` and outside-job refusal messages now use ANSI-C `$'...'` single-line quoting when paths or arguments contain newlines so generated `#   sbatch ...` comment lines never spill uncommented lines.

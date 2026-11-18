@@ -273,6 +273,19 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"FAIL workspace {workspace}: mount {workspace} has noexec\n", run.stdout)
         self.assertEqual(list(workspace.iterdir()), [])
 
+    def test_doctor_workspace_fails_when_bytes_or_inodes_are_zero(self):
+        workspace = self.job / "full-candidate"
+        workspace.mkdir(parents=True)
+        for cap in ("0:10", "100:0"):
+            with self.subTest(cap=cap):
+                run = self.run_tool(
+                    ["doctor", "--workspace", str(workspace)],
+                    EB_LOCAL_TEST_WORKSPACE_CAPACITY=cap,
+                    EB_LOCAL_TEST_WORKSPACE_EXEC="ok",
+                )
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                self.assertIn(f"FAIL workspace {workspace} has no space left on device", run.stdout)
+
     def test_doctor_workspace_reports_real_noexec_mount_execution_failure(self):
         import shlex
         import tempfile
