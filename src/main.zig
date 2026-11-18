@@ -3200,7 +3200,12 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
         failed = true;
         break :blk null;
     };
-    if (available) |free| note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+    if (available) |free| {
+        if (free.bytes == 0 or free.inodes == 0) {
+            note(a, out, json_lines, "FAIL", "workspace {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ path, free.bytes, free.inodes });
+            failed = true;
+        } else note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+    }
     if (storage.hasMountOption(mount.options, "noexec")) {
         note(a, out, json_lines, "FAIL", "workspace {s}: mount {s} has noexec", .{ path, mount.target });
         failed = true;
