@@ -553,6 +553,43 @@ class OverlayMaterialize(unittest.TestCase):
             self.assertEqual(got_fresh.returncode, 1, got_fresh.stdout + got_fresh.stderr)
             self.assertFalse((fresh_dir / "materialized-base.eb").exists())
 
+    def test_unknown_overlay_keys_are_refused_with_exit_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_bytes = b"name = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(base_bytes)
+            digest = digest_of(base_bytes)
+            cases = [
+                (
+                    f'overlay_version = 1\nbase_digest = "{digest}"\n[replaces]\nversion = "\'2.0\'"\n',
+                    "unknown key replaces",
+                ),
+                (
+                    f'overlay_version = 1\nbase_digest = "{digest}"\n[dependencies.remove]\nzlib = "1"\n',
+                    "unknown key dependencies.remove",
+                ),
+            ]
+            for overlay_text, needle in cases:
+                with self.subTest(needle=needle):
+                    (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+                    out_dir = root / "out"
+                    got = run(
+                        [
+                            "materialize",
+                            "--overlay",
+                            "site.overlay.toml",
+                            "--base",
+                            "base.eb",
+                            "--out-dir",
+                            str(out_dir),
+                        ],
+                        cwd=root,
+                    )
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertIn(needle, got.stderr)
+                    self.assertFalse(out_dir.exists())
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
