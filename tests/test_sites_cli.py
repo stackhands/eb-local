@@ -220,6 +220,20 @@ class SitesCli(StorageFixture):
                 self.assertIn(needle, run.stderr)
                 self.assertFalse(target.exists())
 
+    def test_unclosed_placeholder_in_template_is_refused(self):
+        template = self.root / "bad-template.toml"
+        template.write_text('[storage]\nnode_local_root = "/local"\n'
+                            '[build]\nallocation_hint = "salloc -p {{partition"\n')
+        template.chmod(0o644)
+        target = self.root / "bad-config.toml"
+        for argv in (["site", "show", "./bad-template.toml"], ["site", "install", "./bad-template.toml", "--to", str(target)]):
+            with self.subTest(argv=argv):
+                run = self.run_tool(argv)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn("unclosed placeholder", run.stderr)
+                self.assertFalse(target.exists())
+
     # -- configuration in the environment -------------------------------------
 
     def test_config_env_round_trips(self):
