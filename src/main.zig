@@ -2825,7 +2825,11 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     std.mem.sort(Listed, rows.items, {}, listedLess);
 
     // This node's target, when EESSI is loaded.
-    const here_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const raw_here = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
+    const here_target = if (raw_here) |ht| blk: {
+        const trimmed = std.mem.trimEnd(u8, ht, "/");
+        break :blk if (trimmed.len > 0) trimmed else ht;
+    } else null;
     const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
     var here: ?usize = null;
     if (here_target) |ht| for (trees.items, 0..) |t, ti| {

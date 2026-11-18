@@ -169,6 +169,26 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(conflict.returncode, 2)
         self.assertIn("--missing or --json", conflict.stderr)
 
+    def test_list_matches_software_subdir_with_trailing_slash(self):
+        self.two_targets()
+        missing = self.run_tool(
+            ["list", "--missing"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(missing.returncode, 0, missing.stderr)
+        self.assertEqual(missing.stdout, "pigz/2.8-GCCcore-15.2.0\n")
+
+        listing = self.run_tool(
+            ["list"],
+            SLURM_JOB_ID="",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_VERSION="2026.06",
+        )
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertEqual(listing.stdout.splitlines()[1].split(), ["MODULE", "zen2", "zen4*"])
+
     def test_list_of_an_empty_prefix_and_a_symlinked_tree(self):
         run = self.run_tool(["list"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
