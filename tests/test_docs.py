@@ -116,6 +116,26 @@ class OrgPages(unittest.TestCase):
         self.assertIn("1.  Run it:\n\n    ```bash\n    eb-local env\n    ```\n\n2.  Then this.\n", page)
         self.assertEqual([line for line in page.splitlines() if line != line.rstrip()], [])
 
+    @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
+    def test_empty_docs_out_env_falls_back_to_docs_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "docs-tree"
+            cwd = Path(tmp) / "caller-cwd"
+            (root / "orgmode").mkdir(parents=True)
+            cwd.mkdir()
+            shutil.copy(DOCS / "export.el", root)
+            (root / "orgmode" / "page.org").write_text("#+TITLE: Page\n\nBody.\n")
+            run = subprocess.run(
+                ["emacs", "--batch", "-Q", "-l", str(root / "export.el")],
+                cwd=cwd,
+                env=dict(os.environ, EB_LOCAL_DOCS_OUT=""),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertTrue((root / "page.md").is_file(), f"expected {root / 'page.md'}; cwd had {list(cwd.iterdir())}")
+            self.assertEqual(list(cwd.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,6 +137,8 @@ list item, such as those around a block in a numbered step."
         (message "%s" md)))))
 
 (when noninteractive
-  (eb-local-docs-export (or (getenv "EB_LOCAL_DOCS_OUT") eb-local-docs-root)))
+  (let ((out (getenv "EB_LOCAL_DOCS_OUT")))
+    (eb-local-docs-export
+     (if (and out (not (string-empty-p out))) out eb-local-docs-root))))
 
 ;;; export.el ends here
