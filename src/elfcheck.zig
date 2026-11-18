@@ -218,11 +218,12 @@ pub fn targetOf(path: []const u8) ?[]const u8 {
 
 /// A host directory the EESSI compatibility layer replaces.
 pub fn isHostPath(path: []const u8) bool {
-    for ([_][]const u8{ "/lib", "/lib64", "/usr" }) |root| {
-        if (std.mem.eql(u8, path, root)) return true;
-        if (std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/') return true;
-    }
-    return false;
+    if (path.len == 0 or path[0] != '/') return false;
+    var rest = path;
+    while (rest.len > 0 and rest[0] == '/') rest = rest[1..];
+    const end = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    const first = rest[0..end];
+    return std.mem.eql(u8, first, "lib") or std.mem.eql(u8, first, "lib64") or std.mem.eql(u8, first, "usr");
 }
 
 /// One ld.so.conf file: the directories it names go to `dirs` and the
@@ -271,6 +272,8 @@ test "expandOrigin" {
 test "host paths" {
     try std.testing.expect(isHostPath("/usr/lib64"));
     try std.testing.expect(isHostPath("/lib"));
+    try std.testing.expect(isHostPath("//usr/lib64"));
+    try std.testing.expect(isHostPath("///lib//x86_64-linux-gnu"));
     try std.testing.expect(!isHostPath("/library"));
     try std.testing.expect(!isHostPath("/cvmfs/software.eessi.io/versions/2026.06/compat/linux/x86_64/usr/lib64"));
 }
