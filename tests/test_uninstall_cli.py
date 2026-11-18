@@ -457,6 +457,109 @@ sys.exit(int(os.environ["CONTROL_USED_STATUS"]))
         self.assertIn("restore does not know '--usage-log'", run.stderr)
         self.assertTrue(all(p.exists() for p in self.installs + self.modules))
 
+    def test_default_uninstall_outputs_and_statuses_are_unchanged_raw_bytes(self):
+        # Remove the second target so filesystem walk order is single-entry deterministic.
+        subprocess.run(["chmod", "-R", "u+w", str(self.installs[1])], check=True)
+        subprocess.run(["rm", "-rf", str(self.installs[1])], check=True)
+        self.modules[1].unlink()
+
+        def run_raw(args):
+            argv, env = binary.command(self.script, args, dict(self.env, SLURM_JOB_ID=""))
+            return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
+
+        listed = f"  {self.installs[0]}/\n  {self.modules[0]}\n".encode()
+        dry = run_raw(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--dry-run"])
+        self.assertEqual(
+            (dry.returncode, dry.stdout, dry.stderr),
+            (0, listed + b"eb-local: dry run, nothing removed\n", b""),
+        )
+
+        no_rtrash = run_raw(["uninstall", "pigz/2.8-GCCcore-15.2.0"])
+        self.assertEqual(
+            (no_rtrash.returncode, no_rtrash.stdout, no_rtrash.stderr),
+            (
+                1,
+                listed,
+                b"eb-local: rtrash is not installed; nothing removed. Install rtrash, or pass --delete to delete for good.\n",
+            ),
+        )
+
+        deleted = run_raw(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
+        self.assertEqual(
+            (deleted.returncode, deleted.stdout, deleted.stderr),
+            (0, listed + b"eb-local: deleted 1 installation(s) and 1 module file(s)\n", b""),
+        )
+
+        missing = run_raw(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"])
+        self.assertEqual(
+            (missing.returncode, missing.stdout, missing.stderr),
+            (2, b"", f"eb-local: pigz/2.8-GCCcore-15.2.0 is not installed in {self.prefix}\n".encode()),
+        )
+
+    def test_target_limits_uninstall_and_dependents_check_to_one_cpu_target(self):
+        # Dependent module exists only in zen2 (self.modules[0]'s tree).
+        self.dependent('depends_on("pigz/2.8-GCCcore-15.2.0")\n')
+        zen4_link = self.class_link(self.modules[1], "tools", self.modules[1])
+
+        blocked = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target", "zen2", "--delete"])
+        self.assertEqual(blocked.returncode, 2, blocked.stdout + blocked.stderr)
+        self.assertIn("same command", blocked.stderr)
+        self.assertTrue(self.installs[0].exists() and self.installs[1].exists())
+
+        dry = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target=x86_64/amd/zen4", "--dry-run"])
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn(str(self.installs[1]), dry.stdout)
+        self.assertIn(str(self.modules[1]), dry.stdout)
+        self.assertIn(str(zen4_link), dry.stdout)
+        self.assertNotIn(str(self.installs[0]), dry.stdout)
+
+        removed = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target", "zen4", "--delete"])
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertFalse(self.installs[1].exists())
+        self.assertFalse(self.modules[1].exists())
+        self.assertFalse(os.path.lexists(zen4_link))
+        self.assertTrue(self.installs[0].exists())
+        self.assertTrue(self.modules[0].exists())
+
+        absent = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target", "zen4", "--delete"])
+        self.assertEqual(absent.returncode, 2)
+        self.assertIn("not installed for target zen4", absent.stderr)
+
+        dup = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target", "zen2", "--target", "zen4"])
+        self.assertEqual(dup.returncode, 2)
+        self.assertIn("uninstall takes one --target", dup.stderr)
+
+        restore_flag = self.run_tool(["restore", "pigz/2.8-GCCcore-15.2.0", "--target", "zen4"])
+        self.assertEqual(restore_flag.returncode, 2)
+        self.assertIn("restore does not know '--target'", restore_flag.stderr)
+
+    def test_ambiguous_short_target_refuses_and_lists_candidate_paths(self):
+        # Add a second CPU family tree whose basename is also zen4.
+        other_tree = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "other" / "zen4"
+        other_install = other_tree / "software" / "pigz" / "2.8-GCCcore-15.2.0"
+        (other_install / "bin").mkdir(parents=True)
+        (other_install / "bin" / "pigz").write_text("binary\n")
+        other_module = other_tree / "modules" / "all" / "pigz" / "2.8-GCCcore-15.2.0.lua"
+        other_module.parent.mkdir(parents=True)
+        other_module.write_text("-- module\n")
+
+        ambiguous = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target", "zen4", "--delete"])
+        self.assertEqual(ambiguous.returncode, 2, ambiguous.stdout + ambiguous.stderr)
+        self.assertIn("more than one CPU tree", ambiguous.stderr)
+        amd_tree = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+        self.assertIn(str(amd_tree), ambiguous.stderr)
+        self.assertIn(str(other_tree), ambiguous.stderr)
+        self.assertTrue(self.installs[1].exists())
+        self.assertTrue(other_install.exists())
+
+        # Naming the full target selects only that tree.
+        exact = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--target", "x86_64/other/zen4", "--delete"])
+        self.assertEqual(exact.returncode, 0, exact.stdout + exact.stderr)
+        self.assertFalse(other_install.exists())
+        self.assertFalse(other_module.exists())
+        self.assertTrue(self.installs[1].exists())
+        self.assertTrue(self.modules[1].exists())
+
 
 if __name__ == "__main__":
     unittest.main()

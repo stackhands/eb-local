@@ -29,7 +29,7 @@ eb-local [OPTION]... clean [--logs-older-than DAYS] [--no-logs] [--sources] [--w
                            [--dry-run] [--delete] [--json]
 eb-local [OPTION]... config [--check | --env] [--json]
 eb-local [OPTION]... profiles [--json]
-eb-local [OPTION]... uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
+eb-local [OPTION]... uninstall NAME/VERSION... [--target TARGET] [--dry-run] [--delete] [--usage-log FILE]
 eb-local [OPTION]... restore NAME/VERSION... [--dry-run]
 eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
 eb-local overlay materialize --overlay FILE --base PATH [--out-dir DIR] [--dry-run]
@@ -135,11 +135,12 @@ directory you own.
                                        --json is for the default output or --check, not --env
   eb-local profiles [--json]           the profiles the configuration defines; --json
                                        prints one line of JSON with schema_version 1
-  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
+  eb-local uninstall NAME/VERSION... [--target TARGET] [--dry-run] [--delete]
+                                       [--usage-log FILE]
                                        remove an installation and its module file, for
-                                       every CPU target, to the trash with rtrash.
-                                       --usage-log asks eb-keep-logs whether the prefix
-                                       is in FILE, and removes nothing when that exits 2
+                                       every CPU target (or only TARGET), to the trash with
+                                       rtrash. --usage-log asks eb-keep-logs whether the
+                                       prefix is in FILE, and removes nothing when that exits 2
   eb-local restore NAME/VERSION... [--dry-run]
                                        bring them back from the trash, read-only again
   eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -529,6 +530,7 @@ EasyBuild leaves an installation read-only; `uninstall` makes its directories wr
 
 | Option | Meaning |
 |---|---|
+| `--target TARGET` | Remove and check dependents only in the CPU tree matching TARGET (a full target such as `x86_64/amd/zen4`, or a short name when unique; an ambiguous short name exits 2 and lists the candidate trees). |
 | `--dry-run` | Print what would be removed, and remove nothing. |
 | `--delete` | Delete for good when `clean.trash` does not move files to the trash. |
 | `--usage-log FILE` | Ask `eb-keep-logs` whether the install prefix is named in FILE, and remove nothing when that command exits 2. |

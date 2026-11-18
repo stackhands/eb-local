@@ -112,6 +112,7 @@ eb-local: build workspace kept at /local/alice.23/eb-local.bGSoHPgR; it goes whe
     ```
 
     It takes the installation, its module file in `modules/all`, and the link EasyBuild makes to that file from the module's class, here `modules/tools`.
+    Pass `--target TARGET` (such as `x86_64/intel/sapphirerapids`, or `sapphirerapids` when unique) to remove and check dependents only for that CPU target.
 
 2.  Remove it:
 

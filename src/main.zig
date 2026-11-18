@@ -138,11 +138,12 @@ const usage_text =
     \\                                       --json is for the default output or --check, not --env
     \\  eb-local profiles [--json]           the profiles the configuration defines; --json
     \\                                       prints one line of JSON with schema_version 1
-    \\  eb-local uninstall NAME/VERSION... [--dry-run] [--delete] [--usage-log FILE]
+    \\  eb-local uninstall NAME/VERSION... [--target TARGET] [--dry-run] [--delete]
+    \\                                       [--usage-log FILE]
     \\                                       remove an installation and its module file, for
-    \\                                       every CPU target, to the trash with rtrash.
-    \\                                       --usage-log asks eb-keep-logs whether the prefix
-    \\                                       is in FILE, and removes nothing when that exits 2
+    \\                                       every CPU target (or only TARGET), to the trash with
+    \\                                       rtrash. --usage-log asks eb-keep-logs whether the
+    \\                                       prefix is in FILE, and removes nothing when that exits 2
     \\  eb-local restore NAME/VERSION... [--dry-run]
     \\                                       bring them back from the trash, read-only again
     \\  eb-local site [list | show NAME | install NAME] [--set KEY=VALUE]... [--to FILE] [--force]
@@ -1191,7 +1192,7 @@ fn cmdCheckTree(c: Ctx, s: ?config.Settings, mode: CheckMode, modules: []const [
                 const ver = parts.next() orelse die("check --module needs NAME/VERSION; '{s}' has no version", .{m});
                 if (parts.next() != null) die("check --module needs NAME/VERSION; '{s}' has more parts", .{m});
                 const before = found.installs.items.len;
-                findInstalls(c, versions, name, ver, &found, 0);
+                findInstalls(c, versions, name, ver, null, &found, 0);
                 if (found.installs.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
             }
             roots.appendSlice(a, found.installs.items) catch oom();
@@ -3408,7 +3409,28 @@ const UninstallOpts = struct {
     delete: bool = false,
     /// A usage log `eb-keep-logs used` reads. Null leaves uninstall as it was.
     usage_log: ?[]const u8 = null,
+    /// Limit removal and dependent checks to CPU target trees matching this name.
+    target: ?[]const u8 = null,
 };
+
+fn matchesTarget(tree: []const u8, wanted: ?[]const u8) bool {
+    const raw = wanted orelse return true;
+    const w = std.mem.trimEnd(u8, raw, "/");
+    const t = treeTarget(tree);
+    if (std.mem.indexOfScalar(u8, w, '/') != null) return std.mem.eql(u8, t, w);
+    return std.mem.eql(u8, std.fs.path.basename(t), w);
+}
+
+test "matchesTarget accepts null, full target paths, and short target names" {
+    const tree = "/prefix/versions/2026.06/software/linux/x86_64/amd/zen4";
+    try std.testing.expect(matchesTarget(tree, null));
+    try std.testing.expect(matchesTarget(tree, "x86_64/amd/zen4"));
+    try std.testing.expect(matchesTarget(tree, "x86_64/amd/zen4/"));
+    try std.testing.expect(matchesTarget(tree, "zen4"));
+    try std.testing.expect(!matchesTarget(tree, "zen2"));
+    try std.testing.expect(!matchesTarget(tree, "x86_64/amd/zen2"));
+    try std.testing.expect(!matchesTarget(tree, "/"));
+}
 
 const Found = struct {
     installs: std.ArrayList([]const u8) = .empty,
@@ -3433,11 +3455,12 @@ fn literalPath(c: Ctx, path: []const u8) bool {
 /// EESSI-extend lays them out), and in each, software/NAME/VERSION,
 /// modules/all/NAME/VERSION.lua and the links to it from the other
 /// modules/ directories. Installed software is never searched.
-fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, found: *Found, depth: usize) void {
+fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, target: ?[]const u8, found: *Found, depth: usize) void {
     if (depth > 12) return;
     const fd = fsx.openDir(fsx.cwd, path, false) catch return;
     defer sys.close(fd);
     if (isDirAt(fd, "software") and isDirAt(fd, "modules")) {
+        if (!matchesTarget(path, target)) return;
         const dir = std.fs.path.join(c.a, &.{ path, "software", name, ver }) catch oom();
         if (fsx.statAt(fsx.cwd, dir, false)) |st| {
             if (st.isDir() and literalPath(c, dir)) found.installs.append(c.a, dir) catch oom();
@@ -3453,7 +3476,7 @@ fn findInstalls(c: Ctx, path: []const u8, name: []const u8, ver: []const u8, fou
     while (it.next() catch null) |e| {
         const st = fsx.statAt(fd, e.name, false) catch continue;
         if (!st.isDir()) continue;
-        findInstalls(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), name, ver, found, depth + 1);
+        findInstalls(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), name, ver, target, found, depth + 1);
     }
 }
 
@@ -3486,11 +3509,12 @@ fn findClassLinks(c: Ctx, root: []const u8, name: []const u8, ver: []const u8, f
 /// Below `path`, in each target root's modules/all, the module files that
 /// load one of `wanted` (NAME/VERSION), other than those in `skip`. A file
 /// reached through a symbolic link is not read.
-fn findDependents(c: Ctx, path: []const u8, wanted: []const []const u8, skip: []const []const u8, out: *std.ArrayList([]const u8), depth: usize) void {
+fn findDependents(c: Ctx, path: []const u8, wanted: []const []const u8, skip: []const []const u8, target: ?[]const u8, out: *std.ArrayList([]const u8), depth: usize) void {
     if (depth > 12) return;
     const fd = fsx.openDir(fsx.cwd, path, false) catch return;
     defer sys.close(fd);
     if (isDirAt(fd, "software") and isDirAt(fd, "modules")) {
+        if (!matchesTarget(path, target)) return;
         const all = std.fs.path.join(c.a, &.{ path, "modules", "all" }) catch oom();
         const afd = fsx.openDir(fsx.cwd, all, false) catch return;
         defer sys.close(afd);
@@ -3516,7 +3540,7 @@ fn findDependents(c: Ctx, path: []const u8, wanted: []const []const u8, skip: []
     while (it.next() catch null) |e| {
         const st = fsx.statAt(fd, e.name, false) catch continue;
         if (!st.isDir()) continue;
-        findDependents(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), wanted, skip, out, depth + 1);
+        findDependents(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), wanted, skip, target, out, depth + 1);
     }
 }
 
@@ -3607,6 +3631,24 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (fsx.statAt(fsx.cwd, versions, false)) |st| {
         if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
     } else |_| die("nothing is installed in {s}", .{p.prefix});
+    if (o.target) |raw_target| {
+        const trimmed = std.mem.trimEnd(u8, raw_target, "/");
+        if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
+            var trees: std.ArrayList([]const u8) = .empty;
+            findTrees(c, versions, &trees, 0);
+            std.mem.sort([]const u8, trees.items, {}, lessThanStr);
+            var matched: std.ArrayList([]const u8) = .empty;
+            for (trees.items) |tree| {
+                if (matchesTarget(tree, trimmed)) matched.append(a, tree) catch oom();
+            }
+            if (matched.items.len > 1) {
+                die("--target '{s}' matches more than one CPU tree: {s}; pass the full target", .{
+                    raw_target,
+                    std.mem.join(a, ", ", matched.items) catch oom(),
+                });
+            }
+        }
+    }
     var found: Found = .{};
     for (modules) |m| {
         var parts = std.mem.splitScalar(u8, m, '/');
@@ -3614,13 +3656,16 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         const ver = parts.next() orelse die("uninstall needs NAME/VERSION; '{s}' has no version", .{m});
         if (parts.next() != null) die("uninstall needs NAME/VERSION; '{s}' has more parts", .{m});
         const before = found.installs.items.len + found.modules.items.len;
-        findInstalls(c, versions, name, ver, &found, 0);
-        if (found.installs.items.len + found.modules.items.len == before) die("{s} is not installed in {s}", .{ m, p.prefix });
+        findInstalls(c, versions, name, ver, o.target, &found, 0);
+        if (found.installs.items.len + found.modules.items.len == before) {
+            if (o.target) |t| die("{s} is not installed for target {s} in {s}", .{ m, t, p.prefix });
+            die("{s} is not installed in {s}", .{ m, p.prefix });
+        }
     }
     // A module another installed module loads stays, unless that one goes
     // in the same command; Lmod would otherwise fail to load the dependent.
     var dependents: std.ArrayList([]const u8) = .empty;
-    findDependents(c, versions, modules, found.modules.items, &dependents, 0);
+    findDependents(c, versions, modules, found.modules.items, o.target, &dependents, 0);
     if (dependents.items.len > 0) {
         warn("these installed modules load what you named; uninstall them in the same command, or keep it:", .{});
         for (dependents.items) |f| warn("  {s}", .{f});
@@ -4175,6 +4220,12 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (command == .uninstall and joined(x, "--usage-log") != null) {
                     if (uninstall.usage_log != null) die("uninstall takes one --usage-log", .{});
                     uninstall.usage_log = joined(x, "--usage-log").?;
+                } else if (command == .uninstall and std.mem.eql(u8, x, "--target")) {
+                    if (uninstall.target != null) die("uninstall takes one --target", .{});
+                    uninstall.target = value(args, &i, "--target");
+                } else if (command == .uninstall and joined(x, "--target") != null) {
+                    if (uninstall.target != null) die("uninstall takes one --target", .{});
+                    uninstall.target = joined(x, "--target").?;
                 } else if (x.len > 0 and x[0] == '-') {
                     die("{s} does not know '{s}'", .{ @tagName(command), x });
                 } else if (!config.validModule(x)) {
