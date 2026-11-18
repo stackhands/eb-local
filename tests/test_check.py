@@ -485,6 +485,17 @@ class Check(unittest.TestCase):
         self.assertEqual(paths2.count(str(tree / "lib" / "libdemo.so")), 1)
         self.assertEqual(doc2["elf_count"], len(paths2))
 
+    def test_json_without_quiet_emits_pure_json_even_with_errors(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--enable-new-dtags")
+        run = self.check("--json", prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        doc = json.loads(run.stdout)
+        validate(doc, load_schema("check.schema.json"))
+        self.assertEqual(doc["problem_count"], 1)
+        self.assertEqual(len(doc["files"]), 1)
+        self.assertEqual(doc["files"][0]["path"], str(prog))
+
     def test_compat_ld_so_conf_resolves_relative_and_root_includes_under_loader_root(self):
         compat = self.root / "compat"
         (compat / "etc" / "ld.so.conf.d").mkdir(parents=True)
