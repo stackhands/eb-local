@@ -1,0 +1,1 @@
+Updated the `eb-without-a-site-file` how-to guide so `eb-local doctor` without a site file shows the `info no site file sets storage.node_local_root` line that the built binary prints rather than the older `FAIL` line.

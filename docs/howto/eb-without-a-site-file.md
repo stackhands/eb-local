@@ -22,7 +22,7 @@ EESSI-extend keeps EESSI's hooks, RPATH and compatibility layer, and installs wh
 
     ```text
     ok   eb-local 3.1.0
-    FAIL no site file sets storage.node_local_root, so builds cannot run
+    info no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program
     ok   installs go to /home/alice/eessi: a user install, prefix from default
     ok   no other EESSI or EasyBuild install variable is set in this shell
     ok   `eb-local eb` sources /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash
@@ -37,7 +37,7 @@ EESSI-extend keeps EESSI's hooks, RPATH and compatibility layer, and installs wh
     Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.
     ```
 
-    Without a site file, this one `FAIL` line is expected while the rest are for `eb-local eb`.
+    Without a site file, a line that stops `eb-local eb` says `FAIL`.
 
 2.  Run EasyBuild with the easyconfig:
 
