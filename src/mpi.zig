@@ -210,7 +210,7 @@ fn field(line: []const u8, key: []const u8) ?i64 {
 
 /// True when every reported rank ran on one CPU.
 pub fn sharedCpu(ranks: []const Rank) bool {
-    if (ranks.len < 2) return false;
+    if (ranks.len < 2 or ranks[0].cpu < 0) return false;
     for (ranks[1..]) |r| if (r.cpu != ranks[0].cpu) return false;
     return true;
 }
@@ -253,6 +253,11 @@ test "two ranks on one CPU are a shared binding" {
         .{ .rank = 1, .size = 2, .cpu = 1, .cpus = 8 },
     };
     try testing.expect(!sharedCpu(&split));
+    const unknown = [_]Rank{
+        .{ .rank = 0, .size = 2, .cpu = -1, .cpus = 8 },
+        .{ .rank = 1, .size = 2, .cpu = -1, .cpus = 8 },
+    };
+    try testing.expect(!sharedCpu(&unknown));
 }
 
 test "parseRanks ignores rank, size, and cpus prefixes before hello rank=" {
