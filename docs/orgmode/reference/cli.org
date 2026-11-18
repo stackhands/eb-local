@@ -504,6 +504,7 @@ Files go to the trash with =rtrash= as =clean.trash= says; workspaces are delete
 A directory among the logs, such as the =reprod_*= copies of a failed build's easyconfig, easyblocks and hooks, goes whole once neither it nor anything in it is newer than the cutoff: the copies keep their originals' older times, and a file added to a directory makes the directory new.
 =clean= never follows a symbolic link out of the installation directory.
 With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
+If any item or build workspace cannot be removed, =clean= warns and exits 1 (including with =--json=, where =removed_items= and =removed_workspaces= report the actual counts).
 With =--json=, stdout holds one line of JSON with =schema_version= 1, =kind= =clean=, =prefix=, =dry_run=, =action= (=nothing=, =dry-run=, =trashed=, =deleted=, =workspaces-only= or =refused=), =items= (=path= and =kind=), =workspaces=, =removed_items= and =removed_workspaces=; see [[file:json/clean.schema.json][clean.schema.json]].
 Any invalid UTF-8 byte in a path is replaced with the Unicode replacement character =U+FFFD=, so non-UTF-8 paths do not round-trip.
 
@@ -589,7 +590,7 @@ A value with a quote, a backslash or a control character is refused.
 | Status  | Meaning                                                                                                                                         |
 |---------+-------------------------------------------------------------------------------------------------------------------------------------------------|
 | 0       | Done, or nothing to do.                                                                                                                         |
-| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
+| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to, or =clean= failed to remove some items or build workspaces; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
 | 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file. |
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |

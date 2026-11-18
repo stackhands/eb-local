@@ -374,7 +374,19 @@ fn removeOnDevice(a: Allocator, dir: sys.fd_t, name: []const u8, dev: u64) (fsx.
         try sys.unlinkat(dir, name, 0);
         return;
     }
-    const fd = try fsx.openDir(dir, name, false);
+    const fd = fsx.openDir(dir, name, false) catch |e| blk: {
+        if (e == error.AccessDenied and st.uid == linux.getuid()) {
+            var zb: [sys.path_max:0]u8 = undefined;
+            if (sys.z(&zb, name)) |zp| {
+                _ = linux.fchmodat(dir, zp.ptr, @intCast((st.mode & 0o7777) | 0o700));
+            } else |_| {}
+            break :blk try fsx.openDir(dir, name, false);
+        }
+        return e;
+    };
+    if (st.uid == linux.getuid() and (st.mode & 0o700) != 0o700) {
+        sys.fchmod(fd, @intCast((st.mode & 0o7777) | 0o700)) catch {};
+    }
     {
         defer sys.close(fd);
         var it = try fsx.DirIter.init(a, fd);
@@ -766,4 +778,24 @@ test "the allocation's mount name" {
         try testing.expect(validMountPattern(ok));
     for ([_][]const u8{ "", "%u", "u.42", "%u/%j", "../%j", "%x%j", "%j%", "%%j", "%j %u", "%j/" }) |bad|
         try testing.expect(!validMountPattern(bad));
+}
+
+test "removeTree removes read-only subdirectories owned by the caller" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/ro-tree-{d}", .{ cwd, linux.getpid() });
+    const ro_dir = try std.fmt.allocPrint(a, "{s}/sub dir", .{root});
+    const file = try std.fmt.allocPrint(a, "{s}/read-only.txt", .{ro_dir});
+    try common.atomic.makedirs(ro_dir);
+    defer removeTree(a, root) catch {};
+    const fd = try sys.openat(fsx.cwd, file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o444);
+    sys.close(fd);
+    var zb: [sys.path_max:0]u8 = undefined;
+    _ = linux.fchmodat(linux.AT.FDCWD, (try sys.z(&zb, ro_dir)).ptr, 0o555);
+    _ = linux.fchmodat(linux.AT.FDCWD, (try sys.z(&zb, root)).ptr, 0o555);
+    try removeTree(a, root);
+    try testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, root, false));
 }
