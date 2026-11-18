@@ -415,6 +415,60 @@ class Check(unittest.TestCase):
         self.assertEqual(paths2.count(str(tree / "lib" / "libdemo.so")), 1)
         self.assertEqual(doc2["elf_count"], len(paths2))
 
+    def test_compat_ld_so_conf_resolves_relative_and_root_includes_under_loader_root(self):
+        compat = self.root / "compat"
+        (compat / "etc" / "ld.so.conf.d").mkdir(parents=True)
+        (compat / "etc" / "extra.conf.d").mkdir(parents=True)
+        custom_rel = compat / "custom-rel" / "lib"
+        custom_abs = compat / "custom-abs" / "lib"
+        custom_rel.mkdir(parents=True)
+        custom_abs.mkdir(parents=True)
+
+        (self.root / "demo.c").write_text("int demo(void) { return 7; }\n")
+        (self.root / "extra.c").write_text("int extra(void) { return 5; }\n")
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-o", str(custom_rel / "libdemo.so"), str(self.root / "demo.c")],
+            check=True,
+        )
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-o", str(custom_abs / "libextra.so"), str(self.root / "extra.c")],
+            check=True,
+        )
+
+        (compat / "etc" / "ld.so.conf").write_text(
+            "include ld.so.conf.d/*.conf\ninclude /etc/extra.conf.d/*.conf\n",
+            encoding="utf-8",
+        )
+        (compat / "etc" / "ld.so.conf.d" / "rel.conf").write_text(f"{custom_rel}\n", encoding="utf-8")
+        (compat / "etc" / "extra.conf.d" / "abs.conf").write_text(f"{custom_abs}\n", encoding="utf-8")
+
+        (self.root / "compat_prog.c").write_text(
+            "int demo(void);\nint extra(void);\nvoid _start(void) { (void)demo(); (void)extra(); }\n"
+        )
+        prog = self.root / "compat_prog"
+        interp = compat / "lib64" / "ld-linux-x86-64.so.2"
+        subprocess.run(
+            [
+                GCC,
+                "-nostdlib",
+                "-e",
+                "_start",
+                "-o",
+                str(prog),
+                str(self.root / "compat_prog.c"),
+                f"-L{custom_rel}",
+                "-ldemo",
+                f"-L{custom_abs}",
+                "-lextra",
+                f"-Wl,--dynamic-linker={interp}",
+            ],
+            check=True,
+        )
+        run = self.check(prog)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"libdemo.so => {custom_rel}/libdemo.so   [the loader's directories]", run.stdout)
+        self.assertIn(f"libextra.so => {custom_abs}/libextra.so   [the loader's directories]", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
