@@ -106,6 +106,19 @@ class DevBuildenv(StorageFixture):
             "--version",
         ])
 
+    def test_rpath_wrappers_ignore_repeated_slashes_in_host_and_eprefix_dirs(self):
+        after = 'clang a.o -o prog -L//usr/lib64 -L/compat//usr/lib64 -L/opt//foo/lib\n'
+        self.dev(
+            "llvm-compilers/21.1.8",
+            after=after,
+            LIBRARY_PATH="/compat//usr/lib64://lib64:/eessi//fftw/lib",
+            EESSI_EPREFIX="/compat//",
+        )
+        self.assertEqual((self.root / "cc-calls").read_text().splitlines(), [
+            "a.o -o prog -L//usr/lib64 -L/compat//usr/lib64 -L/opt//foo/lib"
+            " -Wl,-rpath,/opt/foo/lib -Wl,-rpath,/eessi/fftw/lib -Wl,--disable-new-dtags",
+        ])
+
     def test_nvhpc_has_no_default_buildenv_and_asks_lmod_nothing(self):
         calls, replay = self.dev("NVHPC/26.7")
         self.assertEqual(calls[-1], "load NVHPC/26.7")

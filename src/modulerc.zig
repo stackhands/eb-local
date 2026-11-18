@@ -56,7 +56,7 @@ fn quoted(a: std.mem.Allocator, value: []const u8) ![]const u8 {
 fn hasLine(text: []const u8, wanted: []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        if (std.mem.eql(u8, std.mem.trimEnd(u8, line, "\r"), wanted)) return true;
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), wanted)) return true;
     }
     return false;
 }
@@ -221,5 +221,11 @@ test "rendering named directives is idempotent" {
     try std.testing.expectEqualStrings(
         "-- keep this\nmodule_version(\"Example/2.0\", \"default\")\nmodule_alias(\"latest\", \"Example/2.0\")\nhide_version(\"Example/1.0\")\n",
         once,
+    );
+
+    const padded = "  module_version(\"Example/2.0\", \"default\") \t\n";
+    try std.testing.expectEqualStrings(
+        padded,
+        try render(a, padded, .{ .defaults = &.{"Example/2.0"} }),
     );
 }
