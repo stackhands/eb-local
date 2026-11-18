@@ -148,3 +148,21 @@ done
         empty = self.run_tool(["doctor", "--mpi"])
         self.assertIn("info no site-approved MPI transport is configured", empty.stdout)
         self.assertNotIn("mpicc", empty.stdout)
+
+    def test_mpi_hello_uses_tmpdir_and_leaves_cwd_clean(self):
+        ro_cwd = self.root / "readonly-cwd"
+        ro_cwd.mkdir()
+        ro_cwd.chmod(0o555)
+        self.addCleanup(lambda: ro_cwd.chmod(0o755))
+
+        argv, env = binary.command(self.script, ["--config", str(self.site(["ofi"])), "doctor", "--mpi"], dict(self.env))
+        run = __import__("subprocess").run(argv, env=env, cwd=ro_cwd, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("ok   MPI ofi hello size 2 on cpus 0,1", run.stdout)
+        self.assertFalse((ro_cwd / ".zig-cache").exists())
+
+        rw_cwd = self.root / "writable-cwd"
+        rw_cwd.mkdir()
+        run_rw = __import__("subprocess").run(argv, env=env, cwd=rw_cwd, capture_output=True, text=True)
+        self.assertEqual(run_rw.returncode, 0, run_rw.stdout + run_rw.stderr)
+        self.assertFalse((rw_cwd / ".zig-cache").exists())
