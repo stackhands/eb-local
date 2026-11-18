@@ -200,15 +200,52 @@ fn findArrayStart(text: []const u8, key: []const u8) ?usize {
 fn findMatchingBracket(text: []const u8, open: usize) ?usize {
     var depth: i32 = 0;
     var i = open;
-    while (i < text.len) : (i += 1) {
-        switch (text[i]) {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if (depth == 0) return i;
-            },
-            else => {},
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == '#') {
+            i += 1;
+            while (i < text.len and text[i] != '\n') : (i += 1) {}
+            continue;
         }
+        if (ch == '\'' or ch == '"') {
+            if (i + 2 < text.len and text[i + 1] == ch and text[i + 2] == ch) {
+                const quote = ch;
+                i += 3;
+                while (i < text.len) {
+                    if (text[i] == '\\') {
+                        i += @min(2, text.len - i);
+                        continue;
+                    }
+                    if (i + 2 < text.len and text[i] == quote and text[i + 1] == quote and text[i + 2] == quote) {
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            const quote = ch;
+            i += 1;
+            while (i < text.len) {
+                if (text[i] == '\\') {
+                    i += @min(2, text.len - i);
+                    continue;
+                }
+                if (text[i] == quote or text[i] == '\n') {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if (ch == '[') {
+            depth += 1;
+        } else if (ch == ']') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+        i += 1;
     }
     return null;
 }
@@ -588,4 +625,23 @@ test "appendToArray handles trailing commas without producing double commas" {
     const out = try materialize(a, base, spec, &d);
     try std.testing.expect(std.mem.indexOf(u8, out, ",,") == null);
     try std.testing.expectEqualStrings("dependencies = [\n    ('zlib', '1.3'),\n    ('pkg', '1.0'),\n]\n", out);
+}
+
+test "findMatchingBracket ignores brackets inside string literals and comments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n]\n";
+    const digest = try sha256Hex(a, base);
+    const patches = [_]Patch{.{ .name = "site", .file = "site.patch" }};
+    const spec: Spec = .{
+        .base_digest = digest,
+        .patches = &patches,
+    };
+    var d: Diagnostic = .{};
+    const out = try materialize(a, base, spec, &d);
+    try std.testing.expectEqualStrings(
+        "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n    ('site', 'site.patch'),\n]\n",
+        out,
+    );
 }

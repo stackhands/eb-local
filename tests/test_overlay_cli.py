@@ -386,6 +386,27 @@ class OverlayMaterialize(unittest.TestCase):
             ast.parse(text)
             self.assertNotIn(",,", text)
 
+    def test_materialize_ignores_brackets_in_quoted_strings_and_comments(self):
+        import ast
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"patches = [\n    # [note]\n    ('fix-[1].patch', 1),\n    ('a]b.patch', 1),\n]\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n'
+                '[patches]\nsite = "site.patch"\n',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            text = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            ast.parse(text)
+            self.assertIn("('site', 'site.patch')", text)
+
 
 @unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
