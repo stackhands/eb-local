@@ -106,6 +106,7 @@ class RpathWrappersCli(unittest.TestCase):
             + "clang -fsyntax-only foo.c\n"
             + "ld --relocatable a.o -o b.o\n"
             + "ld -Ur a.o -o b.o\n"
+            + "ld -i a.o -o b.o\n"
             + "clang --library-path=/opt/x/lib --library-path /opt/y/lib a.o -o prog\n"
         )
         run = subprocess.run(
@@ -127,6 +128,7 @@ class RpathWrappersCli(unittest.TestCase):
                 "clang:-fsyntax-only foo.c",
                 "ld:--relocatable a.o -o b.o",
                 "ld:-Ur a.o -o b.o",
+                "ld:-i a.o -o b.o",
                 "clang:--library-path=/opt/x/lib --library-path /opt/y/lib a.o -o prog"
                 " -Wl,-rpath,/opt/x/lib -Wl,-rpath,/opt/y/lib -Wl,--disable-new-dtags",
             ],

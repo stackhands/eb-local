@@ -64,6 +64,7 @@ pub const script =
     \\    fi
     \\    case $arg in
     \\        -c | -S | -E | -M | -MM | -fsyntax-only) [ $linker = 0 ] && link=0 ;;
+    \\        -i) [ $linker = 1 ] && link=0 ;;
     \\        -r | -Ur | --relocatable) link=0 ;;
     \\        -L | --library-path) want_dir=1 ;;
     \\        -L*) dirs+=("${arg#-L}") ;;
