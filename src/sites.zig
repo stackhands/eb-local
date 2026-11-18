@@ -46,7 +46,7 @@ fn validName(n: []const u8) bool {
 
 /// A value that stays one TOML string: printable, no quote or backslash.
 pub fn validValue(v: []const u8) bool {
-    if (v.len == 0) return false;
+    if (v.len == 0 or !std.unicode.utf8ValidateSlice(v)) return false;
     for (v) |c| if (c < 0x20 or c == 0x7f or c == '"' or c == '\\') return false;
     return true;
 }
@@ -191,7 +191,7 @@ test "a value cannot leave its TOML string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var d: Diagnostic = .{};
-    for ([_][]const u8{ "p=a\"b", "p=a\\b", "p=a\nb", "p=", "P=x", "nop" }) |bad|
+    for ([_][]const u8{ "p=a\"b", "p=a\\b", "p=a\nb", "p=", "P=x", "nop", "p=bad\xff" }) |bad|
         try testing.expectError(error.Invalid, parseSet(arena.allocator(), bad, &d));
     const s = try parseSet(arena.allocator(), "partition=gpu", &d);
     try testing.expectEqualStrings("gpu", s.value);
@@ -201,6 +201,7 @@ test "a value cannot leave its TOML string" {
         "p = \"{{x:a\"b}}\"\n",
         "p = \"{{x:a\\b}}\"\n",
         "p = \"{{x:}}\"\n",
+        "p = \"{{x:bad\xff}}\"\n",
     }) |bad_tmpl| {
         const tmpl: Template = .{ .name = "./bad-default.toml", .text = bad_tmpl };
         try testing.expectError(error.Invalid, render(a, tmpl, &.{}, &d));
