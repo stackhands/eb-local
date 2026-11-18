@@ -217,28 +217,8 @@ const Ctx = struct {
 
 // ---- shell output ---------------------------------------------------------
 
-/// A word the shell reads back as exactly `s`: as it is when it holds only
-/// safe characters, single-quoted otherwise.
-fn shellQuote(a: Allocator, s: []const u8) Allocator.Error![]const u8 {
-    var safe = s.len > 0;
-    for (s) |ch| {
-        if (!(std.ascii.isAlphanumeric(ch) or std.mem.indexOfScalar(u8, "_./:@%+,=-", ch) != null)) {
-            safe = false;
-            break;
-        }
-    }
-    if (safe) return s;
-    var out: std.ArrayList(u8) = .empty;
-    try out.append(a, '\'');
-    for (s) |ch| {
-        if (ch == '\'') try out.appendSlice(a, "'\\''") else try out.append(a, ch);
-    }
-    try out.append(a, '\'');
-    return out.items;
-}
-
 fn q(a: Allocator, s: []const u8) []const u8 {
-    return shellQuote(a, s) catch oom();
+    return common.pytext.shellQuote(a, s) catch oom();
 }
 
 fn str(a: Allocator, comptime f: []const u8, args: anytype) []const u8 {
@@ -4694,9 +4674,10 @@ test "shell quoting reads back as the same word" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const shellQuote = common.pytext.shellQuote;
     try std.testing.expectEqualStrings("EESSI/2026.06", try shellQuote(a, "EESSI/2026.06"));
     try std.testing.expectEqualStrings("/home/u/eessi", try shellQuote(a, "/home/u/eessi"));
     try std.testing.expectEqualStrings("'owned space'", try shellQuote(a, "owned space"));
-    try std.testing.expectEqualStrings("'a'\\''b $(x)'", try shellQuote(a, "a'b $(x)"));
+    try std.testing.expectEqualStrings("'a'\"'\"'b $(x)'", try shellQuote(a, "a'b $(x)"));
     try std.testing.expectEqualStrings("''", try shellQuote(a, ""));
 }
