@@ -3602,12 +3602,13 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
             die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
         say("eb-local: {s}:", .{t.name});
-        switch (runAttached(a, argv.items, c.envp)) {
+        const run = runAttached(a, argv.items, c.envp);
+        switch (run) {
             .exit => |code| if (code != 0) {
                 warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
                 failed = true;
             },
-            .signal => failed = true,
+            .signal => return stop(run),
         }
     }
     if (o.print) return 0;

@@ -1,0 +1,1 @@
+`eb-local submit` now stops immediately and propagates the signal when `sbatch` or `submit` is interrupted by a signal, matching the other attached commands instead of submitting remaining targets and exiting 1.
