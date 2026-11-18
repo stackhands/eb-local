@@ -2035,7 +2035,7 @@ fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
     die("cannot make a build workspace in the node-local mount {s} ({s}); nothing was built.\n" ++
-        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, @errorName(e), q(a, job_root) });
+        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, storage.describeError(e), q(a, job_root) });
 }
 
 // ---- clean ----------------------------------------------------------------
@@ -2661,7 +2661,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const guard = Guard.hold();
     const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
     for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
-        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| workspaceFailed(a, job_root, e);
+        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            workspaceFailed(a, job_root, e);
+        };
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
