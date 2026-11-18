@@ -4415,8 +4415,10 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (std.mem.eql(u8, x, "--mpi")) {
                     doctor_mpi = true;
                 } else if (std.mem.eql(u8, x, "--workspace")) {
+                    if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = value(args, &i, "--workspace");
                 } else if (joined(x, "--workspace")) |v| {
+                    if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = v;
                 } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
             },
