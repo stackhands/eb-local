@@ -295,6 +295,7 @@ pub const MaterializeOptions = struct {
     base_path: []const u8 = "",
     out_dir: []const u8 = "",
     dry_run: bool = false,
+    check: bool = false,
 };
 
 fn quoted(a: Allocator, value: []const u8) ![]const u8 {
@@ -331,8 +332,12 @@ fn failMsg(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("eb-local: " ++ fmt ++ "\n", args);
 }
 
-/// Read overlay and base files, verify the digest, and write or preview the outputs.
+/// Read overlay and base files, verify the digest, and write, preview, or check the outputs.
 pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
+    if (opts.dry_run and opts.check) {
+        failMsg("overlay materialize takes --dry-run or --check, not both", .{});
+        return 2;
+    }
     if (opts.overlay_path.len == 0) {
         failMsg("overlay materialize needs --overlay FILE", .{});
         return 2;
@@ -377,6 +382,38 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     const provenance = writeProvenance(a, .{ .overlay_path = opts.overlay_path, .base_path = opts.base_path, .out_dir = out_dir }, spec, base_digest, overlay_digest, recipe_name) catch return 1;
     defer a.free(provenance);
     var stdout = std.Io.File.stdout();
+    if (opts.check) {
+        const existing_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => {
+                failMsg("cannot read {s}: {s}", .{ recipe_path, @errorName(err) });
+                return 1;
+            },
+        };
+        defer if (existing_recipe) |buf| a.free(buf);
+        const existing_prov = cwd.readFileAlloc(io, provenance_path, a, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => {
+                failMsg("cannot read {s}: {s}", .{ provenance_path, @errorName(err) });
+                return 1;
+            },
+        };
+        defer if (existing_prov) |buf| a.free(buf);
+        const up_to_date = if (existing_recipe) |er|
+            if (existing_prov) |ep|
+                std.mem.eql(u8, er, recipe) and std.mem.eql(u8, ep, provenance)
+            else
+                false
+        else
+            false;
+        const message = std.fmt.allocPrint(a, "{s} {s} and {s}\n", .{
+            if (up_to_date) "up to date" else "would update",
+            recipe_path,
+            provenance_path,
+        }) catch return 1;
+        stdout.writeStreamingAll(io, message) catch return 1;
+        return if (up_to_date) 0 else 1;
+    }
     if (opts.dry_run) {
         const message = std.fmt.allocPrint(a, "would write {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
         stdout.writeStreamingAll(io, message) catch return 1;

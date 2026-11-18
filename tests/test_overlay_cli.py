@@ -53,6 +53,91 @@ class OverlayMaterialize(unittest.TestCase):
                 (0, b"wrote out/materialized-base.eb and out/provenance.toml\n", b""),
             )
 
+            dry = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "dry-out",
+                    "--dry-run",
+                ],
+                cwd=root,
+                text=False,
+            )
+            self.assertEqual(
+                (dry.returncode, dry.stdout, dry.stderr),
+                (0, b"would write dry-out/materialized-base.eb and dry-out/provenance.toml\n", b""),
+            )
+            self.assertFalse((root / "dry-out").exists())
+
+    def test_check_reports_drift_without_creating_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+            (root / "base.eb").write_bytes(content)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(content)}"\n',
+                encoding="utf-8",
+            )
+            args = [
+                "materialize",
+                "--overlay",
+                "site.overlay.toml",
+                "--base",
+                "base.eb",
+                "--out-dir",
+                "out",
+            ]
+
+            missing = run([*args, "--check"], cwd=root)
+            self.assertEqual(
+                (missing.returncode, missing.stdout, missing.stderr),
+                (1, "would update out/materialized-base.eb and out/provenance.toml\n", ""),
+            )
+            self.assertFalse((root / "out").exists())
+
+            wrote = run(args, cwd=root)
+            self.assertEqual(wrote.returncode, 0, wrote.stderr)
+
+            current = run([*args, "--check"], cwd=root)
+            self.assertEqual(
+                (current.returncode, current.stdout, current.stderr),
+                (0, "up to date out/materialized-base.eb and out/provenance.toml\n", ""),
+            )
+
+            recipe = root / "out" / "materialized-base.eb"
+            recipe.write_text("edited by hand\n", encoding="utf-8")
+            drifted_recipe = run([*args, "--check"], cwd=root)
+            self.assertEqual(
+                (drifted_recipe.returncode, drifted_recipe.stdout, drifted_recipe.stderr),
+                (1, "would update out/materialized-base.eb and out/provenance.toml\n", ""),
+            )
+            self.assertEqual(recipe.read_text(encoding="utf-8"), "edited by hand\n")
+
+            wrote_again = run(args, cwd=root)
+            self.assertEqual(wrote_again.returncode, 0, wrote_again.stderr)
+            prov = root / "out" / "provenance.toml"
+            prov.write_text("edited provenance\n", encoding="utf-8")
+            drifted_prov = run([*args, "--check"], cwd=root)
+            self.assertEqual(
+                (drifted_prov.returncode, drifted_prov.stdout, drifted_prov.stderr),
+                (1, "would update out/materialized-base.eb and out/provenance.toml\n", ""),
+            )
+            self.assertEqual(prov.read_text(encoding="utf-8"), "edited provenance\n")
+
+            both = run([*args, "--dry-run", "--check"], cwd=root)
+            self.assertEqual(both.returncode, 2)
+            self.assertEqual(both.stdout, "")
+            self.assertIn("--dry-run or --check, not both", both.stderr)
+
+            (root / "base.eb").write_bytes(b"changed upstream\n")
+            stale_base = run([*args, "--check"], cwd=root)
+            self.assertEqual(stale_base.returncode, 2)
+            self.assertIn("base digest", stale_base.stderr)
+
     def test_dry_run_validates_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
