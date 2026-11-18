@@ -528,9 +528,132 @@ pub fn probeWorkspace(
     return result;
 }
 
+/// Default milliseconds to wait on a contended `flock` lock.
+pub const default_lock_timeout_ms: u32 = 300_000;
+
+/// Outcome of acquiring a bounded exclusive lock.
+pub const LockResult = union(enum) {
+    held: sys.fd_t,
+    unlocked,
+    failed,
+};
+
+/// Resolve the lock wait timeout in milliseconds from `EB_LOCAL_LOCK_TIMEOUT_MS`.
+pub fn lockTimeoutMs(env: ?*const std.process.Environ.Map, err_msg: *[]const u8) ?u32 {
+    const map = env orelse return default_lock_timeout_ms;
+    const raw = map.get("EB_LOCAL_LOCK_TIMEOUT_MS") orelse return default_lock_timeout_ms;
+    if (raw.len == 0) return default_lock_timeout_ms;
+    const ms = std.fmt.parseInt(u32, raw, 10) catch {
+        err_msg.* = "EB_LOCAL_LOCK_TIMEOUT_MS must be a positive integer of milliseconds";
+        return null;
+    };
+    if (ms == 0) {
+        err_msg.* = "EB_LOCAL_LOCK_TIMEOUT_MS must be a positive integer of milliseconds";
+        return null;
+    }
+    return ms;
+}
+
+/// Open `lock_path` without following symlinks and hold an exclusive lock
+/// via `common.state.lockExclusive` with a bounded timeout. When `notify` is
+/// true and another process holds the lock, prints one waiting line on
+/// stderr before waiting.
+pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, notify: bool, err_msg: *[]const u8) LockResult {
+    const fd = sys.openat(fsx.cwd, lock_path, .{
+        .ACCMODE = .RDWR,
+        .CREAT = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o666) catch |err| {
+        err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
+        return .failed;
+    };
+    if (common.state.lockExclusive(fd, 0)) |_| {
+        return .{ .held = fd };
+    } else |err| switch (err) {
+        error.TimedOut => {
+            if (notify) common.cli.err("eb-local: waiting for lock {s}; another eb-local run holds it\n", .{lock_path});
+            common.state.lockExclusive(fd, timeout_ms) catch |wait_err| switch (wait_err) {
+                error.TimedOut => {
+                    sys.close(fd);
+                    err_msg.* = std.fmt.allocPrint(a, "timed out after {d} ms waiting for lock {s}", .{ timeout_ms, lock_path }) catch "timed out waiting for lock";
+                    return .failed;
+                },
+                else => |se| {
+                    const msg = sys.describe(se);
+                    sys.close(fd);
+                    err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, msg }) catch "cannot lock file";
+                    return .failed;
+                },
+            };
+            return .{ .held = fd };
+        },
+        else => |se| {
+            const msg = sys.describe(se);
+            sys.close(fd);
+            err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, msg }) catch "cannot lock file";
+            return .failed;
+        },
+    }
+}
+
+/// Acquire a non-blocking exclusive lock on `path` without printing errors,
+/// returning null when it cannot be opened or locked.
+pub fn acquireOptionalLock(path: []const u8) ?sys.fd_t {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .RDWR,
+        .CREAT = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o666) catch return null;
+    common.state.lockExclusive(fd, 0) catch {
+        sys.close(fd);
+        return null;
+    };
+    return fd;
+}
+
+/// Release a lock descriptor returned by `acquireBoundedLock` or `acquireOptionalLock`.
+pub fn releaseLock(lock: *?sys.fd_t) void {
+    const fd = lock.* orelse return;
+    lock.* = null;
+    _ = linux.flock(fd, std.posix.LOCK.UN);
+    sys.close(fd);
+}
+
 // ---- tests ----------------------------------------------------------------
 
 const testing = std.testing;
+
+test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/bounded-lock-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+
+    var msg: []const u8 = "";
+    const lock_path = try std.fs.path.join(a, &.{ root, ".test.lock" });
+    var holder: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg)) {
+        .held => |fd| fd,
+        else => return error.TestUnexpectedResult,
+    };
+    defer releaseLock(&holder);
+
+    var msg2: []const u8 = "";
+    try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 40, false, &msg2));
+    try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 40 ms") != null);
+
+    releaseLock(&holder);
+    var again: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg2)) {
+        .held => |fd| fd,
+        else => return error.TestUnexpectedResult,
+    };
+    releaseLock(&again);
+}
 
 test "the mount a path lies on" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
