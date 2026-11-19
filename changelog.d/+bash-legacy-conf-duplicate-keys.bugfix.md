@@ -1,0 +1,1 @@
+`eb-local` rejects duplicate keys in `eb-local.conf` after syntax parsing and before value validation with Zig's exact `line` and TOML key diagnostic (`'<toml_key>' is set twice (first on line <N>)`).

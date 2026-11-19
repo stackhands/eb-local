@@ -190,7 +190,7 @@ legacy_toml_key() {
 }
 
 read_config() {
-    local file="$1" line key value lineno=0 idx
+    local file="$1" line key value lineno=0 idx seen_lines=" " toml_key first_line
     local -a lines=() keys=() vals=()
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
@@ -204,6 +204,18 @@ read_config() {
         keys+=("$key")
         vals+=("$value")
     done < "$file"
+    for idx in "${!keys[@]}"; do
+        key="${keys[$idx]}" lineno="${lines[$idx]}"
+        toml_key=$(legacy_toml_key "$key")
+        case "$seen_lines" in
+            *" $key="*)
+                first_line="${seen_lines#* "$key"=}"
+                first_line="${first_line%% *}"
+                fail_storage "$file:$lineno: '$toml_key' is set twice (first on line $first_line)"
+                ;;
+        esac
+        seen_lines+="$key=$lineno "
+    done
     for idx in "${!keys[@]}"; do
         key="${keys[$idx]}" value="${vals[$idx]}"
         case "$key" in
