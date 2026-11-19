@@ -73,6 +73,14 @@ EESSI chooses the binaries for the CPU it finds when it loads.
 A program built with `dev` belongs to that one CPU target, because the wrappers record run paths into `$EESSI_SOFTWARE_SUBDIR`: a binary linked on zen4 loads zen4 libraries wherever it runs, and can stop with an illegal instruction on zen2.
 The build environment also puts `-march=native` in `CFLAGS`, `CXXFLAGS` and `FFLAGS`, so `make` and CMake compile the program for that CPU too; with `buildenv/default-foss-2026.1`, `CFLAGS` is `-O2 -ftree-vectorize -march=native -fno-math-errno`.
 So a program is built once per node type, in an allocation on that node type, and installed into a path that names the target, which `dev` sets as `EB_LOCAL_DEV_PREFIX`.
+A Julia depot and an R package library are specific to that target too.
+When the shell has not set `JULIA_DEPOT_PATH`, `dev` sets it to `$EB_LOCAL_DEV_PREFIX/julia` with a trailing colon, so packages install there and Julia still finds the depots bundled with it.
+When the shell has not set `R_LIBS_USER`, `dev` sets it to `$EB_LOCAL_DEV_PREFIX/R/%p-library/%v`.
+When the shell has not set `PYTHONUSERBASE`, `dev` sets it to `$EB_LOCAL_DEV_PREFIX/python`, which is where pip's user install writes.
+When the shell has not set `GOPATH` or `GOMODCACHE`, `dev` sets them under `$EB_LOCAL_DEV_PREFIX/go`.
+R replaces `%p` with its platform and `%v` with its major and minor version, the same layout it uses for a library under a home directory, so two R versions do not share compiled packages.
+A value the caller set, including an empty one, is left as it is.
+The lines test the variables before they expand them, so a shell with nounset on can run them.
 A job script that loads EESSI first then finds the build for the node it lands on.
 Software built with EasyBuild is the same: each CPU target has a tree of its own below the install prefix.
 

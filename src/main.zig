@@ -875,7 +875,9 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.append(a, '\n') catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
-    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, dev_lang_dirs) catch oom();
+    out.appendSlice(a, "fi\n") catch oom();
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     evalHint("dev --locked");
     cli.put(1, out.items);
@@ -925,6 +927,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, dev_lang_dirs) catch oom();
     if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);
@@ -1032,6 +1035,11 @@ const drop_rpath_wrappers =
     \\fi
     \\
 ;
+
+/// Lines that point Julia and R at the dev prefix when the caller has not
+/// chosen a depot or a user library. Normal dev and locked dev both append
+/// this file. The Bash script prints it too.
+const dev_lang_dirs = @embedFile("dev-lang-dirs.sh");
 
 /// Name the host's CA bundle for the tools that take it from a variable.
 /// EESSI's cargo and curl look for the bundle where their own distribution
