@@ -1,1 +1,0 @@
-`eb-local` prints its version when `--version` is the first argument (matching `src/main.zig`), refusing `--version` after subcommands or `--env` with exit `2` and forwarding it to `eb` in build mode.

@@ -1,1 +1,0 @@
-Added CLI regression tests in `tests/test_lmod_cache_cli_modes.py` using `tests/hostile_fs.py` to verify that `eb-local lmod-cache` refuses read-only cache directories, directory or dangling-symlink collisions at output paths, and `ENOSPC` on a full tmpfs cleanly.

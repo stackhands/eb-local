@@ -1,1 +1,0 @@
-A refused secret source says what is wrong with it: `env:` takes a variable name, `file:` an absolute or `~/` path, and a `nimvault:` entry may not be empty or start with `-`. Before, each of these drew the message for a value written in place of a source, which `file:token` and `nimvault:-x` are not.

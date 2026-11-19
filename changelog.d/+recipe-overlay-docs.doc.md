@@ -1,1 +1,0 @@
-Documents the recipe overlay file format, the overlay command, and a how-to for rebasing site recipe changes.

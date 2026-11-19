@@ -1,1 +1,0 @@
-`eb-local --explain eb [--] [eb options]` prints the script `eb-local eb` runs, after a `set --` line with its arguments, and runs nothing; it ran the launcher. `--explain` with any command other than a build or `eb` is refused with exit 2, where it was ignored and the command ran: `eb-local --explain clean --delete` deleted logs, and `eb-local --explain submit` submitted jobs.

@@ -1,1 +1,0 @@
-`eb-local` rejects repeated `--logs-older-than` options in `clean` with exit `2` (`clean takes one --logs-older-than`), while refusing empty `--logs-older-than=` first to match `joined()` before the duplicate check in `src/main.zig`.

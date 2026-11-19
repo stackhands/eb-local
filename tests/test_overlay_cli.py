@@ -743,7 +743,7 @@ class OverlayDefaultOutput(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertRegex(
             run.stdout,
-            rf"^eb-local 3\.1\.0 \({self.host_musl_target_triple()}",
+            rf"^eb-local 3\.2\.0 \({self.host_musl_target_triple()}",
         )
 
 

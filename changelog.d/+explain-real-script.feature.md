@@ -1,1 +1,0 @@
-`eb-local --explain RECIPE` prints the script a build runs, after the variables eb-local sets for it and a `set --` line with its arguments. It printed a separate rendering of that script, which could differ from it: its guard line did not stop when the guard failed. A build's first line names the command: `eb-local: what this runs: eb-local --explain RECIPE ...`.

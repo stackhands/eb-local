@@ -1,1 +1,0 @@
-`eb-local lmod-cache --verify` now clears `BASH_ENV`, `ENV`, `SHELLOPTS`, and `BASHOPTS` before invoking `bash` to inspect module inventories, preventing caller shell startup hooks from corrupting verification output.

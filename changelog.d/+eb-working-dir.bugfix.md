@@ -1,1 +1,0 @@
-`eb-local eb` no longer sets `WORKING_DIR=/tmp` when it is unset, so EESSI-extend uses its own default, `/tmp/$USER`, and EasyBuild builds under `/tmp/$USER/easybuild`. With `/tmp/easybuild` shared, the first user's build made it with umask 077, and every other user's `eb-local eb` on that node failed with `Permission denied`.

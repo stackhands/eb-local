@@ -1,1 +1,0 @@
-eb-local builds on zig-common 0.9.0, as eessi-arch-guard does. Cleaning secrets from a log now keeps a GPFS NFSv4 ACL on the file, which the rewrite dropped, and a program eb-local runs and reads, such as nimvault, gets `/dev/null` or its pipe on a standard stream eb-local was started without, so its errors no longer land in what eb-local reads from it.

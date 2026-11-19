@@ -1,1 +1,0 @@
-Adds command-line tests for digest-pinned materialization and the default byte-identical path when an overlay has no edits.

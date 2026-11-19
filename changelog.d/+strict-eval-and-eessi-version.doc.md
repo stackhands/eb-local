@@ -1,1 +1,0 @@
-The reference says that `env --strict` and `dev --strict` end the shell that evaluates their lines when the EESSI init file is absent, and that `EESSI_VERSION` and `EESSI_CVMFS_REPO` choose only the Lmod init file for `env` and `dev`: the stack those lines load is `stack.module`.

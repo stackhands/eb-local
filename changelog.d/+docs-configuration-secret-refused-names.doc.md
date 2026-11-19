@@ -1,1 +1,0 @@
-List `SHELLOPTS` and `BASHOPTS` among the refused secret variable names in the configuration reference (`docs/orgmode/reference/configuration.org` and `docs/reference/configuration.md`), matching `src/config.zig`.
