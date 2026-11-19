@@ -1,1 +1,0 @@
-`tests/test_rpath_wrappers_cli.py` extends `test_wrappers_bypass_llvm_intel_nonlinking_flags` to run every LLVM and Intel non-linking flag through the generated wrapper and confirm forwarded `argv` lines omit `-rpath` and `--disable-new-dtags`.

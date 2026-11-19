@@ -1,1 +1,0 @@
-`[build.targets]` in the site file is now `[build.node_types]`, as the documentation calls its entries; a target is already a CPU target in `eb-local list` and `eb-local check`. eb-local reads the old name until 4.0.0 and warns where it does, and refuses a file that has both. `eb-local config` shows the entries as `build.node_types.NAME`.

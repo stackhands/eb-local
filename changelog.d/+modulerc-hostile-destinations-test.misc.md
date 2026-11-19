@@ -1,1 +1,0 @@
-Added CLI regression tests in `tests/test_modulerc_cli.py` using `tests/hostile_fs.py` to verify that `eb-local modulerc` refuses read-only trees, directory or dangling-symlink collisions at `.modulerc.lua`, and `ENOSPC` on a full tmpfs cleanly.

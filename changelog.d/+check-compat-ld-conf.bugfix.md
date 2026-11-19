@@ -1,1 +1,0 @@
-`eb-local check` now resolves `include` patterns and directory entries in `<root>/etc/ld.so.conf` relative to the ELF loader's compatibility-layer root instead of the host filesystem or current working directory.

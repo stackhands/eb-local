@@ -1,1 +1,0 @@
-eb-local now generates bash, zsh and fish completion scripts and a man page from the live command help in CI and release builds, so shell integration and command docs are shipped from one source of truth.

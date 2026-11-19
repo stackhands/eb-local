@@ -1,1 +1,0 @@
-"Build for every node type" in the README uses one set of node types, `cpu` and `gpu`, in its `[build.targets]` example and in its `submit --on gpu` command. The command named a target the example lacked, and exited 2.

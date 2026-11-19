@@ -1,1 +1,0 @@
-`eb-local` recognizes `--env` only inside the `build` branch before any positional recipe argument so non-build subcommands reject extra `--env` flags with their existing refusals matching `src/main.zig`.

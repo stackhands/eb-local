@@ -1,1 +1,0 @@
-`env --strict`, `EB_LOCAL_ENV_STRICT=1`, and `dev --strict` now emit an `elif [[ ! -f $init || ! -r $init ]]` guard in the strict prelude so a non-regular or unreadable EESSI init path exits 2 instead of proceeding to `module load`.

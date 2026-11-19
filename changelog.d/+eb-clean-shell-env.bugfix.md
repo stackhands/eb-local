@@ -1,1 +1,0 @@
-`eb-local eb` now drops `BASH_ENV`, `ENV`, `SHELLOPTS`, and `BASHOPTS` before invoking bash, matching `eb-local <recipe>` so caller startup scripts and shell options do not run inside the launcher shell.

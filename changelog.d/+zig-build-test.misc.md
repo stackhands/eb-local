@@ -1,1 +1,0 @@
-`zig build test` runs the command-line suite without `-Dtest-ops=true`: the suite gets a debug build of its own with the test seams, where it failed 33 tests against a binary without them. `zig build -Dtest-ops=true test`, as CI runs it, still runs the suite against the binary it builds.
