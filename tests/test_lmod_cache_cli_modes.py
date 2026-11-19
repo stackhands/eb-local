@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import binary
+import hostile_fs
 
 
 @unittest.skipUnless(binary.BIN, "lmod-cache is a feature of the Zig build")
@@ -65,6 +66,65 @@ class LmodCacheCliModes(unittest.TestCase):
         self.assertEqual(got.returncode, 9, got.stdout + got.stderr)
         self.assertIn("updater failed", got.stderr)
         self.assertFalse((arch / ".lmod" / "cache" / "spiderT.lua").exists())
+
+    def test_hostile_cache_and_timestamp_destinations_fail_cleanly(self):
+        mods = self.root / "mods"
+        mods.mkdir()
+        spider = self.root / "spider.sh"
+        spider.write_text("#!/bin/sh\necho 'spiderT = {}'\n", encoding="utf-8")
+        spider.chmod(0o755)
+
+        ro_dir = self.root / "ro-cache"
+        ro_dir.mkdir()
+        with hostile_fs.readonly_dir(ro_dir):
+            ro_ts = self.root / "ro-ts"
+            ro_got = self.run_cache(["--modulepath", str(mods), "--cache-dir", str(ro_dir), "--timestamp", str(ro_ts), "--spider", str(spider)])
+            self.assertEqual(ro_got.returncode, 1, ro_got.stdout + ro_got.stderr)
+            self.assertFalse(ro_ts.exists())
+
+        dir_cache = self.root / "dir-cache"
+        dir_cache.mkdir()
+        (dir_cache / "spiderT.lua").mkdir()
+        dir_ts = self.root / "dir-ts"
+        dir_got = self.run_cache(["--modulepath", str(mods), "--cache-dir", str(dir_cache), "--timestamp", str(dir_ts), "--spider", str(spider)])
+        self.assertEqual(dir_got.returncode, 1, dir_got.stdout + dir_got.stderr)
+        self.assertFalse(dir_ts.exists())
+
+        sym_cache = self.root / "sym-cache"
+        sym_cache.mkdir()
+        link, outside = hostile_fs.dangling_symlink(sym_cache / "spiderT.lua", self.root / "outside-spider")
+        sym_ts = self.root / "sym-ts"
+        sym_got = self.run_cache(["--modulepath", str(mods), "--cache-dir", str(sym_cache), "--timestamp", str(sym_ts), "--spider", str(spider)])
+        self.assertEqual(sym_got.returncode, 1, sym_got.stdout + sym_got.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(outside.exists())
+        self.assertFalse(sym_ts.exists())
+
+        ts_is_dir = self.root / "ts-is-dir"
+        ts_is_dir.mkdir()
+        clean_cache = self.root / "clean-cache"
+        clean_cache.mkdir()
+        ts_got = self.run_cache(["--modulepath", str(mods), "--cache-dir", str(clean_cache), "--timestamp", str(ts_is_dir), "--spider", str(spider)])
+        self.assertEqual(ts_got.returncode, 1, ts_got.stdout + ts_got.stderr)
+        self.assertFalse((clean_cache / "spiderT.lua").exists())
+
+    def test_tmpfs_enospc_rolls_back_cache_and_timestamp(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        mods = self.root / "mods-enospc"
+        mods.mkdir()
+        spider = self.root / "spider-enospc.sh"
+        spider.write_text("#!/bin/sh\necho 'spiderT = {}'\n", encoding="utf-8")
+        spider.chmod(0o755)
+        got = self.run_cache([
+            "--modulepath", str(mods),
+            "--cache-dir", str(mnt / "lc"),
+            "--timestamp", str(mnt / "ts"),
+            "--spider", str(spider),
+        ])
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        self.assertIn("NoSpace", got.stderr)
 
 
 if __name__ == "__main__":
