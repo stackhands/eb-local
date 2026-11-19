@@ -12,7 +12,8 @@ eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
-eb-local [OPTION]... dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+eb-local [OPTION]... dev [--strict] [--pure] [--replace] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+eb-local [OPTION]... leave
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
@@ -60,7 +61,7 @@ directory you own.
   eb-local env [--strict] [--json]       lines that make your installed modules visible;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1)
-  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+  eb-local dev [--strict] [--pure] [--replace] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
                                        the same, plus MODULEs and a build environment,
                                        so gcc, make, cmake and meson just work;
                                        --strict exits when the EESSI init file is missing
@@ -69,8 +70,11 @@ directory you own.
                                        --json prints the change as JSON, for env too;
                                        --envrc writes that line to .envrc for direnv;
                                        --pure purges loaded modules and LD_* first;
+                                       --replace records prior state and replaces the
+                                       modules loaded by an earlier --replace;
                                        --lock records what loads in eb-local.lock,
                                        --locked loads exactly that again
+  eb-local leave                       lines that restore the state before dev --replace
   eb-local rpath-wrappers [--for FAMILY | --unwrapped]
                                        lines that put RPATH wrappers for the compilers
                                        on PATH first; dev uses them when no build
@@ -221,7 +225,8 @@ Built with =zig build --release=safe -Dcommit=0123abc=, it prints:
 eb-local 3.3.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 #+end_example
 
-Since =v3.2.0=, no CLI flag was added, removed or renamed.
+Since =v3.2.0=, no CLI flag was removed or renamed.
+The command line added =--replace= on =dev= and the =leave= command.
 
 * Commands
 
@@ -293,6 +298,7 @@ With more than one install variable set, it prints nothing on stdout and exits 3
 Print the shell lines that load EESSI and then EESSI-extend for the prefix, or the project directory, which puts the modules installed there on =MODULEPATH=.
 Run them with =eval "$(eb-local env)"=.
 When stdout is a terminal, it also says on stderr that the lines change nothing until the shell runs them.
+When the shell that runs the lines has no =module= command, they return 1 before they unset or export anything, and that shell stays up unless it has errexit. =--strict= still exits the shell, and it checks the init file first.
 
 | Option     | Meaning                                                                                                              |
 |------------+----------------------------------------------------------------------------------------------------------------------|
@@ -316,6 +322,7 @@ Only variables are in the change. Shell functions and aliases, such as Lmod's =m
 ** dev
 
 Print the lines =env= prints, then the lines that load the modules =dev.modules= names and those named on the line, then a build environment, and that set =EB_LOCAL_DEV_PREFIX= to =<prefix>/dev/<EESSI version>/<CPU target>=, with the GPU target appended when EESSI found one.
+When =rpath-wrappers= fails, the lines return its status before setting =EB_LOCAL_DEV_PREFIX=. Evaluating them in an interactive shell does not close that shell.
 
 | Option              | Meaning                                                                                    |
 |---------------------+--------------------------------------------------------------------------------------------|
@@ -323,6 +330,7 @@ Print the lines =env= prints, then the lines that load the modules =dev.modules=
 | =--json=            | Print the change the lines make to the environment as one line of JSON, as =env --json= does, with =kind= =dev=. |
 | =--buildenv MODULE= | Load MODULE as the build environment whatever the compilers, as =dev.buildenv= does. |
 | =--envrc=           | Write the line that evaluates this =dev= to =.envrc= in the working directory, for direnv, and print nothing on stdout. |
+| =--replace=         | Record the state before the first replacement, and unload only modules recorded by the previous replacement before loading this dev. |
 
 =dev --envrc MODULE...= writes three lines to =.envrc=:
 
@@ -345,6 +353,13 @@ Without =--pure=, the modules the shell already has stay loaded beside the ones 
 
 A =MODULE= starts with a letter or digit and holds letters, digits, =.=, =_=, =+=, =-= and single slashes, with none at the end.
 With =LD_LIBRARY_PATH= set in the shell, =dev= warns on stderr.
+
+** leave
+
+Print shell lines that restore the state recorded by the first =dev --replace= in =EB_LOCAL_DEV_SAVED=.
+Run them with =eval "$(eb-local leave)"=.
+The lines unload modules absent from the recorded prior list, reload that list in order, restore =PATH=, the dev marker variables and =LD_LIBRARY_PATH=, =LD_PRELOAD= and =LD_AUDIT=, then unset =EB_LOCAL_DEV_SAVED=.
+A missing, malformed or unsupported record is refused.
 
 ** rpath-wrappers
 
