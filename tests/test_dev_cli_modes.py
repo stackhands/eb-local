@@ -205,10 +205,25 @@ class DevCliModes(unittest.TestCase):
         load = "module load " + " ".join(self.LOADED.split(":")) + "\n"
         self.assertEqual(got.stdout.count(load), 1)
         self.assertEqual(got.stdout.count("module load"), 2)  # the stack, then the lock
+        self.assertIn("unset EB_LOCAL_RPATH_WRAPPERS", got.stdout)
+        self.assertIn("rpath-wrappers --unwrapped", got.stdout)
+        self.assertNotIn("rpath-wrappers --for", got.stdout)
         # purged first, and the lock's modules only on its own CPU target
         self.assertLess(got.stdout.index("module purge"), got.stdout.index(load))
         self.assertIn('if [ "${EESSI_SOFTWARE_SUBDIR-}" != x86_64/amd/zen4 ]; then', got.stdout)
         self.assertIn("export EB_LOCAL_DEV_PREFIX=", got.stdout)
+
+        # When the lock has no buildenv module (such as llvm-compilers on 2026.06),
+        # dev --locked also emits rpath-wrappers --for "$eb_local_family".
+        no_be = "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
+        self.assertEqual(self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=no_be)).returncode, 0)
+        got_no_be = self.run_dev(["--locked"])
+        self.assertEqual(got_no_be.returncode, 0, got_no_be.stderr)
+        self.assertIn('rpath-wrappers --for "$eb_local_family"', got_no_be.stdout)
+        self.assertIn("rpath-wrappers --unwrapped", got_no_be.stdout)
+
+        # Restore lock for subsequent checks in this test.
+        self.assertEqual(self.run_dev(["--lock"], **self.RESOLVED).returncode, 0)
 
         def run_lines(subdir):
             return subprocess.run(
