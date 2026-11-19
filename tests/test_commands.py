@@ -261,6 +261,12 @@ class Commands(StorageFixture):
         self.assertIn("LD_LIBRARY_PATH", run.stderr)
         self.assertNotIn("LD_LIBRARY_PATH", run.stdout)
 
+    def assert_subcommand_flag_refusals(self, cases):
+        for args, expected_stderr in cases:
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout, err.stderr), (2, "", expected_stderr))
+
     def test_version_is_rejected_after_subcommands(self):
         for args in (["--version"], ["--version", "extra"]):
             with self.subTest(args=args):
@@ -269,20 +275,28 @@ class Commands(StorageFixture):
                 self.assertEqual(top.stderr, "")
                 self.assertIn("eb-local ", top.stdout)
 
-        for args, needle in (
-            (["--env", "--version"], "got '--version'"),
-            (["env", "--version"], "got '--version'"),
-            (["dev", "--version"], "dev does not know the option '--version'"),
-            (["clean", "--version"], "clean does not know '--version'"),
-        ):
-            with self.subTest(args=args):
-                err = self.run_wrapper(args, SLURM_JOB_ID="")
-                self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
-                self.assertIn(needle, err.stderr)
+        self.assert_subcommand_flag_refusals(
+            (
+                (["--env", "--version"], "eb-local: env takes only --project, --profile, --config and --strict; got '--version'\n"),
+                (["env", "--version"], "eb-local: env takes only --project, --profile, --config and --strict; got '--version'\n"),
+                (["dev", "--version"], "eb-local: dev does not know the option '--version'\n"),
+                (["clean", "--version"], "eb-local: clean does not know '--version'\n"),
+            )
+        )
 
         rec = self.run_wrapper(["recipe.eb", "--version"], SLURM_JOB_ID="")
         self.assertEqual((rec.returncode, rec.stdout), (2, ""), rec.stdout + rec.stderr)
         self.assertIn("not inside a Slurm job", rec.stderr)
+
+    def test_env_flag_after_subcommand_exits_two(self):
+        self.assert_subcommand_flag_refusals(
+            (
+                (["--env", "--env"], "eb-local: env takes only --project, --profile, --config and --strict; got '--env'\n"),
+                (["env", "--env"], "eb-local: env takes only --project, --profile, --config and --strict; got '--env'\n"),
+                (["dev", "--env"], "eb-local: dev does not know the option '--env'\n"),
+                (["clean", "--env", "--dry-run"], "eb-local: clean does not know '--env'\n"),
+            )
+        )
 
     @unittest.skipUnless(binary.BIN, "the lfoss warning is a feature of the Zig build")
     def test_dev_warns_when_an_lfoss_module_meets_the_foss_build_environment(self):

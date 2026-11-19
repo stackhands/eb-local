@@ -68,14 +68,12 @@ while [ $# -gt 0 ]; do
             prefix="${1#--project=}"
             [ -n "$prefix" ] || die "--project needs a directory"
             mode=project; shift ;;
-        --env)
-            if [ "$command" = build ] && [ ${#args[@]} -eq 0 ]; then command="env"; else args+=("$1"); fi
-            shift ;;
         *)
             case "$command" in
                 build)
                     if [ ${#args[@]} -eq 0 ]; then
                         case "$1" in
+                            --env) command="env"; shift; continue ;;
                             env|dev|clean) command="$1"; shift; continue ;;
                         esac
                     fi
