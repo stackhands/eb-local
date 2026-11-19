@@ -243,10 +243,14 @@ pub fn scan(a: Allocator, env: *const std.process.Environ.Map, prefixes: []const
     var out: std.ArrayList(Finding) = .empty;
     var foreign_any = false;
     for (path_lists) |name| if (env.get(name)) |value| {
+        // An empty value means the same as unset to these tools; only an
+        // empty entry inside a non-empty list adds the current directory.
         if (value.len == 0) continue;
         if (try appendList(a, &out, name, value, prefixes, clear)) foreign_any = true;
     };
     for (try sortedKeys(a, env, rlibsName)) |name| if (env.get(name)) |value| {
+        // An empty value means the same as unset to these tools; only an
+        // empty entry inside a non-empty list adds the current directory.
         if (value.len == 0) continue;
         if (try appendList(a, &out, name, value, prefixes, clear)) foreign_any = true;
     };
@@ -602,6 +606,39 @@ test "a bind of /etc/localtime and an injected library directory are sentinels" 
         else => {},
     };
     try testing.expect(zone and bind and cuda and extra);
+}
+
+fn emptyEntryFindings(a: Allocator, env: *const std.process.Environ.Map, name: []const u8) !usize {
+    const found = try scan(a, env, &.{"/cvmfs/software.eessi.io"}, false, "");
+    var n: usize = 0;
+    for (found) |f| if (f.code == .list_keep and std.mem.eql(u8, f.name, name)) {
+        try testing.expectEqualStrings("''", f.path);
+        n += 1;
+    };
+    return n;
+}
+
+test "an empty path list is unset, but an empty entry in a list is foreign" {
+    const cases = [_]struct { value: []const u8, entries: usize }{
+        .{ .value = "", .entries = 0 },
+        .{ .value = ":", .entries = 2 },
+        .{ .value = ":/cvmfs/software.eessi.io/lib", .entries = 1 },
+        .{ .value = "/cvmfs/software.eessi.io/lib:", .entries = 1 },
+        .{ .value = "/cvmfs/software.eessi.io/lib", .entries = 0 },
+    };
+    for ([_][]const u8{ "PYTHONPATH", "R_LIBS_USER" }) |name| for (cases) |c| {
+        var s = try Scratch.init(&.{.{ name, c.value }});
+        defer s.deinit();
+        try testing.expectEqual(c.entries, try emptyEntryFindings(s.allocator(), &s.env, name));
+    };
+}
+
+test "an empty Julia list is Julia's default and not foreign" {
+    for ([_][]const u8{ "JULIA_LOAD_PATH", "JULIA_DEPOT_PATH" }) |name| {
+        var s = try Scratch.init(&.{.{ name, "" }});
+        defer s.deinit();
+        try testing.expectEqual(@as(usize, 0), try emptyEntryFindings(s.allocator(), &s.env, name));
+    }
 }
 
 test "an empty shell has nothing foreign and no injected library directory" {
