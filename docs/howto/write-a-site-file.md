@@ -129,7 +129,7 @@ ok   Slurm job 6: build space /local/alice.6
 info EESSI is not loaded in this shell; eval "$(eb-local env)" loads it with your modules
 info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects
 warn your modules are not on MODULEPATH in this shell; eval "$(eb-local env)"
-info no module command in this shell; builds, env and dev source /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash
+info no module command in this shell; builds source /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash
 ok   rtrash is on PATH: clean and uninstall move files to the trash
 
 Nothing above stops a build.

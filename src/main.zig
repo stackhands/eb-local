@@ -2709,21 +2709,11 @@ const test_prelude =
     \\
 ;
 
-/// What a shell without a module command sources for one, in this order:
-/// the host's Lmod, then EESSI's own, from the init `eb-local eb` sources,
-/// for a host whose only Lmod is EESSI's. `lmodInits` names the same files.
-const lmod_init =
-    \\if ! type module >/dev/null 2>&1; then
-    \\    for eb_local_init in "${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash" /etc/profile.d/lmod.sh \
-    \\        "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash"; do
-    \\        [ -f "$eb_local_init" ] && [ -r "$eb_local_init" ] && { . "$eb_local_init" >/dev/null; break; }
-    \\    done
-    \\    unset eb_local_init
-    \\fi
-    \\
-;
+/// What a shell without a module command sources for one.
+const lmod_init = @embedFile("lmod-init.sh");
 
-/// The files `lmod_init` tries, in its order.
+/// The files an internal Bash build tries, in order. Doctor reports this list
+/// for builds; env and dev select the evaluating shell through `lmod_init`.
 fn lmodInits(a: Allocator, env: *const std.process.Environ.Map) [3][]const u8 {
     const pkg = nonEmpty(env.get("LMOD_PKG")) orelse "/usr/share/lmod/lmod";
     return .{
@@ -4020,7 +4010,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         const inits = lmodInits(a, c.env);
         for (inits) |file| {
             if (readable(file)) {
-                note(a, &out, lines_ptr, "info", "no module command in this shell; builds, env and dev source {s}", .{file});
+                note(a, &out, lines_ptr, "info", "no module command in this shell; builds source {s}", .{file});
                 break;
             }
         } else {

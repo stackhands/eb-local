@@ -8,6 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: shellcheck eb-local
+      - run: sudo apt-get update && sudo apt-get install -y zsh
       - run: python3 -m unittest discover -s tests -v
       # A site's own names and paths belong in the site's own repository;
       # release notes may name what a release removed. Each name keeps one
