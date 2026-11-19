@@ -3568,8 +3568,16 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     // What eb-local eb needs: the EESSI init, and at most one install variable.
     const eb_stop = if (site) "warn" else "FAIL";
     const init = extend.initPath(a, c.env) catch oom();
-    if (fsx.statAt(fsx.cwd, init, true)) |_| {
-        note(a, &out, lines_ptr, "ok  ", "`eb-local eb` sources {s}", .{init});
+    if (fsx.statAt(fsx.cwd, init, true)) |st| {
+        if (!st.isReg()) {
+            note(a, &out, lines_ptr, eb_stop, "{s} is not a regular file, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere", .{init});
+            if (!site) failed = true;
+        } else if (!readable(init)) {
+            note(a, &out, lines_ptr, eb_stop, "{s} cannot be read, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere", .{init});
+            if (!site) failed = true;
+        } else {
+            note(a, &out, lines_ptr, "ok  ", "`eb-local eb` sources {s}", .{init});
+        }
     } else |_| {
         note(a, &out, lines_ptr, eb_stop, "{s} is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere", .{init});
         if (!site) failed = true;

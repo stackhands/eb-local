@@ -67,7 +67,6 @@ class DoctorCliModes(unittest.TestCase):
         self.assertTrue(any("LD_PRELOAD is set" in m for m in warns), warns)
         self.assertIn("warnings fail under --strict", doc["summary"])
 
-    @unittest.expectedFailure
     def test_doctor_fails_when_eessi_init_path_is_a_directory(self):
         bad_repo = self.root / "bad-repo"
         (bad_repo / "versions" / "2026.06" / "init" / "lmod" / "bash").mkdir(parents=True)
@@ -75,6 +74,8 @@ class DoctorCliModes(unittest.TestCase):
         self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
         doc = json.loads(got.stdout)
         self.assertTrue(doc["failed"])
+        fails = [entry["text"] for entry in doc["lines"] if entry["level"] == "FAIL"]
+        self.assertTrue(any("is not a regular file" in m for m in fails), fails)
 
 
 if __name__ == "__main__":
