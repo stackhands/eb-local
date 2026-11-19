@@ -143,6 +143,23 @@ class Commands(StorageFixture):
         run = self.run_wrapper(["env"], SLURM_JOB_ID="", EB_LOCAL_PREFIX="relative/prefix")
         self.assertIn(f"export EESSI_USER_INSTALL={self.root}/relative/prefix", run.stdout)
 
+    def test_uncreated_project_mkdir_hint_quotes_special_paths(self):
+        for name in ("team space", "it's"):
+            target = str(self.root / name)
+            with self.subTest(name=name):
+                run = self.run_wrapper(["--project", target, "env"], SLURM_JOB_ID="")
+                q = shlex.quote(target)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (
+                        2,
+                        "",
+                        f"eb-local: project directory {target} does not exist.\n"
+                        "  The project owner creates it once, with the project group and g+s:\n"
+                        f"  mkdir -p {q} && chgrp <group> {q} && chmod 2770 {q}\n",
+                    ),
+                )
+
     @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
     def test_explain_prints_the_build_and_creates_nothing(self):
         run = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"], SLURM_JOB_ID="")
