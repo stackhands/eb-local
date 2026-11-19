@@ -244,25 +244,26 @@ read_config() {
             toml_key=$(legacy_toml_key "$key")
             case "$key" in
                 node_local_root)
-                    [[ "$value" =~ ^/[^[:space:]]*[^/[:space:]]$ ]] ||
+                    c_match "$value" '^/[^[:space:]]*[^/[:space:]]$' ||
                         fail_storage "$file:$lineno: $toml_key must be one absolute path without a trailing slash"
                     node_local_root="$value" ;;
                 node_local_mount)
-                    [[ "$value" =~ ^([A-Za-z0-9._-]|%[uj])+$ && "$value" == *%j* && ${#value} -le 255 ]] ||
+                    if ! { c_match "$value" '^([A-Za-z0-9._-]|%[uj])+$' && [[ "$value" == *%j* ]] && [ ${#value} -le 255 ]; }; then
                         fail_storage "$file:$lineno: $toml_key must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"
+                    fi
                     node_local_mount="$value" ;;
                 node_local_fstype)
                     if [ -z "$value" ]; then
                         fail_storage "$file:$lineno: $toml_key is empty"
                     fi
-                    [[ "$value" =~ ^[a-z0-9_.]+$ ]] || fail_storage "$file:$lineno: $toml_key must be a file system type name"
+                    c_match "$value" '^[a-z0-9_.]+$' || fail_storage "$file:$lineno: $toml_key must be a file system type name"
                     node_local_fstype="$value" ;;
                 shared_scratch)
                     local path
                     scratch_paths=()
                     set -f
                     for path in $value; do
-                        [[ "$path" =~ ^/.*[^/]$ ]] || { set +f; fail_storage "$file:$lineno: $toml_key takes absolute paths without a trailing slash"; }
+                        c_match "$path" '^/.*[^/]$' || { set +f; fail_storage "$file:$lineno: $toml_key takes absolute paths without a trailing slash"; }
                         scratch_paths+=("$path")
                     done
                     set +f
