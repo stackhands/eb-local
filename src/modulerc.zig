@@ -121,6 +121,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
             return 2;
         },
     };
+    if (std.mem.indexOfScalar(u8, previous, 0)) |nul| {
+        var line: usize = 1;
+        for (previous[0..nul]) |ch| if (ch == '\n') {
+            line += 1;
+        };
+        fail("{s}:{d}: the file holds a NUL byte", .{ path, line });
+        return 2;
+    }
     const text = render(a, previous, opts) catch return 1;
     const changed = !std.mem.eql(u8, previous, text);
     if (opts.check) {
