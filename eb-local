@@ -368,6 +368,8 @@ if [ "$command" = dev ]; then
     done
     [ ${#load[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${load[@]}"; printf '\n'; }
     printf 'module load %q\n' "$dev_buildenv"
+    # src/extend.zig cargo_linker embeds src/cargo-linker.sh.
+    cat -- "$script_dir/src/cargo-linker.sh"
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
         echo "eb-local: LD_LIBRARY_PATH is set in this shell; programs built here do not need it," >&2
         echo "  and it can mix host libraries into EESSI's. Unset it unless you know you need it." >&2
