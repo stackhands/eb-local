@@ -157,7 +157,10 @@ const Parser = struct {
             if (!bareKeyChar(d)) break;
             p.pos += 1;
         }
-        if (p.pos == start) return p.fail("'{c}' cannot start a key", .{c});
+        if (p.pos == start) {
+            if (c >= 0x80 or c < 0x20 or c == 0x7f) return p.fail("byte 0x{x:0>2} cannot start a key", .{c});
+            return p.fail("'{c}' cannot start a key", .{c});
+        }
         return p.src[start..p.pos];
     }
 
@@ -243,10 +246,14 @@ const Parser = struct {
                     p.line += 1;
                 },
                 '\r' => {
-                    if (multiline and p.peek() == '\n') {
-                        p.pos += 1;
-                        try out.appendSlice(p.a, "\r\n");
-                        p.line += 1;
+                    if (p.peek() == '\n') {
+                        if (multiline) {
+                            p.pos += 1;
+                            try out.appendSlice(p.a, "\r\n");
+                            p.line += 1;
+                        } else {
+                            return p.fail("a string is not closed on its line", .{});
+                        }
                     } else {
                         return p.fail("a control character is in a string", .{});
                     }
@@ -299,6 +306,7 @@ const Parser = struct {
                 return p.src[start .. p.pos - 1];
             }
             if (c == '\n') return p.fail("a string is not closed on its line", .{});
+            if (c == '\r' and p.pos + 1 < p.src.len and p.src[p.pos + 1] == '\n') return p.fail("a string is not closed on its line", .{});
             if ((c < 0x20 and c != '\t') or c == 0x7f) return p.fail("a control character is in a string", .{});
             p.pos += 1;
         }
@@ -450,13 +458,39 @@ fn joined(a: Allocator, parts: []const []const u8) []const u8 {
     return std.mem.join(a, ".", parts) catch "?";
 }
 
+fn lineAtOffset(src: []const u8, offset: usize) usize {
+    var line: usize = 1;
+    for (src[0..offset]) |ch| if (ch == '\n') {
+        line += 1;
+    };
+    return line;
+}
+
+fn invalidUtf8Offset(src: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < src.len) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(src[i]) catch return i;
+        if (i + seq_len > src.len) return i;
+        _ = std.unicode.utf8Decode(src[i .. i + seq_len]) catch return i;
+        i += seq_len;
+    }
+    return null;
+}
+
 /// Parse `src`. Everything is allocated with `a` (an arena is expected).
 pub fn parse(a: Allocator, src: []const u8, diag: *Diagnostic) Error!*Table {
     const root = try a.create(Table);
     root.* = .{ .explicit = true };
     var p: Parser = .{ .a = a, .src = src, .diag = diag };
-    if (std.mem.indexOfScalar(u8, src, 0) != null) return p.fail("the file holds a NUL byte", .{});
-    if (!std.unicode.utf8ValidateSlice(src)) return p.fail("the file is not UTF-8", .{});
+    if (std.mem.startsWith(u8, src, "\xef\xbb\xbf")) return p.fail("the file starts with a UTF-8 BOM", .{});
+    if (std.mem.indexOfScalar(u8, src, 0)) |nul| {
+        p.line = lineAtOffset(src, nul);
+        return p.fail("the file holds a NUL byte", .{});
+    }
+    if (invalidUtf8Offset(src)) |bad| {
+        p.line = lineAtOffset(src, bad);
+        return p.fail("the file is not UTF-8", .{});
+    }
     var current = root;
     while (p.pos < src.len) {
         p.skipSpace();
@@ -591,4 +625,12 @@ test "multi-line basic strings follow TOML 1.0 newline and backslash rules" {
     try expectInvalid("x = \"\"\"unclosed\n", 2, "not closed");
     try expectInvalid("x = \"\"\"bad\rline\"\"\"\n", 1, "control character");
     try expectInvalid("\"\"\"k\"\"\" = 1\n", 1, "multi-line");
+}
+
+test "malformed BOM, CRLF unclosed strings, and later-line NUL or non-UTF-8 report exact lines" {
+    try expectInvalid("\xef\xbb\xbfprefix = \"/tmp/p\"\n", 1, "UTF-8 BOM");
+    try expectInvalid("a = 1\nb = 2\nc = 3\x00\n", 3, "NUL byte");
+    try expectInvalid("a = 1\nb = 2\n# \xff\n", 3, "not UTF-8");
+    try expectInvalid("a = \"unclosed\r\n", 1, "not closed on its line");
+    try expectInvalid("a = 'unclosed\r\n", 1, "not closed on its line");
 }
