@@ -844,8 +844,10 @@ fn validTarget(text: []const u8) bool {
 
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
 /// from a purged shell, and that load nothing when this shell's CPU target is
-/// not the lock's. The same binaries serve every node with that CPU target,
-/// so a lock written on one node type loads on another that shares it.
+/// not the lock's, or when the lock records an EESSI version and this shell's
+/// is different. The same binaries serve every node with that CPU target, so
+/// a lock written on one node type loads on another that shares it. A lock
+/// with no recorded version still loads.
 fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     const a = c.a;
     const opened = fsx.openRegular(fsx.cwd, lock_name, true) catch
@@ -868,9 +870,18 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, str(a,
         \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
         \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
-        \\else
-        \\module load
+        \\
     , .{ q(a, lock.cpu_target), lock_name, q(a, lock.cpu_target) })) catch oom();
+    // The stack module can keep its name across an EESSI release, and the
+    // CPU subdir often does too. The version is what says these modules
+    // were resolved for another release. An empty one is a lock from before
+    // the field was recorded, and still loads.
+    if (lock.eessi_version.len > 0) out.appendSlice(a, str(a,
+        \\elif [ "${{EESSI_VERSION-}}" != {s} ]; then
+        \\    echo "eb-local: {s} was written for EESSI "{s}", and this shell has ${{EESSI_VERSION:-none}}; its modules are not loaded." >&2
+        \\
+    , .{ q(a, lock.eessi_version), lock_name, q(a, lock.eessi_version) })) catch oom();
+    out.appendSlice(a, "else\nmodule load") catch oom();
     for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
     out.append(a, '\n') catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();

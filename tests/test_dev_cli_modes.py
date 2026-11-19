@@ -214,6 +214,43 @@ class DevCliModes(unittest.TestCase):
         lock.write_text("not json\n")
         self.assertIn("is not a lock eb-local wrote", self.run_dev(["--locked"]).stderr)
 
+    def test_locked_skips_modules_from_another_eessi_version(self):
+        # The stack name can stay EESSI/2026.06 while EESSI_VERSION moves.
+        # The CPU subdir is stable across that bump, so the version is the
+        # only thing that says the locked modules are for another release.
+        lock = self.root / "eb-local.lock"
+        self.assertEqual(self.run_dev(["--lock"], **self.RESOLVED).returncode, 0)
+        record = json.loads(lock.read_text())
+        self.assertEqual(record["eessi_version"], "2026.06")
+        record["eessi_version"] = "2025.06"
+        lock.write_text(json.dumps(record) + "\n")
+        got = self.run_dev(["--locked"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        run = subprocess.run(
+            ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
+                 "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"},
+            capture_output=True, text=True,
+        )
+        self.assertEqual((run.returncode, run.stdout), (0, "unset"), run.stderr)
+        self.assertIn("was written for EESSI", run.stderr)
+        self.assertIn("2025.06", run.stderr)
+        self.assertIn("this shell has 2026.06", run.stderr)
+
+        # A lock that recorded no version still loads.
+        record["eessi_version"] = ""
+        lock.write_text(json.dumps(record) + "\n")
+        empty = self.run_dev(["--locked"])
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertNotIn("EESSI_VERSION-", empty.stdout)
+        loaded = subprocess.run(
+            ["bash", "-c", empty.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
+                 "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"},
+            capture_output=True, text=True,
+        )
+        self.assertTrue(loaded.stdout.endswith("/dev/2026.06/x86_64/amd/zen4"), loaded.stdout + loaded.stderr)
+
     def test_names_the_host_ca_bundle_without_replacing_one_the_shell_set(self):
         got = self.run_dev([])
         self.assertEqual(got.returncode, 0, got.stderr)
