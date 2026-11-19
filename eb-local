@@ -312,6 +312,7 @@ clear_install_environment() {
 # The lines env and dev print. Every value is quoted with %q, and module names
 # are checked above, so the output means the same whatever the input.
 print_environment() {
+    [ ! -r "$script_dir/src/lmod-init.sh" ] || cat -- "$script_dir/src/lmod-init.sh"
     printf 'module unload %q >/dev/null 2>&1 || true\n' "$extend_module"
     printf '%s\n' \
         'unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL' \

@@ -72,7 +72,7 @@ class EessiLmod(StorageFixture):
         self.eessi_init()
         run = self.run_wrapper(["doctor"])
         self.assertEqual(run.returncode, 0, run.stdout)
-        self.assertIn(f"info no module command in this shell; builds, env and dev source {self.init}\n", run.stdout)
+        self.assertIn(f"info no module command in this shell; builds source {self.init}\n", run.stdout)
         self.assertNotIn("FAIL", run.stdout)
 
     def test_doctor_without_a_site_file_warns_that_env_and_dev_need_a_module_command(self):
@@ -89,7 +89,7 @@ class EessiLmod(StorageFixture):
 
         doc = self.run_wrapper(["doctor"])
         self.assertEqual(doc.returncode, 0, doc.stdout + doc.stderr)
-        self.assertIn(f"info no module command in this shell; builds, env and dev source {self.init}\n", doc.stdout)
+        self.assertIn(f"info no module command in this shell; builds source {self.init}\n", doc.stdout)
         self.assertNotIn(f"source {dir_init}", doc.stdout)
 
         env_run = self.run_wrapper(["env"], SLURM_JOB_ID="")
