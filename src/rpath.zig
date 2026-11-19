@@ -63,9 +63,9 @@ pub const script =
     \\        continue
     \\    fi
     \\    case $arg in
-    \\        -c | -S | -E | -M | -MM | -fsyntax-only) [ $linker = 0 ] && link=0 ;;
+    \\        -c | -S | -E | -M | -MM | -fsyntax-only | --analyze | --precompile | --preprocess | -emit-ast | -emit-pch) [ $linker = 0 ] && link=0 ;;
     \\        -i) [ $linker = 1 ] && link=0 ;;
-    \\        -r | -Ur | --relocatable) link=0 ;;
+    \\        -r | -Ur | --relocatable | -help | --help-hidden | --help-list | --help-list-hidden | -version | --version | -qversion | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') link=0 ;;
     \\        -L | --library-path) want_dir=1 ;;
     \\        -L*) dirs+=("${arg#-L}") ;;
     \\        --library-path=*) dirs+=("${arg#--library-path=}") ;;
@@ -284,6 +284,20 @@ test "failed wrapper write leaves no marker or newly created directory" {
     try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.symlink((try sys.z(&tb, real_base)).ptr, (try sys.z(&lb, link_base)).ptr)));
     const nested_dir = try std.fs.path.join(a, &.{ link_base, "rpath-link" });
     try std.testing.expectError(error.Unsafe, write(a, nested_dir, &.{"clang"}));
+}
+
+test "wrapper script disables linking for llvm and intel info or analysis flags" {
+    for ([_][]const u8{
+        "--analyze",
+        "--precompile",
+        "-help",
+        "--help-hidden",
+        "-version",
+        "-dumpmachine",
+        "--print-*",
+    }) |flag| {
+        try std.testing.expect(std.mem.indexOf(u8, script, flag) != null);
+    }
 }
 
 test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's comes first" {
