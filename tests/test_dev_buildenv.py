@@ -155,6 +155,32 @@ class DevBuildenv(StorageFixture):
         self.assertEqual(calls[-1], "load NVHPC/26.9")
         self.assertIn("RPATH wrappers for clang ld", replay.stderr)
 
+    def test_a_failed_rpath_wrapper_returns_without_closing_an_interactive_shell(self):
+        # NVHPC has no buildenv, so dev asks rpath-wrappers to stand in. An
+        # empty PATH has nothing to wrap. An interactive shell must survive,
+        # report that status, and leave the prefix unset.
+        empty = self.root / "empty-path"
+        empty.mkdir()
+        run = self.run_wrapper(["dev", "NVHPC/26.7"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        script = (MODULE + run.stdout
+                  + 'status=$?\n'
+                  + 'printf "survived|%s|%s" "$status" "${EB_LOCAL_DEV_PREFIX-unset}"\n')
+        replay = subprocess.run(
+            [BASH, "--noprofile", "--norc", "-ic", script],
+            env=dict(self.env, PATH=str(empty)),
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(
+            (replay.returncode, replay.stdout),
+            (0, "survived|1|unset"),
+            replay.stdout + replay.stderr,
+        )
+        self.assertIn("no compiler or linker on PATH to wrap", replay.stderr)
+        self.assertNotIn("EB_LOCAL_DEV_PREFIX", replay.stdout)
+
     def test_a_later_dev_drops_the_previous_rpath_wrappers(self):
         first = self.run_wrapper(["dev", "NVHPC/26.7"])
         self.assertEqual(first.returncode, 0, first.stderr)

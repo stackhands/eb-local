@@ -324,6 +324,7 @@ Only variables are in the change. Shell functions and aliases, such as Lmod's `m
 ### dev
 
 Print the lines `env` prints, then the lines that load the modules `dev.modules` names and those named on the line, then a build environment, and that set `EB_LOCAL_DEV_PREFIX` to `<prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one.
+When `rpath-wrappers` fails, the lines return its status before setting `EB_LOCAL_DEV_PREFIX`. Evaluating them in an interactive shell does not close that shell.
 
 | Option | Meaning |
 |---|---|

@@ -1313,6 +1313,13 @@ const host_ca_bundle =
     \\
 ;
 
+/// `eval "$(cmd)"` succeeds when cmd prints nothing, whatever status cmd
+/// returned. Return from `eb_local_apply` with that status, so a failed
+/// rpath-wrappers skips a later export without closing an interactive shell.
+fn rpathEval(a: Allocator, command: []const u8) []const u8 {
+    return str(a, "_eb_local_wrap=$({s}) || return $?\neval \"$_eb_local_wrap\"\nunset _eb_local_wrap\n", .{command});
+}
+
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
@@ -1328,7 +1335,7 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     const gcc = q(a, s.dev_buildenv.value);
     var exe_buf: [sys.path_max]u8 = undefined;
     const exe = q(a, selfExe(&exe_buf) orelse tool);
-    const unwrapped = str(a, "eval \"$({s} rpath-wrappers --unwrapped)\"\n", .{exe});
+    const unwrapped = rpathEval(a, str(a, "{s} rpath-wrappers --unwrapped", .{exe}));
     if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}", .{ gcc, unwrapped });
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
@@ -1361,11 +1368,10 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
         \\elif [ "$eb_local_family" = cuda ]; then
         \\    module load {s}
         \\else
-        \\    eval "$({s} rpath-wrappers --for "$eb_local_family")"
-        \\fi
+        \\    {s}fi
         \\unset eb_local_family eb_local_buildenv eb_local_level
         \\
-    , .{ gcc, gcc, exe }));
+    , .{ gcc, gcc, rpathEval(a, str(a, "{s} rpath-wrappers --for \"$eb_local_family\"", .{exe})) }));
     add(a, &out, unwrapped);
     return out.items;
 }
