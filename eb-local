@@ -94,6 +94,11 @@ while [ $# -gt 0 ]; do
                         --logs-older-than)
                             [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
                             logs_days="$2"; shift 2 ;;
+                        --logs-older-than=*)
+                            logs_days="${1#--logs-older-than=}"
+                            [ -n "$logs_days" ] || die "--logs-older-than needs a value"
+                            [[ "$logs_days" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
+                            shift ;;
                         --no-logs) clean_logs=false; shift ;;
                         --sources) clean_sources=true; shift ;;
                         --workspaces) clean_workspaces=true; shift ;;
