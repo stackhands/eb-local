@@ -14,7 +14,7 @@ eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
-eb-local [OPTION]... dev [--strict] [--json] [--buildenv MODULE] [MODULE...]
+eb-local [OPTION]... dev [--strict] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
@@ -62,13 +62,14 @@ directory you own.
   eb-local env [--strict] [--json]       lines that make your installed modules visible;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1)
-  eb-local dev [--strict] [--json] [--buildenv MODULE] [MODULE...]
+  eb-local dev [--strict] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
                                        the same, plus MODULEs and a build environment,
                                        so gcc, make, cmake and meson just work;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1);
                                        --buildenv names the build environment to load;
-                                       --json prints the change as JSON, for env too
+                                       --json prints the change as JSON, for env too;
+                                       --envrc writes that line to .envrc for direnv
   eb-local rpath-wrappers [--for FAMILY | --unwrapped]
                                        lines that put RPATH wrappers for the compilers
                                        on PATH first; dev uses them when no build
@@ -321,6 +322,17 @@ Print the lines `env` prints, then the lines that load the modules `dev.modules`
 | `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
 | `--json` | Print the change the lines make to the environment as one line of JSON, as `env --json` does, with `kind` `dev`. |
 | `--buildenv MODULE` | Load MODULE as the build environment whatever the compilers, as `dev.buildenv` does. |
+| `--envrc` | Write the line that evaluates this `dev` to `.envrc` in the working directory, for direnv, and print nothing on stdout. |
+
+`dev --envrc MODULE...` writes three lines to `.envrc`:
+
+```sh
+# >>> eb-local dev >>> rerun `eb-local dev --envrc` to change these lines
+eval "$(/path/to/eb-local dev MODULE...)"
+# <<< eb-local dev <<<
+```
+
+The program is named by its own path, and `--config`, `--profile`, `--project` and `--buildenv` are repeated on the line. A block already in the file is replaced and every other line is kept; a file without one gets it appended. A begin line without its end line is refused. Run `direnv allow` once per change. direnv evaluates the file in bash and gives the calling shell the change, so the environment follows the directory in bash, zsh, fish, nushell and the other shells direnv has a hook for, and is taken back on leaving it. As with `--json`, only variables reach the calling shell.
 
 A `MODULE` starts with a letter or digit and holds letters, digits, `.`, `_`, `+`, `-` and single slashes, with none at the end.
 With `LD_LIBRARY_PATH` set in the shell, `dev` warns on stderr.

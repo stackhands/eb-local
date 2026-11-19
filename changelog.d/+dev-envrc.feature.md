@@ -1,0 +1,1 @@
+`eb-local dev --envrc MODULE...` writes the line that evaluates that `dev` to `.envrc` in the working directory, between marker lines it owns, and updates it on a later run without touching other lines. With direnv the build environment then follows the directory, in every shell direnv has a hook for.
