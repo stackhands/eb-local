@@ -1,0 +1,1 @@
+`eb-local dev` prints the Cargo linker lines that `eb-local eb` already runs. They live in `src/cargo-linker.sh`: a host `CARGO_TARGET_*_LINKER`, `RUSTFLAGS` and the rustc wrappers are dropped, and when `rustc -vV` prints a host, `CARGO_TARGET_<target>_LINKER` is `${CC:-gcc}`. The Zig program embeds that file. The Bash script prints the same file.

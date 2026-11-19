@@ -101,6 +101,13 @@ class StorageFixture(unittest.TestCase):
         original = SCRIPT.read_text()
         self.assertNotRegex(original, "/scratch-nod[e]")
         self.script.write_text(original)
+        # dev prints src/cargo-linker.sh from beside the script. The copy
+        # above is the script the Bash front end runs, so the file comes too.
+        linker = SCRIPT.parent / "src" / "cargo-linker.sh"
+        if linker.is_file():
+            dest = self.root / "src"
+            dest.mkdir()
+            (dest / "cargo-linker.sh").write_text(linker.read_text(encoding="utf-8"), encoding="utf-8")
         # The site configuration names the mount namespace; probes remain real.
         self.config = self.root / "site.conf"
         write_config(self.config, self.nodes)

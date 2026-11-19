@@ -53,6 +53,13 @@ class DevBuildenv(StorageFixture):
             (self.bin / name).write_text(FAKE_CC)
             (self.bin / name).chmod(0o755)
         # Only the fake compilers, so the host's are not wrapped too.
+        # env, awk and tr are what the Cargo linker lines call. They are not compilers.
+        self.posix = self.root / "posix"
+        self.posix.mkdir()
+        for name in ("env", "awk", "tr"):
+            tool = self.posix / name
+            tool.write_text(f"#!/bin/sh\nexec /usr/bin/{name} \"$@\"\n", encoding="utf-8")
+            tool.chmod(0o755)
         self.env.update(XDG_CACHE_HOME=str(self.root / "cache"), SLURM_JOB_ID="", PATH=str(self.bin))
         self.env.pop("LIBRARY_PATH", None)
         self.env.pop("EESSI_EPREFIX", None)
@@ -62,7 +69,11 @@ class DevBuildenv(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         script = self.root / "replay.sh"
         script.write_text(MODULE + run.stdout + after)
-        replay = subprocess.run([BASH, str(script)], env=dict(self.env, **extra), cwd=self.root,
+        # dev's Cargo lines call env, awk and tr. The compiler PATH is only
+        # the fakes, so the replay adds those three and no host compiler.
+        replay_env = dict(self.env, **extra)
+        replay_env["PATH"] = replay_env.get("PATH", "") + ":" + str(self.posix)
+        replay = subprocess.run([BASH, str(script)], env=replay_env, cwd=self.root,
                                 text=True, capture_output=True)
         self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
         calls = (self.root / "module-calls").read_text().splitlines()
