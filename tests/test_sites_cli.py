@@ -499,6 +499,22 @@ class SitesCli(StorageFixture):
         self.assertFalse(target.exists())
         self.assertEqual([p.name for p in mnt.iterdir()], ["fill"])
 
+    def test_legacy_conf_rejects_bom_and_bad_comment_bytes(self):
+        cases = {
+            "bom.conf": (b"\xef\xbb\xbfnode_local_root = /local\n", "line 1: the file starts with a UTF-8 BOM"),
+            "nul-comment.conf": (b"node_local_root = /local\n# bad \x00\n", "line 2: the file holds a NUL byte"),
+            "bad-utf8-comment.conf": (b"node_local_root = /local\n# bad \xff\n", "line 2: the file is not UTF-8"),
+        }
+        for name, (payload, needle) in cases.items():
+            with self.subTest(name=name):
+                conf = self.root / name
+                conf.write_bytes(payload)
+                conf.chmod(0o644)
+                got = self.run_tool(["site", "check", str(conf)])
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(needle, got.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
