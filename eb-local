@@ -105,10 +105,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+shell_quote() {
+    local LC_ALL=C s="$1"
+    [ -n "$s" ] || { printf "''"; return; }
+    [[ "$s" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]] && { printf '%s' "$s"; return; }
+    printf "'%s'" "${s//\'/\'\"\'\"\'}"
+}
+
 if [ "$mode" = project ] && [ ! -d "$prefix" ]; then
+    quoted_prefix=$(shell_quote "$prefix")
     echo "eb-local: project directory $prefix does not exist." >&2
     echo "  The project owner creates it once, with the project group and g+s:" >&2
-    echo "  mkdir -p $prefix && chgrp <group> $prefix && chmod 2770 $prefix" >&2
+    echo "  mkdir -p $quoted_prefix && chgrp <group> $quoted_prefix && chmod 2770 $quoted_prefix" >&2
     exit 2
 fi
 if [ -d "$prefix" ]; then
