@@ -89,7 +89,7 @@ The script a build runs gets eb-local's environment without the variables =env= 
 With =build.clear_foreign_prefixes= or =EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES= set, it also drops entries of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =JULIA_LOAD_PATH=, =JULIA_DEPOT_PATH=, =NODE_PATH=, =CMAKE_PREFIX_PATH= and =PKG_CONFIG_PATH= that lie outside the approved prefixes, and unsets a compiler-wrapper variable, a =CARGO_TARGET_*_LINKER=, or =R_MAKEVARS_USER= or =R_MAKEVARS_SITE=, that resolves outside them.
 Off, which is the default, a build keeps those variables.
 The approved prefixes are the EESSI repository, the install prefix, the four EESSI install variables, =doctor.approved_prefixes= and eb-local's RPATH wrapper directory.
-=eb-local doctor= names each foreign entry either way.
+A relative entry and an empty entry in those lists count as outside the approved prefixes. An empty entry of =JULIA_LOAD_PATH= or =JULIA_DEPOT_PATH= and a load-path entry starting with =@= are Julia's own and stay. =eb-local doctor= names each foreign entry either way.
 It sets these, where =W= is the workspace the build makes in its job's node-local mount:
 
 | Variable                                     | Value                         |

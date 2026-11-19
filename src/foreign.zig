@@ -173,12 +173,31 @@ fn commandPath(value: []const u8) []const u8 {
 
 const Split = struct { kept: []const []const u8, foreign: []const []const u8 };
 
-fn splitList(a: Allocator, value: []const u8, prefixes: []const []const u8) Allocator.Error!Split {
+/// A path-list entry is approved only when it is absolute and lies inside an
+/// approved prefix. A relative entry, and an empty one, is foreign. The site
+/// file's approved prefixes are absolute paths, and a build runs in its own
+/// directory, so these entries stay unresolved.
+///
+/// Julia's two lists are the exception, because there such an entry names no
+/// directory of the caller's: an empty entry stands for Julia's default load
+/// path or depots, and a load-path entry starting with `@` (`@`, `@v#.#`,
+/// `@stdlib`, a named environment) is resolved by Julia itself. Dropping
+/// either leaves a build's Julia without its standard library.
+fn splitList(a: Allocator, name: []const u8, value: []const u8, prefixes: []const []const u8) Allocator.Error!Split {
+    const julia_load = std.mem.eql(u8, name, "JULIA_LOAD_PATH");
+    const julia = julia_load or std.mem.eql(u8, name, "JULIA_DEPOT_PATH");
     var kept: std.ArrayList([]const u8) = .empty;
     var foreign: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, value, ':');
     while (it.next()) |entry| {
-        if (entry.len == 0) continue;
+        if ((julia and entry.len == 0) or (julia_load and entry.len > 0 and entry[0] == '@')) {
+            try kept.append(a, entry);
+            continue;
+        }
+        if (entry.len == 0 or entry[0] != '/') {
+            try foreign.append(a, entry);
+            continue;
+        }
         if (inside(a, entry, prefixes)) try kept.append(a, entry) else try foreign.append(a, entry);
     }
     return .{ .kept = kept.items, .foreign = foreign.items };
@@ -254,10 +273,15 @@ pub fn scan(a: Allocator, env: *const std.process.Environ.Map, prefixes: []const
 }
 
 fn appendList(a: Allocator, out: *std.ArrayList(Finding), name: []const u8, value: []const u8, prefixes: []const []const u8, clear: bool) Allocator.Error!bool {
-    const split = try splitList(a, value, prefixes);
+    const split = try splitList(a, name, value, prefixes);
     if (split.foreign.len == 0) return false;
     const code: Code = if (clear) .list_drop else .list_keep;
-    for (split.foreign) |entry| try out.append(a, .{ .code = code, .name = name, .path = entry });
+    for (split.foreign) |entry| {
+        // The locked report template prints the entry as-is. An empty entry
+        // is shown as '', the same quotes a shell uses for an empty word.
+        const shown = if (entry.len == 0) "''" else entry;
+        try out.append(a, .{ .code = code, .name = name, .path = shown });
+    }
     return true;
 }
 
@@ -283,13 +307,20 @@ pub fn scrub(a: Allocator, env: *std.process.Environ.Map, prefixes: []const []co
 
 fn scrubList(a: Allocator, env: *std.process.Environ.Map, name: []const u8, prefixes: []const []const u8) Allocator.Error!void {
     const value = env.get(name) orelse return;
-    const split = try splitList(a, value, prefixes);
+    const split = try splitList(a, name, value, prefixes);
     if (split.foreign.len == 0) return;
     if (split.kept.len == 0) {
         _ = env.swapRemove(name);
         return;
     }
-    try env.put(name, try std.mem.join(a, ":", split.kept));
+    const joined = try std.mem.join(a, ":", split.kept);
+    // Only Julia's empty entry is left: unset means the same defaults, while
+    // an empty value would mean an empty list to Julia.
+    if (joined.len == 0) {
+        _ = env.swapRemove(name);
+        return;
+    }
+    try env.put(name, joined);
 }
 
 fn timezoneTarget(a: Allocator) []const u8 {
@@ -703,4 +734,38 @@ test "bindSource uses the last covering mount entry for /etc/localtime" {
     ;
     const src = bindSource(arena.allocator(), mountinfo) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("/usr/share/zoneinfo/Europe/Amsterdam", src);
+}
+
+test "Julia's own load-path and depot entries are not foreign" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefixes = [_][]const u8{"/cvmfs/software.eessi.io"};
+
+    const load = try splitList(a, "JULIA_LOAD_PATH", "@:@v#.#:@stdlib:/opt/host/julia::rel", &prefixes);
+    try std.testing.expectEqual(@as(usize, 4), load.kept.len);
+    try std.testing.expectEqualStrings("@stdlib", load.kept[2]);
+    try std.testing.expectEqualStrings("", load.kept[3]);
+    try std.testing.expectEqual(@as(usize, 2), load.foreign.len);
+    try std.testing.expectEqualStrings("/opt/host/julia", load.foreign[0]);
+    try std.testing.expectEqualStrings("rel", load.foreign[1]);
+
+    // A depot has no @ entries; its empty entry is the default depots.
+    const depot = try splitList(a, "JULIA_DEPOT_PATH", "/opt/host/depot:@x:", &prefixes);
+    try std.testing.expectEqual(@as(usize, 1), depot.kept.len);
+    try std.testing.expectEqualStrings("", depot.kept[0]);
+    try std.testing.expectEqual(@as(usize, 2), depot.foreign.len);
+
+    var env = std.process.Environ.Map.init(a);
+    try env.put("JULIA_DEPOT_PATH", "/opt/host/depot:");
+    try env.put("JULIA_LOAD_PATH", "/opt/host/julia:@stdlib");
+    try scrubList(a, &env, "JULIA_DEPOT_PATH", &prefixes);
+    try scrubList(a, &env, "JULIA_LOAD_PATH", &prefixes);
+    try std.testing.expect(env.get("JULIA_DEPOT_PATH") == null);
+    try std.testing.expectEqualStrings("@stdlib", env.get("JULIA_LOAD_PATH").?);
+
+    // Every other list keeps the rule: empty and relative entries are foreign.
+    const python = try splitList(a, "PYTHONPATH", "@stdlib::", &prefixes);
+    try std.testing.expectEqual(@as(usize, 0), python.kept.len);
+    try std.testing.expectEqual(@as(usize, 3), python.foreign.len);
 }
