@@ -190,8 +190,8 @@ legacy_toml_key() {
 }
 
 read_config() {
-    local file="$1" line key value lineno=0 idx seen_lines=" " toml_key first_line
-    local -a lines=() keys=() vals=()
+    local file="$1" line key value lineno=0 idx seen_lines=" " seen_tables=" " toml_key first_line table tbl
+    local -a lines=() keys=() vals=() tables=() table_order=()
     while IFS= read -r line || [ -n "$line" ]; do
         lineno=$((lineno + 1))
         line=$(trim_ws "${line%%#*}")
@@ -199,10 +199,16 @@ read_config() {
         [[ "$line" == *=* ]] || fail_storage "$file: line $lineno: cannot read the line '$line'"
         key=$(trim_ws "${line%%=*}" $' \t')
         value=$(trim_ws "${line#*=}" $' \t')
-        legacy_toml_key "$key" >/dev/null || fail_storage "$file: line $lineno: unknown setting '$key'"
+        toml_key=$(legacy_toml_key "$key") || fail_storage "$file: line $lineno: unknown setting '$key'"
+        table="${toml_key%%.*}"
         lines+=("$lineno")
         keys+=("$key")
         vals+=("$value")
+        tables+=("$table")
+        case "$seen_tables" in
+            *" $table "*) ;;
+            *) seen_tables+="$table "; table_order+=("$table") ;;
+        esac
     done < "$file"
     for idx in "${!keys[@]}"; do
         key="${keys[$idx]}" lineno="${lines[$idx]}"
@@ -216,37 +222,44 @@ read_config() {
         esac
         seen_lines+="$key=$lineno "
     done
-    for idx in "${!keys[@]}"; do
-        key="${keys[$idx]}" value="${vals[$idx]}"
-        case "$key" in
-            node_local_root)
-                [[ "$value" =~ ^/[^[:space:]]*[^/[:space:]]$ ]] ||
-                    fail_storage "$file: node_local_root must be one absolute path without a trailing slash."
-                node_local_root="$value" ;;
-            node_local_mount)
-                [[ "$value" =~ ^([A-Za-z0-9._-]|%[uj])+$ && "$value" == *%j* && ${#value} -le 255 ]] ||
-                    fail_storage "$file: node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it."
-                node_local_mount="$value" ;;
-            node_local_fstype)
-                [[ "$value" =~ ^[a-z0-9_.]+$ ]] || fail_storage "$file: node_local_fstype must be a file system type name."
-                node_local_fstype="$value" ;;
-            shared_scratch)
-                local path
-                scratch_paths=()
-                set -f
-                for path in $value; do
-                    [[ "$path" =~ ^/.*[^/]$ ]] || { set +f; fail_storage "$file: shared_scratch takes absolute paths without a trailing slash."; }
-                    scratch_paths+=("$path")
-                done
-                set +f
-                ;;
-            allocation_hint) allocation_hint="$value" ;;
-            stack_module|extend_module|dev_buildenv)
-                valid_module "$value" || fail_storage "$file: $key must be one module name."
-                printf -v "$key" '%s' "$value" ;;
-            trash)
-                case "$value" in auto|rtrash|none) trash="$value" ;; *) fail_storage "$file: trash is auto, rtrash or none." ;; esac ;;
-        esac
+    for tbl in "${table_order[@]}"; do
+        for idx in "${!keys[@]}"; do
+            [ "${tables[$idx]}" = "$tbl" ] || continue
+            key="${keys[$idx]}" value="${vals[$idx]}" lineno="${lines[$idx]}"
+            toml_key=$(legacy_toml_key "$key")
+            case "$key" in
+                node_local_root)
+                    [[ "$value" =~ ^/[^[:space:]]*[^/[:space:]]$ ]] ||
+                        fail_storage "$file:$lineno: $toml_key must be one absolute path without a trailing slash"
+                    node_local_root="$value" ;;
+                node_local_mount)
+                    [[ "$value" =~ ^([A-Za-z0-9._-]|%[uj])+$ && "$value" == *%j* && ${#value} -le 255 ]] ||
+                        fail_storage "$file:$lineno: $toml_key must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"
+                    node_local_mount="$value" ;;
+                node_local_fstype)
+                    if [ -z "$value" ]; then
+                        fail_storage "$file:$lineno: $toml_key is empty"
+                    fi
+                    [[ "$value" =~ ^[a-z0-9_.]+$ ]] || fail_storage "$file:$lineno: $toml_key must be a file system type name"
+                    node_local_fstype="$value" ;;
+                shared_scratch)
+                    local path
+                    scratch_paths=()
+                    set -f
+                    for path in $value; do
+                        [[ "$path" =~ ^/.*[^/]$ ]] || { set +f; fail_storage "$file:$lineno: $toml_key takes absolute paths without a trailing slash"; }
+                        scratch_paths+=("$path")
+                    done
+                    set +f
+                    ;;
+                allocation_hint) allocation_hint="$value" ;;
+                stack_module|extend_module|dev_buildenv)
+                    valid_module "$value" || fail_storage "$file:$lineno: $toml_key '$value' is not a module name"
+                    printf -v "$key" '%s' "$value" ;;
+                trash)
+                    case "$value" in auto|rtrash|none) trash="$value" ;; *) fail_storage "$file:$lineno: $toml_key is auto, rtrash or none" ;; esac ;;
+            esac
+        done
     done
 }
 

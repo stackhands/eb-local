@@ -311,6 +311,29 @@ class Commands(StorageFixture):
                     (2, "", f"eb-local: {self.config}:{suffix}\n"),
                 )
 
+    def test_legacy_config_validation_matches_zig(self):
+        cases = (
+            ("root_trail", "# c\nnode_local_root = /local/\n", "2: storage.node_local_root must be one absolute path without a trailing slash"),
+            ("mount_no_j", "node_local_root = /local\nnode_local_mount = %u\n", "2: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"),
+            ("fstype_empty", "node_local_root = /local\nnode_local_fstype =\n", "2: storage.node_local_fstype is empty"),
+            ("fstype_upper", "node_local_root = /local\nnode_local_fstype = XFS\n", "2: storage.node_local_fstype must be a file system type name"),
+            ("scratch_trail", "node_local_root = /local\nshared_scratch = /scratch/\n", "2: storage.shared_scratch takes absolute paths without a trailing slash"),
+            ("stack_bad", "node_local_root = /local\nstack_module = bad;mod\n", "2: stack.module 'bad;mod' is not a module name"),
+            ("extend_empty", "node_local_root = /local\nextend_module =\n", "2: stack.extend '' is not a module name"),
+            ("buildenv_bad", "node_local_root = /local\ndev_buildenv = bad;mod\n", "2: dev.buildenv 'bad;mod' is not a module name"),
+            ("trash_bad", "node_local_root = /local\ntrash = rm\n", "2: clean.trash is auto, rtrash or none"),
+            ("storage_table_first", "node_local_root = /a\ntrash = rm\nnode_local_mount = bad\n", "3: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"),
+            ("clean_table_first", "trash = rm\nnode_local_root = /a/\n", "1: clean.trash is auto, rtrash or none"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text)
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}:{suffix}\n"),
+                )
+
     def test_configured_module_names_are_checked(self):
         self.config.write_text(self.config.read_text() + "stack_module = EESSI;touch injected\n")
         run = self.run_wrapper(["env"], SLURM_JOB_ID="")
