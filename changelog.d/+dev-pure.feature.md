@@ -1,0 +1,1 @@
+`eb-local dev --pure` runs `module purge` and unsets `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT` before the stack loads, so modules and loader variables the shell already had do not reach the build environment.

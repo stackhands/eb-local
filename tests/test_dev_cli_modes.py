@@ -110,6 +110,21 @@ class DevCliModes(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertTrue(run.stdout.startswith(str(self.prefix) + "/dev/"), run.stdout + run.stderr)
+    def test_pure_purges_modules_and_loader_variables_before_the_stack_loads(self):
+        plain = self.run_dev(["FFTW/3.3.10-GCC-15.2.0"], LD_LIBRARY_PATH="/host/lib")
+        pure = self.run_dev(["--pure", "FFTW/3.3.10-GCC-15.2.0"], LD_LIBRARY_PATH="/host/lib")
+        self.assertEqual(pure.returncode, 0, pure.stderr)
+        purge = "module purge >/dev/null 2>&1 || true\nunset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT\n"
+        self.assertNotIn("module purge", plain.stdout)
+        self.assertEqual(pure.stdout.count(purge), 1)
+        # the rest of the lines is what dev prints without it
+        self.assertEqual(pure.stdout.replace(purge, ""), plain.stdout)
+        # after a module command exists, before anything is loaded
+        self.assertLess(pure.stdout.index("type module"), pure.stdout.index(purge))
+        self.assertLess(pure.stdout.index(purge), pure.stdout.index("module load"))
+        # the variable is unset by the lines, so there is nothing to warn about
+        self.assertIn("LD_LIBRARY_PATH is set", plain.stderr)
+        self.assertNotIn("LD_LIBRARY_PATH is set", pure.stderr)
 
     def test_names_the_host_ca_bundle_without_replacing_one_the_shell_set(self):
         got = self.run_dev([])
