@@ -14,7 +14,8 @@ eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
-eb-local [OPTION]... dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+eb-local [OPTION]... dev [--strict] [--pure] [--replace] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+eb-local [OPTION]... leave
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
@@ -62,7 +63,7 @@ directory you own.
   eb-local env [--strict] [--json]       lines that make your installed modules visible;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1)
-  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+  eb-local dev [--strict] [--pure] [--replace] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
                                        the same, plus MODULEs and a build environment,
                                        so gcc, make, cmake and meson just work;
                                        --strict exits when the EESSI init file is missing
@@ -71,8 +72,11 @@ directory you own.
                                        --json prints the change as JSON, for env too;
                                        --envrc writes that line to .envrc for direnv;
                                        --pure purges loaded modules and LD_* first;
+                                       --replace records prior state and replaces the
+                                       modules loaded by an earlier --replace;
                                        --lock records what loads in eb-local.lock,
                                        --locked loads exactly that again
+  eb-local leave                       lines that restore the state before dev --replace
   eb-local rpath-wrappers [--for FAMILY | --unwrapped]
                                        lines that put RPATH wrappers for the compilers
                                        on PATH first; dev uses them when no build
@@ -228,7 +232,8 @@ Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 eb-local 3.3.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
 
-Since `v3.2.0`, no CLI flag was added, removed or renamed.
+Since `v3.2.0`, no CLI flag was removed or renamed.
+The command line added `--replace` on `dev` and the `leave` command.
 
 ## Commands
 
@@ -331,6 +336,7 @@ Print the lines `env` prints, then the lines that load the modules `dev.modules`
 | `--json` | Print the change the lines make to the environment as one line of JSON, as `env --json` does, with `kind` `dev`. |
 | `--buildenv MODULE` | Load MODULE as the build environment whatever the compilers, as `dev.buildenv` does. |
 | `--envrc` | Write the line that evaluates this `dev` to `.envrc` in the working directory, for direnv, and print nothing on stdout. |
+| `--replace` | Record the state before the first replacement, and unload only modules recorded by the previous replacement before loading this dev. |
 
 `dev --envrc MODULE...` writes three lines to `.envrc`:
 
@@ -355,6 +361,13 @@ Without `--pure`, the modules the shell already has stay loaded beside the ones 
 
 A `MODULE` starts with a letter or digit and holds letters, digits, `.`, `_`, `+`, `-` and single slashes, with none at the end.
 With `LD_LIBRARY_PATH` set in the shell, `dev` warns on stderr.
+
+### leave
+
+Print shell lines that restore the state recorded by the first `dev --replace` in `EB_LOCAL_DEV_SAVED`.
+Run them with `eval "$(eb-local leave)"`.
+The lines unload modules absent from the recorded prior list, reload that list in order, restore `PATH`, the dev marker variables and `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`, then unset `EB_LOCAL_DEV_SAVED`.
+A missing, malformed or unsupported record is refused.
 
 ### rpath-wrappers
 
