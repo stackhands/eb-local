@@ -40,7 +40,7 @@ These steps build a C program that uses FFTW and OpenMP for one node type, check
    #+end_src
 
    =EB_LOCAL_DEV_PREFIX= is =<install prefix>/dev/<EESSI version>/<CPU target>=, with the GPU target appended when EESSI found one, such as =/home/alice/eessi/dev/2026.06/x86_64/intel/sapphirerapids=.
-   CMake takes =-DCMAKE_INSTALL_PREFIX="$EB_LOCAL_DEV_PREFIX"=, and a =configure= script =--prefix="$EB_LOCAL_DEV_PREFIX"=.
+   CMake takes ~-DCMAKE_INSTALL_PREFIX="$EB_LOCAL_DEV_PREFIX"~, and a =configure= script ~--prefix="$EB_LOCAL_DEV_PREFIX"~.
 
 4. Check that the program finds its libraries without =LD_LIBRARY_PATH=:
 
