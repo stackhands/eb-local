@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Black-box CLI behavior tests for `eb-local dev` module validation and warnings."""
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -43,6 +44,35 @@ class DevCliModes(unittest.TestCase):
                 self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
                 self.assertEqual(got.stdout, "")
                 self.assertIn("is not a module name", got.stderr)
+
+    def test_names_the_host_ca_bundle_without_replacing_one_the_shell_set(self):
+        got = self.run_dev([])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        start = got.stdout.index("if [ ! -r /etc/ssl/certs/ca-certificates.crt ]; then")
+        block = got.stdout[start:got.stdout.index("\nfi\n", start) + 4]
+        self.assertLess(got.stdout.rindex("module load"), start)
+
+        def after(present, **given):
+            # The block with its three host paths under a scratch root.
+            with tempfile.TemporaryDirectory() as root:
+                for rel in present:
+                    path = Path(root) / rel
+                    path.parent.mkdir(parents=True)
+                    path.write_text("")
+                script = block.replace("/etc/", root + "/etc/")
+                script += 'printf "%s|%s" "${SSL_CERT_FILE-}" "${CARGO_HTTP_CAINFO-}"\n'
+                env = {"PATH": os.environ["PATH"], **given}
+                run = subprocess.run(["bash", "-euc", script], env=env, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                return run.stdout.replace(root, "")
+
+        rhel = "etc/pki/tls/certs/ca-bundle.crt"
+        self.assertEqual(after([rhel]), f"/{rhel}|/{rhel}")
+        self.assertEqual(after([rhel], SSL_CERT_FILE="/mine.pem"), f"/mine.pem|/{rhel}")
+        self.assertEqual(after([rhel], CARGO_HTTP_CAINFO="/mine.pem"), f"/{rhel}|/mine.pem")
+        self.assertEqual(after([rhel, "etc/ssl/certs/ca-certificates.crt"]), "|")
+        self.assertEqual(after(["etc/ssl/ca-bundle.pem"]), "/etc/ssl/ca-bundle.pem|/etc/ssl/ca-bundle.pem")
+        self.assertEqual(after([]), "|")
 
     def test_deduplicates_modules_and_warns_for_gcc_buildenv_with_lfoss_module(self):
         got = self.run_dev(
