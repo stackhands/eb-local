@@ -1,0 +1,24 @@
+#+title: Install variables cleared for a child
+
+=share/env-scrub.json= is a JSON array of the install-location names a child command must not inherit.
+The Bash program keeps that array as =scrub_names=, in the same order.
+=clear_install_environment= unsets every name in it before a build.
+=eb-local env= prints the same names, in four =unset= lines, in that order.
+The Zig program names the same list as =install_vars=.
+
+| Name                                |
+|-------------------------------------|
+| =EESSI_CVMFS_INSTALL=               |
+| =EESSI_SITE_INSTALL=                |
+| =EESSI_USER_INSTALL=                |
+| =EESSI_PROJECT_INSTALL=             |
+| =EESSI_SITE_SOFTWARE_PREFIX=        |
+| =EESSI_SOFTWARE_SUBDIR_OVERRIDE=    |
+| =EESSI_ACCELERATOR_TARGET_OVERRIDE= |
+| =EESSI_OVERRIDE_GPU_CHECK=          |
+| =EASYBUILD_INSTALLPATH=             |
+| =EASYBUILD_INSTALLPATH_SOFTWARE=    |
+| =EASYBUILD_INSTALLPATH_MODULES=     |
+| =EASYBUILD_PREFIX=                  |
+
+[[file:environment.org][Environment variables]] says what each name selects.

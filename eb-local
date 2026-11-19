@@ -302,22 +302,37 @@ case "${EB_LOCAL_TRASH:-}" in
     *) die "EB_LOCAL_TRASH is auto, rtrash or none" ;;
 esac
 
+# The install-location names a child must not inherit. The same names, in
+# this order, are share/env-scrub.json and the Zig program's install_vars.
+scrub_names=(
+    EESSI_CVMFS_INSTALL
+    EESSI_SITE_INSTALL
+    EESSI_USER_INSTALL
+    EESSI_PROJECT_INSTALL
+    EESSI_SITE_SOFTWARE_PREFIX
+    EESSI_SOFTWARE_SUBDIR_OVERRIDE
+    EESSI_ACCELERATOR_TARGET_OVERRIDE
+    EESSI_OVERRIDE_GPU_CHECK
+    EASYBUILD_INSTALLPATH
+    EASYBUILD_INSTALLPATH_SOFTWARE
+    EASYBUILD_INSTALLPATH_MODULES
+    EASYBUILD_PREFIX
+)
+
 clear_install_environment() {
-    unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
-    unset EESSI_SITE_SOFTWARE_PREFIX
-    unset EESSI_SOFTWARE_SUBDIR_OVERRIDE EESSI_ACCELERATOR_TARGET_OVERRIDE EESSI_OVERRIDE_GPU_CHECK
-    unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
+    [ "${#scrub_names[@]}" -eq 12 ] || die "the install-location list has ${#scrub_names[@]} names"
+    unset "${scrub_names[@]}"
 }
 
 # The lines env and dev print. Every value is quoted with %q, and module names
 # are checked above, so the output means the same whatever the input.
 print_environment() {
     printf 'module unload %q >/dev/null 2>&1 || true\n' "$extend_module"
-    printf '%s\n' \
-        'unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL' \
-        'unset EESSI_SITE_SOFTWARE_PREFIX' \
-        'unset EESSI_SOFTWARE_SUBDIR_OVERRIDE EESSI_ACCELERATOR_TARGET_OVERRIDE EESSI_OVERRIDE_GPU_CHECK' \
-        'unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX'
+    [ "${#scrub_names[@]}" -eq 12 ] || die "the install-location list has ${#scrub_names[@]} names"
+    printf 'unset %s %s %s %s\n' "${scrub_names[@]:0:4}"
+    printf 'unset %s\n' "${scrub_names[4]}"
+    printf 'unset %s %s %s\n' "${scrub_names[@]:5:3}"
+    printf 'unset %s %s %s %s\n' "${scrub_names[@]:8:4}"
     if [ "$mode" = project ]; then
         printf 'export EESSI_PROJECT_INSTALL=%q\n' "$prefix"
     else
