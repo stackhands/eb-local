@@ -71,7 +71,7 @@ pub const script =
     \\        --library-path=*) dirs+=("${arg#--library-path=}") ;;
     \\    esac
     \\    case $arg in
-    \\        -v | -V | --version | -qversion | --help | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
+    \\        -v | -V | --version | -qversion | --help | --help=* | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
     \\        *) info_only=0 ;;
     \\    esac
     \\done
@@ -325,4 +325,8 @@ test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's come
         try std.testing.expectEqual(case.want.len, got.len);
         for (case.want, got) |w, g| try std.testing.expectEqualStrings(w, g);
     }
+}
+
+test "wrapper script recognizes --help=class flags as info-only" {
+    try std.testing.expect(std.mem.indexOf(u8, script, "--help | --help=*") != null);
 }
