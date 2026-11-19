@@ -1,0 +1,1 @@
+Updated the `load-eessi` and `install` how-to guides so the strict-mode example evaluates `eval "$(eb-local env --strict)"` in the shell (which emits the missing-init error and exits 2) instead of invoking `eb-local env --strict` directly.

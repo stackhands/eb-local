@@ -75,7 +75,7 @@ eb-local 3.2.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 The last part of the version line is the commit the binary was built from: the release commit for a release binary, and your checkout's for a build from source.
 `./eb-local --version` in a source checkout prints `eb-local 1.x (frozen Bash script)`, the compatibility script kept for old installs; this page checks the installed binary on your `PATH`.
 `eb-local env` and `eb-local dev` work from here.
-`eb-local env --strict` refuses load lines until the EESSI init file exists, as [Load EESSI before a build](load-eessi.md) describes.
+`eval "$(eb-local env --strict)"` stops with exit 2 until the EESSI init file exists, as [Load EESSI before a build](load-eessi.md) describes.
 Site operators refresh Lmod's cache with `eb-local lmod-cache`, as [Refresh the module cache](refresh-the-module-cache.md) describes.
 A build with EasyBuild also needs a site file, which [Write the site file for a cluster](write-a-site-file.md) installs.
 
