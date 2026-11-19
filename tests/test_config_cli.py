@@ -176,7 +176,7 @@ class ConfigCli(StorageFixture):
         self.assertIn("module load GSL/2.8-GCC-15.2.0\n", run.stdout)
         run = self.run_tool(["dev", "--profile", "mine", "--buildenv", "buildenv/mine"], SLURM_JOB_ID="")
         self.assertIn("module load FFTW/3.3.10-GCC-15.2.0\n", run.stdout)
-        self.assertIn("\nmodule load buildenv/mine\n", run.stdout)
+        self.assertIn("\nmodule load buildenv/mine || return $?\n", run.stdout)
 
     def test_dev_loads_a_module_the_profile_and_the_command_line_both_name_once(self):
         run = self.run_tool(["dev", "GSL/2.8-GCC-15.2.0", "FFTW/3.3.10-GCC-15.2.0"], SLURM_JOB_ID="")

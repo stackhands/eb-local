@@ -50,7 +50,7 @@ class SubcommandFlags(StorageFixture):
         dev = self.run_bin(["dev", "FFTW/3.3.10-GCC-15.2.0", "--strict", "--buildenv", "buildenv/mine"], SLURM_JOB_ID="")
         self.assertEqual(dev.returncode, 0, dev.stderr)
         self.assertIn("if [[ ! -e $init ]]; then", dev.stdout)
-        self.assertIn("module load buildenv/mine\n", dev.stdout)
+        self.assertIn("module load buildenv/mine || return $?\n", dev.stdout)
         self.assertNotIn("--strict", dev.stdout)
 
         # list: --missing after a filter narrows and stays an option, not a filter.

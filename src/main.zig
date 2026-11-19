@@ -1336,7 +1336,10 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     var exe_buf: [sys.path_max]u8 = undefined;
     const exe = q(a, selfExe(&exe_buf) orelse tool);
     const unwrapped = rpathEval(a, str(a, "{s} rpath-wrappers --unwrapped", .{exe}));
-    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}", .{ gcc, unwrapped });
+    // A named build environment is one load. Its status has to leave the
+    // function before the unwrapped rpath command and the prefix export,
+    // or eval, --json and --lock all report a shell the load refused.
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s} || return $?\n{s}", .{ gcc, unwrapped });
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {

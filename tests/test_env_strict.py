@@ -71,7 +71,7 @@ class EnvStrictCli(unittest.TestCase):
             self.assertEqual((custom_be.returncode, custom_be.stderr), (0, b""))
             self.assertTrue(custom_be.stdout.startswith(b"eb_local_apply() {\nif ! type module >/dev/null 2>&1; then\n"))
             self.assertIn(b"module load FFTW/3.3.10\n", custom_be.stdout)
-            self.assertIn(b"module load buildenv/site-gcc\n", custom_be.stdout)
+            self.assertIn(b"module load buildenv/site-gcc || return $?\n", custom_be.stdout)
 
     def test_dev_strict_exits_2_when_init_is_absent(self):
         run = subprocess.run(
