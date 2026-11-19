@@ -842,6 +842,28 @@ fn validTarget(text: []const u8) bool {
     return true;
 }
 
+fn hasBuildenvModule(s: config.Settings, modules: []const []const u8) bool {
+    for (modules) |m| {
+        if (std.mem.startsWith(u8, m, "buildenv/")) return true;
+        if (std.mem.eql(u8, m, s.dev_buildenv.value)) return true;
+        for (s.buildenv_for) |b| if (b.value.len > 0 and std.mem.eql(u8, m, b.value)) return true;
+    }
+    return false;
+}
+
+fn lockedRpathWrapperLines(c: Ctx, s: config.Settings, modules: []const []const u8) []const u8 {
+    const a = c.a;
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const exe = q(a, selfExe(&exe_buf) orelse tool);
+    const unwrapped = str(a, "eval \"$({s} rpath-wrappers --unwrapped)\"\n", .{exe});
+    if (hasBuildenvModule(s, modules)) return unwrapped;
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, familyDetectLines(a)) catch oom();
+    out.appendSlice(a, str(a, "eval \"$({s} rpath-wrappers --for \"$eb_local_family\")\"\nunset eb_local_family\n", .{exe})) catch oom();
+    out.appendSlice(a, unwrapped) catch oom();
+    return out.items;
+}
+
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
 /// from a purged shell, and that load nothing when this shell's CPU target is
 /// not the lock's. The same binaries serve every node with that CPU target,
@@ -873,6 +895,8 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     , .{ q(a, lock.cpu_target), lock_name, q(a, lock.cpu_target) })) catch oom();
     for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
     out.append(a, '\n') catch oom();
+    out.appendSlice(a, drop_rpath_wrappers) catch oom();
+    out.appendSlice(a, lockedRpathWrapperLines(c, s, lock.modules)) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
