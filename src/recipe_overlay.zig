@@ -107,9 +107,19 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
             return fail(a, d, "unknown key {s}", .{e.key});
         }
     }
-    const digest = (try tableString(a, root, "base_digest", d)) orelse return fail(a, d, "base_digest is required", .{});
-    if (digest.len != 64) return fail(a, d, "base_digest must be a SHA-256 hex digest (64 characters)", .{});
-    for (digest) |ch| if (!std.ascii.isHex(ch)) return fail(a, d, "base_digest must be a SHA-256 hex digest", .{});
+    const digest_entry = root.get("base_digest") orelse {
+        d.line = 1;
+        return fail(a, d, "base_digest is required", .{});
+    };
+    const digest = try expectString(a, digest_entry, d);
+    if (digest.len != 64) {
+        d.line = digest_entry.line;
+        return fail(a, d, "base_digest must be a SHA-256 hex digest (64 characters)", .{});
+    }
+    for (digest) |ch| if (!std.ascii.isHex(ch)) {
+        d.line = digest_entry.line;
+        return fail(a, d, "base_digest must be a SHA-256 hex digest", .{});
+    };
     var spec: Spec = .{
         .base_digest = digest,
         .base_easyconfig = (try tableString(a, root, "base_easyconfig", d)) orelse "",
@@ -118,20 +128,32 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     if (root.get("overlay_version")) |e| {
         spec.overlay_version = switch (e.value) {
             .int => |n| n,
-            else => return fail(a, d, "overlay_version must be an integer", .{}),
+            else => {
+                d.line = e.line;
+                return fail(a, d, "overlay_version must be an integer", .{});
+            },
         };
+        if (spec.overlay_version != 1) {
+            d.line = e.line;
+            return fail(a, d, "overlay_version must be 1", .{});
+        }
     }
-    if (spec.overlay_version != 1) return fail(a, d, "overlay_version must be 1", .{});
     var parameters: std.ArrayList(Parameter) = .empty;
     var patches: std.ArrayList(Patch) = .empty;
     var dependencies: std.ArrayList(Dependency) = .empty;
     if (root.get("replace")) |e| switch (e.value) {
         .table => |t| try walkTable(a, t, d, &parameters),
-        else => return fail(a, d, "[replace] must be a table", .{}),
+        else => {
+            d.line = e.line;
+            return fail(a, d, "[replace] must be a table", .{});
+        },
     };
     if (root.get("patches")) |e| switch (e.value) {
         .table => |t| try walkPatches(a, t, d, &patches),
-        else => return fail(a, d, "[patches] must be a table", .{}),
+        else => {
+            d.line = e.line;
+            return fail(a, d, "[patches] must be a table", .{});
+        },
     };
     if (root.get("dependencies")) |e| switch (e.value) {
         .table => |deps| {
@@ -143,14 +165,23 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
             }
             if (deps.get("add")) |add| switch (add.value) {
                 .table => |t| try walkDependencies(a, t, "add", d, &dependencies),
-                else => return fail(a, d, "[dependencies.add] must be a table", .{}),
+                else => {
+                    d.line = add.line;
+                    return fail(a, d, "[dependencies.add] must be a table", .{});
+                },
             };
             if (deps.get("replace")) |rep| switch (rep.value) {
                 .table => |t| try walkDependencies(a, t, "replace", d, &dependencies),
-                else => return fail(a, d, "[dependencies.replace] must be a table", .{}),
+                else => {
+                    d.line = rep.line;
+                    return fail(a, d, "[dependencies.replace] must be a table", .{});
+                },
             };
         },
-        else => return fail(a, d, "[dependencies] must be a table", .{}),
+        else => {
+            d.line = e.line;
+            return fail(a, d, "[dependencies] must be a table", .{});
+        },
     };
     spec.parameters = try parameters.toOwnedSlice(a);
     spec.patches = try patches.toOwnedSlice(a);
@@ -668,7 +699,11 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     };
     const spec = parseSpec(a, overlay_text, &od) catch |e| switch (e) {
         error.Invalid => {
-            failMsg("{s}", .{if (od.message.len > 0) od.message else "overlay file is invalid"});
+            const msg = if (od.message.len > 0) od.message else "overlay file is invalid";
+            if (od.line > 0)
+                failMsg("{s}:{d}: {s}", .{ opts.overlay_path, od.line, msg })
+            else
+                failMsg("{s}: {s}", .{ opts.overlay_path, msg });
             return 2;
         },
         error.OutOfMemory => return 1,

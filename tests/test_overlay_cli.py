@@ -762,6 +762,43 @@ class OverlayCheckUnreadableOutputs(unittest.TestCase):
             self.assertIn("dependencies == []\n", recipe)
             self.assertIn("('pkg', '1.0')", recipe)
 
+    def test_malformed_overlay_reports_file_and_line(self):
+        base_bytes = b"name = 'Demo'\nversion = '1.0'\n"
+        digest = hashlib.sha256(base_bytes).hexdigest()
+        cases = {
+            "trunc.overlay.toml": (b'overlay_version = 1\n[replace\n', "trunc.overlay.toml:2:"),
+            "dup.overlay.toml": (
+                f'base_digest = "{digest}"\nrationale = "a"\nrationale = "b"\n'.encode("utf-8"),
+                "dup.overlay.toml:3:",
+            ),
+            "unknown.overlay.toml": (
+                f'base_digest = "{digest}"\n[bogus]\nx = "1"\n'.encode("utf-8"),
+                "unknown.overlay.toml:2: unknown key bogus",
+            ),
+            "badver.overlay.toml": (
+                f'overlay_version = 2\nbase_digest = "{digest}"\n'.encode("utf-8"),
+                "badver.overlay.toml:1: overlay_version must be 1",
+            ),
+            "baddigest.overlay.toml": (
+                b'overlay_version = 1\nbase_digest = "short"\n',
+                "baddigest.overlay.toml:2: base_digest must be a SHA-256 hex digest",
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            for fname, (payload, needle) in cases.items():
+                with self.subTest(fname=fname):
+                    (root / fname).write_bytes(payload)
+                    got = run(
+                        ["materialize", "--overlay", fname, "--base", "base.eb", "--out-dir", "out"],
+                        cwd=root,
+                    )
+                    self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                    self.assertEqual(got.stdout, "")
+                    self.assertIn(needle, got.stderr)
+                    self.assertFalse((root / "out").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
