@@ -27,7 +27,7 @@ The wrappers record =RPATH=, not =RUNPATH=: =LD_LIBRARY_PATH= overrides =RUNPATH
 
 =clang=, =clang++=, =flang=, =flang-new= and =ld.lld= find their linker themselves, so an =ld= wrapper never sees what they link.
 The =LLVM= module, which other modules also load, ships =clang= but is not =llvm-compilers=: with it, =dev= loads the GCC build environment, which wraps =gcc= and =ld= but not =clang=.
-So =dev= puts RPATH wrappers of its own first for each of those compilers on =PATH= that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded.
+So =dev= puts RPATH wrappers of its own first for each of those compilers on =PATH= that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded, neither the family's nor one at the compiler's own toolchain level.
 Like EasyBuild's wrappers, they add a run path for each library directory a link names with =-L= or finds through =LIBRARY_PATH=, and leave out the system's and the compatibility layer's directories.
 
 * Linkers the wrappers never see

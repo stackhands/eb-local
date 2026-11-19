@@ -137,11 +137,18 @@ pub const Settings = struct {
 /// EBROOT variable of its compiler module, in rising precedence. GCC is the
 /// rest and uses dev.buildenv. The names are EasyBuild's: a hyphen in the
 /// software name becomes "min", so llvm-compilers sets EBROOTLLVMMINCOMPILERS.
-pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8 }{
+///
+/// `compiler` is the software name of the family's compiler module and
+/// `version` the variable that module sets to its version. Together they name
+/// the build environment a site installs at the compiler's own toolchain
+/// level, `buildenv/default-<compiler>-<version>`, which dev tries when the
+/// family's configured build environment is not installed. CUDA is not a
+/// toolchain and has none.
+pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8, compiler: []const u8 = "", version: []const u8 = "" }{
     .{ .name = "cuda", .ebroot = "EBROOTCUDA", .env = "EB_LOCAL_DEV_BUILDENV_FOR_CUDA" },
-    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM" },
-    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL" },
-    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC" },
+    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM", .compiler = "llvm-compilers", .version = "EBVERSIONLLVMMINCOMPILERS" },
+    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL", .compiler = "intel-compilers", .version = "EBVERSIONINTELMINCOMPILERS" },
+    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC", .compiler = "NVHPC", .version = "EBVERSIONNVHPC" },
 };
 
 /// The `EBROOT` name EasyBuild writes for `software`. `convert_name` replaces

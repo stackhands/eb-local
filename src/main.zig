@@ -1054,9 +1054,11 @@ const host_ca_bundle =
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
-/// family's buildenv when Lmod has it, else the GCC one for CUDA (nvcc
-/// links through gcc), else eb-local's RPATH wrappers, so nothing links
-/// without run paths. Whichever loads, a clang that no wrapper covers then
+/// family's buildenv when Lmod has it, else the one at the compiler's own
+/// toolchain level (buildenv/default-NVHPC-26.9) when the site installed
+/// that, else the GCC one for CUDA (nvcc links through gcc), else eb-local's
+/// RPATH wrappers, so nothing links without run paths. A family the site set
+/// to "none" goes to the wrappers without asking Lmod. Whichever loads, a clang that no wrapper covers then
 /// gets one: the LLVM module sets EBROOTLLVM, not llvm-compilers' variable,
 /// so its clang comes with the GCC build environment, which does not wrap it.
 fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
@@ -1076,20 +1078,30 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     for (config.families) |f|
         add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
     add(a, &out, "case $eb_local_family in\n");
-    for (config.families, s.buildenv_for) |f, b|
-        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value) }));
-    add(a, &out, "    *) eb_local_buildenv= ;;\nesac\n");
+    for (config.families, s.buildenv_for) |f, b| {
+        // "none" from a site or the environment means the wrappers, with no
+        // level build environment tried; the built-in "none" (NVHPC) does try.
+        const refused = b.value.len == 0 and !std.mem.eql(u8, b.from, "default");
+        const level = if (f.compiler.len == 0 or refused)
+            "''"
+        else
+            str(a, "${{{s}:+buildenv/default-{s}-${s}}}", .{ f.version, f.compiler, f.version });
+        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} eb_local_level={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value), level }));
+    }
+    add(a, &out, "    *) eb_local_buildenv= eb_local_level= ;;\nesac\n");
     add(a, &out, str(a,
         \\if [ "$eb_local_family" = gcc ]; then
         \\    module load {s}
         \\elif [ -n "$eb_local_buildenv" ] && module is-avail "$eb_local_buildenv" >/dev/null 2>&1; then
         \\    module load "$eb_local_buildenv"
+        \\elif [ -n "$eb_local_level" ] && module is-avail "$eb_local_level" >/dev/null 2>&1; then
+        \\    module load "$eb_local_level"
         \\elif [ "$eb_local_family" = cuda ]; then
         \\    module load {s}
         \\else
         \\    eval "$({s} rpath-wrappers --for "$eb_local_family")"
         \\fi
-        \\unset eb_local_family eb_local_buildenv
+        \\unset eb_local_family eb_local_buildenv eb_local_level
         \\
     , .{ gcc, gcc, exe }));
     add(a, &out, unwrapped);

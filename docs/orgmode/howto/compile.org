@@ -117,7 +117,10 @@ The modules on the =dev= line choose the build environment:
 | =intel-compilers=           | =buildenv/default-intel-2026.1=                           |
 | NVHPC                       | none                                                      |
 
-When Lmod has no such module, =dev= writes RPATH wrappers for the compilers and linkers on =PATH= into =~/.cache/eb-local=, puts them first, and says so.
+When Lmod has no such module, =dev= looks for one at the compiler's own toolchain level: =buildenv/default-llvm-compilers-VERSION=, =buildenv/default-intel-compilers-VERSION= or =buildenv/default-NVHPC-VERSION=, with the version of the compiler module that is loaded.
+A site that builds =buildenv-default-NVHPC-26.9.eb= therefore gives its NVHPC users EasyBuild's own wrappers with no setting anywhere.
+
+When Lmod has neither, =dev= writes RPATH wrappers for the compilers and linkers on =PATH= into =~/.cache/eb-local=, puts them first, and says so.
 It does the same for each =clang=, =clang++=, =flang=, =flang-new= or =ld.lld= on =PATH= that no wrapper covers, whichever build environment loads:
 
 #+begin_example
