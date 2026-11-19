@@ -127,20 +127,62 @@ class RpathWrappersCli(unittest.TestCase):
         intel_got = self.run_cmd(["--for", "intel"])
         self.assertEqual(intel_got.returncode, 0, intel_got.stderr)
 
-        script = (
-            llvm_got.stdout
-            + "clang --help-hidden\n"
-            + "clang --target=x86_64-linux-gnu -dumpmachine\n"
-            + "clang --target=x86_64-linux-gnu --print-resource-dir\n"
-            + "clang --analyze foo.c\n"
-            + "clang --precompile foo.hpp\n"
-            + "ld.lld -version\n"
-            + "ld.lld --help-hidden\n"
-            + intel_got.stdout
-            + "icx -help\n"
-            + "ifx -help\n"
-            + "clang -o prog a.o\n"
-        )
+        nonlinking = [
+            ("clang", ["-help"]),
+            ("clang", ["--help-hidden"]),
+            ("clang", ["--help-list"]),
+            ("clang", ["--help-list-hidden"]),
+            ("clang", ["-version"]),
+            ("clang", ["--version"]),
+            ("clang", ["-qversion"]),
+            ("clang", ["-dumpversion"]),
+            ("clang", ["-dumpfullversion"]),
+            ("clang", ["--target=x86_64-linux-gnu", "-dumpmachine"]),
+            ("clang", ["-print-resource-dir"]),
+            ("clang", ["--target=x86_64-linux-gnu", "--print-resource-dir"]),
+            ("clang", ["-###"]),
+            ("clang", ["--analyze", "foo.c"]),
+            ("clang", ["--precompile", "foo.hpp"]),
+            ("clang", ["--preprocess", "foo.c"]),
+            ("clang", ["-emit-ast", "foo.c"]),
+            ("clang", ["-emit-pch", "foo.h"]),
+            ("clang", ["-v"]),
+            ("ld.lld", ["-help"]),
+            ("ld.lld", ["--help-hidden"]),
+            ("ld.lld", ["--help-list"]),
+            ("ld.lld", ["--help-list-hidden"]),
+            ("ld.lld", ["-version"]),
+            ("ld.lld", ["--version"]),
+            ("icx", ["-help"]),
+            ("icx", ["--help-hidden"]),
+            ("icx", ["-version"]),
+            ("icx", ["--version"]),
+            ("icx", ["-qversion"]),
+            ("icx", ["-dumpversion"]),
+            ("icx", ["-dumpmachine"]),
+            ("icx", ["--analyze", "foo.c"]),
+            ("icx", ["--precompile", "foo.hpp"]),
+            ("icx", ["--preprocess", "foo.c"]),
+            ("icx", ["-emit-ast", "foo.c"]),
+            ("icx", ["-emit-pch", "foo.h"]),
+            ("ifx", ["-help"]),
+            ("ifx", ["--help-hidden"]),
+            ("ifx", ["-version"]),
+            ("ifx", ["--version"]),
+            ("ifx", ["-dumpversion"]),
+            ("ifx", ["--preprocess", "foo.F90"]),
+        ]
+        script = llvm_got.stdout + intel_got.stdout
+        expected = []
+        for tool, args in nonlinking:
+            script += f"{tool} {' '.join(args)}\n"
+            expected.append(f"{tool}:{' '.join(args)}")
+        script += "clang -o prog a.o\nclang -v foo.o -o prog2\n"
+        expected.extend([
+            "clang:-o prog a.o -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+            "clang:-v foo.o -o prog2 -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+        ])
+
         run = subprocess.run(
             ["/bin/bash", "--noprofile", "--norc", "-c", script],
             env={
@@ -152,21 +194,11 @@ class RpathWrappersCli(unittest.TestCase):
             text=True,
         )
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertEqual(
-            self.log.read_text(encoding="utf-8").splitlines(),
-            [
-                "clang:--help-hidden",
-                "clang:--target=x86_64-linux-gnu -dumpmachine",
-                "clang:--target=x86_64-linux-gnu --print-resource-dir",
-                "clang:--analyze foo.c",
-                "clang:--precompile foo.hpp",
-                "ld.lld:-version",
-                "ld.lld:--help-hidden",
-                "icx:-help",
-                "ifx:-help",
-                "clang:-o prog a.o -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
-            ],
-        )
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines, expected)
+        for line in lines[:-2]:
+            self.assertNotIn("-rpath", line)
+            self.assertNotIn("--disable-new-dtags", line)
 
     def test_generated_wrappers_skip_non_linking_flags_and_accept_library_path_flag(self):
         got = self.run_cmd(["--for", "llvm"])
