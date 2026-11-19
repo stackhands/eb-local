@@ -90,6 +90,13 @@ jobs:
             b="dist/eb-local-${v}-${arch}-linux-musl"
             python3 -I tools/sbom.py --binary "$b" --zon build.zig.zon --zig "$(zig version)" --commit "${GITHUB_SHA}" > "${b}.cdx.json"
           done
+      # Completions and man pages are a directory, and a release takes files:
+      # one archive, named like the binaries so SHA256SUMS covers it.
+      - name: share archive
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          tar -C dist --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -czf "dist/eb-local-${v}-share.tar.gz" share
+          rm -r dist/share
       - run: cd dist && sha256sum eb-local-* > SHA256SUMS && cat SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
