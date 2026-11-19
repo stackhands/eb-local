@@ -51,7 +51,7 @@ esac
 args=()
 dev_modules=()
 buildenv_override=""
-logs_days=30
+logs_days=""
 clean_logs=true
 clean_sources=false
 clean_workspaces=false
@@ -357,6 +357,8 @@ remove_workspace() {
 }
 
 if [ "$command" = clean ]; then
+    [ "$clean_logs" = false ] && [ -n "$logs_days" ] && die "clean takes --no-logs or --logs-older-than, not both"
+    logs_days="${logs_days:-30}"
     if [ "$clean_workspaces" = true ]; then
         [ -n "${SLURM_JOB_ID:-}" ] || die "--workspaces works inside the allocation that made them."
         [ -n "$node_local_root" ] || fail_storage 'no node-local root is configured; set node_local_root in eb-local.conf.'

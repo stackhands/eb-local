@@ -339,6 +339,16 @@ class Commands(StorageFixture):
         self.assertTrue(old.exists())
         self.assertFalse((self.root / "trashed").exists())
 
+    def test_clean_refuses_no_logs_with_logs_older_than(self):
+        for args in (
+            ["clean", "--no-logs", "--logs-older-than", "7", "--dry-run"],
+            ["clean", "--logs-older-than", "7", "--no-logs", "--dry-run"],
+        ):
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
+                self.assertIn("clean takes --no-logs or --logs-older-than, not both", err.stderr)
+
     def test_clean_does_not_follow_a_symlinked_log_directory(self):
         self.with_rtrash()
         outside = self.root / "outside"
