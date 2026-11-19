@@ -14,7 +14,7 @@ eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
-eb-local [OPTION]... dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
+eb-local [OPTION]... dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
@@ -62,7 +62,7 @@ directory you own.
   eb-local env [--strict] [--json]       lines that make your installed modules visible;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1)
-  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
+  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
                                        the same, plus MODULEs and a build environment,
                                        so gcc, make, cmake and meson just work;
                                        --strict exits when the EESSI init file is missing
@@ -70,7 +70,9 @@ directory you own.
                                        --buildenv names the build environment to load;
                                        --json prints the change as JSON, for env too;
                                        --envrc writes that line to .envrc for direnv;
-                                       --pure purges loaded modules and LD_* first
+                                       --pure purges loaded modules and LD_* first;
+                                       --lock records what loads in eb-local.lock,
+                                       --locked loads exactly that again
   eb-local rpath-wrappers [--for FAMILY | --unwrapped]
                                        lines that put RPATH wrappers for the compilers
                                        on PATH first; dev uses them when no build
@@ -337,6 +339,12 @@ The program is named by its own path, and `--config`, `--profile`, `--project` a
 
 | `--pure` | Before anything loads, run `module purge` and unset `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`. |
 |---|---|
+| `--lock` | Run the lines in a bash child and write what loaded to `eb-local.lock` in the working directory; print nothing on stdout. |
+| `--locked` | Print the lines that load exactly the modules of `eb-local.lock`, from a purged shell. Takes no MODULE. |
+
+`dev --lock MODULE...` records what a dev environment resolved to: `stack.module`, the EESSI version, the CPU target (`EESSI_SOFTWARE_SUBDIR`), the accelerator target, and every loaded module with its version, in load order, the build environment among them. The file is one line of JSON with `kind` `dev-lock`. It is not written when the lines load no module.
+
+`dev --locked` loads that list and nothing else: it purges first, as `--pure` does, and names every module in full, so Lmod resolves nothing. A lock written with another `stack.module` is refused. When the shell's CPU target is not the lock's, the lines say so and load none of its modules; node types with the same CPU target share their binaries, so a lock from one loads on the other. `--json` and `--envrc` work with `--locked`: `dev --envrc --locked` writes the locked line to `.envrc`.
 
 Without `--pure`, the modules the shell already has stay loaded beside the ones `dev` names, and the loader variables stay as they are, with a warning for `LD_LIBRARY_PATH`. With it, the build environment is the stack, the named modules and the build environment only. Sticky modules survive `module purge`. A site that preloads a library for every process (XALT through `LD_PRELOAD`) loses that in this shell.
 
