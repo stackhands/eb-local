@@ -205,7 +205,7 @@ After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, eve
 | `--explain` | Before an easyconfig, or before `eb`: print what would run, and create and run nothing. |
 | `-h`, `--help`, `help` | Print the usage on stdout and exit 0. |
 | `--version` | Print the version line on stdout and exit 0. |
-| `--json` | On `list`, `check`, `doctor`, `config`, `profiles`, and `site list`: print one line of JSON with `schema_version` 1 on stdout instead of the text report. Not with `config --env`. |
+| `--json` | On `list`, `check`, `doctor`, `modulerc`, `clean`, `config`, `profiles`, and `site list`: print one line of JSON with `schema_version` 1 on stdout instead of the text report. Not with `config --env` or `config --get`. |
 
 Each option that takes a value also takes it after an equals sign, as in `--profile=gpu`.
 An empty value is refused either way, with `OPTION needs a value`.
@@ -377,7 +377,7 @@ A `NAME` keeps the modules of that name, and a `NAME/VERSION` that module.
 
 `--missing` prints only the sorted `NAME/VERSION` lines missing on the loaded CPU target, or nothing when every matching module is built there, and exits 2 when EESSI is not loaded.
 `--missing` and `--json` cannot be used together.
-`--json` prints one line of JSON with `schema_version` 1, `kind` `list`, the `prefix`, `filters`, CPU `targets`, `modules` with a `built` boolean per target, `missing_on_node`, and optional `node_target` and `hint`.
+`--json` prints one line of JSON with `schema_version` 1, `kind` `list`, the `prefix`, `filters`, `empty`, CPU `targets`, `modules` with a `built` boolean per target, `missing_on_node`, and nullable `node_target` and `hint`.
 The shape is in [list.schema.json](json/list.schema.json).
 
 ### doctor
@@ -525,7 +525,7 @@ Print every setting in force, with where its value came from: `default`, a file 
 It exits 1 with `--check` when a secret cannot be read or the project directory cannot be used.
 With `--json`, the same holds; the document has `check_failed` `true`.
 
-`--json` without `--check` prints `kind` `config`, `profile`, `settings`, and `secrets` listed only.
+`--json` without `--check` prints `schema_version` 1, `kind` `config`, `profile`, `check` (`false`), `check_failed` (`false`), `settings`, and `secrets` listed only (with `detail` set to `null`).
 With `--check`, `check` is `true` and each secret row records whether it could be read.
 The shape is in [config.schema.json](json/config.schema.json).
 
