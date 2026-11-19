@@ -350,6 +350,27 @@ print_environment() {
     fi
 }
 
+print_drop_rpath_wrappers() {
+    cat <<'EOF'
+if [ -n "${EB_LOCAL_RPATH_WRAPPERS-}" ]; then
+    _eb_local_path=
+    _eb_local_rest=$PATH
+    while [ -n "$_eb_local_rest" ]; do
+        case $_eb_local_rest in
+            *:*) _eb_local_ent=${_eb_local_rest%%:*}; _eb_local_rest=${_eb_local_rest#*:} ;;
+            *) _eb_local_ent=$_eb_local_rest; _eb_local_rest= ;;
+        esac
+        if [ "$_eb_local_ent" != "$EB_LOCAL_RPATH_WRAPPERS" ]; then
+            _eb_local_path=${_eb_local_path:+$_eb_local_path:}$_eb_local_ent
+        fi
+    done
+    PATH=$_eb_local_path
+    export PATH
+    unset EB_LOCAL_RPATH_WRAPPERS _eb_local_path _eb_local_rest _eb_local_ent
+fi
+EOF
+}
+
 eval_hint() {
     if [ -t 1 ]; then
         echo "eb-local: these lines change nothing until the shell runs them:" >&2
@@ -378,6 +399,7 @@ if [ "$command" = dev ]; then
         load+=("$m")
     done
     [ ${#load[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${load[@]}"; printf '\n'; }
+    print_drop_rpath_wrappers
     printf 'module load %q\n' "$dev_buildenv"
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
         echo "eb-local: LD_LIBRARY_PATH is set in this shell; programs built here do not need it," >&2
