@@ -1148,6 +1148,12 @@ const CheckReport = struct {
     files: []const CheckFileOut,
 };
 
+const CheckQueueItem = struct {
+    path: []const u8,
+    loader_root: ?[]const u8 = null,
+    inherited_rpath: []const []const u8 = &.{},
+};
+
 const Check = struct {
     problems: usize = 0,
     json: bool = false,
@@ -1155,7 +1161,7 @@ const Check = struct {
     files: std.ArrayList(CheckFileJson) = .empty,
     audited: std.StringHashMapUnmanaged(void) = .empty,
     queued: std.StringHashMapUnmanaged(void) = .empty,
-    queue: std.ArrayList([]const u8) = .empty,
+    queue: std.ArrayList(CheckQueueItem) = .empty,
 
     fn canonicalKey(a: Allocator, path: []const u8) []const u8 {
         var buf: [sys.path_max]u8 = undefined;
@@ -1170,12 +1176,16 @@ const Check = struct {
         k.audited.put(a, canonicalKey(a, path), {}) catch oom();
     }
 
-    fn enqueue(k: *Check, a: Allocator, path: []const u8) void {
+    fn enqueue(k: *Check, a: Allocator, path: []const u8, loader_root: ?[]const u8, inherited_rpath: []const []const u8) void {
         if (!k.recursive) return;
         const key = canonicalKey(a, path);
         if (k.audited.contains(key) or k.queued.contains(key)) return;
         k.queued.put(a, key, {}) catch oom();
-        k.queue.append(a, a.dupe(u8, path) catch oom()) catch oom();
+        k.queue.append(a, .{
+            .path = a.dupe(u8, path) catch oom(),
+            .loader_root = loader_root,
+            .inherited_rpath = inherited_rpath,
+        }) catch oom();
     }
 
     fn beginFile(k: *Check, a: Allocator, path: []const u8, machine: []const u8) void {
@@ -1322,7 +1332,15 @@ fn showHeader(shown: *bool, path: []const u8, machine: []const u8) void {
 /// The report `check` prints for one ELF file already parsed. `quiet`
 /// skips the lines that are not problems; the problem lines are the same
 /// either way.
-fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool) void {
+fn reportElf(
+    c: Ctx,
+    k: *Check,
+    path: []const u8,
+    elf: elfcheck.Elf,
+    quiet: bool,
+    inherited_loader_root: ?[]const u8,
+    inherited_rpath: []const []const u8,
+) void {
     const a = c.a;
     const raw_target = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
     const target = if (raw_target) |rt| blk: {
@@ -1367,13 +1385,6 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
     if (elf.runpath == null) sr.add(a, elf.rpath, origin, "RPATH");
     sr.add(a, c.env.get("LD_LIBRARY_PATH"), origin, "LD_LIBRARY_PATH");
     sr.add(a, elf.runpath, origin, "RUNPATH");
-    // The loader's own directories: <root>/lib64 and the rest, where
-    // <root> is the compatibility layer for its loader, / for the host's.
-    const root = if (elf.interp) |i| (std.fs.path.dirname(std.fs.path.dirname(i) orelse "/") orelse "/") else "/";
-    for (loaderDirs(a, root)) |d| {
-        sr.dirs.append(a, d) catch oom();
-        sr.whence.append(a, "the loader's directories") catch oom();
-    }
 
     var seen_targets: std.ArrayList([]const u8) = .empty;
     for (sr.dirs.items, sr.whence.items) |d, why| {
@@ -1390,6 +1401,38 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
         }
     }
 
+    // Inherited DT_RPATH from loading executables applies after this object's
+    // own DT_RPATH when this object has no DT_RUNPATH, matching ld.so scope.
+    var child_rpath_list: std.ArrayList([]const u8) = .empty;
+    if (elf.runpath == null) {
+        for (sr.dirs.items, sr.whence.items) |d, why| {
+            if (std.mem.eql(u8, why, "RPATH")) child_rpath_list.append(a, d) catch oom();
+        }
+        for (inherited_rpath) |d| {
+            sr.dirs.append(a, d) catch oom();
+            sr.whence.append(a, "RPATH") catch oom();
+            child_rpath_list.append(a, d) catch oom();
+        }
+    } else {
+        for (inherited_rpath) |d| child_rpath_list.append(a, d) catch oom();
+    }
+
+    // The loader's own directories: <root>/lib64 and the rest, where
+    // <root> is the compatibility layer for its loader, / for the host's.
+    // Shared objects inherit the loading executable's loader root when they
+    // have no PT_INTERP of their own.
+    const effective_loader_root: ?[]const u8 = if (elf.interp) |i|
+        elfcheck.loaderRoot(i)
+    else if (inherited_loader_root) |lr|
+        lr
+    else
+        eprefix;
+    const root = effective_loader_root orelse "/";
+    for (loaderDirs(a, root)) |d| {
+        sr.dirs.append(a, d) catch oom();
+        sr.whence.append(a, "the loader's directories") catch oom();
+    }
+
     for (elf.needed) |n| {
         if (std.mem.indexOfScalar(u8, n, '/') != null) {
             const needed_path = elfcheck.expandOrigin(a, n, origin) catch oom();
@@ -1402,7 +1445,7 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
                 k.problem(a, "{s} does not exist", .{needed_path});
-            } else k.enqueue(a, needed_path);
+            } else k.enqueue(a, needed_path, effective_loader_root, child_rpath_list.items);
             continue;
         }
         // The job may run without this shell's LD_LIBRARY_PATH, so the
@@ -1427,14 +1470,23 @@ fn reportElf(c: Ctx, k: *Check, path: []const u8, elf: elfcheck.Elf, quiet: bool
             showHeader(&shown, path, machine);
             k.problem(a, "{s} comes from the host, not from EESSI", .{n});
         }
-        k.enqueue(a, h.path);
+        k.enqueue(a, h.path, effective_loader_root, child_rpath_list.items);
     }
 }
 
 /// Open `path` and report it. A tree audit (`skip_non_elf`) skips a file
 /// that is not 64-bit little-endian ELF; naming the file does not.
 /// True when an ELF file was audited.
-fn auditFile(c: Ctx, k: *Check, path: []const u8, quiet: bool, skip_non_elf: bool, unreadable: *bool) bool {
+fn auditFile(
+    c: Ctx,
+    k: *Check,
+    path: []const u8,
+    quiet: bool,
+    skip_non_elf: bool,
+    unreadable: *bool,
+    inherited_loader_root: ?[]const u8,
+    inherited_rpath: []const []const u8,
+) bool {
     const opened = fsx.openRegular(fsx.cwd, path, !skip_non_elf) catch |e| {
         warn("cannot open {s} ({s})", .{ path, @errorName(e) });
         unreadable.* = true;
@@ -1451,16 +1503,16 @@ fn auditFile(c: Ctx, k: *Check, path: []const u8, quiet: bool, skip_non_elf: boo
         return false;
     };
     k.markAudited(c.a, path);
-    reportElf(c, k, path, elf, quiet or k.json);
+    reportElf(c, k, path, elf, quiet or k.json, inherited_loader_root, inherited_rpath);
     return true;
 }
 
 fn drainCheckQueue(c: Ctx, k: *Check, quiet: bool, unreadable: *bool, elfs: *usize) void {
     var idx: usize = 0;
     while (idx < k.queue.items.len) : (idx += 1) {
-        const path = k.queue.items[idx];
-        if (k.isAudited(c.a, path)) continue;
-        if (auditFile(c, k, path, quiet, false, unreadable)) elfs.* += 1;
+        const item = k.queue.items[idx];
+        if (k.isAudited(c.a, item.path)) continue;
+        if (auditFile(c, k, item.path, quiet, false, unreadable, item.loader_root, item.inherited_rpath)) elfs.* += 1;
     }
 }
 
@@ -1473,7 +1525,7 @@ fn cmdCheck(c: Ctx, files: []const []const u8, quiet: bool, json: bool, recursiv
     var elfs: usize = 0;
     for (files) |f| {
         if (k.isAudited(c.a, f)) continue;
-        if (auditFile(c, &k, f, quiet, false, &unreadable)) elfs += 1;
+        if (auditFile(c, &k, f, quiet, false, &unreadable, null, &.{})) elfs += 1;
     }
     drainCheckQueue(c, &k, quiet, &unreadable, &elfs);
     return checkStatus(c, &k, unreadable, elfs);
@@ -1520,7 +1572,7 @@ fn walkElfs(c: Ctx, root: []const u8, quiet: bool, k: *Check, unreadable: *bool,
         if (st.isDir()) {
             walkElfs(c, path, quiet, k, unreadable, elfs, depth + 1);
         } else if (st.isReg()) {
-            if (auditFile(c, k, path, quiet, true, unreadable)) elfs.* += 1;
+            if (auditFile(c, k, path, quiet, true, unreadable, null, &.{})) elfs.* += 1;
         }
     }
 }

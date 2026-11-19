@@ -587,6 +587,62 @@ class Check(unittest.TestCase):
         self.assertIn("eb-local check: no problems", run.stdout)
         self.assertNotIn("the loader is the host's", run.stdout)
 
+    def test_recursive_inherits_compat_loader_and_rpath_without_host_libc(self):
+        compat = self.root / "compat"
+        (compat / "lib64").mkdir(parents=True)
+        (compat / "usr" / "lib64").mkdir(parents=True)
+        (compat / "etc").mkdir(parents=True)
+        (compat / "etc" / "ld.so.conf").write_text(f"{compat / 'usr' / 'lib64'}\n", encoding="utf-8")
+
+        (self.root / "c_stub.c").write_text("int c_fn(void) { return 1; }\n")
+        (self.root / "m_stub.c").write_text("int c_fn(void);\nint m_fn(void) { return c_fn() + 2; }\n")
+        (self.root / "demo_stub.c").write_text("int m_fn(void);\nint demo_fn(void) { return m_fn() + 3; }\n")
+        (self.root / "app_stub.c").write_text("int demo_fn(void);\nvoid _start(void) { (void)demo_fn(); }\n")
+
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-Wl,-soname,libc.so.6",
+             "-o", str(compat / "usr" / "lib64" / "libc.so.6"), str(self.root / "c_stub.c")],
+            check=True,
+        )
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-Wl,-soname,libm.so.6",
+             "-o", str(compat / "usr" / "lib64" / "libm.so.6"), str(self.root / "m_stub.c"),
+             str(compat / "usr" / "lib64" / "libc.so.6")],
+            check=True,
+        )
+
+        demo_dir = self.root / "versions/2026.06/software/linux/x86_64/amd/zen4/software/demo/1.0/lib"
+        demo_dir.mkdir(parents=True)
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-nostdlib", "-Wl,-soname,libdemo.so",
+             "-o", str(demo_dir / "libdemo.so"), str(self.root / "demo_stub.c"),
+             str(compat / "usr" / "lib64" / "libm.so.6"), str(compat / "usr" / "lib64" / "libc.so.6")],
+            check=True,
+        )
+
+        interp = compat / "lib64" / "ld-linux-x86-64.so.2"
+        prog = self.root / "compat_rec_prog"
+        subprocess.run(
+            [GCC, "-nostdlib", "-e", "_start", "-o", str(prog), str(self.root / "app_stub.c"),
+             f"-L{demo_dir}", "-ldemo", f"-Wl,-rpath,{demo_dir}",
+             f"-Wl,-rpath-link,{compat / 'usr' / 'lib64'}",
+             "-Wl,--disable-new-dtags", f"-Wl,--dynamic-linker={interp}"],
+            check=True,
+        )
+
+        run = self.check("--recursive", prog, EESSI_EPREFIX=str(compat), EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("eb-local check: no problems", run.stdout)
+        self.assertNotIn("comes from the host", run.stdout)
+
+        # A host-linked program still fails with host loader and host libc.
+        host_lib = self.tree("x86_64/amd/zen4")
+        host_prog = self.program(host_lib, f"-Wl,-rpath,{host_lib}", "-Wl,--disable-new-dtags")
+        host_run = self.check("--recursive", host_prog, EESSI_EPREFIX=str(compat), EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(host_run.returncode, 1, host_run.stdout + host_run.stderr)
+        self.assertIn("the loader is the host's", host_run.stdout)
+        self.assertIn("comes from the host", host_run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
