@@ -1,0 +1,1 @@
+Tests pin that `eb-local doctor` reports no finding for a path-list variable such as `PYTHONPATH` or `R_LIBS_USER` whose whole value is empty, which the tools that read it treat as unset, while an empty entry inside a non-empty list, as in `:`, `:DIR` or `DIR:`, is still named.

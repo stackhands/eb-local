@@ -248,6 +248,18 @@ class ForeignPrefixes(StorageFixture):
         seen = json.loads((self.root / "eb.json").read_text())
         self.assertEqual(seen["paths"]["PYTHONPATH"], f"{self.prefix}/lib")
 
+    def test_doctor_ignores_an_empty_path_list_but_names_an_empty_entry_in_one(self):
+        warn = ("warn PYTHONPATH entry '' is outside the approved prefixes; "
+                "a build keeps it until build.clear_foreign_prefixes is set")
+        locale = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
+        approved = f"{self.prefix}/lib"
+        for value, entries in (("", 0), (":", 2), (f":{approved}", 1), (f"{approved}:", 1)):
+            with self.subTest(value=value):
+                run = self.run_tool(["doctor"], PYTHONPATH=value, **locale)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(run.stdout.count(warn), entries, run.stdout)
+                self.assertNotIn(f"warn PYTHONPATH entry {approved}", run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
