@@ -192,7 +192,14 @@ pub const script =
     \\# and does not require that directory yet. An empty value is set, so
     \\# it is not this default, and there is no path to create.
     \\if [[ $mode == user && -n ${EESSI_USER_INSTALL:-} ]]; then
-    \\  mkdir -p -- "$EESSI_USER_INSTALL"
+    \\  if [[ -e $EESSI_USER_INSTALL && ! -d $EESSI_USER_INSTALL ]]; then
+    \\    echo "eb-local: EESSI_USER_INSTALL=${EESSI_USER_INSTALL} is not a directory; eb was not run." >&2
+    \\    exit 2
+    \\  fi
+    \\  if ! mkdir_err=$(mkdir -p -- "$EESSI_USER_INSTALL" 2>&1); then
+    \\    echo "eb-local: cannot create EESSI_USER_INSTALL=${EESSI_USER_INSTALL} (${mkdir_err#mkdir: }); eb was not run." >&2
+    \\    exit 2
+    \\  fi
     \\fi
     \\unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
     \\  CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER CMAKE_Fortran_COMPILER_LAUNCHER || true

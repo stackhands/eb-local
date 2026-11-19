@@ -43,7 +43,7 @@ const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
 /// The version `eb-local --version` prints, and the release it is.
-pub const version = "3.1.0";
+pub const version = "3.2.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
@@ -62,15 +62,20 @@ const usage_text =
     \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
-    \\  eb-local env [--strict]                lines that make your installed modules visible;
+    \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--buildenv MODULE] [MODULE...]
+    \\  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1);
-    \\                                       --buildenv names the build environment to load
+    \\                                       --buildenv names the build environment to load;
+    \\                                       --json prints the change as JSON, for env too;
+    \\                                       --envrc writes that line to .envrc for direnv;
+    \\                                       --pure purges loaded modules and LD_* first;
+    \\                                       --lock records what loads in eb-local.lock,
+    \\                                       --locked loads exactly that again
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -288,7 +293,16 @@ const env_strict_prelude =
     \\
 ;
 
-fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool) []const u8 {
+/// `dev --pure`: start from no loaded modules and no loader variables, so
+/// what the shell had before does not reach the build environment. Sticky
+/// modules stay, as `module purge` leaves them.
+const pure_prelude =
+    \\module purge >/dev/null 2>&1 || true
+    \\unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT
+    \\
+;
+
+fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bool) []const u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
@@ -298,6 +312,7 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool) []const 
     }.f;
     if (strict) add(a, &out, env_strict_prelude);
     add(a, &out, lmod_init);
+    if (pure) add(a, &out, pure_prelude);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
     add(a, &out,
         \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
@@ -365,6 +380,8 @@ fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, cano
     if (s.project.value != null) parts.appendSlice(a, &.{ "--project", q(a, canonical_prefix) }) catch oom();
     parts.append(a, command) catch oom();
     if (std.mem.eql(u8, command, "dev")) {
+        if (g.pure) parts.append(a, "--pure") catch oom();
+        if (g.locked) parts.append(a, "--locked") catch oom();
         if (g.buildenv) |p| parts.appendSlice(a, &.{ "--buildenv", q(a, p) }) catch oom();
         for (extra) |m| parts.append(a, q(a, m)) catch oom();
     }
@@ -476,6 +493,14 @@ const Global = struct {
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
     json_out: bool = false,
+    /// `dev --envrc`: write the dev line to `.envrc` here, for direnv.
+    envrc: bool = false,
+    /// `dev --pure`: purge the loaded modules and the loader variables first.
+    pure: bool = false,
+    /// `dev --lock`: write what the dev lines load to `eb-local.lock`.
+    lock: bool = false,
+    /// `dev --locked`: load the modules of `eb-local.lock`, and only those.
+    locked: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -599,10 +624,261 @@ fn envStrict(c: Ctx, g: Global) bool {
     return v.len > 0 and !std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "false");
 }
 
+/// One variable of an `EnvChange`.
+const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// `env --json` and `dev --json`: what the lines change in the environment of
+/// the shell that evaluates them, for a shell that cannot evaluate them.
+/// Shell functions and aliases (Lmod's `module`) are not variables and are
+/// not in it.
+const EnvChange = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8,
+    /// Variables the lines add or change, by name.
+    set: []const EnvVar,
+    /// Variables the lines remove, by name.
+    unset: []const []const u8,
+};
+
+/// Variables bash keeps for itself; they say nothing about the lines.
+const shell_own = [_][]const u8{ "_", "SHLVL", "PWD", "OLDPWD", "BASH_EXECUTION_STRING" };
+
+fn shellOwn(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "BASH_FUNC_")) return true;
+    for (shell_own) |own| if (std.mem.eql(u8, name, own)) return true;
+    return false;
+}
+
+fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
+    return std.mem.lessThan(u8, x.name, y.name);
+}
+
+/// Run `lines` in a bash child and print, as one JSON document, how its
+/// environment then differs from this process's. The child's own output goes
+/// to stderr, so stdout carries the document alone.
+/// Run `lines` in a bash child and return its environment afterwards, as
+/// `env -0` prints it. What the lines print goes to stderr. Null, with a
+/// message, when the child cannot run or the lines fail.
+fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
+    const a = c.a;
+    const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
+    const script = str(a, "exec 3>&1 1>&2\n{s}\nenv -0 >&3\n", .{lines});
+    const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script }, c.envp, .{
+        .stdout_limit = 8 << 20,
+        .stderr_limit = 1 << 20,
+        .timeout_ms = 300_000,
+    }) catch |e| {
+        warn("could not run the {s} lines in bash: {s}", .{ kind, @errorName(e) });
+        return null;
+    };
+    if (r.stderr.len > 0) cli.put(2, r.stderr);
+    if (r.term.code() != 0) {
+        warn("the {s} lines failed in bash (status {d}); nothing is written", .{ kind, r.term.code() });
+        return null;
+    }
+    return r.stdout;
+}
+
+/// The value of `name` in the output of `env -0`, or "" when it is not set.
+fn env0Value(env0: []const u8, name: []const u8) []const u8 {
+    var it = std.mem.splitScalar(u8, env0, 0);
+    while (it.next()) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        if (std.mem.eql(u8, entry[0..eq], name)) return entry[eq + 1 ..];
+    }
+    return "";
+}
+
+fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
+    const a = c.a;
+    const env0 = runLines(c, kind, lines) orelse return 1;
+    var set: std.ArrayList(EnvVar) = .empty;
+    var after: std.StringHashMapUnmanaged(void) = .empty;
+    var it = std.mem.splitScalar(u8, env0, 0);
+    while (it.next()) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        const name = entry[0..eq];
+        const value = entry[eq + 1 ..];
+        if (name.len == 0 or shellOwn(name)) continue;
+        after.put(a, name, {}) catch oom();
+        if (c.env.get(name)) |before| {
+            if (std.mem.eql(u8, before, value)) continue;
+        }
+        set.append(a, .{ .name = name, .value = value }) catch oom();
+    }
+    var unset: std.ArrayList([]const u8) = .empty;
+    var before_it = c.env.iterator();
+    while (before_it.next()) |kv| {
+        const name = kv.key_ptr.*;
+        if (shellOwn(name) or after.contains(name)) continue;
+        unset.append(a, name) catch oom();
+    }
+    std.mem.sort(EnvVar, set.items, {}, envVarLess);
+    std.mem.sort([]const u8, unset.items, {}, lessThanStr);
+    jsonout.emit(a, EnvChange{ .kind = kind, .set = set.items, .unset = unset.items });
+    return 0;
+}
+
 fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const p = place(c, s);
+    const lines = environmentLines(c, s, p, envStrict(c, g), false);
+    if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    cli.put(1, environmentLines(c, s, p, envStrict(c, g)));
+    cli.put(1, lines);
+    return 0;
+}
+
+/// The first and last line of the lines `dev --envrc` owns in `.envrc`.
+/// What stands outside them is the user's and is kept.
+const envrc_begin = "# >>> eb-local dev >>>";
+const envrc_end = "# <<< eb-local dev <<<";
+
+/// Write `eval "$(eb-local WORDS)"` between the markers of `.envrc` in the
+/// working directory, for direnv: it evaluates the file in bash and gives the
+/// calling shell the change, whatever that shell is, and takes it back on
+/// leaving the directory. A block already there is replaced; other lines
+/// stay. The program is named by its own path, since a shell that direnv
+/// starts need not have eb-local on PATH.
+fn writeEnvrc(c: Ctx, words: []const u8) u8 {
+    const a = c.a;
+    var buf: [sys.path_max]u8 = undefined;
+    const exe = selfExe(&buf) orelse "eb-local";
+    const block = str(a, "{s} rerun `eb-local dev --envrc` to change these lines\neval \"$({s} {s})\"\n{s}\n", .{ envrc_begin, q(a, exe), words, envrc_end });
+    var exists_already = false;
+    const old: []const u8 = if (fsx.openRegular(fsx.cwd, ".envrc", true)) |opened| blk: {
+        defer sys.close(opened.fd);
+        exists_already = true;
+        break :blk fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read .envrc ({s})", .{@errorName(e)});
+    } else |_| "";
+    const text = if (std.mem.indexOf(u8, old, envrc_begin)) |at| blk: {
+        const rest = std.mem.indexOfPos(u8, old, at, envrc_end) orelse
+            die(".envrc has `{s}` without `{s}`; remove that line or add the end line, then run this again", .{ envrc_begin, envrc_end });
+        var end = rest + envrc_end.len;
+        if (end < old.len and old[end] == '\n') end += 1;
+        break :blk str(a, "{s}{s}{s}", .{ old[0..at], block, old[end..] });
+    } else if (old.len == 0)
+        block
+    else
+        str(a, "{s}{s}{s}", .{ old, if (old[old.len - 1] == '\n') "" else "\n", block });
+    if (exists_already) {
+        // Written beside the old file and renamed over it, with its mode.
+        fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+    } else {
+        const fd = sys.openat(fsx.cwd, ".envrc", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
+            die("cannot create .envrc ({s})", .{@errorName(e)});
+        defer sys.close(fd);
+        sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+    }
+    cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
+    return 0;
+}
+
+/// The file `dev --lock` writes and `dev --locked` reads, in the working directory.
+const lock_name = "eb-local.lock";
+
+/// What a dev environment resolved to: enough for a later shell to load the
+/// same modules, and to notice that it cannot.
+const DevLock = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "dev-lock",
+    /// `stack.module` when the lock was written.
+    stack: []const u8,
+    eessi_version: []const u8 = "",
+    /// EESSI_SOFTWARE_SUBDIR: the CPU target the modules were resolved for.
+    /// Nodes with the same CPU share it, whatever their accelerator.
+    cpu_target: []const u8,
+    accelerator_target: []const u8 = "",
+    /// LOADEDMODULES in load order: every module, each with its version.
+    modules: []const []const u8,
+};
+
+/// Create `name` in the working directory, or replace it atomically with its mode kept.
+fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
+    if (fsx.statAt(fsx.cwd, name, true)) |_| {
+        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+    } else |_| {
+        const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
+            die("cannot create {s} ({s})", .{ name, @errorName(e) });
+        defer sys.close(fd);
+        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+    }
+}
+
+/// `dev --lock`: run the dev lines in a bash child and record what loaded.
+fn writeLock(c: Ctx, s: config.Settings, lines: []const u8) u8 {
+    const a = c.a;
+    const env0 = runLines(c, "dev", lines) orelse return 1;
+    var modules: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, env0Value(env0, "LOADEDMODULES"), ':');
+    while (it.next()) |m| {
+        if (m.len > 0) modules.append(a, m) catch oom();
+    }
+    const cpu = env0Value(env0, "EESSI_SOFTWARE_SUBDIR");
+    if (cpu.len == 0 or modules.items.len == 0) {
+        warn("the dev lines loaded no module or set no EESSI_SOFTWARE_SUBDIR, so there is nothing to lock; {s} is not written", .{lock_name});
+        return 1;
+    }
+    const text = jsonout.renderLine(a, DevLock{
+        .stack = s.stack_module.value,
+        .eessi_version = env0Value(env0, "EESSI_VERSION"),
+        .cpu_target = cpu,
+        .accelerator_target = env0Value(env0, "EESSI_ACCELERATOR_TARGET"),
+        .modules = modules.items,
+    }) catch oom();
+    writeCwdFile(a, lock_name, text);
+    cli.err("eb-local: wrote {s}: {d} modules for {s}; `eb-local dev --locked` loads them again\n", .{ lock_name, modules.items.len, cpu });
+    return 0;
+}
+
+/// A CPU target as EESSI names one: path parts of letters, digits, `_`, `.` and `-`.
+fn validTarget(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '/' or ch == '_' or ch == '.' or ch == '-')) return false;
+    }
+    return true;
+}
+
+/// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
+/// from a purged shell, and that load nothing when this shell's CPU target is
+/// not the lock's. The same binaries serve every node with that CPU target,
+/// so a lock written on one node type loads on another that shares it.
+fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
+    const a = c.a;
+    const opened = fsx.openRegular(fsx.cwd, lock_name, true) catch
+        die("there is no {s} here; write one with `eb-local dev --lock MODULE...`", .{lock_name});
+    defer sys.close(opened.fd);
+    const text = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ lock_name, @errorName(e) });
+    const lock = std.json.parseFromSliceLeaky(DevLock, a, text, .{ .ignore_unknown_fields = true }) catch
+        die("{s} is not a lock eb-local wrote; write it again with `eb-local dev --lock MODULE...`", .{lock_name});
+    if (!std.mem.eql(u8, lock.kind, "dev-lock") or lock.schema_version != jsonout.schema_version)
+        die("{s} is not a dev lock of this eb-local (kind {s}, schema {d})", .{ lock_name, lock.kind, lock.schema_version });
+    if (!validTarget(lock.cpu_target)) die("{s} names no usable CPU target", .{lock_name});
+    if (lock.modules.len == 0) die("{s} lists no modules", .{lock_name});
+    for (lock.modules) |m| {
+        if (!config.validModule(m)) die("{s} lists '{s}', which is not a module name", .{ lock_name, m });
+    }
+    if (!std.mem.eql(u8, lock.stack, s.stack_module.value))
+        die("{s} was written with the stack {s}; this configuration loads {s}. Write the lock again, or select that stack", .{ lock_name, lock.stack, s.stack_module.value });
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), true)) catch oom();
+    out.appendSlice(a, str(a,
+        \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
+        \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
+        \\else
+        \\module load
+    , .{ q(a, lock.cpu_target), lock_name, q(a, lock.cpu_target) })) catch oom();
+    for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
+    out.append(a, '\n') catch oom();
+    out.appendSlice(a, host_ca_bundle) catch oom();
+    const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
+    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
+    if (g.json_out) return emitEnvChange(c, "dev", out.items);
+    evalHint("dev --locked");
+    cli.put(1, out.items);
     return 0;
 }
 
@@ -620,9 +896,15 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         } else mods.append(a, m) catch oom();
     };
     const installed = place(c, s);
-    evalHint(replay(a, "dev", s, g, installed.prefix, extra));
+    if (g.locked) {
+        if (extra.len > 0) die("dev --locked loads the modules of {s}; name none on the line", .{lock_name});
+        if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
+        return lockedLines(c, s, g, installed);
+    }
+    if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
+    if (!g.json_out and !g.lock) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g))) catch oom();
+    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), g.pure)) catch oom();
     // The modules the program uses first, the build environment last, so
     // its wrappers come first on PATH. When the program links, they record
     // a run path for each directory on LIBRARY_PATH, which the modules set
@@ -643,8 +925,10 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    if (g.lock) return writeLock(c, s, out.items);
+    if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);
-    if (nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
+    if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
     }
@@ -770,9 +1054,11 @@ const host_ca_bundle =
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
-/// family's buildenv when Lmod has it, else the GCC one for CUDA (nvcc
-/// links through gcc), else eb-local's RPATH wrappers, so nothing links
-/// without run paths. Whichever loads, a clang that no wrapper covers then
+/// family's buildenv when Lmod has it, else the one at the compiler's own
+/// toolchain level (buildenv/default-NVHPC-26.9) when the site installed
+/// that, else the GCC one for CUDA (nvcc links through gcc), else eb-local's
+/// RPATH wrappers, so nothing links without run paths. A family the site set
+/// to "none" goes to the wrappers without asking Lmod. Whichever loads, a clang that no wrapper covers then
 /// gets one: the LLVM module sets EBROOTLLVM, not llvm-compilers' variable,
 /// so its clang comes with the GCC build environment, which does not wrap it.
 fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
@@ -792,20 +1078,30 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     for (config.families) |f|
         add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
     add(a, &out, "case $eb_local_family in\n");
-    for (config.families, s.buildenv_for) |f, b|
-        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value) }));
-    add(a, &out, "    *) eb_local_buildenv= ;;\nesac\n");
+    for (config.families, s.buildenv_for) |f, b| {
+        // "none" from a site or the environment means the wrappers, with no
+        // level build environment tried; the built-in "none" (NVHPC) does try.
+        const refused = b.value.len == 0 and !std.mem.eql(u8, b.from, "default");
+        const level = if (f.compiler.len == 0 or refused)
+            "''"
+        else
+            str(a, "${{{s}:+buildenv/default-{s}-${s}}}", .{ f.version, f.compiler, f.version });
+        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} eb_local_level={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value), level }));
+    }
+    add(a, &out, "    *) eb_local_buildenv= eb_local_level= ;;\nesac\n");
     add(a, &out, str(a,
         \\if [ "$eb_local_family" = gcc ]; then
         \\    module load {s}
         \\elif [ -n "$eb_local_buildenv" ] && module is-avail "$eb_local_buildenv" >/dev/null 2>&1; then
         \\    module load "$eb_local_buildenv"
+        \\elif [ -n "$eb_local_level" ] && module is-avail "$eb_local_level" >/dev/null 2>&1; then
+        \\    module load "$eb_local_level"
         \\elif [ "$eb_local_family" = cuda ]; then
         \\    module load {s}
         \\else
         \\    eval "$({s} rpath-wrappers --for "$eb_local_family")"
         \\fi
-        \\unset eb_local_family eb_local_buildenv
+        \\unset eb_local_family eb_local_buildenv eb_local_level
         \\
     , .{ gcc, gcc, exe }));
     add(a, &out, unwrapped);
@@ -1525,7 +1821,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         return list(s.site_toolchains.value);
     } else if (std.mem.startsWith(u8, key, "build.node_types.")) {
         const name = key["build.node_types.".len..];
-        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        if (!config.validNodeTypeName(name)) die("unknown configuration key '{s}'", .{key});
         for (nodeTypes(s)) |t| {
             if (std.mem.eql(u8, t.name, name)) return scalar(t.sbatch);
         }
@@ -1568,7 +1864,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         return 1;
     } else if (std.mem.startsWith(u8, key, "secrets.")) {
         const name = key["secrets.".len..];
-        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        if (!config.validSecretName(name)) die("unknown configuration key '{s}'", .{key});
         for (s.secrets.items) |sec| {
             if (std.mem.eql(u8, sec.name, name)) return scalar(sec.source);
         }
@@ -2590,7 +2886,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
     if (s.clear_foreign_prefixes.value)
-        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper variable that resolves outside them") catch oom();
+        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper, Cargo linker or Makevars variable that resolves outside them") catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
     for (buildVariables(a, "$W", d)) |kv| {
         if (std.mem.startsWith(u8, kv[1], "$W/")) {
@@ -3134,7 +3430,7 @@ fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.Array
     const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, prefix) catch oom();
     const found = foreign.scan(a, c.env, prefs, s.clear_foreign_prefixes.value, mountinfoSoft(c)) catch oom();
     for (found) |f| switch (f.code) {
-        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
+        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper, Cargo linker or Makevars variable, points outside the approved prefixes", .{}),
         .list_keep => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
         .list_drop => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
         .wrap_keep => note(a, out, json_lines, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
@@ -4537,6 +4833,8 @@ pub fn main(init: std.process.Init) u8 {
             .env => {
                 if (std.mem.eql(u8, x, "--strict")) {
                     g.env_strict = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
                 } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
             },
             .profiles => {
@@ -4731,6 +5029,16 @@ pub fn main(init: std.process.Init) u8 {
             .dev => {
                 if (std.mem.eql(u8, x, "--strict")) {
                     g.env_strict = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--envrc")) {
+                    g.envrc = true;
+                } else if (std.mem.eql(u8, x, "--pure")) {
+                    g.pure = true;
+                } else if (std.mem.eql(u8, x, "--lock")) {
+                    g.lock = true;
+                } else if (std.mem.eql(u8, x, "--locked")) {
+                    g.locked = true;
                 } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
                 } else if (joined(x, "--buildenv")) |v| {

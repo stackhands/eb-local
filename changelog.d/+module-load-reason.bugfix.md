@@ -1,1 +1,0 @@
-A build that cannot load the stack module or EESSI-extend shows Lmod's reason, such as an unknown module, under `eb-local: could not load <module>:`. A build dropped everything a load wrote to stderr, so a module missing from `MODULEPATH` and a load hook that failed both read only `could not load`. A load that works stays quiet.

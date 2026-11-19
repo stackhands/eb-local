@@ -269,6 +269,38 @@ class RpathWrappersCli(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertFalse(outside.exists())
 
+    def _run_wrapper(self, setup_stdout, path, cwd):
+        script = setup_stdout + "gcc -c foo.c\n"
+        return subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": path, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_an_empty_path_entry_is_the_current_directory(self):
+        got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        cwd_gcc = self.root / "gcc"
+        cwd_gcc.write_text("#!/bin/sh\nprintf 'from-cwd\\n'\n", encoding="utf-8")
+        cwd_gcc.chmod(0o755)
+
+        # A trailing colon is an empty entry after every other directory.
+        trailing = self._run_wrapper(got.stdout, "", self.root)
+        self.assertEqual(trailing.returncode, 0, trailing.stdout + trailing.stderr)
+        self.assertEqual(trailing.stdout, "from-cwd\n")
+        self.assertEqual(trailing.stderr, "")
+
+        # An empty entry in the middle is the current directory, and it wins
+        # over a later directory that also has gcc.
+        self.log.write_text("", encoding="utf-8")
+        middle = self._run_wrapper(got.stdout, f":{self.bin}", self.root)
+        self.assertEqual(middle.returncode, 0, middle.stdout + middle.stderr)
+        self.assertEqual(middle.stdout, "from-cwd\n")
+        self.assertEqual(middle.stderr, "")
+        self.assertEqual(self.log.read_text(encoding="utf-8"), "")
+
     def test_tmpfs_enospc_exits_two_and_cleans_wrapper_tree(self):
         mnt = hostile_fs.enter_full_tmpfs(self)
         if mnt is None:

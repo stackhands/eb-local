@@ -148,3 +148,13 @@ class CvmfsDoctor(StorageFixture):
             f"info CernVM-FS HTTP proxy mode is direct, from {self.cvmfs_etc}/config.d/{self.repo.name}.local\n",
             direct.stdout,
         )
+
+    def test_cvmfs_skips_fifo_config_without_blocking(self):
+        import os
+        import subprocess
+        fifo = self.cvmfs_etc / "default.local"
+        os.mkfifo(fifo)
+        argv, env = binary.command(self.script, ["doctor", "--cvmfs"], dict(self.env))
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True, timeout=2)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("info CernVM-FS HTTP proxy is unset", run.stdout)

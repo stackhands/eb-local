@@ -19,8 +19,12 @@ class ForeignPrefixes(StorageFixture):
         (modules / "EESSI" / "2026.06.lua").write_text("-- module\n")
         self.env["MODULEPATH"] = str(modules)
         for name in ("PERL5LIB", "PYTHONPATH", "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH", "CC", "CXX",
-                     "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "APPTAINER_CONTAINLIBS", "SINGULARITY_CONTAINLIBS"):
+                     "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "APPTAINER_CONTAINLIBS", "SINGULARITY_CONTAINLIBS",
+                     "JULIA_LOAD_PATH", "JULIA_DEPOT_PATH", "NODE_PATH", "CARGO_BUILD_RUSTC_WRAPPER",
+                     "RUSTC_WORKSPACE_WRAPPER", "R_MAKEVARS_USER", "R_MAKEVARS_SITE", "RUSTFLAGS"):
             self.env.pop(name, None)
+        for key in [k for k in self.env if k.startswith("CARGO_TARGET_") and k.endswith(("_LINKER", "_RUSTFLAGS"))]:
+            self.env.pop(key, None)
 
     def run_tool(self, args, cwd=None, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
@@ -38,6 +42,50 @@ class ForeignPrefixes(StorageFixture):
         self.assertNotIn("warn CXX resolves", run.stdout)
         self.assertRegex(run.stdout, r"info timezone target \S+")
         self.assertTrue(run.stdout.rstrip().endswith("Nothing above stops a build."))
+
+    def test_doctor_names_host_language_paths_and_ignores_rustflags(self):
+        linker = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+        flags = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS"
+        keep = ("is outside the approved prefixes; "
+                "a build keeps it until build.clear_foreign_prefixes is set")
+        run = self.run_tool(["doctor"], **{
+            "NODE_PATH": "/opt/host/node",
+            "JULIA_LOAD_PATH": f"/opt/host/julia:{self.prefix}/julia",
+            "JULIA_DEPOT_PATH": "/opt/host/depot",
+            "CARGO_BUILD_RUSTC_WRAPPER": "/opt/host/sccache",
+            "RUSTC_WORKSPACE_WRAPPER": "/opt/host/sccache",
+            "R_MAKEVARS_USER": "/opt/host/Makevars",
+            "R_MAKEVARS_SITE": "/opt/host/Makevars.site",
+            linker: "/usr/bin/gcc",
+            flags: "-C link-arg=-fuse-ld=mold",
+            "RUSTFLAGS": "-C link-arg=-fuse-ld=mold",
+        })
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"warn NODE_PATH entry /opt/host/node {keep}", run.stdout)
+        self.assertIn(f"warn JULIA_LOAD_PATH entry /opt/host/julia {keep}", run.stdout)
+        self.assertNotIn(f"warn JULIA_LOAD_PATH entry {self.prefix}/julia", run.stdout)
+        self.assertIn(f"warn JULIA_DEPOT_PATH entry /opt/host/depot {keep}", run.stdout)
+        self.assertIn(f"warn {linker} resolves to /usr/bin/gcc, outside the approved prefixes; "
+                      "a build keeps it until build.clear_foreign_prefixes is set", run.stdout)
+        self.assertIn("warn CARGO_BUILD_RUSTC_WRAPPER resolves to /opt/host/sccache", run.stdout)
+        self.assertIn("warn RUSTC_WORKSPACE_WRAPPER resolves to /opt/host/sccache", run.stdout)
+        self.assertIn("warn R_MAKEVARS_USER resolves to /opt/host/Makevars", run.stdout)
+        self.assertIn("warn R_MAKEVARS_SITE resolves to /opt/host/Makevars.site", run.stdout)
+        self.assertNotIn("RUSTFLAGS", run.stdout)
+        self.assertNotIn(flags, run.stdout)
+
+        self.env.update(
+            NODE_PATH=f"/opt/host/node:{self.prefix}/node",
+            RUSTFLAGS="-C link-arg=-fuse-ld=mold",
+            CONTROL_PATH_NAMES=f"NODE_PATH {linker} RUSTFLAGS",
+        )
+        self.env[linker] = "/usr/bin/gcc"
+        cleared = self.run_wrapper(["recipe.eb"], EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES="true")
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(seen["paths"]["NODE_PATH"], f"{self.prefix}/node")
+        self.assertIsNone(seen["paths"][linker])
+        self.assertEqual(seen["paths"]["RUSTFLAGS"], "-C link-arg=-fuse-ld=mold")
 
     def test_clearing_is_off_until_asked_and_then_drops_only_foreign_entries(self):
         explained = self.run_tool(["--explain", "recipe.eb"])

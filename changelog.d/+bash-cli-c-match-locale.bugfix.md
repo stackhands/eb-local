@@ -1,1 +1,0 @@
-`eb-local` evaluates `valid_module`, `--logs-older-than`, `SLURM_JOB_ID`, and workspace regexes under `LC_ALL=C` via `c_match` so Unicode letters and digits under `LANG=en_US.UTF-8` are refused like `src/main.zig` and `src/config.zig`.

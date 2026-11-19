@@ -129,9 +129,9 @@ fn configFiles(a: Allocator, root: []const u8, repo_name: []const u8) Allocator.
 }
 
 fn readFile(a: Allocator, path: []const u8) ?[]const u8 {
-    const fd = sys.openat(fsx.cwd, path, .{}, 0) catch return null;
-    defer sys.close(fd);
-    return fsx.readAll(a, fd, 1 << 20) catch null;
+    const opened = fsx.openRegular(fsx.cwd, path, true) catch return null;
+    defer sys.close(opened.fd);
+    return fsx.readAll(a, opened.fd, 1 << 20) catch null;
 }
 
 /// The last `CVMFS_HTTP_PROXY=` in a client file. Quotes around the value
@@ -418,4 +418,22 @@ test "a parallel read uses srun when it is on PATH, and forks when it is not" {
     const many = parallelProbe(a, repo, 11, true, false, null, no_env);
     try testing.expectEqual(ParallelKind.fork_ok, many.kind);
     try testing.expectEqual(@as(u8, 11), many.tasks);
+}
+
+test "readProxy ignores a FIFO client config file instead of blocking" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try scratch(a);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const fifo = try std.fs.path.join(a, &.{ root, "default.local" });
+    var zbuf: [sys.path_max:0]u8 = undefined;
+    const zfifo = try sys.z(&zbuf, fifo);
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.mknodat(linux.AT.FDCWD, zfifo.ptr, 0o010600, 0)),
+    );
+    var env = std.process.Environ.Map.init(a);
+    const got = try readProxy(a, &env, root, "software.eessi.io");
+    try testing.expectEqual(ProxyMode.unset, got.mode);
 }

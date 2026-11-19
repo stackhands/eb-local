@@ -9,7 +9,7 @@ How eb-stack decides, and what its other answers mean, is in its guide [Route th
 
 ## Before you start
 
--   eb-local with a site file, as [Write the site file for a cluster](write-a-site-file.md) describes.
+-   eb-local with a site file, as [Write the site file for a cluster](write-a-site-file.md) describes, or without a site file or Slurm job using `eb-local eb` as [Run EasyBuild through EESSI-extend without a site file](eb-without-a-site-file.md) describes.
 -   eb-stack, from its [Installation](https://eb-stack.rgoswami.me/install.html) page; these steps use eb-stack 0.7.4.
 -   The modules your users load, in a file with one `Name/version` per line, here `site-modules.txt`:
 
@@ -110,6 +110,13 @@ How eb-stack decides, and what its other answers mean, is in its guide [Route th
 
 3.  Repeat steps 1 and 2 on each other node type that will run the software.
 
+Where there is no site file and no Slurm job, such as on a workstation with CernVM-FS or inside `eessi_container.sh`, install the same list through `eb-local eb`:
+
+```bash
+mapfile -t recipes < gap/roots.txt
+for recipe in "${recipes[@]}"; do eb-local eb -- "$recipe" --robot || break; done
+```
+
 To have eb-stack run the builds instead, as a campaign on a target, give the target eb-local as its EasyBuild command.
 eb-stack's [eOn on EESSI with EESSI-extend and `eb --robot`](https://eb-stack.rgoswami.me/howto/eon-eessi-extend.html) and [Build target configuration](https://eb-stack.rgoswami.me/reference/targets.html) have such a target, and [Run EasyBuild through EESSI-extend without a site file](eb-without-a-site-file.md) says what eb-local does in it.
 
@@ -137,7 +144,7 @@ jq-1.8.1
 
 | Message | Cause | What to do |
 |---|---|---|
-| `eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.` | The loop ran outside an allocation. | Start one, and run the loop again. |
+| `eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.` | The loop ran outside an allocation. | Start one, or run `eb-local eb -- "$recipe" --robot` where there is no site file or Slurm job. |
 | `ERROR: One or more files not found: RECIPE (search paths: DIR)` | EasyBuild does not find the recipe in the easyconfigs of EESSI's EasyBuild, as when `--easyconfigs` named another tree. | Give eb-local the recipe's path, such as `eb-local recipes/pigz-2.8-GCCcore-15.2.0.eb --robot`. |
 | `eb-local: build workspace kept at WORKSPACE; it goes when the allocation ends,` | A build failed, and the loop stopped there. | Follow [Find what is wrong with a build or a module](find-what-is-wrong.md), then run the loop again. |
 | A module of the list is in `gap/gap.tsv` and not in `gap/roots.txt` | eb-stack gave it a route other than `recipe`. | Look the route up in eb-stack's [Route the modules a stack does not have](https://eb-stack.rgoswami.me/howto/module-gap.html). |

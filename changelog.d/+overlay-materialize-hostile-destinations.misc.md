@@ -1,1 +1,0 @@
-`tests/test_overlay_cli.py` verifies that `eb-local overlay materialize` refuses read-only output directories and dangling symlinks while rolling back partial outputs on symlink or out-of-space tmpfs failures.

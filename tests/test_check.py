@@ -587,6 +587,54 @@ class Check(unittest.TestCase):
         self.assertIn("eb-local check: no problems", run.stdout)
         self.assertNotIn("the loader is the host's", run.stdout)
 
+    def test_unbraced_origin_requires_token_boundary(self):
+        sub = self.root / "sub"
+        sub_extra = self.root / "sub_extra"
+        sub.mkdir()
+        sub_extra.mkdir()
+        (self.root / "demo.c").write_text("int demo(void) { return 7; }\n")
+        (self.root / "prog.c").write_text("int demo(void);\nint main(void) { return demo() == 7 ? 0 : 1; }\n")
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-o", str(sub_extra / "libdemo.so"), str(self.root / "demo.c")],
+            check=True,
+        )
+
+        unbraced = sub / "unbraced"
+        subprocess.run(
+            [
+                GCC,
+                "-o",
+                str(unbraced),
+                str(self.root / "prog.c"),
+                f"-L{sub_extra}",
+                "-ldemo",
+                "-Wl,-rpath,$ORIGIN_extra",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+        run_unbraced = self.check(unbraced)
+        self.assertEqual(run_unbraced.returncode, 1, run_unbraced.stdout + run_unbraced.stderr)
+        self.assertIn("libdemo.so => not found", run_unbraced.stdout)
+
+        braced = sub / "braced"
+        subprocess.run(
+            [
+                GCC,
+                "-o",
+                str(braced),
+                str(self.root / "prog.c"),
+                f"-L{sub_extra}",
+                "-ldemo",
+                "-Wl,-rpath,${ORIGIN}_extra",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+        run_braced = self.check(braced)
+        self.assertEqual(run_braced.returncode, 0, run_braced.stdout + run_braced.stderr)
+        self.assertIn(f"libdemo.so => {sub_extra}/libdemo.so   [RPATH]", run_braced.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

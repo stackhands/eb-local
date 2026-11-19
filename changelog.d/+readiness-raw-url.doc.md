@@ -1,1 +1,0 @@
-The find-what-is-wrong how-to says release 3.1.0 does not ship `eb-local-readiness`, and installs the script from a pinned main commit or a checkout instead of a missing release URL.

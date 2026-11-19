@@ -1,1 +1,0 @@
-The reference has the API of each component, written from the doc comments as the site is built: a page for each source file, with each `pub` declaration linked to its source line, and the Zig autodoc site at `api/`, which `zig build docs` makes. Building the documentation now needs Zig 0.17.1 on `PATH`. "Edit this page" opens a page's Org source.

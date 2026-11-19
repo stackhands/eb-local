@@ -1,1 +1,0 @@
-`eb-local dev` names the host's CA bundle in `SSL_CERT_FILE` and `CARGO_HTTP_CAINFO` when the host has none at `/etc/ssl/certs/ca-certificates.crt`, so `cargo` and `curl` from EESSI reach HTTPS servers on RHEL-family hosts. A value the shell already set is kept.

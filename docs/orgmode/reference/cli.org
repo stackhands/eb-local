@@ -11,8 +11,8 @@ eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
-eb-local [OPTION]... env [--strict]
-eb-local [OPTION]... dev [--strict] [--buildenv MODULE] [MODULE...]
+eb-local [OPTION]... env [--strict] [--json]
+eb-local [OPTION]... dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
@@ -57,15 +57,20 @@ directory you own.
                                        tree that variable selects
   eb-local --explain eb [--] [eb options]
                                        the script eb runs, with its arguments; runs nothing
-  eb-local env [--strict]                lines that make your installed modules visible;
+  eb-local env [--strict] [--json]       lines that make your installed modules visible;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1)
-  eb-local dev [--strict] [--buildenv MODULE] [MODULE...]
+  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
                                        the same, plus MODULEs and a build environment,
                                        so gcc, make, cmake and meson just work;
                                        --strict exits when the EESSI init file is missing
                                        (also when EB_LOCAL_ENV_STRICT=1);
-                                       --buildenv names the build environment to load
+                                       --buildenv names the build environment to load;
+                                       --json prints the change as JSON, for env too;
+                                       --envrc writes that line to .envrc for direnv;
+                                       --pure purges loaded modules and LD_* first;
+                                       --lock records what loads in eb-local.lock,
+                                       --locked loads exactly that again
   eb-local rpath-wrappers [--for FAMILY | --unwrapped]
                                        lines that put RPATH wrappers for the compilers
                                        on PATH first; dev uses them when no build
@@ -213,11 +218,11 @@ The version line names the program, its version, the target and optimize mode of
 Built with =zig build --release=safe -Dcommit=0123abc=, it prints:
 
 #+begin_example
-eb-local 3.1.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
+eb-local 3.2.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 #+end_example
 
-Since =v3.1.0=, no CLI flag was removed or renamed on =main=.
-The command line added =--strict= on =env=, =--unwrapped= on =rpath-wrappers=, =--recursive= on =check=, =--cvmfs=, =--cvmfs-parallel= and =--mpi= on =doctor=, =lmod-cache= (single-target and =--prefix= modes, with =--verify=), =modulerc=, =overlay=, =site check=, and =--target= and =--usage-log= on =uninstall=.
+Since =v3.1.0=, no CLI flag was removed or renamed.
+The command line added =--strict= and =--json= on =env=, =--json=, =--envrc=, =--pure=, =--lock= and =--locked= on =dev=, =--unwrapped= on =rpath-wrappers=, =--recursive= on =check=, =--cvmfs=, =--cvmfs-parallel= and =--mpi= on =doctor=, =lmod-cache= (single-target and =--prefix= modes, with =--verify=), =modulerc=, =overlay=, =site check=, and =--target= and =--usage-log= on =uninstall=.
 
 * Commands
 
@@ -292,7 +297,22 @@ When stdout is a terminal, it also says on stderr that the lines change nothing 
 
 | Option     | Meaning                                                                                                              |
 |------------+----------------------------------------------------------------------------------------------------------------------|
-| =--strict= | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when =EB_LOCAL_ENV_STRICT=1=). |
+| =--strict= | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when =EB_LOCAL_ENV_STRICT=1=). The =exit= is in the lines, so it ends the shell that evaluates them: meant for a job script, not an interactive shell. |
+| =--json=   | Print, in place of the lines, the change they make to the environment, as one line of JSON. |
+
+With =--json=, eb-local runs the lines in a bash child and prints how that shell's environment then differs from the caller's: ={"schema_version":1,"kind":"env","set":[{"name":...,"value":...}],"unset":[...]}=, both lists sorted by name. A shell that cannot evaluate POSIX lines applies it; in nushell:
+
+#+begin_src text
+def --env --wrapped eb [...args] {
+  let change = (^eb-local ...$args --json | from json)
+  $change.set | reduce --fold {} {|var, acc| $acc | upsert $var.name $var.value } | load-env
+  hide-env --ignore-errors ...$change.unset
+}
+eb env
+eb dev FFTW/3.3.10-GCC-15.2.0
+#+end_src
+
+Only variables are in the change. Shell functions and aliases, such as Lmod's =module=, stay in the bash child, so a later =module load= in the other shell is not possible this way; name the modules on the =dev= line. What the lines print goes to stderr. If the lines fail in bash, nothing is printed and the status is 1.
 
 ** dev
 
@@ -300,8 +320,29 @@ Print the lines =env= prints, then the lines that load the modules =dev.modules=
 
 | Option              | Meaning                                                                                    |
 |---------------------+--------------------------------------------------------------------------------------------|
-| =--strict=          | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when =EB_LOCAL_ENV_STRICT=1=). |
+| =--strict=          | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when =EB_LOCAL_ENV_STRICT=1=). As for =env=, the =exit= ends the shell that evaluates the lines. |
+| =--json=            | Print the change the lines make to the environment as one line of JSON, as =env --json= does, with =kind= =dev=. |
 | =--buildenv MODULE= | Load MODULE as the build environment whatever the compilers, as =dev.buildenv= does. |
+| =--envrc=           | Write the line that evaluates this =dev= to =.envrc= in the working directory, for direnv, and print nothing on stdout. |
+
+=dev --envrc MODULE...= writes three lines to =.envrc=:
+
+#+begin_src sh
+# >>> eb-local dev >>> rerun `eb-local dev --envrc` to change these lines
+eval "$(/path/to/eb-local dev MODULE...)"
+# <<< eb-local dev <<<
+#+end_src
+
+The program is named by its own path, and =--config=, =--profile=, =--project= and =--buildenv= are repeated on the line. A block already in the file is replaced and every other line is kept; a file without one gets it appended. A begin line without its end line is refused. Run =direnv allow= once per change. direnv evaluates the file in bash and gives the calling shell the change, so the environment follows the directory in bash, zsh, fish, nushell and the other shells direnv has a hook for, and is taken back on leaving it. As with =--json=, only variables reach the calling shell.
+| =--pure=            | Before anything loads, run =module purge= and unset =LD_LIBRARY_PATH=, =LD_PRELOAD= and =LD_AUDIT=. |
+| =--lock=            | Run the lines in a bash child and write what loaded to =eb-local.lock= in the working directory; print nothing on stdout. |
+| =--locked=          | Print the lines that load exactly the modules of =eb-local.lock=, from a purged shell. Takes no MODULE. |
+
+=dev --lock MODULE...= records what a dev environment resolved to: =stack.module=, the EESSI version, the CPU target (=EESSI_SOFTWARE_SUBDIR=), the accelerator target, and every loaded module with its version, in load order, the build environment among them. The file is one line of JSON with =kind= =dev-lock=. It is not written when the lines load no module.
+
+=dev --locked= loads that list and nothing else: it purges first, as =--pure= does, and names every module in full, so Lmod resolves nothing. A lock written with another =stack.module= is refused. When the shell's CPU target is not the lock's, the lines say so and load none of its modules; node types with the same CPU target share their binaries, so a lock from one loads on the other. =--json= and =--envrc= work with =--locked=: =dev --envrc --locked= writes the locked line to =.envrc=.
+
+Without =--pure=, the modules the shell already has stay loaded beside the ones =dev= names, and the loader variables stay as they are, with a warning for =LD_LIBRARY_PATH=. With it, the build environment is the stack, the named modules and the build environment only. Sticky modules survive =module purge=. A site that preloads a library for every process (XALT through =LD_PRELOAD=) loses that in this shell.
 
 A =MODULE= starts with a letter or digit and holds letters, digits, =.=, =_=, =+=, =-= and single slashes, with none at the end.
 With =LD_LIBRARY_PATH= set in the shell, =dev= warns on stderr.
@@ -389,8 +430,9 @@ It checks the site file, the secrets a build reads (never their values), the pre
 With =--workspace PATH=, it also creates, writes, renames, executes and removes a small probe in that existing directory.
 It reports the file-system type, whether the storage is node-local or shared, free bytes and inodes, a =noexec= mount, and whether the effective =XDG_CACHE_HOME= (or =$HOME/.cache= when unset) is inside the workspace.
 The check does not create a build workspace and never starts a build.
-It names an entry of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =CMAKE_PREFIX_PATH= or =PKG_CONFIG_PATH=, and a compiler-wrapper variable (=CC=, =CXX=, =FC=, =F77=, =F90=, =F95=, =CPP=, the =OMPI_=, =MPICH_= and =I_MPI_= forms, =RUSTC_WRAPPER=, =CCACHE_*=, =SCCACHE_*= and =CMAKE_*_COMPILER_LAUNCHER=), that resolves outside the approved prefixes.
+It names an entry of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =JULIA_LOAD_PATH=, =JULIA_DEPOT_PATH=, =NODE_PATH=, =CMAKE_PREFIX_PATH= or =PKG_CONFIG_PATH=, and a compiler-wrapper variable (=CC=, =CXX=, =FC=, =F77=, =F90=, =F95=, =CPP=, the =OMPI_=, =MPICH_= and =I_MPI_= forms, =RUSTC_WRAPPER=, =CARGO_BUILD_RUSTC_WRAPPER=, =RUSTC_WORKSPACE_WRAPPER=, =CARGO_TARGET_*_LINKER=, =R_MAKEVARS_USER=, =R_MAKEVARS_SITE=, =CCACHE_*=, =SCCACHE_*= and =CMAKE_*_COMPILER_LAUNCHER=), that resolves outside the approved prefixes. =RUSTFLAGS= and =CARGO_TARGET_*_RUSTFLAGS= are flag strings, not paths, so they are not named.
 A relative entry and an empty entry in those lists are foreign too, because the approved prefixes are absolute paths. =doctor= shows an empty entry as =''=.
+Julia's own entries are not: an empty entry of =JULIA_LOAD_PATH= or =JULIA_DEPOT_PATH= stands for Julia's defaults, and a load-path entry starting with =@=, such as =@stdlib=, is resolved by Julia.
 A build keeps that entry unless =build.clear_foreign_prefixes= is set.
 It reports the path =/etc/localtime= resolves to, warns when that file is its own bind mount, and warns about a host library directory a container runtime injected, including =/.singularity.d/libs= and a directory named by =APPTAINER_CONTAINLIBS= or =SINGULARITY_CONTAINLIBS=.
 With =--cvmfs=, it also checks the CernVM-FS repository named by =EESSI_CVMFS_REPO=, or =/cvmfs/software.eessi.io=.
