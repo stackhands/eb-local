@@ -62,15 +62,16 @@ const usage_text =
     \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
-    \\  eb-local env [--strict]                lines that make your installed modules visible;
+    \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--buildenv MODULE] [MODULE...]
+    \\  eb-local dev [--strict] [--json] [--buildenv MODULE] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1);
-    \\                                       --buildenv names the build environment to load
+    \\                                       --buildenv names the build environment to load;
+    \\                                       --json prints the change as JSON, for env too
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
