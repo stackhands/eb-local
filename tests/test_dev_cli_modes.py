@@ -264,7 +264,7 @@ class DevCliModes(unittest.TestCase):
         self.assertIn("LD_LIBRARY_PATH is set", got.stderr)
         self.assertIn("module load ScaLAPACK/2.2.2-lfoss-2026.1\n", got.stdout)
         self.assertEqual(got.stdout.count("ScaLAPACK/2.2.2-lfoss-2026.1"), 1)
-        self.assertIn("module load buildenv/default-foss-2026.1\n", got.stdout)
+        self.assertIn("module load buildenv/default-foss-2026.1 || return $?\n", got.stdout)
         self.assertIn("export EB_LOCAL_DEV_PREFIX=", got.stdout)
 
     def test_strict_prepends_cvmfs_init_check_before_module_loads(self):
@@ -293,6 +293,92 @@ class DevCliModes(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn("CVMFS", proc.stderr)
+
+    def test_a_default_buildenv_load_stays_a_plain_module_load(self):
+        # The default path picks a build environment after the modules load.
+        # That load line stays byte-identical: a return there would skip the
+        # unset of the compiler-family scratch names.
+        got = self.run_dev(["GSL/2.8-GCC-15.2.0"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("\n    module load buildenv/default-foss-2026.1\n", got.stdout)
+        self.assertNotIn("module load buildenv/default-foss-2026.1 || return $?", got.stdout)
+
+    def _failed_module(self):
+        # A module command that exists and refuses every load. The status is
+        # distinctive, so a later rpath failure cannot be mistaken for it.
+        stub = self.root / "module-fail.sh"
+        stub.write_text("module() { return 9; }\n", encoding="utf-8")
+        return stub
+
+    def test_a_failed_configured_buildenv_load_fails_eval_before_the_prefix(self):
+        # The configuration (here --buildenv) names one module. A load that
+        # returns nonzero must fail eval of the dev lines and must not export
+        # the prefix.
+        got = self.run_dev(["--buildenv", "buildenv/missing", "FFTW/3.3.10"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        script = self._failed_module().read_text(encoding="utf-8") + got.stdout
+        script += 'printf "status|%s|%s" "$?" "${EB_LOCAL_DEV_PREFIX-unset}"\n'
+        replay = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual((replay.returncode, replay.stdout), (0, "status|9|unset"), replay.stdout + replay.stderr)
+        self.assertIn("module load buildenv/missing || return $?\n", got.stdout)
+        self.assertNotIn("EB_LOCAL_DEV_PREFIX=", replay.stdout)
+
+    def test_json_reports_a_failed_configured_module_load(self):
+        got = self.run_dev(
+            ["--json", "--buildenv", "buildenv/missing", "FFTW/3.3.10"],
+            BASH_ENV=str(self._failed_module()),
+        )
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("the dev lines failed in bash (status 9)", got.stderr)
+        self.assertNotIn("EB_LOCAL_DEV_PREFIX", got.stdout)
+
+    def test_lock_reports_a_failed_configured_module_load(self):
+        lock = self.root / "eb-local.lock"
+        got = self.run_dev(
+            ["--lock", "--buildenv", "buildenv/missing", "FFTW/3.3.10"],
+            BASH_ENV=str(self._failed_module()),
+            **self.RESOLVED,
+        )
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("the dev lines failed in bash (status 9)", got.stderr)
+        self.assertFalse(lock.exists(), got.stderr)
+
+    def test_a_failed_configured_buildenv_load_leaves_an_interactive_shell_up(self):
+        # Same failure as the eval case, sourced by an interactive shell.
+        # The shell stays up, reports the load status, and leaves the prefix
+        # unset. Matches the rpath interactive-shell case.
+        got = self.run_dev(["--buildenv", "buildenv/missing"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        script = (
+            self._failed_module().read_text(encoding="utf-8")
+            + got.stdout
+            + "status=$?\n"
+            + 'printf "survived|%s|%s|%s|%s|%s" "$status" "${EB_LOCAL_DEV_PREFIX-unset}" '
+            + '"${eb_local_family-unset}" "${eb_local_buildenv-unset}" "${eb_local_level-unset}"\n'
+        )
+        replay = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-ic", script],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            (replay.returncode, replay.stdout),
+            (0, "survived|9|unset|unset|unset|unset"),
+            replay.stdout + replay.stderr,
+        )
+        self.assertNotIn("EB_LOCAL_DEV_PREFIX", replay.stdout)
 
 
 if __name__ == "__main__":

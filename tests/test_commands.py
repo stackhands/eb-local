@@ -265,7 +265,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         loads = [l for l in run.stdout.splitlines() if l.startswith("module load ")]
         self.assertEqual(loads[-2:], ["module load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
-                                      "module load buildenv/default-foss-2026.1"], run.stdout)
+                                      "module load buildenv/default-foss-2026.1 || return $?"], run.stdout)
 
     def test_a_relative_prefix_is_printed_absolute(self):
         run = self.run_wrapper(["env"], SLURM_JOB_ID="", EB_LOCAL_PREFIX="relative/prefix")
@@ -394,14 +394,14 @@ class Commands(StorageFixture):
 
     def test_dev_buildenv_comes_from_the_option_or_the_configuration(self):
         run = self.run_wrapper(["dev", "--buildenv", "buildenv/default-gompi-2026.1"], SLURM_JOB_ID="")
-        self.assertEqual(last_load(run.stdout), "module load buildenv/default-gompi-2026.1", run.stdout)
+        self.assertEqual(last_load(run.stdout), "module load buildenv/default-gompi-2026.1 || return $?", run.stdout)
         self.prefix.mkdir(parents=True)
         self.config.write_text(self.config.read_text() + "dev_buildenv = buildenv/mine\nstack_module = stack/mine\n")
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
         self.assertIn("module load stack/mine\n"
                       'if command -v eessi-arch-guard >/dev/null 2>&1; then eval "$(eessi-arch-guard --shell)"; fi\n'
                       "module load EESSI-extend/2026.06-easybuild\n", run.stdout)
-        self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
+        self.assertEqual(last_load(run.stdout), "module load buildenv/mine || return $?", run.stdout)
 
     def test_legacy_config_checks_all_lines_before_value_validation(self):
         cases = (
@@ -520,7 +520,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("belongs to the lfoss toolchain", run.stderr)
         self.assertIn("--buildenv", run.stderr)
-        self.assertEqual(last_load(run.stdout), "module load buildenv/default-foss-2026.1", run.stdout)
+        self.assertEqual(last_load(run.stdout), "module load buildenv/default-foss-2026.1 || return $?", run.stdout)
         for argv in (["dev", "FFTW/3.3.10-GCC-15.2.0"],
                      ["dev", "ScaLAPACK/2.2.2-lfoss-2026.1-fb"],
                      ["dev", "--buildenv", "buildenv/default-lfoss-2026.1", "FFTW.MPI/3.3.10-lompi-2026.1"],
