@@ -634,6 +634,28 @@ class Commands(StorageFixture):
                         (2, "", f"eb-local: {opt} needs a value\n"),
                     )
 
+    def test_locale_unicode_module_and_days_rejected_under_utf8(self):
+        utf8_env = {"LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "SLURM_JOB_ID": ""}
+        for mod in ("mod/café", "mod²/1.0", "É/1.0"):
+            with self.subTest(mod=mod):
+                run = self.run_wrapper(["dev", mod], **utf8_env)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: '{mod}' is not a module name\n"),
+                )
+        for flag in (["--buildenv=mod/café"], ["--buildenv", "mod/café"]):
+            with self.subTest(flag=flag):
+                run = self.run_wrapper(["dev", *flag], **utf8_env)
+                self.assertEqual((run.returncode, run.stdout), (2, ""), run.stdout + run.stderr)
+                self.assertIn("'mod/café' is not a module name\n", run.stderr)
+        for tail in (["--logs-older-than", "²"], ["--logs-older-than=²"], ["--logs-older-than", "¹"]):
+            with self.subTest(tail=tail):
+                run = self.run_wrapper(["clean", *tail, "--dry-run"], **utf8_env)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", "eb-local: --logs-older-than needs a number of days\n"),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

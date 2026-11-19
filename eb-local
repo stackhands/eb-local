@@ -42,9 +42,14 @@ opt_value() {
     printf -v "$var" '%s' "$val"
 }
 
+c_match() {
+    local LC_ALL=C
+    [[ "$1" =~ $2 ]]
+}
+
 # Module names as Lmod writes them. Anything else could change the meaning of
 # the lines env and dev print for eval, so it is refused.
-valid_module() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9._+-]+)*$ ]]; }
+valid_module() { c_match "$1" '^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9._+-]+)*$'; }
 
 prefix="${EB_LOCAL_PREFIX:-$HOME/.local/eessi}"
 mode=user
@@ -97,12 +102,12 @@ while [ $# -gt 0 ]; do
                         --logs-older-than)
                             [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
                             opt_value logs_days --logs-older-than "${2:-}"
-                            [[ "$logs_days" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
+                            c_match "$logs_days" '^[0-9]{1,5}$' || die "--logs-older-than needs a number of days"
                             logs_days_set=true; shift 2 ;;
                         --logs-older-than=*)
                             opt_value logs_days --logs-older-than "${1#--logs-older-than=}"
                             [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
-                            [[ "$logs_days" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
+                            c_match "$logs_days" '^[0-9]{1,5}$' || die "--logs-older-than needs a number of days"
                             logs_days_set=true; shift ;;
                         --no-logs) clean_logs=false; shift ;;
                         --sources) clean_sources=true; shift ;;
@@ -385,7 +390,7 @@ durable_dirs() {
 # The allocation's node-local mount: the exact job mount, owned, canonical,
 # its own file system of the configured type, writable.
 check_job_root() {
-    [[ "$SLURM_JOB_ID" =~ ^[1-9][0-9]*$ ]] || fail_storage 'invalid Slurm allocation identity.'
+    c_match "$SLURM_JOB_ID" '^[1-9][0-9]*$' || fail_storage 'invalid Slurm allocation identity.'
     job_user=$(id -un) || fail_storage 'cannot determine the allocation user.'
     local pattern="$node_local_mount" name=""
     while [ -n "$pattern" ]; do
@@ -423,7 +428,7 @@ check_job_root() {
 own_workspace() {
     local dir="$1"
     [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-    [[ "$dir" =~ ^"$job_root"/eb-local\.[A-Za-z0-9]{8}$ ]] || return 1
+    [[ "$dir" == "$job_root"/eb-local.* ]] && c_match "${dir#"$job_root"/}" '^eb-local\.[A-Za-z0-9]{8}$' || return 1
     [ "$(stat -c %u -- "$dir")" = "$(id -u)" ]
 }
 
