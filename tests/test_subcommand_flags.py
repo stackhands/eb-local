@@ -183,50 +183,6 @@ class SubcommandFlags(StorageFixture):
                 self.assertEqual(fwd.returncode, 0, fwd.stderr)
                 self.assertEqual(fwd.stdout.splitlines(), ["package", action, "--dry-run"])
 
-    def test_rpath_wrapper_treats_help_equals_as_info_only(self):
-        tools = self.root / "fake-gcc-bin"
-        tools.mkdir()
-        gcc = tools / "gcc"
-        gcc.write_text(
-            "#!/bin/sh\n"
-            "for a in \"$@\"; do\n"
-            "  case \"$a\" in\n"
-            "    -Wl,*)\n"
-            "      if [ \"${1-}\" = '--help=target' ]; then\n"
-            "        echo \"gcc: unrecognized option '$a'\" >&2\n"
-            "        exit 2\n"
-            "      fi\n"
-            "      ;;\n"
-            "  esac\n"
-            "done\n"
-            "printf '%s\\n' \"$*\"\n"
-        )
-        gcc.chmod(0o755)
-        cache = self.root / "rpath-cache"
-        cache.mkdir()
-        gen = self.run_bin(
-            ["rpath-wrappers", "--for", "gcc"],
-            PATH=f"{tools}:/usr/bin:/bin",
-            XDG_CACHE_HOME=str(cache),
-        )
-        self.assertEqual(gen.returncode, 0, gen.stderr)
-        wrap_dir = next(
-            line.split("=", 1)[1]
-            for line in gen.stdout.splitlines()
-            if line.startswith("export EB_LOCAL_RPATH_WRAPPERS=")
-        )
-        wgcc = Path(wrap_dir) / "gcc"
-        run_env = {"PATH": f"{wrap_dir}:{tools}:/usr/bin:/bin", "LIBRARY_PATH": "/opt/mylib"}
-
-        info = subprocess.run([str(wgcc), "--help=target"], env=run_env, capture_output=True, text=True)
-        self.assertEqual(info.returncode, 0, info.stdout + info.stderr)
-        self.assertEqual(info.stdout.strip(), "--help=target")
-
-        link = subprocess.run([str(wgcc), "-o", "a.out", "a.o"], env=run_env, capture_output=True, text=True)
-        self.assertEqual(link.returncode, 0, link.stdout + link.stderr)
-        self.assertIn("-Wl,-rpath,/opt/mylib", link.stdout)
-        self.assertIn("-Wl,--disable-new-dtags", link.stdout)
-
 
 if __name__ == "__main__":
     unittest.main()

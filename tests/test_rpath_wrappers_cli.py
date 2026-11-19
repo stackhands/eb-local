@@ -84,6 +84,26 @@ class RpathWrappersCli(unittest.TestCase):
         self.assertEqual(got.stdout, "")
         self.assertIn("no compiler or linker on PATH to wrap", got.stderr)
 
+    def test_generated_wrappers_bypass_help_equals_queries(self):
+        got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        script = got.stdout + "gcc --help=target\n" + "gcc -o prog a.o\n"
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": f"{self.bin}:/usr/bin:/bin", "LIBRARY_PATH": "/opt/mylib"},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(
+            self.log.read_text(encoding="utf-8").splitlines(),
+            [
+                "gcc:--help=target",
+                "gcc:-o prog a.o -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+            ],
+        )
+
     def test_unwrapped_skips_easybuild_wrapped_compilers_and_wraps_bare_clang(self):
         eb_wrap = self.root / "eb" / "rpath_wrappers" / "clang_wrapper"
         eb_wrap.mkdir(parents=True)
