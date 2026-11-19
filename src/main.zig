@@ -65,7 +65,7 @@ const usage_text =
     \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
+    \\  eb-local dev [--strict] [--pure] [--replace] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
@@ -74,8 +74,11 @@ const usage_text =
     \\                                       --json prints the change as JSON, for env too;
     \\                                       --envrc writes that line to .envrc for direnv;
     \\                                       --pure purges loaded modules and LD_* first;
+    \\                                       --replace records prior state and replaces the
+    \\                                       modules loaded by an earlier --replace;
     \\                                       --lock records what loads in eb-local.lock,
     \\                                       --locked loads exactly that again
+    \\  eb-local leave                       lines that restore the state before dev --replace
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -381,6 +384,7 @@ fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, cano
     parts.append(a, command) catch oom();
     if (std.mem.eql(u8, command, "dev")) {
         if (g.pure) parts.append(a, "--pure") catch oom();
+        if (g.replace) parts.append(a, "--replace") catch oom();
         if (g.locked) parts.append(a, "--locked") catch oom();
         if (g.buildenv) |p| parts.appendSlice(a, &.{ "--buildenv", q(a, p) }) catch oom();
         for (extra) |m| parts.append(a, q(a, m)) catch oom();
@@ -497,6 +501,8 @@ const Global = struct {
     envrc: bool = false,
     /// `dev --pure`: purge the loaded modules and the loader variables first.
     pure: bool = false,
+    /// `dev --replace`: remember the caller and replace an earlier recorded dev.
+    replace: bool = false,
     /// `dev --lock`: write what the dev lines load to `eb-local.lock`.
     lock: bool = false,
     /// `dev --locked`: load the modules of `eb-local.lock`, and only those.
@@ -731,6 +737,190 @@ fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     return 0;
 }
 
+const dev_saved_names = [_][]const u8{
+    "PATH",
+    "EB_LOCAL_DEV_PREFIX",
+    "EB_LOCAL_RPATH_WRAPPERS",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+};
+
+const SavedVar = struct {
+    present: bool,
+    value: []const u8 = "",
+};
+
+const DevSaved = struct {
+    prior: []const u8,
+    active: []const u8,
+    values: [dev_saved_names.len]SavedVar,
+    base: []const u8,
+};
+
+fn validModuleList(text: []const u8) bool {
+    if (text.len == 0) return true;
+    var it = std.mem.splitScalar(u8, text, ':');
+    while (it.next()) |module| {
+        if (!config.validModule(module)) return false;
+    }
+    return true;
+}
+
+fn moduleInList(list: []const u8, wanted: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ':');
+    while (it.next()) |module| {
+        if (std.mem.eql(u8, module, wanted)) return true;
+    }
+    return false;
+}
+
+fn hexNibble(ch: u8) ?u8 {
+    return switch (ch) {
+        '0'...'9' => ch - '0',
+        'a'...'f' => ch - 'a' + 10,
+        else => null,
+    };
+}
+
+fn hexEncode(a: Allocator, text: []const u8) []const u8 {
+    const digits = "0123456789abcdef";
+    const out = a.alloc(u8, text.len * 2) catch oom();
+    for (text, 0..) |ch, i| {
+        out[i * 2] = digits[ch >> 4];
+        out[i * 2 + 1] = digits[ch & 15];
+    }
+    return out;
+}
+
+fn hexDecode(a: Allocator, text: []const u8) ?[]const u8 {
+    if (text.len % 2 != 0) return null;
+    const out = a.alloc(u8, text.len / 2) catch oom();
+    var i: usize = 0;
+    while (i < text.len) : (i += 2) {
+        const high = hexNibble(text[i]) orelse return null;
+        const low = hexNibble(text[i + 1]) orelse return null;
+        const byte = high * 16 + low;
+        if (byte == 0) return null;
+        out[i / 2] = byte;
+    }
+    return out;
+}
+
+fn savedValue(c: Ctx, line: []const u8, name: []const u8) SavedVar {
+    if (!std.mem.startsWith(u8, line, name) or line.len <= name.len or line[name.len] != ':')
+        die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    const encoded = line[name.len + 1 ..];
+    if (std.mem.eql(u8, encoded, "u")) return .{ .present = false };
+    if (encoded.len == 0 or encoded[0] != 's')
+        die("EB_LOCAL_DEV_SAVED contains an invalid value", .{});
+    return .{
+        .present = true,
+        .value = hexDecode(c.a, encoded[1..]) orelse
+            die("EB_LOCAL_DEV_SAVED contains an invalid value", .{}),
+    };
+}
+
+fn parseDevSaved(c: Ctx, text: []const u8) DevSaved {
+    var lines: [9][]const u8 = undefined;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    for (&lines) |*line| {
+        line.* = it.next() orelse
+            die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    }
+    if (it.next() != null)
+        die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    if (!std.mem.eql(u8, lines[0], "eb-local-dev-v1"))
+        die("EB_LOCAL_DEV_SAVED has an unsupported version", .{});
+    if (!std.mem.startsWith(u8, lines[1], "prior:"))
+        die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    const prior = lines[1]["prior:".len..];
+    if (!validModuleList(prior))
+        die("EB_LOCAL_DEV_SAVED contains an invalid prior module list", .{});
+    var values: [dev_saved_names.len]SavedVar = undefined;
+    for (dev_saved_names, 0..) |name, i| values[i] = savedValue(c, lines[i + 2], name);
+    if (!std.mem.startsWith(u8, lines[8], "active:"))
+        die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    const active = lines[8]["active:".len..];
+    if (!validModuleList(active))
+        die("EB_LOCAL_DEV_SAVED contains an invalid active module list", .{});
+    const marker = std.mem.lastIndexOf(u8, text, "\nactive:") orelse unreachable;
+    return .{ .prior = prior, .active = active, .values = values, .base = text[0..marker] };
+}
+
+fn newDevSaved(c: Ctx) DevSaved {
+    const prior = c.env.get("LOADEDMODULES") orelse "";
+    if (!validModuleList(prior))
+        die("LOADEDMODULES contains a module name that cannot be recorded", .{});
+    var values: [dev_saved_names.len]SavedVar = undefined;
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(c.a, "eb-local-dev-v1\nprior:") catch oom();
+    out.appendSlice(c.a, prior) catch oom();
+    for (dev_saved_names, 0..) |name, i| {
+        out.append(c.a, '\n') catch oom();
+        out.appendSlice(c.a, name) catch oom();
+        out.append(c.a, ':') catch oom();
+        if (c.env.get(name)) |value| {
+            values[i] = .{ .present = true, .value = value };
+            out.append(c.a, 's') catch oom();
+            out.appendSlice(c.a, hexEncode(c.a, value)) catch oom();
+        } else {
+            values[i] = .{ .present = false };
+            out.append(c.a, 'u') catch oom();
+        }
+    }
+    return .{ .prior = prior, .active = "", .values = values, .base = out.items };
+}
+
+fn currentDevSaved(c: Ctx) DevSaved {
+    return if (c.env.get("EB_LOCAL_DEV_SAVED")) |text| parseDevSaved(c, text) else newDevSaved(c);
+}
+
+fn moduleRestoreLines(c: Ctx, saved: DevSaved) []const u8 {
+    const current = c.env.get("LOADEDMODULES") orelse "";
+    if (!validModuleList(current))
+        die("LOADEDMODULES contains a module name that cannot be restored", .{});
+    var out: std.ArrayList(u8) = .empty;
+    var wrote_unload = false;
+    var it = std.mem.splitScalar(u8, current, ':');
+    while (it.next()) |module| {
+        if (module.len == 0 or moduleInList(saved.prior, module)) continue;
+        if (!wrote_unload) {
+            out.appendSlice(c.a, "module unload") catch oom();
+            wrote_unload = true;
+        }
+        out.appendSlice(c.a, str(c.a, " {s}", .{q(c.a, module)})) catch oom();
+    }
+    if (wrote_unload) out.append(c.a, '\n') catch oom();
+    if (saved.prior.len > 0) {
+        out.appendSlice(c.a, "module load") catch oom();
+        it = std.mem.splitScalar(u8, saved.prior, ':');
+        while (it.next()) |module|
+            out.appendSlice(c.a, str(c.a, " {s}", .{q(c.a, module)})) catch oom();
+        out.append(c.a, '\n') catch oom();
+    }
+    return out.items;
+}
+
+fn cmdLeave(c: Ctx) u8 {
+    const text = c.env.get("EB_LOCAL_DEV_SAVED") orelse
+        die("there is no recorded dev environment to leave", .{});
+    const saved = parseDevSaved(c, text);
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(c.a, moduleRestoreLines(c, saved)) catch oom();
+    for (dev_saved_names, saved.values) |name, value| {
+        if (value.present) {
+            out.appendSlice(c.a, str(c.a, "export {s}={s}\n", .{ name, q(c.a, value.value) })) catch oom();
+        } else {
+            out.appendSlice(c.a, str(c.a, "unset {s}\n", .{name})) catch oom();
+        }
+    }
+    out.appendSlice(c.a, "unset EB_LOCAL_DEV_SAVED\n") catch oom();
+    evalHint("leave");
+    cli.put(1, out.items);
+    return 0;
+}
+
 /// The first and last line of the lines `dev --envrc` owns in `.envrc`.
 /// What stands outside them is the user's and is kept.
 const envrc_begin = "# >>> eb-local dev >>>";
@@ -882,6 +1072,33 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     return 0;
 }
 
+fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
+    const current = c.env.get("LOADEDMODULES") orelse "";
+    if (!validModuleList(current))
+        die("LOADEDMODULES contains a module name that cannot be replaced", .{});
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(c.a, lmod_init) catch oom();
+    out.appendSlice(c.a, str(c.a, "export EB_LOCAL_DEV_SAVED={s}\n", .{q(c.a, saved.base)})) catch oom();
+    var wrote_unload = false;
+    var it = std.mem.splitScalar(u8, saved.active, ':');
+    while (it.next()) |module| {
+        if (module.len == 0 or moduleInList(saved.prior, module) or !moduleInList(current, module)) continue;
+        if (!wrote_unload) {
+            out.appendSlice(c.a, "module unload") catch oom();
+            wrote_unload = true;
+        }
+        out.appendSlice(c.a, str(c.a, " {s}", .{q(c.a, module)})) catch oom();
+    }
+    if (wrote_unload) out.append(c.a, '\n') catch oom();
+    return out.items;
+}
+
+const record_active_modules =
+    \\EB_LOCAL_DEV_SAVED=$(printf '%s\nactive:%s' "$EB_LOCAL_DEV_SAVED" "${LOADEDMODULES-}")
+    \\export EB_LOCAL_DEV_SAVED
+    \\
+;
+
 fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const a = c.a;
     // A module is loaded once, where it is first named; a chosen build
@@ -896,6 +1113,8 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         } else mods.append(a, m) catch oom();
     };
     const installed = place(c, s);
+    if (g.replace and (g.lock or g.locked))
+        die("dev --replace does not go with --lock or --locked", .{});
     if (g.locked) {
         if (extra.len > 0) die("dev --locked loads the modules of {s}; name none on the line", .{lock_name});
         if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
@@ -904,6 +1123,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
     if (!g.json_out and !g.lock) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
+    if (g.replace) out.appendSlice(a, replacePrelude(c, currentDevSaved(c))) catch oom();
     out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), g.pure)) catch oom();
     // The modules the program uses first, the build environment last, so
     // its wrappers come first on PATH. When the program links, they record
@@ -925,6 +1145,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);
@@ -4710,7 +4931,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit };
+const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -4895,6 +5116,7 @@ pub fn main(init: std.process.Init) u8 {
                     g.json_out = true;
                 } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
             },
+            .leave => die("leave takes no arguments; got '{s}'", .{x}),
             .profiles => {
                 if (std.mem.eql(u8, x, "--json")) {
                     g.json_out = true;
@@ -5093,6 +5315,8 @@ pub fn main(init: std.process.Init) u8 {
                     g.envrc = true;
                 } else if (std.mem.eql(u8, x, "--pure")) {
                     g.pure = true;
+                } else if (std.mem.eql(u8, x, "--replace")) {
+                    g.replace = true;
                 } else if (std.mem.eql(u8, x, "--lock")) {
                     g.lock = true;
                 } else if (std.mem.eql(u8, x, "--locked")) {
@@ -5216,6 +5440,7 @@ pub fn main(init: std.process.Init) u8 {
             die("eb reads the install mode from the environment, not from --profile, --project or --config", .{});
         return if (g.explain) explainExtend(c, rest.items) else cmdExtend(c, rest.items);
     }
+    if (command == .leave) return cmdLeave(c);
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s, g),
@@ -5239,7 +5464,7 @@ pub fn main(init: std.process.Init) u8 {
         },
         .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
+        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
     };
 }
 

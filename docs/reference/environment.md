@@ -47,6 +47,7 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 | `EB_LOCAL_LOCK_TIMEOUT_MS` | Positive integer milliseconds to wait for a busy `flock` lock before exiting non-zero; default `300000`. |
 | `EB_LOCAL_EESSI_EXTEND` | Set, not empty and not `0`, it sends every argument to `eb`, as after `eb-local eb --`. An eb-stack EESSI target runs eb-local this way. |
 | `EB_LOCAL_ENV_STRICT` | Set, not empty and not `0` or `false`, `env` and `dev` prepend the same CVMFS check as `--strict` before their load lines. |
+| `EB_LOCAL_DEV_SAVED` | The versioned state written by `dev --replace` and read by the next `dev --replace` or `leave`; malformed state is refused. |
 | `EB_LOCAL_RPATH_WRAPPERS` | The wrapper directory an earlier `dev` put first on `PATH`; the next `dev` takes it off. |
 | `HOME` | Stands for `~/` in settings and secret sources, holds the default prefix, and the user file and the wrappers when the `XDG_*` variable is unset. |
 | `XDG_CONFIG_HOME` | Holds the user file, `$XDG_CONFIG_HOME/eb-local/config.toml`. |
@@ -79,6 +80,7 @@ The lines `eb-local dev` prints do the same, load the modules and a build enviro
 | Variable | Value |
 |---|---|
 | `EB_LOCAL_DEV_PREFIX` | `<prefix>/dev/<EESSI version>/<CPU target>`, with `/<GPU target>` after it when EESSI found one |
+| `EB_LOCAL_DEV_SAVED` | The state from before the first `dev --replace` and the module list from the latest replacement |
 | `PATH` | The RPATH wrappers' directory first, when eb-local writes wrappers |
 | `EB_LOCAL_RPATH_WRAPPERS` | The RPATH wrappers' directory, when eb-local writes wrappers |
 | `SSL_CERT_FILE`, `CARGO_HTTP_CAINFO` | The host's CA bundle, when the host has none at `/etc/ssl/certs/ca-certificates.crt` and the variable is not set |
