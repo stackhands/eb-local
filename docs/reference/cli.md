@@ -304,7 +304,7 @@ When stdout is a terminal, it also says on stderr that the lines change nothing 
 
 With `--json`, eb-local runs the lines in a bash child and prints how that shell's environment then differs from the caller's: `{"schema_version":1,"kind":"env","set":[{"name":...,"value":...}],"unset":[...]}`, both lists sorted by name. A shell that cannot evaluate POSIX lines applies it; in nushell:
 
-```nu
+```text
 def --env --wrapped eb [...args] {
   let change = (^eb-local ...$args --json | from json)
   $change.set | reduce --fold {} {|var, acc| $acc | upsert $var.name $var.value } | load-env
