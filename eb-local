@@ -43,6 +43,7 @@ valid_module() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9._+-]+)*$ ]]
 prefix="${EB_LOCAL_PREFIX:-$HOME/.local/eessi}"
 mode=user
 command=build
+if [ "${1:-}" = "--version" ]; then version; exit 0; fi
 case "${1:-}" in
     env|dev|clean) command="$1"; shift ;;
     help|-h|--help) usage; exit 0 ;;
@@ -60,7 +61,6 @@ allow_delete=false
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --version) version; exit 0 ;;
         --project)
             [ -n "${2:-}" ] || die "--project needs a directory"
             prefix="$2"; mode=project; shift 2 ;;
