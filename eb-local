@@ -61,7 +61,6 @@ while :; do
   PATH directory: $absolute_dir"
     candidate=$absolute_dir/eb-local
     if [ -x "$candidate" ] && [ ! -d "$candidate" ] &&
-        ! [ "$candidate" -ef "$real_shim" ] &&
         ! is_delegation_shim "$candidate"; then
         exec "$candidate" "$@"
     fi
