@@ -296,6 +296,21 @@ class Commands(StorageFixture):
         ok = self.run_wrapper(["env"], SLURM_JOB_ID="")
         self.assertEqual(ok.returncode, 0, ok.stderr)
 
+    def test_legacy_config_rejects_duplicate_keys(self):
+        cases = (
+            ("same_after_bad", "node_local_root = /a/\ntrash = rm\nnode_local_root = /b\n", "3: 'storage.node_local_root' is set twice (first on line 1)"),
+            ("cross_table", "trash = auto\nnode_local_root = /a\ntrash = none\n", "3: 'clean.trash' is set twice (first on line 1)"),
+            ("stack_dup", "stack_module = EESSI/2026.06\nstack_module = EESSI/2026.06\n", "2: 'stack.module' is set twice (first on line 1)"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text)
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}:{suffix}\n"),
+                )
+
     def test_configured_module_names_are_checked(self):
         self.config.write_text(self.config.read_text() + "stack_module = EESSI;touch injected\n")
         run = self.run_wrapper(["env"], SLURM_JOB_ID="")
