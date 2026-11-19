@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 import binary
+import hostile_fs
 
 REPO = Path(__file__).resolve().parents[1]
 TOOL = REPO / "tools" / "cli_assets.py"
@@ -102,6 +103,71 @@ class CliAssets(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(posix.returncode, 0, posix.stdout + posix.stderr)
+
+    def test_hostile_destinations_refuse_and_preserve_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out_ro = root / "ro-share"
+            comps_ro = out_ro / "completions"
+            comps_ro.mkdir(parents=True)
+            with hostile_fs.readonly_dir(comps_ro):
+                cp_ro = subprocess.run(
+                    ["python3", str(TOOL), "--out", str(out_ro), "--tool", f"eb-local::{binary.BIN}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertEqual(cp_ro.returncode, 1, cp_ro.stdout + cp_ro.stderr)
+            self.assertNotIn("Traceback", cp_ro.stderr)
+            self.assertIn("cli_assets:", cp_ro.stderr)
+
+            out_dir_collision = root / "dir-collision"
+            (out_dir_collision / "completions" / "eb-local.bash").mkdir(parents=True)
+            cp_dir = subprocess.run(
+                ["python3", str(TOOL), "--out", str(out_dir_collision), "--tool", f"eb-local::{binary.BIN}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(cp_dir.returncode, 1, cp_dir.stdout + cp_dir.stderr)
+            self.assertNotIn("Traceback", cp_dir.stderr)
+            self.assertIn("cli_assets:", cp_dir.stderr)
+
+            for rel in ("completions/eb-local.bash", "man/eb-local.1"):
+                with self.subTest(rel=rel):
+                    out_sym = root / f"sym-{rel.replace('/', '-')}"
+                    link_path = out_sym / rel
+                    link_path.parent.mkdir(parents=True)
+                    outside = root / f"outside-{rel.replace('/', '-')}"
+                    hostile_fs.dangling_symlink(link_path, outside)
+                    cp_sym = subprocess.run(
+                        ["python3", str(TOOL), "--out", str(out_sym), "--tool", f"eb-local::{binary.BIN}"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(cp_sym.returncode, 1, cp_sym.stdout + cp_sym.stderr)
+                    self.assertNotIn("Traceback", cp_sym.stderr)
+                    self.assertIn("symlink", cp_sym.stderr)
+                    self.assertFalse(outside.exists())
+                    if rel == "man/eb-local.1":
+                        self.assertFalse((out_sym / "completions").exists())
+
+    def test_tmpfs_enospc_keeps_destination_clean(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        out = mnt / "share"
+        cp = subprocess.run(
+            ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.BIN}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+        self.assertNotIn("Traceback", cp.stderr)
+        self.assertIn("cli_assets:", cp.stderr)
+        self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":
