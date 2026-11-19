@@ -220,11 +220,10 @@ The version line names the program, its version, the target and optimize mode of
 Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 
 ```text
-eb-local 3.2.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
+eb-local 3.3.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
 
-Since `v3.1.0`, no CLI flag was removed or renamed.
-The command line added `--strict` and `--json` on `env`, `--json`, `--envrc`, `--pure`, `--lock` and `--locked` on `dev`, `--unwrapped` on `rpath-wrappers`, `--recursive` on `check`, `--cvmfs`, `--cvmfs-parallel` and `--mpi` on `doctor`, `lmod-cache` (single-target and `--prefix` modes, with `--verify`), `modulerc`, `overlay`, `site check`, and `--target` and `--usage-log` on `uninstall`.
+Since `v3.2.0`, no CLI flag was added, removed or renamed.
 
 ## Commands
 
