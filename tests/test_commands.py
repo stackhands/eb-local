@@ -656,6 +656,22 @@ class Commands(StorageFixture):
                     (2, "", "eb-local: --logs-older-than needs a number of days\n"),
                 )
 
+    def test_legacy_config_rejects_unicode_in_ascii_fields_under_utf8(self):
+        utf8_env = {"LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "SLURM_JOB_ID": ""}
+        cases = (
+            ("fstype_unicode", "node_local_root = /local\nnode_local_fstype = ext⁴\n", "2: storage.node_local_fstype must be a file system type name"),
+            ("mount_unicode", "node_local_root = /local\nnode_local_mount = %u.%j-café\n", "2: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"),
+            ("stack_unicode", "node_local_root = /local\nstack_module = mod/café\n", "2: stack.module 'mod/café' is not a module name"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text, encoding="utf-8")
+                run = self.run_wrapper(["env"], **utf8_env)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}:{suffix}\n"),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
