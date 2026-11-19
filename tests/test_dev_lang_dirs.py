@@ -40,6 +40,38 @@ class DevLangDirs(StorageFixture):
         return subprocess.run([shell, str(script)], env=env, cwd=self.root,
                               text=True, capture_output=True)
 
+    def evaluate_vars(self, shell, stdout, names, **preset):
+        """Run the dev lines under nounset and print the named variables."""
+        script = self.root / f"vars-{shell}.sh"
+        prints = "".join(
+            "printf '%s=%%s\\n' \"${%s-}\"\n" % (name, name) for name in names
+        )
+        script.write_text(
+            "set -u\n"
+            "module() {\n"
+            "  if [ \"$1\" = load ]; then\n"
+            "    export EESSI_VERSION=2026.06\n"
+            "    export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4\n"
+            "    export EESSI_ACCELERATOR_TARGET=\n"
+            "  fi\n"
+            "  return 0\n"
+            "}\n"
+            + stdout
+            + prints,
+            encoding="utf-8",
+        )
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root)}
+        env.update(preset)
+        got = subprocess.run([shell, str(script)], env=env, cwd=self.root,
+                             text=True, capture_output=True)
+        found = {}
+        for line in got.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                if key in names:
+                    found[key] = value
+        return got, found
+
     def test_unset_library_directories_follow_the_dev_prefix(self):
         stdout = self.dev_stdout()
         root = f"{self.prefix}/dev/2026.06/x86_64/amd/zen4"
@@ -79,6 +111,24 @@ class DevLangDirs(StorageFixture):
         self.assertEqual(bash.count('cat -- "$script_dir/src/dev-lang-dirs.sh"'), 1)
         self.assertEqual(bash.count("JULIA_DEPOT_PATH"), 0)
         self.assertEqual(main.count("JULIA_DEPOT_PATH"), 0)
+
+    def test_unset_python_user_base_follows_the_dev_prefix(self):
+        stdout = self.dev_stdout()
+        root = f"{self.prefix}/dev/2026.06/x86_64/amd/zen4"
+        expect = {"PYTHONUSERBASE": f"{root}/python"}
+        for shell in SHELLS:
+            with self.subTest(shell=shell, case="unset"):
+                got, found = self.evaluate_vars(shell, stdout, expect)
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                self.assertEqual(found, expect, got.stderr)
+            with self.subTest(shell=shell, case="kept"):
+                got, found = self.evaluate_vars(shell, stdout, expect, PYTHONUSERBASE="/chosen")
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                self.assertEqual(found, {"PYTHONUSERBASE": "/chosen"})
+            with self.subTest(shell=shell, case="empty"):
+                got, found = self.evaluate_vars(shell, stdout, expect, PYTHONUSERBASE="")
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                self.assertEqual(found, {"PYTHONUSERBASE": ""})
 
     @unittest.skipIf(binary.BIN, "the Zig program embeds the language file")
     def test_bash_dev_skips_a_missing_language_file(self):

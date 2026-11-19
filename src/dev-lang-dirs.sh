@@ -8,3 +8,7 @@ if [ -z "${R_LIBS_USER+x}" ] && [ -n "${EB_LOCAL_DEV_PREFIX-}" ]; then
   # R expands %p to its platform and %v to major.minor, its own library layout.
   export R_LIBS_USER="${EB_LOCAL_DEV_PREFIX}/R/%p-library/%v"
 fi
+if [ -z "${PYTHONUSERBASE+x}" ] && [ -n "${EB_LOCAL_DEV_PREFIX-}" ]; then
+  # pip's user install writes under this directory, per Python version.
+  export PYTHONUSERBASE="${EB_LOCAL_DEV_PREFIX}/python"
+fi

@@ -41,6 +41,7 @@ So a program is built once per node type, in an allocation on that node type, an
 A Julia depot and an R package library are specific to that target too.
 When the shell has not set `JULIA_DEPOT_PATH`, `dev` sets it to `$EB_LOCAL_DEV_PREFIX/julia` with a trailing colon, so packages install there and Julia still finds the depots bundled with it.
 When the shell has not set `R_LIBS_USER`, `dev` sets it to `$EB_LOCAL_DEV_PREFIX/R/%p-library/%v`.
+When the shell has not set `PYTHONUSERBASE`, `dev` sets it to `$EB_LOCAL_DEV_PREFIX/python`, which is where pip's user install writes.
 R replaces `%p` with its platform and `%v` with its major and minor version, the same layout it uses for a library under a home directory, so two R versions do not share compiled packages.
 A value the caller set, including an empty one, is left as it is.
 The lines test the variables before they expand them, so a shell with nounset on can run them.
