@@ -194,5 +194,32 @@ class ReadinessProbeTests(unittest.TestCase):
         self.assertEqual(run.stderr, "")
         self.assertIn("/cvmfs/software.eessi.io", run.stdout)
 
+    def test_non_utf8_and_fifo_mountinfo_fail_cleanly(self):
+        bad_utf8 = self.root / "bad-utf8-mountinfo"
+        bad_utf8.write_bytes(b"22 1 0:21 / / rw - ext4 /dev/sda1 rw\n# \xff\n")
+        run_utf8 = subprocess.run(
+            [str(PROBE), "--repo", str(self.repo), "--mountinfo", str(bad_utf8)],
+            env=dict(os.environ, EB_LOCAL_PREFIX="", MODULEPATH=""),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run_utf8.returncode, 1, run_utf8.stdout + run_utf8.stderr)
+        self.assertNotIn("Traceback", run_utf8.stderr)
+        self.assertIn(f"FAIL cannot read {bad_utf8}:", run_utf8.stderr)
+
+        fifo = self.root / "fifo-mountinfo"
+        os.mkfifo(fifo)
+        run_fifo = subprocess.run(
+            [str(PROBE), "--repo", str(self.repo), "--mountinfo", str(fifo)],
+            env=dict(os.environ, EB_LOCAL_PREFIX="", MODULEPATH=""),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        self.assertEqual(run_fifo.returncode, 1, run_fifo.stdout + run_fifo.stderr)
+        self.assertIn(f"FAIL cannot read {fifo}: not a regular file", run_fifo.stderr)
+
 if __name__ == "__main__":
     unittest.main()
