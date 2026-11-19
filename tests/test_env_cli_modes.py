@@ -27,6 +27,8 @@ class EnvCliModes(unittest.TestCase):
             encoding="utf-8",
         )
         self.site.chmod(0o600)
+        self.module_sh = self.root / "module.sh"
+        self.module_sh.write_text("module() { return 0; }\n")
 
     def run_env(self, args, **env_overrides):
         env = {
@@ -36,6 +38,7 @@ class EnvCliModes(unittest.TestCase):
             "EB_LOCAL_PREFIX": str(self.prefix),
         }
         env.update(env_overrides)
+        env.setdefault("BASH_ENV", str(self.module_sh))
         return subprocess.run(
             [binary.BIN, *args],
             env=env,
