@@ -70,7 +70,10 @@ pub fn renderLine(a: std.mem.Allocator, value: anytype) std.mem.Allocator.Error!
 pub fn emit(a: std.mem.Allocator, value: anytype) void {
     const slice = renderLine(a, value) catch oom();
     defer a.free(slice);
-    cli.put(1, slice);
+    common.sys.writeAll(1, slice) catch |e| {
+        cli.err("eb-local: cannot write JSON output ({s})\n", .{common.sys.describe(e)});
+        std.process.exit(1);
+    };
 }
 
 test "renderLine replaces non-UTF-8 bytes in nested strings without emitting byte arrays" {
