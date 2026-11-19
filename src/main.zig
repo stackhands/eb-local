@@ -3002,7 +3002,11 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
         if (here) |hi| {
             for (rows.items) |r| if (std.mem.indexOfScalar(usize, r.at.items, hi) == null)
                 missing_on_node.append(a, r.module) catch oom();
-        } else if (here_target == null) {
+        } else if (here_target) |ht| {
+            for (rows.items) |r| missing_on_node.append(a, r.module) catch oom();
+            if (rows.items.len > 0)
+                hint = str(a, "Nothing is built for this node's target, {s}, yet; build in an allocation on this node type.", .{ht});
+        } else {
             hint = "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.";
         }
         var targets: std.ArrayList(ListTargetJson) = .empty;
