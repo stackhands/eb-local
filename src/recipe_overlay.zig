@@ -646,6 +646,14 @@ fn failMsg(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("eb-local: " ++ fmt ++ "\n", args);
 }
 
+fn writeStdout(io: std.Io, stdout: *std.Io.File, message: []const u8) bool {
+    stdout.writeStreamingAll(io, message) catch |err| {
+        failMsg("cannot write the result: {s}", .{@errorName(err)});
+        return false;
+    };
+    return true;
+}
+
 /// Read overlay and base files, verify the digest, and write, preview, or check the outputs.
 pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     if (opts.dry_run and opts.check) {
@@ -733,12 +741,12 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
             recipe_path,
             provenance_path,
         }) catch return 1;
-        stdout.writeStreamingAll(io, message) catch return 1;
+        if (!writeStdout(io, &stdout, message)) return 1;
         return if (up_to_date) 0 else 1;
     }
     if (opts.dry_run) {
         const message = std.fmt.allocPrint(a, "would write {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
-        stdout.writeStreamingAll(io, message) catch return 1;
+        if (!writeStdout(io, &stdout, message)) return 1;
         return 0;
     }
     const prev_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch null;
@@ -781,7 +789,7 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         return 1;
     };
     const message = std.fmt.allocPrint(a, "wrote {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
-    stdout.writeStreamingAll(io, message) catch return 1;
+    if (!writeStdout(io, &stdout, message)) return 1;
     return 0;
 }
 
