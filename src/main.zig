@@ -2874,7 +2874,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
     if (s.clear_foreign_prefixes.value)
-        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper variable that resolves outside them") catch oom();
+        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper, Cargo linker or Makevars variable that resolves outside them") catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
     for (buildVariables(a, "$W", d)) |kv| {
         if (std.mem.startsWith(u8, kv[1], "$W/")) {
@@ -3418,7 +3418,7 @@ fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.Array
     const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, prefix) catch oom();
     const found = foreign.scan(a, c.env, prefs, s.clear_foreign_prefixes.value, mountinfoSoft(c)) catch oom();
     for (found) |f| switch (f.code) {
-        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
+        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper, Cargo linker or Makevars variable, points outside the approved prefixes", .{}),
         .list_keep => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
         .list_drop => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
         .wrap_keep => note(a, out, json_lines, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),

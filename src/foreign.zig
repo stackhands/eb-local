@@ -1,8 +1,13 @@
 //! Host and container paths that must not leak into a build.
 //!
 //! `eb-local doctor` reports entries of `PERL5LIB`, `PYTHONPATH`, `R_LIBS*`,
-//! `CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH`, and compiler-wrapper variables,
-//! that resolve outside the approved prefixes. It also reports the timezone
+//! `JULIA_LOAD_PATH`, `JULIA_DEPOT_PATH`, `NODE_PATH`, `CMAKE_PREFIX_PATH`
+//! and `PKG_CONFIG_PATH`, and compiler-wrapper variables, that resolve
+//! outside the approved prefixes. `CARGO_TARGET_*_LINKER`,
+//! `CARGO_BUILD_RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `R_MAKEVARS_USER`
+//! and `R_MAKEVARS_SITE` are wrapper variables. `RUSTFLAGS` and
+//! `CARGO_TARGET_*_RUSTFLAGS` are flag strings, so they are not paths.
+//! It also reports the timezone
 //! `/etc/localtime` resolves to, a bind mount of that file, and host library
 //! directories a container runtime injected. A build drops the foreign entries
 //! only when `build.clear_foreign_prefixes` is set.
@@ -16,15 +21,17 @@ const Allocator = std.mem.Allocator;
 
 /// Path-list variables doctor inspects, besides every `R_LIBS*`.
 pub const path_lists = [_][]const u8{
-    "PERL5LIB", "PYTHONPATH", "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH",
+    "PERL5LIB",        "PYTHONPATH",       "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH",
+    "JULIA_LOAD_PATH", "JULIA_DEPOT_PATH", "NODE_PATH",
 };
 
 /// Compiler variables whose value is a program or a path. `CCACHE_*`,
 /// `SCCACHE_*` and `CMAKE_*_COMPILER_LAUNCHER` are recognised by name.
 pub const compiler_vars = [_][]const u8{
-    "CC",        "CXX",      "FC",        "F77",      "F90",       "F95",       "CPP",
-    "OMPI_CC",   "OMPI_CXX", "OMPI_FC",   "OMPI_F77", "MPICH_CC",  "MPICH_CXX", "MPICH_FC",
-    "MPICH_F77", "I_MPI_CC", "I_MPI_CXX", "I_MPI_FC", "I_MPI_F77", "I_MPI_F90", "RUSTC_WRAPPER",
+    "CC",                        "CXX",                     "FC",              "F77",             "F90",       "F95",       "CPP",
+    "OMPI_CC",                   "OMPI_CXX",                "OMPI_FC",         "OMPI_F77",        "MPICH_CC",  "MPICH_CXX", "MPICH_FC",
+    "MPICH_F77",                 "I_MPI_CC",                "I_MPI_CXX",       "I_MPI_FC",        "I_MPI_F77", "I_MPI_F90", "RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "R_MAKEVARS_USER", "R_MAKEVARS_SITE",
 };
 
 /// What doctor prints for one finding. The words are in `main.zig`, so a
@@ -177,8 +184,13 @@ fn splitList(a: Allocator, value: []const u8, prefixes: []const []const u8) Allo
     return .{ .kept = kept.items, .foreign = foreign.items };
 }
 
+fn isCargoLinker(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "CARGO_TARGET_") and std.mem.endsWith(u8, name, "_LINKER");
+}
+
 fn isWrapperName(name: []const u8) bool {
     for (compiler_vars) |v| if (std.mem.eql(u8, name, v)) return true;
+    if (isCargoLinker(name)) return true;
     if (std.mem.startsWith(u8, name, "CCACHE_") or std.mem.startsWith(u8, name, "SCCACHE_")) return true;
     return std.mem.startsWith(u8, name, "CMAKE_") and std.mem.endsWith(u8, name, "_COMPILER_LAUNCHER");
 }
@@ -484,6 +496,52 @@ test "a compiler wrapper outside the prefixes is unset and one inside stays" {
     try testing.expect(s.env.get("CC") == null);
     try testing.expect(s.env.get("CXX") != null);
     try testing.expect(s.env.get("OMPI_MCA_PML") == null);
+}
+
+test "a host cargo linker, makevars file and language path are named, and rustflags is not" {
+    const linker = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER";
+    const flags = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS";
+    var s = try Scratch.init(&.{
+        .{ "NODE_PATH", "/opt/host/node:/cvmfs/software.eessi.io/versions/2026.06/software" },
+        .{ "JULIA_DEPOT_PATH", "/cvmfs/software.eessi.io/versions/2026.06/software/julia" },
+        .{ linker, "/usr/bin/gcc" },
+        .{ flags, "-C link-arg=-fuse-ld=mold" },
+        .{ "RUSTFLAGS", "-C link-arg=-fuse-ld=mold" },
+        .{ "CARGO_BUILD_RUSTC_WRAPPER", "/opt/host/sccache" },
+        .{ "RUSTC_WORKSPACE_WRAPPER", "/usr/bin/sccache" },
+        .{ "R_MAKEVARS_USER", "/opt/host/Makevars" },
+        .{ "R_MAKEVARS_SITE", "/opt/host/Makevars.site" },
+        .{ "PATH", "/usr/bin:/bin" },
+    });
+    defer s.deinit();
+    const a = s.allocator();
+    const prefixes = try approvedPrefixes(a, &s.env, &.{}, "/home/u/eessi");
+    const found = try scan(a, &s.env, prefixes, false, "");
+    var node = false;
+    var depot = false;
+    var cargo = false;
+    var wrapper = false;
+    var makevars = false;
+    for (found) |f| {
+        try testing.expect(!std.mem.endsWith(u8, f.name, "RUSTFLAGS"));
+        if (f.code == .list_keep and std.mem.eql(u8, f.name, "NODE_PATH")) {
+            node = true;
+            try testing.expectEqualStrings("/opt/host/node", f.path);
+        }
+        if (std.mem.eql(u8, f.name, "JULIA_DEPOT_PATH")) depot = true;
+        if (f.code == .wrap_keep and std.mem.eql(u8, f.name, linker)) cargo = true;
+        if (f.code == .wrap_keep and std.mem.eql(u8, f.name, "CARGO_BUILD_RUSTC_WRAPPER")) wrapper = true;
+        if (f.code == .wrap_keep and std.mem.eql(u8, f.name, "R_MAKEVARS_USER")) makevars = true;
+    }
+    try testing.expect(node and cargo and wrapper and makevars);
+    try testing.expect(!depot);
+    try scrub(a, &s.env, prefixes);
+    try testing.expectEqualStrings("/cvmfs/software.eessi.io/versions/2026.06/software", s.env.get("NODE_PATH").?);
+    try testing.expect(s.env.get("JULIA_DEPOT_PATH") != null);
+    try testing.expect(s.env.get(linker) == null);
+    try testing.expect(s.env.get("R_MAKEVARS_USER") == null);
+    try testing.expectEqualStrings("-C link-arg=-fuse-ld=mold", s.env.get("RUSTFLAGS").?);
+    try testing.expectEqualStrings("-C link-arg=-fuse-ld=mold", s.env.get(flags).?);
 }
 
 test "a bind of /etc/localtime and an injected library directory are sentinels" {
