@@ -36,6 +36,12 @@ die() {
 }
 fail_storage() { die "$@"; }
 
+opt_value() {
+    local var="$1" opt="$2" val="${3:-}"
+    [ -n "$val" ] || die "$opt needs a value"
+    printf -v "$var" '%s' "$val"
+}
+
 # Module names as Lmod writes them. Anything else could change the meaning of
 # the lines env and dev print for eval, so it is refused.
 valid_module() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9._+-]+)*$ ]]; }
@@ -63,12 +69,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
         --project)
-            [ -n "${2:-}" ] || die "--project needs a directory"
-            prefix="$2"; mode=project; shift 2 ;;
+            opt_value prefix --project "${2:-}"; mode=project; shift 2 ;;
         --project=*)
-            prefix="${1#--project=}"
-            [ -n "$prefix" ] || die "--project needs a directory"
-            mode=project; shift ;;
+            opt_value prefix --project "${1#--project=}"; mode=project; shift ;;
         *)
             case "$command" in
                 build)
@@ -82,11 +85,10 @@ while [ $# -gt 0 ]; do
                 env) die "env takes only --project, --profile, --config and --strict; got '$1'" ;;
                 dev)
                     case "$1" in
-                        --buildenv) [ -n "${2:-}" ] || die "--buildenv needs a module"; buildenv_override="$2"; shift 2 ;;
+                        --buildenv)
+                            opt_value buildenv_override --buildenv "${2:-}"; shift 2 ;;
                         --buildenv=*)
-                            buildenv_override="${1#--buildenv=}"
-                            [ -n "$buildenv_override" ] || die "--buildenv needs a module"
-                            shift ;;
+                            opt_value buildenv_override --buildenv "${1#--buildenv=}"; shift ;;
                         -*) die "dev does not know the option '$1'" ;;
                         *) valid_module "$1" || die "'$1' is not a module name"; dev_modules+=("$1"); shift ;;
                     esac ;;
@@ -94,11 +96,11 @@ while [ $# -gt 0 ]; do
                     case "$1" in
                         --logs-older-than)
                             [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
-                            [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
-                            logs_days="$2"; logs_days_set=true; shift 2 ;;
+                            opt_value logs_days --logs-older-than "${2:-}"
+                            [[ "$logs_days" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
+                            logs_days_set=true; shift 2 ;;
                         --logs-older-than=*)
-                            logs_days="${1#--logs-older-than=}"
-                            [ -n "$logs_days" ] || die "--logs-older-than needs a value"
+                            opt_value logs_days --logs-older-than "${1#--logs-older-than=}"
                             [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
                             [[ "$logs_days" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
                             logs_days_set=true; shift ;;

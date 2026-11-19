@@ -618,6 +618,22 @@ class Commands(StorageFixture):
                     (2, "", f"eb-local: {msg}\n"),
                 )
 
+    def test_empty_and_omitted_option_values_match_zig(self):
+        cases = (
+            (["env"], "--project"),
+            (["dev"], "--buildenv"),
+            (["clean"], "--logs-older-than"),
+        )
+        for prefix, opt in cases:
+            for tail in ([f"{opt}="], [opt, ""], [opt]):
+                argv = [*prefix, *tail]
+                with self.subTest(argv=argv):
+                    res = self.run_wrapper(argv, SLURM_JOB_ID="")
+                    self.assertEqual(
+                        (res.returncode, res.stdout, res.stderr),
+                        (2, "", f"eb-local: {opt} needs a value\n"),
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

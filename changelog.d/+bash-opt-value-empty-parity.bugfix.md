@@ -1,0 +1,1 @@
+`eb-local` uses one shared helper (`opt_value`) for `--project`, `--buildenv`, and `--logs-older-than` so separated and joined empty or omitted values print `<opt> needs a value` (`exit 2`), matching `src/main.zig`.
