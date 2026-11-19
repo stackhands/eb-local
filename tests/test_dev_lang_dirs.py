@@ -130,6 +130,26 @@ class DevLangDirs(StorageFixture):
                 self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
                 self.assertEqual(found, {"PYTHONUSERBASE": ""})
 
+    def test_unset_go_paths_follow_the_dev_prefix(self):
+        stdout = self.dev_stdout()
+        root = f"{self.prefix}/dev/2026.06/x86_64/amd/zen4/go"
+        names = ("GOPATH", "GOMODCACHE")
+        expect = {"GOPATH": root, "GOMODCACHE": f"{root}/pkg/mod"}
+        for shell in SHELLS:
+            with self.subTest(shell=shell, case="unset"):
+                got, found = self.evaluate_vars(shell, stdout, names)
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                self.assertEqual(found, expect, got.stderr)
+            with self.subTest(shell=shell, case="kept"):
+                got, found = self.evaluate_vars(
+                    shell, stdout, names, GOPATH="/chosen/go", GOMODCACHE="/chosen/mod")
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                self.assertEqual(found, {"GOPATH": "/chosen/go", "GOMODCACHE": "/chosen/mod"})
+            with self.subTest(shell=shell, case="empty"):
+                got, found = self.evaluate_vars(shell, stdout, names, GOPATH="", GOMODCACHE="")
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                self.assertEqual(found, {"GOPATH": "", "GOMODCACHE": ""})
+
     @unittest.skipIf(binary.BIN, "the Zig program embeds the language file")
     def test_bash_dev_skips_a_missing_language_file(self):
         lang = self.root / "src" / "dev-lang-dirs.sh"

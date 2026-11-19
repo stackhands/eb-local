@@ -12,3 +12,9 @@ if [ -z "${PYTHONUSERBASE+x}" ] && [ -n "${EB_LOCAL_DEV_PREFIX-}" ]; then
   # pip's user install writes under this directory, per Python version.
   export PYTHONUSERBASE="${EB_LOCAL_DEV_PREFIX}/python"
 fi
+if [ -z "${GOPATH+x}" ] && [ -n "${EB_LOCAL_DEV_PREFIX-}" ]; then
+  export GOPATH="${EB_LOCAL_DEV_PREFIX}/go"
+fi
+if [ -z "${GOMODCACHE+x}" ] && [ -n "${EB_LOCAL_DEV_PREFIX-}" ]; then
+  export GOMODCACHE="${EB_LOCAL_DEV_PREFIX}/go/pkg/mod"
+fi
