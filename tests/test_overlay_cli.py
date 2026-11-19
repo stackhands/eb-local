@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import binary
+import hostile_fs
 
 
 def digest_of(data: bytes) -> str:
@@ -158,6 +159,65 @@ class OverlayMaterialize(unittest.TestCase):
                 self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
                 self.assertEqual(got.stdout, "")
                 self.assertIn("symlink", got.stderr)
+
+    def test_materialize_refuses_readonly_and_symlinks(self):
+        base_bytes = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+        overlay_text = f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+
+            ro_out = root / "ro-out"
+            ro_out.mkdir()
+            with hostile_fs.readonly_dir(ro_out):
+                got_ro = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", str(ro_out)],
+                    cwd=root,
+                )
+            self.assertEqual(got_ro.returncode, 1, got_ro.stdout + got_ro.stderr)
+            self.assertEqual(got_ro.stdout, "")
+            self.assertIn("cannot write", got_ro.stderr)
+            self.assertEqual(list(ro_out.iterdir()), [])
+
+            for name in ("materialized-base.eb", "provenance.toml"):
+                with self.subTest(name=name):
+                    sym_out = root / f"sym-{name}"
+                    sym_out.mkdir()
+                    outside = root / f"outside-{name}"
+                    hostile_fs.dangling_symlink(sym_out / name, outside)
+                    got_sym = run(
+                        ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", str(sym_out)],
+                        cwd=root,
+                    )
+                    self.assertEqual(got_sym.returncode, 1, got_sym.stdout + got_sym.stderr)
+                    self.assertEqual(got_sym.stdout, "")
+                    self.assertIn("symlink", got_sym.stderr)
+                    self.assertFalse(outside.exists())
+                    if name == "provenance.toml":
+                        self.assertFalse((sym_out / "materialized-base.eb").exists())
+
+    def test_materialize_tmpfs_enospc_keeps_destination_clean(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        base_bytes = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n',
+                encoding="utf-8",
+            )
+            target = mnt / "out"
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", str(target)],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertEqual(got.stdout, "")
+            self.assertNotEqual(got.stderr.strip(), "")
+            self.assertFalse(target.exists())
 
     def test_dry_run_validates_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
