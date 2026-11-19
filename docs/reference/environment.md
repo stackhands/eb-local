@@ -48,9 +48,6 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 | `EB_LOCAL_EESSI_EXTEND` | Set, not empty and not `0`, it sends every argument to `eb`, as after `eb-local eb --`. An eb-stack EESSI target runs eb-local this way. |
 | `EB_LOCAL_ENV_STRICT` | Set, not empty and not `0` or `false`, `env` and `dev` prepend the same CVMFS check as `--strict` before their load lines. |
 | `EB_LOCAL_RPATH_WRAPPERS` | The wrapper directory an earlier `dev` put first on `PATH`; the next `dev` takes it off. |
-| `SSL_CERT_FILE`, `CARGO_HTTP_CAINFO` | The host's CA bundle, when the host has none at `/etc/ssl/certs/ca-certificates.crt` and the variable is not set |
-
-EESSI's `cargo` and `curl` look for the CA bundle at `/etc/ssl/certs/ca-certificates.crt`. A host that keeps it at `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem` or `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` would leave them without one, so `dev` names the first of those that is readable.
 | `HOME` | Stands for `~/` in settings and secret sources, holds the default prefix, and the user file and the wrappers when the `XDG_*` variable is unset. |
 | `XDG_CONFIG_HOME` | Holds the user file, `$XDG_CONFIG_HOME/eb-local/config.toml`. |
 | `XDG_CACHE_HOME` | Holds the RPATH wrappers, below `$XDG_CACHE_HOME/eb-local`. |
@@ -84,6 +81,9 @@ The lines `eb-local dev` prints do the same, load the modules and a build enviro
 | `EB_LOCAL_DEV_PREFIX` | `<prefix>/dev/<EESSI version>/<CPU target>`, with `/<GPU target>` after it when EESSI found one |
 | `PATH` | The RPATH wrappers' directory first, when eb-local writes wrappers |
 | `EB_LOCAL_RPATH_WRAPPERS` | The RPATH wrappers' directory, when eb-local writes wrappers |
+| `SSL_CERT_FILE`, `CARGO_HTTP_CAINFO` | The host's CA bundle, when the host has none at `/etc/ssl/certs/ca-certificates.crt` and the variable is not set |
+
+EESSI's `cargo` and `curl` look for the CA bundle at `/etc/ssl/certs/ca-certificates.crt`. A host that keeps it at `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem` or `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` would leave them without one, so `dev` names the first of those that is readable.
 
 ## Set for a build
 
