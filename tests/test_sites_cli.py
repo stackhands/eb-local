@@ -235,6 +235,22 @@ class SitesCli(StorageFixture):
                 self.assertIn("unclosed placeholder", run.stderr)
                 self.assertFalse(target.exists())
 
+    def test_template_placeholder_errors_report_line_numbers(self):
+        cases = {
+            "unclosed.toml": ('[storage]\nnode_local_root = "/local"\n[build]\nallocation_hint = "salloc -p {{partition"\n', ":4: unclosed placeholder"),
+            "badname.toml": ('[storage]\nnode_local_root = "/local"\n[build]\nallocation_hint = "salloc -p {{BAD}}"\n', ":4: invalid placeholder 'BAD'"),
+            "baddefault.toml": ('[storage]\nnode_local_root = "/local"\n[build]\nallocation_hint = "salloc -p {{partition:}}"\n', ":4: invalid default for 'partition'"),
+        }
+        for name, (body, needle) in cases.items():
+            with self.subTest(name=name):
+                tmpl = self.root / name
+                tmpl.write_text(body)
+                tmpl.chmod(0o644)
+                run = self.run_tool(["site", "show", f"./{name}"])
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn(f"template ./{name}{needle}", run.stderr)
+
     # -- configuration in the environment -------------------------------------
 
     def test_config_env_round_trips(self):
