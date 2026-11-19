@@ -65,13 +65,14 @@ const usage_text =
     \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--json] [--buildenv MODULE] [MODULE...]
+    \\  eb-local dev [--strict] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1);
     \\                                       --buildenv names the build environment to load;
-    \\                                       --json prints the change as JSON, for env too
+    \\                                       --json prints the change as JSON, for env too;
+    \\                                       --envrc writes that line to .envrc for direnv
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -706,8 +707,10 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
     var buf: [sys.path_max]u8 = undefined;
     const exe = selfExe(&buf) orelse "eb-local";
     const block = str(a, "{s} rerun `eb-local dev --envrc` to change these lines\neval \"$({s} {s})\"\n{s}\n", .{ envrc_begin, q(a, exe), words, envrc_end });
+    var exists_already = false;
     const old: []const u8 = if (fsx.openRegular(fsx.cwd, ".envrc", true)) |opened| blk: {
         defer sys.close(opened.fd);
+        exists_already = true;
         break :blk fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read .envrc ({s})", .{@errorName(e)});
     } else |_| "";
     const text = if (std.mem.indexOf(u8, old, envrc_begin)) |at| blk: {
@@ -720,7 +723,15 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
         block
     else
         str(a, "{s}{s}{s}", .{ old, if (old[old.len - 1] == '\n') "" else "\n", block });
-    fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+    if (exists_already) {
+        // Written beside the old file and renamed over it, with its mode.
+        fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+    } else {
+        const fd = sys.openat(fsx.cwd, ".envrc", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
+            die("cannot create .envrc ({s})", .{@errorName(e)});
+        defer sys.close(fd);
+        sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+    }
     cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
     return 0;
 }
