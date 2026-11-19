@@ -333,7 +333,18 @@ print_environment() {
     # below the one EESSI detects; where the guard is installed, it moves the
     # stack there before EESSI-extend reads its install path.
     # shellcheck disable=SC2016  # expanded by the shell that runs the lines
-    printf '%s\n' 'if command -v eessi-arch-guard >/dev/null 2>&1; then eval "$(eessi-arch-guard --shell)"; fi'
+    printf '%s\n' \
+        'if command -v eessi-arch-guard >/dev/null 2>&1; then' \
+        '    if _eb_local_arch_delta=$(eessi-arch-guard --shell); then' \
+        '        eval "$_eb_local_arch_delta"' \
+        '        unset _eb_local_arch_delta' \
+        '    else' \
+        '        _eb_local_arch_status=$?' \
+        '        unset _eb_local_arch_delta' \
+        '        (exit "$_eb_local_arch_status")' \
+        '        unset _eb_local_arch_status' \
+        '    fi' \
+        'fi'
     if [ -d "$prefix" ]; then
         printf 'module load %q\n' "$extend_module"
     fi

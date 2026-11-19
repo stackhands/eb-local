@@ -334,7 +334,20 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
     // Tasks run with the CPU target eessi-arch-guard selects, which can be
     // below the one EESSI detects; where the guard is installed, it moves the
     // stack there before EESSI-extend reads its install path.
-    add(a, &out, "if command -v eessi-arch-guard >/dev/null 2>&1; then eval \"$(eessi-arch-guard --shell)\"; fi\n");
+    add(a, &out,
+        \\if command -v eessi-arch-guard >/dev/null 2>&1; then
+        \\    if _eb_local_arch_delta=$(eessi-arch-guard --shell); then
+        \\        eval "$_eb_local_arch_delta"
+        \\        unset _eb_local_arch_delta
+        \\    else
+        \\        _eb_local_arch_status=$?
+        \\        unset _eb_local_arch_delta
+        \\        (exit "$_eb_local_arch_status")
+        \\        unset _eb_local_arch_status
+        \\    fi
+        \\fi
+        \\
+    );
     const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
     if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
     // build.site_toolchains under the version the stack set, as a build
