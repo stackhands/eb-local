@@ -233,31 +233,39 @@ class DevBuildenv(StorageFixture):
         self.assertEqual(calls[-1], "load NVHPC/26.9")
         self.assertIn("RPATH wrappers for clang ld", replay.stderr)
 
-    def test_a_failed_rpath_wrapper_returns_without_closing_an_interactive_shell(self):
+    def test_a_failed_rpath_wrapper_leaves_no_scratch_variables_in_an_interactive_shell(self):
         # NVHPC has no buildenv, so dev asks rpath-wrappers to stand in. An
         # empty PATH has nothing to wrap. An interactive shell must survive,
-        # report that status, and leave the prefix unset.
+        # report that status, and leave the prefix and scratch variables unset.
         empty = self.root / "empty-path"
         empty.mkdir()
         run = self.run_wrapper(["dev", "NVHPC/26.7"])
         self.assertEqual(run.returncode, 0, run.stderr)
         script = (MODULE + run.stdout
-                  + 'status=$?\n'
-                  + 'printf "survived|%s|%s" "$status" "${EB_LOCAL_DEV_PREFIX-unset}"\n')
-        replay = subprocess.run(
-            [BASH, "--noprofile", "--norc", "-ic", script],
-            env=dict(self.env, PATH=str(empty)),
-            cwd=self.root,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(
-            (replay.returncode, replay.stdout),
-            (0, "survived|1|unset"),
-            replay.stdout + replay.stderr,
-        )
-        self.assertIn("no compiler or linker on PATH to wrap", replay.stderr)
-        self.assertNotIn("EB_LOCAL_DEV_PREFIX", replay.stdout)
+                  + '_test_status=$?\n'
+                  + 'printf "survived|%s|%s|%s|%s|%s|%s" "$_test_status" '
+                  + '"${EB_LOCAL_DEV_PREFIX-unset}" "${_eb_local_wrap-unset}" '
+                  + '"${eb_local_family-unset}" "${eb_local_buildenv-unset}" '
+                  + '"${eb_local_level-unset}"\n')
+        shells = [(BASH, ["--noprofile", "--norc"])]
+        if shutil.which("zsh"):
+            shells.append((shutil.which("zsh"), ["-f"]))
+        for shell, flags in shells:
+            with self.subTest(shell=Path(shell).name):
+                replay = subprocess.run(
+                    [shell, *flags, "-ic", script],
+                    env=dict(self.env, PATH=str(empty)),
+                    cwd=self.root,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(
+                    (replay.returncode, replay.stdout),
+                    (0, "survived|1|unset|unset|unset|unset|unset"),
+                    replay.stdout + replay.stderr,
+                )
+                self.assertIn("no compiler or linker on PATH to wrap", replay.stderr)
+                self.assertNotIn("EB_LOCAL_DEV_PREFIX", replay.stdout)
 
     def test_a_later_dev_drops_the_previous_rpath_wrappers(self):
         first = self.run_wrapper(["dev", "NVHPC/26.7"])

@@ -520,6 +520,7 @@ fn shellApply(a: Allocator, body: []const u8) []const u8 {
     const nl = if (body.len == 0 or body[body.len - 1] != '\n') "\n" else "";
     return str(a,
         \\eb_local_apply() {{
+        \\    local _eb_local_wrap eb_local_family eb_local_buildenv eb_local_level
         \\{s}{s}}}
         \\eb_local_apply
         \\_eb_local_status=$?
