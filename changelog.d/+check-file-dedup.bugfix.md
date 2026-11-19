@@ -1,1 +1,0 @@
-`eb-local check` now deduplicates positional file arguments and symlink aliases by canonical path, so repeating a file or passing a symlink to an already-checked binary no longer audits it twice or doubles `elf_count` and `problem_count`.

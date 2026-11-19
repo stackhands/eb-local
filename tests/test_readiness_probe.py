@@ -194,5 +194,99 @@ class ReadinessProbeTests(unittest.TestCase):
         self.assertEqual(run.stderr, "")
         self.assertIn("/cvmfs/software.eessi.io", run.stdout)
 
+    def test_non_utf8_and_fifo_mountinfo_fail_cleanly(self):
+        bad_utf8 = self.root / "bad-utf8-mountinfo"
+        bad_utf8.write_bytes(b"22 1 0:21 / / rw - ext4 /dev/sda1 rw\n# \xff\n")
+        run_utf8 = subprocess.run(
+            [str(PROBE), "--repo", str(self.repo), "--mountinfo", str(bad_utf8)],
+            env=dict(os.environ, EB_LOCAL_PREFIX="", MODULEPATH=""),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run_utf8.returncode, 1, run_utf8.stdout + run_utf8.stderr)
+        self.assertNotIn("Traceback", run_utf8.stderr)
+        self.assertIn(f"FAIL cannot read {bad_utf8}:", run_utf8.stderr)
+
+        fifo = self.root / "fifo-mountinfo"
+        os.mkfifo(fifo)
+        run_fifo = subprocess.run(
+            [str(PROBE), "--repo", str(self.repo), "--mountinfo", str(fifo)],
+            env=dict(os.environ, EB_LOCAL_PREFIX="", MODULEPATH=""),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        self.assertEqual(run_fifo.returncode, 1, run_fifo.stdout + run_fifo.stderr)
+        self.assertIn(f"FAIL cannot read {fifo}: not a regular file", run_fifo.stderr)
+
+    def test_fuse3_cvmfs2_and_fuse_cvmfs_mounts_report_cvmfs(self):
+        for fstype, source in (
+            ("fuse", "cvmfs2"),
+            ("fuse", "cvmfs2#software.eessi.io"),
+            ("fuse.cvmfs", "cvmfs2"),
+        ):
+            with self.subTest(fstype=fstype, source=source):
+                self.mountinfo.write_text(
+                    "172 201 0:43 / {} ro,nosuid,nodev,relatime - {} {} ro,allow_other\n".format(
+                        self.repo, fstype, source
+                    )
+                )
+                run = subprocess.run(
+                    [
+                        str(PROBE),
+                        "--repo",
+                        str(self.repo),
+                        "--prefix",
+                        str(self.local),
+                        "--mountinfo",
+                        str(self.mountinfo),
+                    ],
+                    env=dict(
+                        os.environ,
+                        MODULEPATH="{}:{}".format(self.local_modules, self.upstream_modules),
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(
+                    run.stdout,
+                    "ok   EESSI repository {} is mounted with cvmfs\n"
+                    "ok   local modules precede EESSI on MODULEPATH\n".format(self.repo),
+                )
+
+    def test_non_cvmfs_fuse_mount_keeps_exact_warning(self):
+        self.mountinfo.write_text(
+            "172 201 0:43 / {} ro,relatime - fuse sshfs#host:/eessi rw\n".format(self.repo)
+        )
+        run = subprocess.run(
+            [
+                str(PROBE),
+                "--repo",
+                str(self.repo),
+                "--prefix",
+                str(self.local),
+                "--mountinfo",
+                str(self.mountinfo),
+            ],
+            env=dict(
+                os.environ,
+                MODULEPATH="{}:{}".format(self.local_modules, self.upstream_modules),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(
+            run.stdout,
+            "warn EESSI repository {} is on fuse, not cvmfs; check the EESSI client or site bind mount\n"
+            "ok   local modules precede EESSI on MODULEPATH\n".format(self.repo),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

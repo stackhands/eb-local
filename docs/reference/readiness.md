@@ -22,7 +22,7 @@ eb-local-readiness [--repo PATH] [--prefix PATH] [--mountinfo FILE]
 ## Output lines
 
 `ok`
-: the EESSI repository is mounted with `cvmfs`, or a module directory under `--prefix` precedes upstream EESSI on `MODULEPATH`.
+: the EESSI repository is mounted with `cvmfs` (including `fuse.cvmfs` and `fuse` mounts whose source is `cvmfs2`), or a module directory under `--prefix` precedes upstream EESSI on `MODULEPATH`.
 
 `warn`
 : the EESSI repository exists without a mount entry or on another filesystem (for example a bind mount), or no upstream module directory is on `MODULEPATH`.

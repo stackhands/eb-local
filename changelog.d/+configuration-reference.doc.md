@@ -1,1 +1,0 @@
-The reference describes the configuration files: where eb-local looks for them, which owners and permissions it accepts, the order of the layers, how a profile is chosen, and each setting with its value, default and meaning. A test fails when a setting `eb-local config` shows has no row on the page, or when the page's default differs from what it prints.

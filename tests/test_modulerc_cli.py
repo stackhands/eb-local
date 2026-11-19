@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import binary
+import hostile_fs
 
 
 def run(args, *, text=True):
@@ -225,6 +226,49 @@ class Modulerc(unittest.TestCase):
                     self.assertEqual(ro.returncode, 2, ro.stdout + ro.stderr)
                     self.assertEqual(ro.stdout, "")
                     self.assertIn("symlink", ro.stderr)
+
+    def test_hostile_write_destinations_fail_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            ro_tree = root / "ro-tree"
+            ro_tree.mkdir()
+            with hostile_fs.readonly_dir(ro_tree):
+                ro_got = run(["--module-tree", str(ro_tree), "--default", "Example/2.0"])
+                self.assertEqual(ro_got.returncode, 1, ro_got.stdout + ro_got.stderr)
+                self.assertEqual(ro_got.stdout, "")
+                self.assertIn("AccessDenied", ro_got.stderr)
+
+            dir_tree = root / "dir-tree"
+            dir_tree.mkdir()
+            (dir_tree / ".modulerc.lua").mkdir()
+            dir_got = run(["--module-tree", str(dir_tree), "--default", "Example/2.0"])
+            self.assertEqual(dir_got.returncode, 2, dir_got.stdout + dir_got.stderr)
+            self.assertEqual(dir_got.stdout, "")
+            self.assertIn("not a regular file", dir_got.stderr)
+
+            dangling_tree = root / "dangling-tree"
+            dangling_tree.mkdir()
+            link, outside = hostile_fs.dangling_symlink(dangling_tree / ".modulerc.lua", root / "outside-target.lua")
+            w_got = run(["--module-tree", str(dangling_tree), "--default", "Example/2.0"])
+            self.assertEqual(w_got.returncode, 1, w_got.stdout + w_got.stderr)
+            self.assertIn("symlink", w_got.stderr)
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(outside.exists())
+            for flag in ("--check", "--dry-run"):
+                ro = run(["--module-tree", str(dangling_tree), "--default", "Example/2.0", flag])
+                self.assertEqual(ro.returncode, 2, ro.stdout + ro.stderr)
+                self.assertEqual(ro.stdout, "")
+                self.assertIn("symlink", ro.stderr)
+
+    def test_tmpfs_enospc_fails_cleanly(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        got = run(["--module-tree", str(mnt / "mods"), "--default", "Example/2.0"])
+        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("NoSpace", got.stderr)
 
 
 if __name__ == "__main__":

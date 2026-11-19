@@ -621,6 +621,21 @@ class CleanFilesystemEdgeCases(StorageFixture):
         finally:
             locked_dir.chmod(0o755)
 
+    def test_clean_refuses_fifo_lockfile(self):
+        eb_dir = self.prefix / ".eb-local"
+        eb_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = eb_dir / ".lock"
+        os.mkfifo(lock_file)
+        argv, env = binary.command(
+            self.script,
+            ["clean", "--sources"],
+            dict(self.env, SLURM_JOB_ID=""),
+        )
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertEqual(run.stdout, "")
+        self.assertIn("not a regular file", run.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

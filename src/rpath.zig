@@ -30,7 +30,9 @@ pub const self_linking = [_][]const u8{ "clang", "clang++", "flang", "flang-new"
 pub const marker = ".eb-local-rpath";
 
 /// One script for every name: it runs the next command of its own name on
-/// PATH. When that command links, it adds a run path for each absolute
+/// PATH. An empty entry is the current directory, including the one a
+/// trailing colon names, as execvp searches. When that command links, it
+/// adds a run path for each absolute
 /// library directory named with -L, and for a compiler driver for each
 /// LIBRARY_PATH entry, which EESSI's modules set and the driver passes to
 /// the linker; system and compatibility-layer directories are left out, as
@@ -41,9 +43,19 @@ pub const script =
     \\# RPATH wrapper written by eb-local; see `eb-local help`.
     \\name=${0##*/}
     \\real=
-    \\IFS=: read -r -a path_dirs <<< "$PATH"
+    \\# read drops a trailing colon, so an empty entry would disappear. Split
+    \\# on colons and keep every one. An empty entry is the current directory.
+    \\# An unset PATH is the default command search path, not the current directory.
+    \\path_dirs=()
+    \\if [ -n "${PATH+x}" ]; then _eb_path_rest="${PATH}:"; else _eb_path_rest="/bin:/usr/bin:"; fi
+    \\while [ -n "$_eb_path_rest" ]; do
+    \\    path_dirs+=("${_eb_path_rest%%:*}")
+    \\    _eb_path_rest="${_eb_path_rest#*:}"
+    \\done
+    \\unset _eb_path_rest
     \\for d in "${path_dirs[@]}"; do
-    \\    if [ -n "$d" ] && [ ! -e "$d/.eb-local-rpath" ] && [ -f "$d/$name" ] && [ -x "$d/$name" ]; then
+    \\    [ -n "$d" ] || d=.
+    \\    if [ ! -e "$d/.eb-local-rpath" ] && [ -f "$d/$name" ] && [ -x "$d/$name" ]; then
     \\        real=$d/$name
     \\        break
     \\    fi
@@ -63,15 +75,15 @@ pub const script =
     \\        continue
     \\    fi
     \\    case $arg in
-    \\        -c | -S | -E | -M | -MM | -fsyntax-only) [ $linker = 0 ] && link=0 ;;
+    \\        -c | -S | -E | -M | -MM | -fsyntax-only | --analyze | --precompile | --preprocess | -emit-ast | -emit-pch) [ $linker = 0 ] && link=0 ;;
     \\        -i) [ $linker = 1 ] && link=0 ;;
-    \\        -r | -Ur | --relocatable) link=0 ;;
+    \\        -r | -Ur | --relocatable | -help | --help-hidden | --help-list | --help-list-hidden | -version | --version | -qversion | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') link=0 ;;
     \\        -L | --library-path) want_dir=1 ;;
     \\        -L*) dirs+=("${arg#-L}") ;;
     \\        --library-path=*) dirs+=("${arg#--library-path=}") ;;
     \\    esac
     \\    case $arg in
-    \\        -v | -V | --version | -qversion | --help | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
+    \\        -v | -V | --version | -qversion | --help | --help=* | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
     \\        *) info_only=0 ;;
     \\    esac
     \\done
@@ -286,6 +298,20 @@ test "failed wrapper write leaves no marker or newly created directory" {
     try std.testing.expectError(error.Unsafe, write(a, nested_dir, &.{"clang"}));
 }
 
+test "wrapper script disables linking for llvm and intel info or analysis flags" {
+    for ([_][]const u8{
+        "--analyze",
+        "--precompile",
+        "-help",
+        "--help-hidden",
+        "-version",
+        "-dumpmachine",
+        "--print-*",
+    }) |flag| {
+        try std.testing.expect(std.mem.indexOf(u8, script, flag) != null);
+    }
+}
+
 test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's comes first" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -325,4 +351,8 @@ test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's come
         try std.testing.expectEqual(case.want.len, got.len);
         for (case.want, got) |w, g| try std.testing.expectEqualStrings(w, g);
     }
+}
+
+test "wrapper script recognizes --help=class flags as info-only" {
+    try std.testing.expect(std.mem.indexOf(u8, script, "--help | --help=*") != null);
 }

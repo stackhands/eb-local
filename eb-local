@@ -36,13 +36,25 @@ die() {
 }
 fail_storage() { die "$@"; }
 
+opt_value() {
+    local var="$1" opt="$2" val="${3:-}"
+    [ -n "$val" ] || die "$opt needs a value"
+    printf -v "$var" '%s' "$val"
+}
+
+c_match() {
+    local LC_ALL=C
+    [[ "$1" =~ $2 ]]
+}
+
 # Module names as Lmod writes them. Anything else could change the meaning of
 # the lines env and dev print for eval, so it is refused.
-valid_module() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9._+-]+)*$ ]]; }
+valid_module() { c_match "$1" '^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9._+-]+)*$'; }
 
 prefix="${EB_LOCAL_PREFIX:-$HOME/.local/eessi}"
 mode=user
 command=build
+if [ "${1:-}" = "--version" ]; then version; exit 0; fi
 case "${1:-}" in
     env|dev|clean) command="$1"; shift ;;
     help|-h|--help) usage; exit 0 ;;
@@ -51,45 +63,52 @@ esac
 args=()
 dev_modules=()
 buildenv_override=""
-logs_days=30
+logs_days=""
 clean_logs=true
 clean_sources=false
 clean_workspaces=false
 dry_run=false
 allow_delete=false
+logs_days_set=false
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
-        --version) version; exit 0 ;;
         --project)
-            [ -n "${2:-}" ] || die "--project needs a directory"
-            prefix="$2"; mode=project; shift 2 ;;
+            opt_value prefix --project "${2:-}"; mode=project; shift 2 ;;
         --project=*)
-            prefix="${1#--project=}"
-            [ -n "$prefix" ] || die "--project needs a directory"
-            mode=project; shift ;;
-        --env)
-            if [ "$command" = build ] && [ ${#args[@]} -eq 0 ]; then command="env"; else args+=("$1"); fi
-            shift ;;
+            opt_value prefix --project "${1#--project=}"; mode=project; shift ;;
         *)
             case "$command" in
-                build) args+=("$1"); shift ;;
-                env) die "env takes only --project; got '$1'" ;;
+                build)
+                    if [ ${#args[@]} -eq 0 ]; then
+                        case "$1" in
+                            --env) command="env"; shift; continue ;;
+                            env|dev|clean) command="$1"; shift; continue ;;
+                        esac
+                    fi
+                    args+=("$1"); shift ;;
+                env) die "env takes only --project, --profile, --config and --strict; got '$1'" ;;
                 dev)
                     case "$1" in
-                        --buildenv) [ -n "${2:-}" ] || die "--buildenv needs a module"; buildenv_override="$2"; shift 2 ;;
+                        --buildenv)
+                            opt_value buildenv_override --buildenv "${2:-}"; shift 2 ;;
                         --buildenv=*)
-                            buildenv_override="${1#--buildenv=}"
-                            [ -n "$buildenv_override" ] || die "--buildenv needs a module"
-                            shift ;;
+                            opt_value buildenv_override --buildenv "${1#--buildenv=}"; shift ;;
                         -*) die "dev does not know the option '$1'" ;;
                         *) valid_module "$1" || die "'$1' is not a module name"; dev_modules+=("$1"); shift ;;
                     esac ;;
                 clean)
                     case "$1" in
                         --logs-older-than)
-                            [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
-                            logs_days="$2"; shift 2 ;;
+                            [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
+                            opt_value logs_days --logs-older-than "${2:-}"
+                            c_match "$logs_days" '^[0-9]{1,5}$' || die "--logs-older-than needs a number of days"
+                            logs_days_set=true; shift 2 ;;
+                        --logs-older-than=*)
+                            opt_value logs_days --logs-older-than "${1#--logs-older-than=}"
+                            [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
+                            c_match "$logs_days" '^[0-9]{1,5}$' || die "--logs-older-than needs a number of days"
+                            logs_days_set=true; shift ;;
                         --no-logs) clean_logs=false; shift ;;
                         --sources) clean_sources=true; shift ;;
                         --workspaces) clean_workspaces=true; shift ;;
@@ -101,10 +120,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+shell_quote() {
+    local LC_ALL=C s="$1"
+    [ -n "$s" ] || { printf "''"; return; }
+    [[ "$s" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]] && { printf '%s' "$s"; return; }
+    printf "'%s'" "${s//\'/\'\"\'\"\'}"
+}
+
 if [ "$mode" = project ] && [ ! -d "$prefix" ]; then
+    quoted_prefix=$(shell_quote "$prefix")
     echo "eb-local: project directory $prefix does not exist." >&2
     echo "  The project owner creates it once, with the project group and g+s:" >&2
-    echo "  mkdir -p $prefix && chgrp <group> $prefix && chmod 2770 $prefix" >&2
+    echo "  mkdir -p $quoted_prefix && chgrp <group> $quoted_prefix && chmod 2770 $quoted_prefix" >&2
     exit 2
 fi
 if [ -d "$prefix" ]; then
@@ -156,45 +183,100 @@ config_trusted() {
     return 1
 }
 
+# Trims the characters in $2 (default space, tab and carriage return) from both
+# ends of $1.
+trim_ws() {
+    local s="$1" set="${2:-$' \t\r'}"
+    s="${s#"${s%%[!"$set"]*}"}"
+    s="${s%"${s##*[!"$set"]}"}"
+    printf '%s' "$s"
+}
+
+legacy_toml_key() {
+    case "$1" in
+        node_local_root|node_local_mount|node_local_fstype|shared_scratch) printf 'storage.%s' "$1" ;;
+        stack_module) printf 'stack.module' ;;
+        extend_module) printf 'stack.extend' ;;
+        allocation_hint) printf 'build.allocation_hint' ;;
+        dev_buildenv) printf 'dev.buildenv' ;;
+        trash) printf 'clean.trash' ;;
+        *) return 1 ;;
+    esac
+}
+
 read_config() {
-    local file="$1" line key value
+    local file="$1" line key value lineno=0 idx seen_lines=" " seen_tables=" " toml_key first_line table tbl
+    local -a lines=() keys=() vals=() tables=() table_order=()
     while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%%#*}"
-        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-        [[ "$line" =~ ^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*(.*[^[:space:]])?[[:space:]]*$ ]] ||
-            fail_storage "$file: cannot read the line '$line'."
-        key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
-        case "$key" in
-            node_local_root)
-                [[ "$value" =~ ^/[^[:space:]]*[^/[:space:]]$ ]] ||
-                    fail_storage "$file: node_local_root must be one absolute path without a trailing slash."
-                node_local_root="$value" ;;
-            node_local_mount)
-                [[ "$value" =~ ^([A-Za-z0-9._-]|%[uj])+$ && "$value" == *%j* && ${#value} -le 255 ]] ||
-                    fail_storage "$file: node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it."
-                node_local_mount="$value" ;;
-            node_local_fstype)
-                [[ "$value" =~ ^[a-z0-9_.]+$ ]] || fail_storage "$file: node_local_fstype must be a file system type name."
-                node_local_fstype="$value" ;;
-            shared_scratch)
-                local path
-                scratch_paths=()
-                set -f
-                for path in $value; do
-                    [[ "$path" =~ ^/.*[^/]$ ]] || { set +f; fail_storage "$file: shared_scratch takes absolute paths without a trailing slash."; }
-                    scratch_paths+=("$path")
-                done
-                set +f
-                ;;
-            allocation_hint) allocation_hint="$value" ;;
-            stack_module|extend_module|dev_buildenv)
-                valid_module "$value" || fail_storage "$file: $key must be one module name."
-                printf -v "$key" '%s' "$value" ;;
-            trash)
-                case "$value" in auto|rtrash|none) trash="$value" ;; *) fail_storage "$file: trash is auto, rtrash or none." ;; esac ;;
-            *) fail_storage "$file: unknown setting '$key'." ;;
+        lineno=$((lineno + 1))
+        line=$(trim_ws "${line%%#*}")
+        [ -z "$line" ] && continue
+        [[ "$line" == *=* ]] || fail_storage "$file: line $lineno: cannot read the line '$line'"
+        key=$(trim_ws "${line%%=*}" $' \t')
+        value=$(trim_ws "${line#*=}" $' \t')
+        toml_key=$(legacy_toml_key "$key") || fail_storage "$file: line $lineno: unknown setting '$key'"
+        table="${toml_key%%.*}"
+        lines+=("$lineno")
+        keys+=("$key")
+        vals+=("$value")
+        tables+=("$table")
+        case "$seen_tables" in
+            *" $table "*) ;;
+            *) seen_tables+="$table "; table_order+=("$table") ;;
         esac
     done < "$file"
+    for idx in "${!keys[@]}"; do
+        key="${keys[$idx]}" lineno="${lines[$idx]}"
+        toml_key=$(legacy_toml_key "$key")
+        case "$seen_lines" in
+            *" $key="*)
+                first_line="${seen_lines#* "$key"=}"
+                first_line="${first_line%% *}"
+                fail_storage "$file:$lineno: '$toml_key' is set twice (first on line $first_line)"
+                ;;
+        esac
+        seen_lines+="$key=$lineno "
+    done
+    for tbl in "${table_order[@]}"; do
+        for idx in "${!keys[@]}"; do
+            [ "${tables[$idx]}" = "$tbl" ] || continue
+            key="${keys[$idx]}" value="${vals[$idx]}" lineno="${lines[$idx]}"
+            toml_key=$(legacy_toml_key "$key")
+            case "$key" in
+                node_local_root)
+                    c_match "$value" '^/[^[:space:]]*[^/[:space:]]$' ||
+                        fail_storage "$file:$lineno: $toml_key must be one absolute path without a trailing slash"
+                    node_local_root="$value" ;;
+                node_local_mount)
+                    if ! { c_match "$value" '^([A-Za-z0-9._-]|%[uj])+$' && [[ "$value" == *%j* ]] && [ ${#value} -le 255 ]; }; then
+                        fail_storage "$file:$lineno: $toml_key must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"
+                    fi
+                    node_local_mount="$value" ;;
+                node_local_fstype)
+                    if [ -z "$value" ]; then
+                        fail_storage "$file:$lineno: $toml_key is empty"
+                    fi
+                    c_match "$value" '^[a-z0-9_.]+$' || fail_storage "$file:$lineno: $toml_key must be a file system type name"
+                    node_local_fstype="$value" ;;
+                shared_scratch)
+                    local path
+                    scratch_paths=()
+                    set -f
+                    for path in $value; do
+                        c_match "$path" '^/.*[^/]$' || { set +f; fail_storage "$file:$lineno: $toml_key takes absolute paths without a trailing slash"; }
+                        scratch_paths+=("$path")
+                    done
+                    set +f
+                    ;;
+                allocation_hint) allocation_hint="$value" ;;
+                stack_module|extend_module|dev_buildenv)
+                    valid_module "$value" || fail_storage "$file:$lineno: $toml_key '$value' is not a module name"
+                    printf -v "$key" '%s' "$value" ;;
+                trash)
+                    case "$value" in auto|rtrash|none) trash="$value" ;; *) fail_storage "$file:$lineno: $toml_key is auto, rtrash or none" ;; esac ;;
+            esac
+        done
+    done
 }
 
 script_dir=$(dirname -- "$(readlink -f -- "$0")")
@@ -211,7 +293,7 @@ for candidate in ${EB_LOCAL_CONFIG:+"$EB_LOCAL_CONFIG"} "$script_dir/eb-local.co
 done
 [ -z "$config_file" ] || read_config "$config_file"
 if [ -n "$buildenv_override" ]; then
-    valid_module "$buildenv_override" || die "'$buildenv_override' is not a module name"
+    valid_module "$buildenv_override" || die "--buildenv: '$buildenv_override' is not a module name"
     dev_buildenv="$buildenv_override"
 fi
 case "${EB_LOCAL_TRASH:-}" in
@@ -309,7 +391,7 @@ durable_dirs() {
 # The allocation's node-local mount: the exact job mount, owned, canonical,
 # its own file system of the configured type, writable.
 check_job_root() {
-    [[ "$SLURM_JOB_ID" =~ ^[1-9][0-9]*$ ]] || fail_storage 'invalid Slurm allocation identity.'
+    c_match "$SLURM_JOB_ID" '^[1-9][0-9]*$' || fail_storage 'invalid Slurm allocation identity.'
     job_user=$(id -un) || fail_storage 'cannot determine the allocation user.'
     local pattern="$node_local_mount" name=""
     while [ -n "$pattern" ]; do
@@ -347,7 +429,7 @@ check_job_root() {
 own_workspace() {
     local dir="$1"
     [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-    [[ "$dir" =~ ^"$job_root"/eb-local\.[A-Za-z0-9]{8}$ ]] || return 1
+    [[ "$dir" == "$job_root"/eb-local.* ]] && c_match "${dir#"$job_root"/}" '^eb-local\.[A-Za-z0-9]{8}$' || return 1
     [ "$(stat -c %u -- "$dir")" = "$(id -u)" ]
 }
 
@@ -357,6 +439,8 @@ remove_workspace() {
 }
 
 if [ "$command" = clean ]; then
+    [ "$clean_logs" = false ] && [ -n "$logs_days" ] && die "clean takes --no-logs or --logs-older-than, not both"
+    logs_days="${logs_days:-30}"
     if [ "$clean_workspaces" = true ]; then
         [ -n "${SLURM_JOB_ID:-}" ] || die "--workspaces works inside the allocation that made them."
         [ -n "$node_local_root" ] || fail_storage 'no node-local root is configured; set node_local_root in eb-local.conf.'

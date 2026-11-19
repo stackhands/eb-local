@@ -1,1 +1,0 @@
-`eb-local list` now trims trailing slashes from `EESSI_SOFTWARE_SUBDIR` before matching CPU target trees, so `list` and `list --missing` recognize the current node when `EESSI_SOFTWARE_SUBDIR` ends with `/`.

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import binary
+import hostile_fs
 
 
 @unittest.skipUnless(binary.BIN, "rpath-wrappers is a feature of the Zig build")
@@ -21,15 +22,21 @@ class RpathWrappersCli(unittest.TestCase):
         self.cache.mkdir()
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.lld_bin = self.root / "lld-bin"
+        self.lld_bin.mkdir()
         self.log = self.root / "calls.log"
-        for tool in ("gcc", "clang", "ld"):
-            p = self.bin / tool
-            p.write_text(
-                "#!/bin/sh\n"
-                f'printf "%s:%s\\n" "{tool}" "$*" >> "{self.log}"\n',
-                encoding="utf-8",
-            )
-            p.chmod(0o755)
+        for directory, tools in (
+            (self.bin, ("gcc", "clang", "ld", "icx", "ifx")),
+            (self.lld_bin, ("ld.lld",)),
+        ):
+            for tool in tools:
+                p = directory / tool
+                p.write_text(
+                    "#!/bin/sh\n"
+                    f'printf "%s:%s\\n" "{tool}" "$*" >> "{self.log}"\n',
+                    encoding="utf-8",
+                )
+                p.chmod(0o755)
 
     def run_cmd(self, args, **env_overrides):
         env = {
@@ -77,6 +84,26 @@ class RpathWrappersCli(unittest.TestCase):
         self.assertEqual(got.stdout, "")
         self.assertIn("no compiler or linker on PATH to wrap", got.stderr)
 
+    def test_generated_wrappers_bypass_help_equals_queries(self):
+        got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        script = got.stdout + "gcc --help=target\n" + "gcc -o prog a.o\n"
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": f"{self.bin}:/usr/bin:/bin", "LIBRARY_PATH": "/opt/mylib"},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(
+            self.log.read_text(encoding="utf-8").splitlines(),
+            [
+                "gcc:--help=target",
+                "gcc:-o prog a.o -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+            ],
+        )
+
     def test_unwrapped_skips_easybuild_wrapped_compilers_and_wraps_bare_clang(self):
         eb_wrap = self.root / "eb" / "rpath_wrappers" / "clang_wrapper"
         eb_wrap.mkdir(parents=True)
@@ -93,6 +120,85 @@ class RpathWrappersCli(unittest.TestCase):
         self.assertIn("does not wrap clang", bare.stderr)
         self.assertIn("export PATH=", bare.stdout)
         self.assertIn("export EB_LOCAL_RPATH_WRAPPERS=", bare.stdout)
+
+    def test_wrappers_bypass_llvm_intel_nonlinking_flags(self):
+        llvm_got = self.run_cmd(["--for", "llvm"], PATH=f"{self.lld_bin}:{self.bin}")
+        self.assertEqual(llvm_got.returncode, 0, llvm_got.stderr)
+        intel_got = self.run_cmd(["--for", "intel"])
+        self.assertEqual(intel_got.returncode, 0, intel_got.stderr)
+
+        nonlinking = [
+            ("clang", ["-help"]),
+            ("clang", ["--help-hidden"]),
+            ("clang", ["--help-list"]),
+            ("clang", ["--help-list-hidden"]),
+            ("clang", ["-version"]),
+            ("clang", ["--version"]),
+            ("clang", ["-qversion"]),
+            ("clang", ["-dumpversion"]),
+            ("clang", ["-dumpfullversion"]),
+            ("clang", ["--target=x86_64-linux-gnu", "-dumpmachine"]),
+            ("clang", ["-print-resource-dir"]),
+            ("clang", ["--target=x86_64-linux-gnu", "--print-resource-dir"]),
+            ("clang", ["-###"]),
+            ("clang", ["--analyze", "foo.c"]),
+            ("clang", ["--precompile", "foo.hpp"]),
+            ("clang", ["--preprocess", "foo.c"]),
+            ("clang", ["-emit-ast", "foo.c"]),
+            ("clang", ["-emit-pch", "foo.h"]),
+            ("clang", ["-v"]),
+            ("ld.lld", ["-help"]),
+            ("ld.lld", ["--help-hidden"]),
+            ("ld.lld", ["--help-list"]),
+            ("ld.lld", ["--help-list-hidden"]),
+            ("ld.lld", ["-version"]),
+            ("ld.lld", ["--version"]),
+            ("icx", ["-help"]),
+            ("icx", ["--help-hidden"]),
+            ("icx", ["-version"]),
+            ("icx", ["--version"]),
+            ("icx", ["-qversion"]),
+            ("icx", ["-dumpversion"]),
+            ("icx", ["-dumpmachine"]),
+            ("icx", ["--analyze", "foo.c"]),
+            ("icx", ["--precompile", "foo.hpp"]),
+            ("icx", ["--preprocess", "foo.c"]),
+            ("icx", ["-emit-ast", "foo.c"]),
+            ("icx", ["-emit-pch", "foo.h"]),
+            ("ifx", ["-help"]),
+            ("ifx", ["--help-hidden"]),
+            ("ifx", ["-version"]),
+            ("ifx", ["--version"]),
+            ("ifx", ["-dumpversion"]),
+            ("ifx", ["--preprocess", "foo.F90"]),
+        ]
+        script = llvm_got.stdout + intel_got.stdout
+        expected = []
+        for tool, args in nonlinking:
+            script += f"{tool} {' '.join(args)}\n"
+            expected.append(f"{tool}:{' '.join(args)}")
+        script += "clang -o prog a.o\nclang -v foo.o -o prog2\n"
+        expected.extend([
+            "clang:-o prog a.o -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+            "clang:-v foo.o -o prog2 -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+        ])
+
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={
+                "PATH": f"{self.lld_bin}:{self.bin}:/usr/bin:/bin",
+                "LIBRARY_PATH": "/opt/mylib",
+            },
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines, expected)
+        for line in lines[:-2]:
+            self.assertNotIn("-rpath", line)
+            self.assertNotIn("--disable-new-dtags", line)
 
     def test_generated_wrappers_skip_non_linking_flags_and_accept_library_path_flag(self):
         got = self.run_cmd(["--for", "llvm"])
@@ -133,6 +239,76 @@ class RpathWrappersCli(unittest.TestCase):
                 " -Wl,-rpath,/opt/x/lib -Wl,-rpath,/opt/y/lib -Wl,--disable-new-dtags",
             ],
         )
+
+    def test_hostile_wrapper_destinations_exit_two(self):
+        ro_cache = self.root / "ro-cache"
+        (ro_cache / "eb-local").mkdir(parents=True)
+        with hostile_fs.readonly_dir(ro_cache / "eb-local"):
+            ro_got = self.run_cmd(["--for", "gcc"], XDG_CACHE_HOME=str(ro_cache))
+            self.assertEqual(ro_got.returncode, 2, ro_got.stdout + ro_got.stderr)
+            self.assertEqual(ro_got.stdout, "")
+            self.assertIn("Permission denied", ro_got.stderr)
+
+        ok = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        wrap_dir = Path(ok.stdout.splitlines()[1].split("=", 1)[1])
+
+        (wrap_dir / "gcc").unlink()
+        (wrap_dir / "gcc").mkdir()
+        dir_got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(dir_got.returncode, 2, dir_got.stdout + dir_got.stderr)
+        self.assertEqual(dir_got.stdout, "")
+        self.assertIn("Unsafe", dir_got.stderr)
+        (wrap_dir / "gcc").rmdir()
+
+        link, outside = hostile_fs.dangling_symlink(wrap_dir / "gcc", self.root / "outside-gcc")
+        sym_got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(sym_got.returncode, 2, sym_got.stdout + sym_got.stderr)
+        self.assertEqual(sym_got.stdout, "")
+        self.assertIn("Unsafe", sym_got.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(outside.exists())
+
+    def _run_wrapper(self, setup_stdout, path, cwd):
+        script = setup_stdout + "gcc -c foo.c\n"
+        return subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": path, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_an_empty_path_entry_is_the_current_directory(self):
+        got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        cwd_gcc = self.root / "gcc"
+        cwd_gcc.write_text("#!/bin/sh\nprintf 'from-cwd\\n'\n", encoding="utf-8")
+        cwd_gcc.chmod(0o755)
+
+        # A trailing colon is an empty entry after every other directory.
+        trailing = self._run_wrapper(got.stdout, "", self.root)
+        self.assertEqual(trailing.returncode, 0, trailing.stdout + trailing.stderr)
+        self.assertEqual(trailing.stdout, "from-cwd\n")
+        self.assertEqual(trailing.stderr, "")
+
+        # An empty entry in the middle is the current directory, and it wins
+        # over a later directory that also has gcc.
+        self.log.write_text("", encoding="utf-8")
+        middle = self._run_wrapper(got.stdout, f":{self.bin}", self.root)
+        self.assertEqual(middle.returncode, 0, middle.stdout + middle.stderr)
+        self.assertEqual(middle.stdout, "from-cwd\n")
+        self.assertEqual(middle.stderr, "")
+        self.assertEqual(self.log.read_text(encoding="utf-8"), "")
+
+    def test_tmpfs_enospc_exits_two_and_cleans_wrapper_tree(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        got = self.run_cmd(["--for", "gcc"], XDG_CACHE_HOME=str(mnt))
+        self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("cannot write RPATH wrappers", got.stderr)
 
 
 if __name__ == "__main__":

@@ -1,1 +1,0 @@
-`eb-local check --module NAME/VERSION`, `--dev` and `--prefix DIR` audit every ELF file in those installations, the dev tree or a directory. A file that is not ELF is skipped. `--quiet` prints a file only when it has a problem.

@@ -18,7 +18,7 @@ These steps run them and read what they say.
    #+end_src
 
    #+begin_example
-   ok   eb-local 3.1.0
+   ok   eb-local 3.2.0
    ok   site file /usr/local/bin/config.toml
    ok   builds use the allocation's own xfs mount /local/%u.%j
    ok   installs go to /home/alice/eessi: a user install, prefix from default
@@ -111,7 +111,7 @@ When you ask the site for help, include the output of =eb-local doctor= and of =
 * Check the EESSI client and module order
 
 Before a site build, run the standalone, non-mutating readiness probe =eb-local-readiness=.
-Release 3.1.0 ships the =eb-local= binary only; the script is in the repository on =main=, not in the release archive.
+A release ships the =eb-local= binary only; the script is in the repository on =main=, not in the release archive.
 
 From a checkout, run it from the repository root:
 
@@ -142,7 +142,7 @@ See [[file:../reference/readiness.org][Readiness probe]] for every option and ex
 * A path from outside the prefix
 
 A value left in the shell can point a build at the host's Perl, Python, R, CMake or pkg-config tree, or at a compiler wrapper that is not EESSI's.
-=eb-local doctor= names each entry of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =CMAKE_PREFIX_PATH= and =PKG_CONFIG_PATH=, and each compiler-wrapper variable, that resolves outside the EESSI repository, your prefix and =doctor.approved_prefixes=.
+=eb-local doctor= names each entry of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =JULIA_LOAD_PATH=, =JULIA_DEPOT_PATH=, =NODE_PATH=, =CMAKE_PREFIX_PATH= and =PKG_CONFIG_PATH=, and each compiler-wrapper variable, including a =CARGO_TARGET_*_LINKER= and =R_MAKEVARS_USER= or =R_MAKEVARS_SITE=, that resolves outside the EESSI repository, your prefix and =doctor.approved_prefixes=.
 It also names the timezone =/etc/localtime= resolves to, a bind mount of that file, and a host library directory a container runtime injected.
 
 #+begin_src bash

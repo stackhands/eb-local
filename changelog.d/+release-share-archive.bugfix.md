@@ -1,0 +1,1 @@
+The release workflow publishes the shell completions and man pages as `eb-local-X.Y.Z-share.tar.gz`. For 3.2.0 the `share` directory made the upload step fail after the binaries, their software bills of materials and `SHA256SUMS` were attached, so that release has no completions archive.

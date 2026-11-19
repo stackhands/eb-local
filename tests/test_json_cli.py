@@ -360,6 +360,20 @@ class JsonCli(StorageFixture):
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("symlink is not followed", proc.stderr)
 
+    def test_json_stdout_enospc_exits_one_and_reports_errno(self):
+        for args in (
+            ["profiles", "--json"],
+            ["site", "list", "--json"],
+            ["config", "--json"],
+            ["list", "--json"],
+        ):
+            with self.subTest(args=args):
+                argv, env = binary.command(self.script, args, dict(self.env, SLURM_JOB_ID=""))
+                with open("/dev/full", "wb") as dev_full:
+                    proc = subprocess.run(argv, env=env, cwd=self.root, stdout=dev_full, stderr=subprocess.PIPE, text=True)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn("No space left on device", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

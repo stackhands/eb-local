@@ -73,6 +73,26 @@ class ModulercCliErrors(unittest.TestCase):
         self.assertFalse(doc2["changed"])
         self.assertEqual(doc2["mode"], "write")
 
+    def test_nul_byte_in_existing_modulerc_exits_two_with_file_and_line(self):
+        tree = self.root / "nul-mods"
+        tree.mkdir()
+        control = tree / ".modulerc.lua"
+        payload = b'-- keep\nmodule_version("Bad/1.0\x00", "default")\n'
+        control.write_bytes(payload)
+        for extra in ([], ["--check"], ["--dry-run"]):
+            with self.subTest(extra=extra):
+                got = subprocess.run(
+                    [binary.BIN, "modulerc", "--module-tree", str(tree), "--default", "Example/2.0", *extra],
+                    env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
+                    cwd=self.root,
+                    capture_output=True,
+                    text=False,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, b"")
+                self.assertIn(f"{control}:2: the file holds a NUL byte".encode("utf-8"), got.stderr)
+        self.assertEqual(control.read_bytes(), payload)
+
 
 if __name__ == "__main__":
     unittest.main()

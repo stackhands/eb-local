@@ -51,7 +51,7 @@ The site settings, =storage.*=, =build.site_toolchains= and =build.node_types=, 
 | =XDG_CACHE_HOME=                                                                          | Holds the RPATH wrappers, below =$XDG_CACHE_HOME/eb-local=.                                                                                   |
 | =SLURM_JOB_ID=                                                                            | The job a build runs in, whose node-local mount it uses; without it, a build and =clean --workspaces= stop.                                  |
 | =EESSI_USER_INSTALL=, =EESSI_PROJECT_INSTALL=, =EESSI_SITE_INSTALL=, =EESSI_CVMFS_INSTALL= | Choose where =eb-local eb= installs. A build clears them, and warns about one left in the shell that is not the one it sets.                 |
-| =EESSI_CVMFS_REPO=, =EESSI_VERSION=                                                       | Name the EESSI repository (default =/cvmfs/software.eessi.io=) and version (default =2026.06=) for =eb=, =env=, =dev=, =doctor= and =list=.    |
+| =EESSI_CVMFS_REPO=, =EESSI_VERSION=                                                       | Name the EESSI repository (default =/cvmfs/software.eessi.io=) and version (default =2026.06=) for =eb=, =doctor= and =list=. For =env= and =dev= they name only the Lmod init file a shell without =module= sources and the file =--strict= checks; the stack those lines load is =stack.module=. |
 | =EESSI_SOFTWARE_PATH=, =EESSI_SITE_SOFTWARE_PATH=                                         | Checked by =eb-local eb= to confirm that EESSI-extend selected an install path inside the requested tree.                                     |
 | =EESSI_SOFTWARE_SUBDIR=, =EESSI_ACCELERATOR_TARGET=, =EESSI_EPREFIX=                      | Used by =check=, =check --dev=, =list=, =rpath-wrappers= and =doctor= to identify the loaded CPU target, accelerator and compatibility layer. |
 | =LMOD_PKG=, =LMOD_CMD=, =MODULESHOME=, =MODULEPATH=                                       | Checked by =doctor= and the emitted shell snippets to locate Lmod initialization and verify loaded module trees.                              |
@@ -79,11 +79,14 @@ The lines =eb-local dev= prints do the same, load the modules and a build enviro
 | =EB_LOCAL_DEV_PREFIX=     | =<prefix>/dev/<EESSI version>/<CPU target>=, with =/<GPU target>= after it when EESSI found one               |
 | =PATH=                    | The RPATH wrappers' directory first, when eb-local writes wrappers                                             |
 | =EB_LOCAL_RPATH_WRAPPERS= | The RPATH wrappers' directory, when eb-local writes wrappers                                                   |
+| =SSL_CERT_FILE=, =CARGO_HTTP_CAINFO= | The host's CA bundle, when the host has none at =/etc/ssl/certs/ca-certificates.crt= and the variable is not set |
+
+EESSI's =cargo= and =curl= look for the CA bundle at =/etc/ssl/certs/ca-certificates.crt=. A host that keeps it at =/etc/pki/tls/certs/ca-bundle.crt=, =/etc/ssl/ca-bundle.pem= or =/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem= would leave them without one, so =dev= names the first of those that is readable.
 
 * Set for a build
 
 The script a build runs gets eb-local's environment without the variables =env= unsets, =BASH_ENV=, =ENV=, =SHELLOPTS=, =BASHOPTS=, =LD_LIBRARY_PATH=, =LD_PRELOAD= and =LD_AUDIT=.
-With =build.clear_foreign_prefixes= or =EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES= set, it also drops entries of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =CMAKE_PREFIX_PATH= and =PKG_CONFIG_PATH= that lie outside the approved prefixes, and unsets a compiler-wrapper variable that resolves outside them.
+With =build.clear_foreign_prefixes= or =EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES= set, it also drops entries of =PERL5LIB=, =PYTHONPATH=, =R_LIBS*=, =JULIA_LOAD_PATH=, =JULIA_DEPOT_PATH=, =NODE_PATH=, =CMAKE_PREFIX_PATH= and =PKG_CONFIG_PATH= that lie outside the approved prefixes, and unsets a compiler-wrapper variable, a =CARGO_TARGET_*_LINKER=, or =R_MAKEVARS_USER= or =R_MAKEVARS_SITE=, that resolves outside them.
 Off, which is the default, a build keeps those variables.
 The approved prefixes are the EESSI repository, the install prefix, the four EESSI install variables, =doctor.approved_prefixes= and eb-local's RPATH wrapper directory.
 =eb-local doctor= names each foreign entry either way.
