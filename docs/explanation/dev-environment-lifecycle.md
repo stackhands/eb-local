@@ -1,0 +1,44 @@
+<!-- Generated from docs/orgmode/explanation/dev-environment-lifecycle.org by docs/export.el; edit that file. -->
+
+# The opt-in development environment lifecycle
+
+The Zig front end keeps ordinary `eb-local dev` stacking behaviour.
+It neither records the calling shell nor removes modules loaded by an earlier invocation.
+Its lifecycle starts only when the caller evaluates `eb-local dev --replace`.
+
+## One saved state
+
+The first `dev --replace` records the state from before it changes the shell in the exported `EB_LOCAL_DEV_SAVED` variable.
+The record has a version and stores:
+
+-   `LOADEDMODULES`, including its load order;
+-   `PATH`;
+-   whether `EB_LOCAL_DEV_PREFIX` and `EB_LOCAL_RPATH_WRAPPERS` were unset, empty or set, and their values when set; and
+-   the same presence and value information for `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`.
+
+Values that may contain shell syntax are encoded as data.
+`leave` validates the record and quotes its output instead of evaluating text from the variable.
+A malformed or unsupported record is an error.
+
+After the loads finish, `dev --replace` records the resulting module list in the same variable.
+On a later `dev --replace` it unloads only modules in that resulting list that were absent before the lifecycle began.
+It then performs the normal `dev` loads and replaces the resulting list in the record.
+Modules that preceded the first entry are therefore not candidates for replacement.
+
+## Leaving
+
+`eb-local leave` prints shell code, like `env` and `dev`.
+The caller leaves with:
+
+```sh
+eval "$(eb-local leave)"
+```
+
+The code unloads modules that are not in the recorded prior list, reloads the recorded modules in their prior order, and restores the recorded `PATH`, marker variables and loader variables.
+It then unsets `EB_LOCAL_DEV_SAVED`.
+Successful module operations restore the recorded module list rather than merely removing the modules named on the `dev` command line.
+
+Leaving does not restore the working directory, shell options, aliases, functions or arbitrary variables changed after entry.
+It does not remove files such as compiler wrappers from the cache.
+Lmod policy still applies: a sticky module that Lmod refuses to unload prevents an exact module restoration, and a recorded module that is no longer available makes the emitted code fail.
+Changes made by ordinary `dev` invocations outside the lifecycle have no saved state to restore.
