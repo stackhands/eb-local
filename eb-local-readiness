@@ -3,8 +3,8 @@
 
 import argparse
 import os
-from pathlib import Path
 import re
+import stat
 import sys
 
 
@@ -95,6 +95,24 @@ def check(repo, prefix, modulepath, mountinfo):
     return failed
 
 
+def read_mountinfo(path):
+    """Read mountinfo from a regular file without blocking on a FIFO."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8")
+    finally:
+        os.close(fd)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Check the EESSI mount and local-module precedence"
@@ -122,8 +140,8 @@ def main(argv=None):
         print("FAIL --prefix must not be empty", file=sys.stderr)
         return 2
     try:
-        mountinfo = Path(args.mountinfo).read_text(encoding="utf-8")
-    except OSError as error:
+        mountinfo = read_mountinfo(args.mountinfo)
+    except (OSError, UnicodeDecodeError) as error:
         print("FAIL cannot read {}: {}".format(args.mountinfo, error), file=sys.stderr)
         return 1
     return int(check(args.repo, args.prefix, os.environ.get("MODULEPATH", ""), mountinfo))

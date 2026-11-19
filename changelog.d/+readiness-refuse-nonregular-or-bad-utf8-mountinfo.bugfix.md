@@ -1,0 +1,1 @@
+`eb-local-readiness` now checks that `--mountinfo` is a regular file and handles non-UTF-8 bytes cleanly with `FAIL` and exit status 1 instead of hanging on a FIFO or crashing with `UnicodeDecodeError`.
