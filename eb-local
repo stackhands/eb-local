@@ -168,14 +168,44 @@ config_trusted() {
     return 1
 }
 
+# Trims the characters in $2 (default space, tab and carriage return) from both
+# ends of $1.
+trim_ws() {
+    local s="$1" set="${2:-$' \t\r'}"
+    s="${s#"${s%%[!"$set"]*}"}"
+    s="${s%"${s##*[!"$set"]}"}"
+    printf '%s' "$s"
+}
+
+legacy_toml_key() {
+    case "$1" in
+        node_local_root|node_local_mount|node_local_fstype|shared_scratch) printf 'storage.%s' "$1" ;;
+        stack_module) printf 'stack.module' ;;
+        extend_module) printf 'stack.extend' ;;
+        allocation_hint) printf 'build.allocation_hint' ;;
+        dev_buildenv) printf 'dev.buildenv' ;;
+        trash) printf 'clean.trash' ;;
+        *) return 1 ;;
+    esac
+}
+
 read_config() {
-    local file="$1" line key value
+    local file="$1" line key value lineno=0 idx
+    local -a lines=() keys=() vals=()
     while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%%#*}"
-        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-        [[ "$line" =~ ^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*(.*[^[:space:]])?[[:space:]]*$ ]] ||
-            fail_storage "$file: cannot read the line '$line'."
-        key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        lineno=$((lineno + 1))
+        line=$(trim_ws "${line%%#*}")
+        [ -z "$line" ] && continue
+        [[ "$line" == *=* ]] || fail_storage "$file: line $lineno: cannot read the line '$line'"
+        key=$(trim_ws "${line%%=*}" $' \t')
+        value=$(trim_ws "${line#*=}" $' \t')
+        legacy_toml_key "$key" >/dev/null || fail_storage "$file: line $lineno: unknown setting '$key'"
+        lines+=("$lineno")
+        keys+=("$key")
+        vals+=("$value")
+    done < "$file"
+    for idx in "${!keys[@]}"; do
+        key="${keys[$idx]}" value="${vals[$idx]}"
         case "$key" in
             node_local_root)
                 [[ "$value" =~ ^/[^[:space:]]*[^/[:space:]]$ ]] ||
@@ -204,9 +234,8 @@ read_config() {
                 printf -v "$key" '%s' "$value" ;;
             trash)
                 case "$value" in auto|rtrash|none) trash="$value" ;; *) fail_storage "$file: trash is auto, rtrash or none." ;; esac ;;
-            *) fail_storage "$file: unknown setting '$key'." ;;
         esac
-    done < "$file"
+    done
 }
 
 script_dir=$(dirname -- "$(readlink -f -- "$0")")

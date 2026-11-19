@@ -275,6 +275,27 @@ class Commands(StorageFixture):
                       "module load EESSI-extend/2026.06-easybuild\n", run.stdout)
         self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
 
+    def test_legacy_config_checks_all_lines_before_value_validation(self):
+        cases = (
+            ("caps_key", "node_local_root = /a/\nFoo = 1\n", "line 2: unknown setting 'Foo'"),
+            ("empty_key", "node_local_root = /a/\n = 1\n", "line 2: unknown setting ''"),
+            ("unknown_key", "node_local_root = /a/\nunknown_key = 1\n", "line 2: unknown setting 'unknown_key'"),
+            ("no_equals", "node_local_root = /a/\nbad line\n", "line 2: cannot read the line 'bad line'"),
+            # text=True turns the carriage return in the key into a newline.
+            ("cr_before_equals", "trash\r= none\n", "line 1: unknown setting 'trash\n'"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text)
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}: {suffix}\n"),
+                )
+        self.config.write_text("node_local_root = /a\r\n")
+        ok = self.run_wrapper(["env"], SLURM_JOB_ID="")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
     def test_configured_module_names_are_checked(self):
         self.config.write_text(self.config.read_text() + "stack_module = EESSI;touch injected\n")
         run = self.run_wrapper(["env"], SLURM_JOB_ID="")
