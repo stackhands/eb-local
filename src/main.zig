@@ -1821,7 +1821,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         return list(s.site_toolchains.value);
     } else if (std.mem.startsWith(u8, key, "build.node_types.")) {
         const name = key["build.node_types.".len..];
-        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        if (!config.validNodeTypeName(name)) die("unknown configuration key '{s}'", .{key});
         for (nodeTypes(s)) |t| {
             if (std.mem.eql(u8, t.name, name)) return scalar(t.sbatch);
         }
@@ -1864,7 +1864,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         return 1;
     } else if (std.mem.startsWith(u8, key, "secrets.")) {
         const name = key["secrets.".len..];
-        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        if (!config.validSecretName(name)) die("unknown configuration key '{s}'", .{key});
         for (s.secrets.items) |sec| {
             if (std.mem.eql(u8, sec.name, name)) return scalar(sec.source);
         }
