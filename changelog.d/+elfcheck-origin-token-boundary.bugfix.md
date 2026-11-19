@@ -1,1 +1,0 @@
-`eb-local check` (`elfcheck.expandOrigin`) now requires a non-word boundary after unbraced `$ORIGIN` (matching `ld.so`), leaving tokens such as `$ORIGIN_extra` unexpanded while still expanding `$ORIGIN`, `$ORIGIN-extra`, and `${ORIGIN}_extra`.

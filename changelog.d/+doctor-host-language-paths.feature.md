@@ -1,1 +1,0 @@
-`eb-local doctor` names a host `CARGO_TARGET_*_LINKER`, `CARGO_BUILD_RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `R_MAKEVARS_USER`, `R_MAKEVARS_SITE`, and a host entry of `JULIA_LOAD_PATH`, `JULIA_DEPOT_PATH` or `NODE_PATH`. `build.clear_foreign_prefixes` drops those when it is set, and stays off by default. `RUSTFLAGS` is a flag string, so it is not treated as a path.
