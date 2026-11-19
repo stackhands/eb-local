@@ -301,6 +301,20 @@ class ConfigCli(StorageFixture):
         self.assertIn("mine", run.stdout)
         self.assertIn("licensed", run.stdout)
 
+    def test_default_profile_type_checked_when_overridden(self):
+        self.user.write_text('default_profile = 123\n\n[profile.mine]\nprefix = "/tmp/p"\n')
+        for args, extra_env in (
+            (["config"], {}),
+            (["--profile", "mine", "config"], {}),
+            (["config"], {"EB_LOCAL_PROFILE": "mine"}),
+            (["config"], {"EB_LOCAL_PROFILE": ""}),
+        ):
+            with self.subTest(args=args, extra_env=extra_env):
+                got = self.run_tool(args, **extra_env)
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn("config.toml:1: default_profile must be a string, not an integer", got.stderr)
+
     def test_a_build_gets_its_secrets_and_its_log_does_not_keep_them(self):
         self.user.write_text(USER.format(token=self.token).replace(
             "[profile.licensed.secrets]", "[profile.licensed.secrets]"))

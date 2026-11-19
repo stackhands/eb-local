@@ -685,10 +685,12 @@ pub fn load(
     }
 
     // The profile: an option, then EB_LOCAL_PROFILE, then the last default_profile.
-    var profile: ?[]const u8 = cli.profile orelse env.get("EB_LOCAL_PROFILE");
-    if (profile == null) for (sources, tables.items) |src, t| {
-        if (try defaultProfile(&l, src, t)) |p| profile = p;
-    };
+    // Every default_profile is checked for type even when overridden.
+    var file_default: ?[]const u8 = null;
+    for (sources, tables.items) |src, t| {
+        if (try defaultProfile(&l, src, t)) |p| file_default = p;
+    }
+    var profile: ?[]const u8 = cli.profile orelse env.get("EB_LOCAL_PROFILE") orelse file_default;
     if (profile) |p| {
         if (p.len == 0) profile = null;
     }
@@ -1461,4 +1463,22 @@ test "build.node_types" {
     try std.testing.expect(validNodeTypeName("gpu_cc90"));
     try std.testing.expect(!validNodeTypeName("a b"));
     try std.testing.expect(!validNodeTypeName(""));
+}
+
+test "default_profile must be a string even when overridden" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const sources = [_]Source{.{
+        .path = "c.toml",
+        .text = "default_profile = 123\n[profile.mine]\nprefix = \"/tmp/p\"\n",
+        .layer = .user,
+    }};
+    try t.refuse(&sources, "c.toml:1: default_profile must be a string, not an integer");
+    var d: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, config_load(t.arena.allocator(), &sources, &t.env, .{ .profile = "mine" }, &d));
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "c.toml:1: default_profile must be a string, not an integer") != null);
+    try t.env.put("EB_LOCAL_PROFILE", "mine");
+    try t.refuse(&sources, "c.toml:1: default_profile must be a string, not an integer");
+    try t.env.put("EB_LOCAL_PROFILE", "");
+    try t.refuse(&sources, "c.toml:1: default_profile must be a string, not an integer");
 }
