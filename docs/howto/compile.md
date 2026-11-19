@@ -98,7 +98,14 @@ The program runs without the FFTW module, and without `LD_LIBRARY_PATH`.
 | MPI | `eval "$(eb-local dev)"`, then `mpicc` |
 | CMake against GSL | `eval "$(eb-local dev GSL/2.8-GCC-15.2.0 CMake/3.31.11-GCCcore-15.2.0)"` |
 | A Python virtual environment, with packages that compile C | `eval "$(eb-local dev Python/3.14.2-GCCcore-15.2.0)"`, then `python -m venv` and `pip install` |
+| A setuptools extension against GSL | `eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0)"` |
+| A meson-python extension against GSL | `eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0)"` |
+| A scikit-build-core extension against GSL | `eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0 CMake/3.31.11-GCCcore-15.2.0)"` |
 | R packages, into a library of your own | `eval "$(eb-local dev R/4.6.1-gfbf-2026.1)"`, then `install.packages()` into your library, which `R_LIBS` names |
+
+Each of the three extension tasks builds a module that calls GSL, then reads the module with `readelf`.
+The task passes when the module has a `DT_RPATH` entry naming the GSL directory and `readelf` shows no `DT_RUNPATH` entry.
+The task then imports the module with `env -i`, with no modules loaded.
 
 ## Other compilers
 
