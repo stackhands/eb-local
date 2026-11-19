@@ -73,7 +73,13 @@ while [ $# -gt 0 ]; do
             shift ;;
         *)
             case "$command" in
-                build) args+=("$1"); shift ;;
+                build)
+                    if [ ${#args[@]} -eq 0 ]; then
+                        case "$1" in
+                            env|dev|clean) command="$1"; shift; continue ;;
+                        esac
+                    fi
+                    args+=("$1"); shift ;;
                 env) die "env takes only --project; got '$1'" ;;
                 dev)
                     case "$1" in

@@ -286,6 +286,18 @@ class Commands(StorageFixture):
         self.assertEqual((new.returncode, new.stdout), (0, old.stdout))
         self.assertEqual(self.run_wrapper(["env", "extra"], SLURM_JOB_ID="").returncode, 2)
 
+    def test_project_flag_before_subcommand_matches_after(self):
+        proj = self.root / "proj-order"
+        proj.mkdir()
+        for sub_args in (["env"], ["dev", "FFTW/3.3.10-GCC-15.2.0"], ["clean", "--dry-run"]):
+            with self.subTest(sub_args=sub_args):
+                after = self.run_wrapper([*sub_args, "--project", str(proj)], SLURM_JOB_ID="")
+                before_sep = self.run_wrapper(["--project", str(proj), *sub_args], SLURM_JOB_ID="")
+                before_eq = self.run_wrapper([f"--project={proj}", *sub_args], SLURM_JOB_ID="")
+                self.assertEqual(after.returncode, 0, after.stderr)
+                self.assertEqual((before_sep.returncode, before_sep.stdout), (0, after.stdout), before_sep.stderr)
+                self.assertEqual((before_eq.returncode, before_eq.stdout), (0, after.stdout), before_eq.stderr)
+
     # -- clean ---------------------------------------------------------------
 
     def logs(self, *ages_days):
