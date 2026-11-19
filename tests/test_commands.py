@@ -232,10 +232,19 @@ class Commands(StorageFixture):
 
     def test_dev_refuses_a_module_name_that_is_not_one(self):
         for name in ("GSL; touch injected", "$(touch injected)", "../x", "a b", "-x", "GSL/`id`"):
-            with self.subTest(name=name):
-                run = self.run_wrapper(["dev", name], SLURM_JOB_ID="")
-                self.assertEqual(run.returncode, 2, run.stdout)
-                self.assertEqual(run.stdout, "")
+            pos_err = (
+                "eb-local: dev does not know the option '-x'\n"
+                if name == "-x"
+                else f"eb-local: '{name}' is not a module name\n"
+            )
+            for args, expected_stderr in (
+                (["dev", name], pos_err),
+                (["dev", "--buildenv", name], f"eb-local: --buildenv: '{name}' is not a module name\n"),
+                (["dev", f"--buildenv={name}"], f"eb-local: --buildenv: '{name}' is not a module name\n"),
+            ):
+                with self.subTest(args=args):
+                    run = self.run_wrapper(args, SLURM_JOB_ID="")
+                    self.assertEqual((run.returncode, run.stdout, run.stderr), (2, "", expected_stderr))
         self.assertFalse((self.root / "injected").exists())
 
     def test_dev_buildenv_comes_from_the_option_or_the_configuration(self):

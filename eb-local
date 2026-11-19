@@ -215,7 +215,7 @@ for candidate in ${EB_LOCAL_CONFIG:+"$EB_LOCAL_CONFIG"} "$script_dir/eb-local.co
 done
 [ -z "$config_file" ] || read_config "$config_file"
 if [ -n "$buildenv_override" ]; then
-    valid_module "$buildenv_override" || die "'$buildenv_override' is not a module name"
+    valid_module "$buildenv_override" || die "--buildenv: '$buildenv_override' is not a module name"
     dev_buildenv="$buildenv_override"
 fi
 case "${EB_LOCAL_TRASH:-}" in
