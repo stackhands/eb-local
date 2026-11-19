@@ -96,6 +96,8 @@ class Commands(StorageFixture):
     def dev_calls(self):
         run = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0", "FFTW/3.3.10-GCC-15.2.0"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.env.update(EESSI_VERSION="2026.06", EESSI_SOFTWARE_SUBDIR="x86_64/generic",
+                        EESSI_ACCELERATOR_TARGET="")
         replay = self.replay(run.stdout)
         self.assertEqual(replay.returncode, 0, replay.stderr)
         calls = (self.root / "module-calls").read_text().splitlines()
@@ -109,7 +111,6 @@ class Commands(StorageFixture):
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
 
-    @unittest.skipUnless(binary.BIN, "the install prefix is a feature of the Zig build")
     def test_dev_names_an_install_prefix_for_the_target(self):
         self.prefix.mkdir(parents=True)
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")

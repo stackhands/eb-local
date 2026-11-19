@@ -855,6 +855,18 @@ fn validTarget(text: []const u8) bool {
     return true;
 }
 
+fn devPrefixLines(a: Allocator, dev_root: []const u8) []const u8 {
+    return str(a,
+        \\if [ -z "${{EESSI_VERSION-}}" ] || [ -z "${{EESSI_SOFTWARE_SUBDIR-}}" ]; then
+        \\    echo "eb-local: the EESSI module set no software target; the dev install prefix is unavailable" >&2
+        \\    false
+        \\else
+        \\    export EB_LOCAL_DEV_PREFIX={s}"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}"
+        \\fi
+        \\
+    , .{q(a, dev_root)});
+}
+
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
 /// from a purged shell, and that load nothing when this shell's CPU target is
 /// not the lock's. The same binaries serve every node with that CPU target,
@@ -888,7 +900,8 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.append(a, '\n') catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
-    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, devPrefixLines(a, dev_root)) catch oom();
+    out.appendSlice(a, "fi\n") catch oom();
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     evalHint("dev --locked");
     cli.put(1, out.items);
@@ -937,7 +950,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // its install directory names them; the shell fills them in once EESSI
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
-    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, devPrefixLines(a, dev_root)) catch oom();
     if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);

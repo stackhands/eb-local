@@ -27,6 +27,9 @@ class DevCliModes(unittest.TestCase):
             "HOME": str(self.root),
             "EB_LOCAL_CONFIG": str(self.site),
             "EB_LOCAL_PREFIX": str(self.prefix),
+            "EESSI_VERSION": "2026.06",
+            "EESSI_SOFTWARE_SUBDIR": "x86_64/generic",
+            "EESSI_ACCELERATOR_TARGET": "",
         }
         env.pop("LD_LIBRARY_PATH", None)
         env.update(env_overrides)
@@ -106,7 +109,8 @@ class DevCliModes(unittest.TestCase):
             ["bash", "-c", 'source ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
             cwd=self.root,
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": str(self.site),
-                 "EB_LOCAL_PREFIX": str(self.prefix)},
+                 "EB_LOCAL_PREFIX": str(self.prefix), "EESSI_VERSION": "2026.06",
+                 "EESSI_SOFTWARE_SUBDIR": "x86_64/generic", "EESSI_ACCELERATOR_TARGET": ""},
             capture_output=True, text=True,
         )
         self.assertTrue(run.stdout.startswith(str(self.prefix) + "/dev/"), run.stdout + run.stderr)

@@ -24,6 +24,11 @@ module() {
             shift
             for m in "$@"; do
                 case $m in
+                    EESSI/*)
+                        export EESSI_VERSION=2026.06
+                        export EESSI_SOFTWARE_SUBDIR=x86_64/generic
+                        export EESSI_ACCELERATOR_TARGET=
+                        ;;
                     llvm-compilers/*) export EBROOTLLVMMINCOMPILERS=/eessi/llvm ;;
                     intel-compilers/*) export EBROOTINTELMINCOMPILERS=/eessi/intel ;;
                     CUDA/*) export EBROOTCUDA=/eessi/cuda ;;

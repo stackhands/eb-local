@@ -401,6 +401,14 @@ if [ "$command" = dev ]; then
     [ ${#load[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${load[@]}"; printf '\n'; }
     print_drop_rpath_wrappers
     printf 'module load %q\n' "$dev_buildenv"
+    printf '%s\n' \
+        'if [ -z "${EESSI_VERSION-}" ] || [ -z "${EESSI_SOFTWARE_SUBDIR-}" ]; then' \
+        '    echo "eb-local: the EESSI module set no software target; the dev install prefix is unavailable" >&2' \
+        '    false' \
+        'else'
+    # shellcheck disable=SC2016  # expanded by the shell that runs the lines
+    printf '    export EB_LOCAL_DEV_PREFIX=%q"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}"\n' "$prefix/dev"
+    printf '%s\n' 'fi'
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
         echo "eb-local: LD_LIBRARY_PATH is set in this shell; programs built here do not need it," >&2
         echo "  and it can mix host libraries into EESSI's. Unset it unless you know you need it." >&2

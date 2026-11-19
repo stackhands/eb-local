@@ -25,6 +25,8 @@ printf '%s\n' 'export EESSI_SOFTWARE_SUBDIR=wrong/from-failed-guard'
 exit 78
 """
 
+MODULE_WITHOUT_TARGET = "module() { :; }\n"
+
 
 class DevShellLifecycle(StorageFixture):
     """Exercise successive dev-shell changes in the same caller."""
@@ -91,6 +93,44 @@ class DevShellLifecycle(StorageFixture):
                 self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
                 self.assertNotIn(str(stale), path_file.read_text().split(":"))
                 self.assertEqual(wrapper_file.read_text(), "unset")
+
+    def test_nounset_dev_names_the_selected_target_prefix(self):
+        emitted = self.run_wrapper(["dev"])
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+        expected = self.prefix / "dev" / "2026.06" / "x86_64" / "generic"
+
+        for name, executable in available_shells():
+            with self.subTest(shell=name):
+                replay = run_shell(
+                    name,
+                    executable,
+                    MODULE_WITH_TARGET
+                    + "\nset -u\n"
+                    + emitted.stdout
+                    + "\nprintf '%s\\n' \"$EB_LOCAL_DEV_PREFIX\"\n",
+                    env=self.env,
+                    cwd=self.root,
+                )
+                self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+                self.assertEqual(replay.stdout.strip(), str(expected))
+
+    def test_nounset_dev_reports_a_missing_target_without_expanding_it(self):
+        emitted = self.run_wrapper(["dev"])
+        self.assertEqual(emitted.returncode, 0, emitted.stderr)
+
+        for name, executable in available_shells():
+            with self.subTest(shell=name):
+                replay = run_shell(
+                    name,
+                    executable,
+                    MODULE_WITHOUT_TARGET + "\nset -u\n" + emitted.stdout,
+                    env=self.env,
+                    cwd=self.root,
+                )
+                self.assertEqual(replay.returncode, 1, replay.stdout + replay.stderr)
+                self.assertIn("the EESSI module set no software target", replay.stderr)
+                self.assertNotIn("unbound variable", replay.stderr)
+                self.assertNotIn("parameter not set", replay.stderr)
 
 
 if __name__ == "__main__":
