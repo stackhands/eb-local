@@ -321,6 +321,17 @@ Print the lines `env` prints, then the lines that load the modules `dev.modules`
 | `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
 | `--json` | Print the change the lines make to the environment as one line of JSON, as `env --json` does, with `kind` `dev`. |
 | `--buildenv MODULE` | Load MODULE as the build environment whatever the compilers, as `dev.buildenv` does. |
+| `--envrc` | Write the line that evaluates this `dev` to `.envrc` in the working directory, for direnv, and print nothing on stdout. |
+
+`dev --envrc MODULE...` writes three lines to `.envrc`:
+
+```sh
+# >>> eb-local dev >>> rerun `eb-local dev --envrc` to change these lines
+eval "$(/path/to/eb-local dev MODULE...)"
+# <<< eb-local dev <<<
+```
+
+The program is named by its own path, and `--config`, `--profile`, `--project` and `--buildenv` are repeated on the line. A block already in the file is replaced and every other line is kept; a file without one gets it appended. A begin line without its end line is refused. Run `direnv allow` once per change. direnv evaluates the file in bash and gives the calling shell the change, so the environment follows the directory in bash, zsh, fish, nushell and the other shells direnv has a hook for, and is taken back on leaving it. As with `--json`, only variables reach the calling shell.
 
 A `MODULE` starts with a letter or digit and holds letters, digits, `.`, `_`, `+`, `-` and single slashes, with none at the end.
 With `LD_LIBRARY_PATH` set in the shell, `dev` warns on stderr.

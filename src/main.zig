@@ -477,6 +477,8 @@ const Global = struct {
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
     json_out: bool = false,
+    /// `dev --envrc`: write the dev line to `.envrc` here, for direnv.
+    envrc: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -688,6 +690,41 @@ fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     return 0;
 }
 
+/// The first and last line of the lines `dev --envrc` owns in `.envrc`.
+/// What stands outside them is the user's and is kept.
+const envrc_begin = "# >>> eb-local dev >>>";
+const envrc_end = "# <<< eb-local dev <<<";
+
+/// Write `eval "$(eb-local WORDS)"` between the markers of `.envrc` in the
+/// working directory, for direnv: it evaluates the file in bash and gives the
+/// calling shell the change, whatever that shell is, and takes it back on
+/// leaving the directory. A block already there is replaced; other lines
+/// stay. The program is named by its own path, since a shell that direnv
+/// starts need not have eb-local on PATH.
+fn writeEnvrc(c: Ctx, words: []const u8) u8 {
+    const a = c.a;
+    var buf: [sys.path_max]u8 = undefined;
+    const exe = selfExe(&buf) orelse "eb-local";
+    const block = str(a, "{s} rerun `eb-local dev --envrc` to change these lines\neval \"$({s} {s})\"\n{s}\n", .{ envrc_begin, q(a, exe), words, envrc_end });
+    const old: []const u8 = if (fsx.openRegular(fsx.cwd, ".envrc", true)) |opened| blk: {
+        defer sys.close(opened.fd);
+        break :blk fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read .envrc ({s})", .{@errorName(e)});
+    } else |_| "";
+    const text = if (std.mem.indexOf(u8, old, envrc_begin)) |at| blk: {
+        const rest = std.mem.indexOfPos(u8, old, at, envrc_end) orelse
+            die(".envrc has `{s}` without `{s}`; remove that line or add the end line, then run this again", .{ envrc_begin, envrc_end });
+        var end = rest + envrc_end.len;
+        if (end < old.len and old[end] == '\n') end += 1;
+        break :blk str(a, "{s}{s}{s}", .{ old[0..at], block, old[end..] });
+    } else if (old.len == 0)
+        block
+    else
+        str(a, "{s}{s}{s}", .{ old, if (old[old.len - 1] == '\n') "" else "\n", block });
+    fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+    cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
+    return 0;
+}
+
 fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const a = c.a;
     // A module is loaded once, where it is first named; a chosen build
@@ -702,6 +739,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         } else mods.append(a, m) catch oom();
     };
     const installed = place(c, s);
+    if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
     if (!g.json_out) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g))) catch oom();
@@ -4818,6 +4856,8 @@ pub fn main(init: std.process.Init) u8 {
                     g.env_strict = true;
                 } else if (std.mem.eql(u8, x, "--json")) {
                     g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--envrc")) {
+                    g.envrc = true;
                 } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
                 } else if (joined(x, "--buildenv")) |v| {
