@@ -261,6 +261,29 @@ class Commands(StorageFixture):
         self.assertIn("LD_LIBRARY_PATH", run.stderr)
         self.assertNotIn("LD_LIBRARY_PATH", run.stdout)
 
+    def test_version_is_rejected_after_subcommands(self):
+        for args in (["--version"], ["--version", "extra"]):
+            with self.subTest(args=args):
+                top = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual(top.returncode, 0, top.stderr)
+                self.assertEqual(top.stderr, "")
+                self.assertIn("eb-local ", top.stdout)
+
+        for args, needle in (
+            (["--env", "--version"], "got '--version'"),
+            (["env", "--version"], "got '--version'"),
+            (["dev", "--version"], "dev does not know the option '--version'"),
+            (["clean", "--version"], "clean does not know '--version'"),
+        ):
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
+                self.assertIn(needle, err.stderr)
+
+        rec = self.run_wrapper(["recipe.eb", "--version"], SLURM_JOB_ID="")
+        self.assertEqual((rec.returncode, rec.stdout), (2, ""), rec.stdout + rec.stderr)
+        self.assertIn("not inside a Slurm job", rec.stderr)
+
     @unittest.skipUnless(binary.BIN, "the lfoss warning is a feature of the Zig build")
     def test_dev_warns_when_an_lfoss_module_meets_the_foss_build_environment(self):
         # With the default, dev picks the build environment for the compilers
