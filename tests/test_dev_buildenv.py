@@ -72,6 +72,84 @@ class DevBuildenv(StorageFixture):
         calls, _ = self.dev("GSL/2.8-GCC-15.2.0")
         self.assertEqual(calls[-2:], ["load GSL/2.8-GCC-15.2.0", "load buildenv/default-foss-2026.1"])
 
+    def test_opt_in_pin_uses_only_the_compatibility_python(self):
+        compat = self.root / "compat"
+        python = compat / "usr" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text('#!/bin/sh\nprintf compat > "$CONTROL_ROOT/python"\n')
+        python.chmod(0o755)
+        for name, text in {
+            "python3": '#!/bin/sh\nprintf foreign > "$CONTROL_ROOT/python"\nexit 1\n',
+            "gcc": "#!/bin/sh\npython3\n",
+            "as": "#!/bin/sh\nexit 0\n",
+        }.items():
+            path = self.bin / name
+            path.write_text(text)
+            path.chmod(0o755)
+
+        base = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        self.assertEqual(base.returncode, 0, base.stderr)
+        failed = subprocess.run(
+            [
+                BASH,
+                "-c",
+                MODULE
+                + base.stdout
+                + 'printf "%s\\n" "$(command -v ld)" "$(command -v gcc)" '
+                + '"$(command -v as)" > "$CONTROL_ROOT/paths-base"\n'
+                + "gcc\n",
+            ],
+            env=dict(self.env, EESSI_EPREFIX=str(compat), EPREFIX=str(compat)),
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual((self.root / "python").read_text(), "foreign")
+
+        pinned = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        pinned_again = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        runtime = self.root / "runtime"
+        script = (
+            MODULE
+            + pinned.stdout
+            + "gcc\n"
+            + 'printf "%s\\n" "$(command -v ld)" "$(command -v gcc)" '
+            + '"$(command -v as)" > "$CONTROL_ROOT/paths-pinned"\n'
+            + pinned_again.stdout
+            + 'printf "%s" "$PATH" > "$CONTROL_ROOT/path-after-second-dev"\n'
+        )
+        replay = subprocess.run(
+            [BASH, "-c", script],
+            env=dict(
+                self.env,
+                EESSI_EPREFIX=str(compat),
+                EPREFIX=str(compat),
+                EB_LOCAL_PIN_BUILDENV_PYTHON="1",
+                XDG_RUNTIME_DIR=str(runtime),
+                PATH=f"{self.bin}:/usr/bin:/bin",
+            ),
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        pin = runtime / "eb-local" / "python-pin"
+        self.assertEqual(sorted(p.relative_to(runtime) for p in runtime.rglob("*")), [
+            Path("eb-local"),
+            Path("eb-local/python-pin"),
+            Path("eb-local/python-pin/python3"),
+        ])
+        self.assertEqual(
+            (self.root / "path-after-second-dev").read_text().split(":").count(str(pin)),
+            1,
+        )
+        self.assertEqual((self.root / "python").read_text(), "compat")
+        self.assertEqual(
+            (self.root / "paths-base").read_text(),
+            (self.root / "paths-pinned").read_text(),
+        )
+
     def test_the_family_buildenv_when_lmod_has_it(self):
         calls, _ = self.dev("llvm-compilers/21.1.8", CONTROL_AVAILABLE="buildenv/default-lfoss-2026.1")
         self.assertEqual(calls[-2:], ["is-avail buildenv/default-lfoss-2026.1", "load buildenv/default-lfoss-2026.1"])
