@@ -1,0 +1,49 @@
+<!-- Generated from docs/orgmode/howto/nix.org by docs/export.el; edit that file. -->
+
+# Compile with Nix inside the dev shell
+
+`eb-local dev` loads the European Environment for Scientific Software Installations and the modules you name.
+A Nix shell brings its own compiler and its own glibc.
+Link from `nix-shell` when the library you need lives in the stack, and keep that directory in `DT_RPATH`.
+
+## Link from the dev shell
+
+Start the dev shell for every module you link against, then start Nix inside it:
+
+```bash
+eval "$(eb-local dev GSL/2.8-GCC-15.2.0)"
+nix-shell -p gcc
+```
+
+Compile with the stack library on the link line, and ask the linker for `DT_RPATH`:
+
+```bash
+gcc prog.c -L"$EBROOTGSL/lib" -lgsl -lgslcblas \
+  -Wl,-rpath,"$EBROOTGSL/lib" -Wl,--disable-new-dtags \
+  -o "$EB_LOCAL_DEV_PREFIX/bin/prog"
+```
+
+`EBROOTGSL` is the root the GSL module sets.
+Use the root of the module you linked.
+`--disable-new-dtags` records `DT_RPATH`.
+A `DT_RUNPATH` entry is the other dynamic tag, and the recipe asks the linker to leave it out.
+
+## What Nix 2.35.6 recorded
+
+`tests/site/nix-dev.sh` builds a small library outside the Nix store and links a program against it.
+
+On Nix 2.35.6, `nix-shell -p gcc` kept a `DT_RPATH` entry for that directory.
+`nix-shell --pure -p gcc` kept the same entry.
+`readelf` showed a `DT_RPATH` entry and no `DT_RUNPATH` entry.
+`NIX_ENFORCE_PURITY` was unset in the shell.
+
+The `DT_RPATH` entry also names Nix's glibc 2.44, and the program interpreter is that glibc's `ld-linux`.
+The host glibc on the machine where this was measured is glibc 2.39.
+The program ran under `env -i` while the Nix store was present, because the interpreter path is the Nix store path.
+
+## A sandboxed build
+
+`nix-build` runs the compiler in a sandbox.
+The same link failed there, and the log said `cannot find -lanswer`.
+The sandbox hides a directory outside the Nix store, including a stack prefix.
+Build the program in `nix-shell` when the library lives outside the store.
