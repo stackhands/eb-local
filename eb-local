@@ -368,6 +368,23 @@ if [ "$command" = dev ]; then
     done
     [ ${#load[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${load[@]}"; printf '\n'; }
     printf 'module load %q\n' "$dev_buildenv"
+    cat <<'EOF'
+if [ "${EB_LOCAL_PIN_BUILDENV_PYTHON-}" = 1 ] && [ -x "${EPREFIX-}/usr/bin/python3" ]; then
+    _eb_local_python_root=${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}
+    _eb_local_python_dir=$_eb_local_python_root/eb-local/python-pin
+    if mkdir -p "$_eb_local_python_dir" && chmod 700 "$_eb_local_python_dir"; then
+        if ln -sfn "$EPREFIX/usr/bin/python3" "$_eb_local_python_dir/python3"; then
+            case $PATH in "$_eb_local_python_dir"|"$_eb_local_python_dir":*) ;; *) PATH="$_eb_local_python_dir:$PATH" ;; esac
+            export PATH
+        else
+            echo "eb-local: cannot pin build environment Python" >&2
+        fi
+    else
+        echo "eb-local: cannot create a private Python wrapper directory" >&2
+    fi
+    unset _eb_local_python_root _eb_local_python_dir
+fi
+EOF
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
         echo "eb-local: LD_LIBRARY_PATH is set in this shell; programs built here do not need it," >&2
         echo "  and it can mix host libraries into EESSI's. Unset it unless you know you need it." >&2
