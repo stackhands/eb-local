@@ -166,12 +166,19 @@ fn commandPath(value: []const u8) []const u8 {
 
 const Split = struct { kept: []const []const u8, foreign: []const []const u8 };
 
+/// A path-list entry is approved only when it is absolute and lies inside an
+/// approved prefix. A relative entry, and an empty one, is foreign. The site
+/// file's approved prefixes are absolute paths, and a build runs in its own
+/// directory, so these entries stay unresolved.
 fn splitList(a: Allocator, value: []const u8, prefixes: []const []const u8) Allocator.Error!Split {
     var kept: std.ArrayList([]const u8) = .empty;
     var foreign: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, value, ':');
     while (it.next()) |entry| {
-        if (entry.len == 0) continue;
+        if (entry.len == 0 or entry[0] != '/') {
+            try foreign.append(a, entry);
+            continue;
+        }
         if (inside(a, entry, prefixes)) try kept.append(a, entry) else try foreign.append(a, entry);
     }
     return .{ .kept = kept.items, .foreign = foreign.items };
@@ -245,7 +252,12 @@ fn appendList(a: Allocator, out: *std.ArrayList(Finding), name: []const u8, valu
     const split = try splitList(a, value, prefixes);
     if (split.foreign.len == 0) return false;
     const code: Code = if (clear) .list_drop else .list_keep;
-    for (split.foreign) |entry| try out.append(a, .{ .code = code, .name = name, .path = entry });
+    for (split.foreign) |entry| {
+        // The locked report template prints the entry as-is. An empty entry
+        // is shown as '', the same quotes a shell uses for an empty word.
+        const shown = if (entry.len == 0) "''" else entry;
+        try out.append(a, .{ .code = code, .name = name, .path = shown });
+    }
     return true;
 }
 

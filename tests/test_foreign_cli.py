@@ -22,9 +22,9 @@ class ForeignPrefixes(StorageFixture):
                      "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "APPTAINER_CONTAINLIBS", "SINGULARITY_CONTAINLIBS"):
             self.env.pop(name, None)
 
-    def run_tool(self, args, **extra):
+    def run_tool(self, args, cwd=None, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
-        return __import__("subprocess").run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        return __import__("subprocess").run(argv, env=env, cwd=cwd or self.root, capture_output=True, text=True)
 
     def test_doctor_names_a_foreign_entry_and_keeps_an_approved_one(self):
         run = self.run_tool(["doctor"], PERL5LIB=f"/opt/host/perl5:{self.prefix}/lib",
@@ -171,6 +171,34 @@ class ForeignPrefixes(StorageFixture):
         self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
         seen = json.loads((self.root / "eb.json").read_text())
         self.assertEqual(seen["paths"]["PYTHONPATH"], f"{sym_lib}:{real_lib}")
+
+    def test_a_relative_or_empty_path_list_entry_is_foreign(self):
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        locale = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
+        warn = ("warn PYTHONPATH entry {0} is outside the approved prefixes; "
+                "a build keeps it until build.clear_foreign_prefixes is set")
+
+        # doctor is started in the prefix. The build runs in its own directory,
+        # so the relative entry stays foreign.
+        inside = self.run_tool(["doctor"], cwd=self.prefix, PYTHONPATH="lib", **locale)
+        self.assertEqual(inside.returncode, 0, inside.stdout + inside.stderr)
+        self.assertIn(warn.format("lib"), inside.stdout)
+
+        empty = self.run_tool(["doctor"], cwd=self.root, PYTHONPATH=":", **locale)
+        self.assertEqual(empty.returncode, 0, empty.stdout + empty.stderr)
+        self.assertIn(warn.format("''"), empty.stdout)
+
+        climbed = self.run_tool(["doctor"], cwd=self.prefix, PYTHONPATH="lib/../lib", **locale)
+        self.assertEqual(climbed.returncode, 0, climbed.stdout + climbed.stderr)
+        self.assertIn(warn.format("lib/../lib"), climbed.stdout)
+
+        self.env["PYTHONPATH"] = f"{self.prefix}/lib:"
+        self.env["CONTROL_PATH_NAMES"] = "PYTHONPATH"
+        self.env.update(locale)
+        cleared = self.run_wrapper(["recipe.eb"], EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES="true")
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        seen = json.loads((self.root / "eb.json").read_text())
+        self.assertEqual(seen["paths"]["PYTHONPATH"], f"{self.prefix}/lib")
 
 
 if __name__ == "__main__":
