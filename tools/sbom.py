@@ -49,7 +49,40 @@ def _brace_block(text, open_brace_idx):
     return None, len(text)
 
 
+def _strip_comments(text):
+    out = []
+    in_str = False
+    esc = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            nl = text.find("\n", i)
+            if nl == -1:
+                break
+            i = nl
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def zon_field(text, field):
+    text = _strip_comments(text)
     m = re.search(r'^\s*\.' + field + r'\s*=\s*"([^"]+)"', text, re.M)
     if not m:
         raise SystemExit(f"build.zig.zon has no .{field}")
@@ -57,6 +90,7 @@ def zon_field(text, field):
 
 
 def dependencies(text):
+    text = _strip_comments(text)
     start = re.search(r'\.dependencies\s*=\s*\.\{', text)
     if not start:
         return []

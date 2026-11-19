@@ -2,6 +2,62 @@
 
 <!-- towncrier release notes start -->
 
+## 3.3.0 (2026-11-19)
+
+### Features
+
+- The site tasks for a setuptools, meson-python, and scikit-build-core
+  extension read the built module with `readelf` and pass when it has a
+  `DT_RPATH` entry naming the stack library and no `DT_RUNPATH` entry.
+  The task then imports the module with no modules loaded.
+- `dev` tries the build environment at the compiler's own toolchain level, `buildenv/default-NVHPC-VERSION`, `buildenv/default-intel-compilers-VERSION` or `buildenv/default-llvm-compilers-VERSION`, when the family's configured one is not installed, before it falls back to its own RPATH wrappers. A site that installs such a module needs no `dev.buildenv_for` setting. A family set to none still goes to the wrappers without asking Lmod.
+- `eb-local doctor` names a host `CARGO_TARGET_*_LINKER`, `CARGO_BUILD_RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `R_MAKEVARS_USER`, `R_MAKEVARS_SITE`, and a host entry of `JULIA_LOAD_PATH`, `JULIA_DEPOT_PATH` or `NODE_PATH`. `build.clear_foreign_prefixes` drops those when it is set, and stays off by default. `RUSTFLAGS` is a flag string, so it is not treated as a path.
+
+### Fixes
+
+- A site file may write a decimal integer with a single "_" between two
+  digits, so `1_000` is one thousand. A leading zero, a doubled "_" or a
+  "_" at either end of the digits stays invalid.
+- Ignore Zig `//` line comments when parsing `build.zig.zon` dependencies and fields in `tools/sbom.py`.
+- Site template placeholder errors in `src/sites.zig` now report the 1-based line number alongside the template name.
+- Split whitespace-separated patterns on `include` lines inside `elfcheck.parseLdSoConf` so multi-pattern `ld.so.conf` directives are not skipped.
+- The release workflow publishes the shell completions and man pages as `eb-local-X.Y.Z-share.tar.gz`. For 3.2.0 the `share` directory made the upload step fail after the binaries, their software bills of materials and `SHA256SUMS` were attached, so that release has no completions archive.
+- Treat `fuse` mounts backed by `cvmfs2` (and `fuse.cvmfs`) as valid CernVM File System (CVMFS) mounts in `eb-local-readiness`, avoiding false warnings on hosts running `cvmfs-fuse3`.
+- `acquireBoundedLock`, `acquireOptionalLock`, and `tryLockFree` in `src/storage.zig` now check `fstat` and refuse non-regular lockfiles such as FIFOs instead of locking or treating them as free.
+- `cvmfs.readFile` now uses `fsx.openRegular` when reading CernVM-FS client configuration files so non-regular entries such as a FIFO are skipped instead of blocking `eb-local doctor --cvmfs`.
+- `eb-local check` (`elfcheck.expandOrigin`) now requires a non-word boundary after unbraced `$ORIGIN` (matching `ld.so`), leaving tokens such as `$ORIGIN_extra` unexpanded while still expanding `$ORIGIN`, `$ORIGIN-extra`, and `${ORIGIN}_extra`.
+- `eb-local config --get` now rejects invalid `build.node_types.<NAME>` and `secrets.<NAME>` names with exit 2 and `unknown configuration key` instead of exiting 1 as unset.
+- `eb-local doctor` and `build.clear_foreign_prefixes` treat every
+  relative path-list entry and every empty one as outside the approved
+  prefixes. An empty entry is reported as `''`. Julia's own entries are kept: an empty entry of
+  `JULIA_LOAD_PATH` or `JULIA_DEPOT_PATH`, and a load-path entry starting
+  with `@`.
+- `eb-local eb` now refuses a non-directory or uncreatable `EESSI_USER_INSTALL` path with an `eb-local:` message and exit status 2 instead of failing in `mkdir -p` with exit status 1.
+- `eb-local` RPATH wrappers now search an empty `PATH` entry as the current directory, including a trailing colon, as `execvp` does.
+- `legacyToToml` now rejects a leading UTF-8 BOM and validates every line (including comments) for NUL and non-UTF-8 bytes with its line number before stripping comments.
+
+### Documentation
+
+- Add `gfortran -O2 -fopenmp` and `mpifort` build rows to `docs/howto/compile.md`.
+- Expanded the EESSI compilation how-to with Python, uv, R, Rust, Julia, and Node.js package build commands that keep native links under the build environment wrappers.
+- Extend `docs/howto/install-what-eessi-lacks.md` to show `eb-local eb -- "$recipe" --robot` for installing missing modules where there is no site file or Slurm job.
+- Switch the CMake and configure prefix flag examples in `docs/howto/compile.md` to Org tilde code spans so the exported Markdown renders valid inline code.
+- The how-to "Compile with Nix inside the dev shell" links a stack
+  library from `nix-shell` with `DT_RPATH`. On Nix 2.35.6 that entry
+  stays, including under `nix-shell --pure`, and a sandboxed
+  `nix-build` fails with `cannot find -lanswer`.
+- The run-paths page no longer says a program loses its run paths only when `gcc` and `ld` are both bypassed. On x86_64, rustc 1.90 and later links with rust-lld, which those wrappers never see. The page says how `eb-local eb` points Cargo at the wrapped compiler, and what a `dev` shell still has to set for Julia's depot, a host `NODE_PATH`, R's Makevars and a Python virtual environment. `tests/site/lang-dev-tasks.sh` runs each of those and then runs the program with no modules loaded.
+- Update the `README.md` EasyBuild example from `GSL-2.8-GCC-15.2.0.eb` (already provided by EESSI 2026.06) to `pigz-2.8-GCCcore-15.2.0.eb`, matching `docs/howto/install-software.md`.
+- Updated the `eb-without-a-site-file` how-to guide so `eb-local doctor` without a site file shows the `info no site file sets storage.node_local_root` line that the built binary prints rather than the older `FAIL` line.
+- Updated the `load-eessi` and `install` how-to guides so the strict-mode example evaluates `eval "$(eb-local env --strict)"` in the shell (which emits the missing-init error and exits 2) instead of invoking `eb-local env --strict` directly.
+
+### Miscellaneous
+
+- Added a CLI test verifying `eb-local check --prefix` and `eb-local check --dev` exit 2 when the target path is not a directory.
+- Switch `lmodcache.installVerified` in `eb-local` to create its verification directory with `zig-common` `fsx.mkdtemp`.
+- The Zig workflow runs overlay bump and overlay plan against the eb-stack 0.8.0 release.
+
+
 ## 3.2.0 (2026-11-19)
 
 ### Features

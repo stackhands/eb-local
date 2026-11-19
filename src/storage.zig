@@ -600,6 +600,16 @@ pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, 
         err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
         return .failed;
     };
+    const st = fsx.fstat(fd) catch |err| {
+        sys.close(fd);
+        err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
+        return .failed;
+    };
+    if (!st.isReg()) {
+        sys.close(fd);
+        err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: not a regular file", .{lock_path}) catch "cannot lock file";
+        return .failed;
+    }
     if (comptime build_options.test_ops) {
         if (test_flock_errno) |te| {
             if (notify) common.cli.err("eb-local: warning: cannot lock {s} ({s}); continuing unlocked\n", .{ lock_path, sys.describeErrno(te) });
@@ -655,6 +665,14 @@ pub fn acquireOptionalLock(path: []const u8) ?sys.fd_t {
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0o666) catch return null;
+    const st = fsx.fstat(fd) catch {
+        sys.close(fd);
+        return null;
+    };
+    if (!st.isReg()) {
+        sys.close(fd);
+        return null;
+    }
     common.state.lockExclusive(fd, 0) catch {
         sys.close(fd);
         return null;
@@ -681,6 +699,8 @@ pub fn tryLockFree(path: []const u8) bool {
         else => return false,
     };
     defer sys.close(fd);
+    const st = fsx.fstat(fd) catch return false;
+    if (!st.isReg()) return false;
     common.state.lockExclusive(fd, 0) catch |e| switch (e) {
         error.TimedOut => return false,
         else => |se| return flockUnsupported(se),
@@ -732,6 +752,19 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
     try testing.expect(lockTimeoutMs(&bad_env, &msg) == null);
     try bad_env.put("EB_LOCAL_LOCK_TIMEOUT_MS", "1_000");
     try testing.expect(lockTimeoutMs(&bad_env, &msg) == null);
+
+    const fifo_lock = try std.fs.path.join(a, &.{ root, ".fifo.lock" });
+    var zbuf: [sys.path_max:0]u8 = undefined;
+    const zfifo = try sys.z(&zbuf, fifo_lock);
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.mknodat(linux.AT.FDCWD, zfifo.ptr, 0o010600, 0)),
+    );
+    var fifo_msg: []const u8 = "";
+    try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, fifo_lock, 40, false, &fifo_msg));
+    try testing.expect(std.mem.indexOf(u8, fifo_msg, "not a regular file") != null);
+    try testing.expect(acquireOptionalLock(fifo_lock) == null);
+    try testing.expect(!tryLockFree(fifo_lock));
 }
 
 test "the mount a path lies on" {

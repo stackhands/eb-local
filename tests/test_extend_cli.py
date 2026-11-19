@@ -216,5 +216,19 @@ class ExtendCli(unittest.TestCase):
         self.assertIn(f"eb-local: cannot read {init}, the EESSI init; eb was not run.", run.stderr)
         self.assertFalse((self.root / "eb-ran").exists())
 
+    def test_user_install_file_or_uncreatable_path_exits_two(self):
+        target_file = self.root / "user-file"
+        target_file.write_text("not a dir\n")
+        for bad_val, needle in (
+            (str(target_file), f"EESSI_USER_INSTALL={target_file} is not a directory; eb was not run."),
+            (f"{target_file}/child", f"cannot create EESSI_USER_INSTALL={target_file}/child"),
+        ):
+            with self.subTest(bad_val=bad_val):
+                run = self.run_tool(["eb", "x.eb"], EESSI_USER_INSTALL=bad_val)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn(needle, run.stderr)
+                self.assertFalse((self.root / "eb-ran").exists())
+
 if __name__ == "__main__":
     unittest.main()

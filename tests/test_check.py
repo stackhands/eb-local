@@ -587,6 +587,54 @@ class Check(unittest.TestCase):
         self.assertIn("eb-local check: no problems", run.stdout)
         self.assertNotIn("the loader is the host's", run.stdout)
 
+    def test_unbraced_origin_requires_token_boundary(self):
+        sub = self.root / "sub"
+        sub_extra = self.root / "sub_extra"
+        sub.mkdir()
+        sub_extra.mkdir()
+        (self.root / "demo.c").write_text("int demo(void) { return 7; }\n")
+        (self.root / "prog.c").write_text("int demo(void);\nint main(void) { return demo() == 7 ? 0 : 1; }\n")
+        subprocess.run(
+            [GCC, "-shared", "-fPIC", "-o", str(sub_extra / "libdemo.so"), str(self.root / "demo.c")],
+            check=True,
+        )
+
+        unbraced = sub / "unbraced"
+        subprocess.run(
+            [
+                GCC,
+                "-o",
+                str(unbraced),
+                str(self.root / "prog.c"),
+                f"-L{sub_extra}",
+                "-ldemo",
+                "-Wl,-rpath,$ORIGIN_extra",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+        run_unbraced = self.check(unbraced)
+        self.assertEqual(run_unbraced.returncode, 1, run_unbraced.stdout + run_unbraced.stderr)
+        self.assertIn("libdemo.so => not found", run_unbraced.stdout)
+
+        braced = sub / "braced"
+        subprocess.run(
+            [
+                GCC,
+                "-o",
+                str(braced),
+                str(self.root / "prog.c"),
+                f"-L{sub_extra}",
+                "-ldemo",
+                "-Wl,-rpath,${ORIGIN}_extra",
+                "-Wl,--disable-new-dtags",
+            ],
+            check=True,
+        )
+        run_braced = self.check(braced)
+        self.assertEqual(run_braced.returncode, 0, run_braced.stdout + run_braced.stderr)
+        self.assertIn(f"libdemo.so => {sub_extra}/libdemo.so   [RPATH]", run_braced.stdout)
+
     def test_recursive_inherits_compat_loader_and_rpath_without_host_libc(self):
         compat = self.root / "compat"
         (compat / "lib64").mkdir(parents=True)
@@ -642,6 +690,30 @@ class Check(unittest.TestCase):
         self.assertEqual(host_run.returncode, 1, host_run.stdout + host_run.stderr)
         self.assertIn("the loader is the host's", host_run.stdout)
         self.assertIn("comes from the host", host_run.stdout)
+
+    def test_recursive_reads_the_loaders_rpath_before_ld_library_path(self):
+        # ld.so searches the DT_RPATH of an object's loaders before
+        # LD_LIBRARY_PATH. A library both hold is the one under the RPATH.
+        rpath_dir = self.root / "by-rpath"
+        env_dir = self.root / "by-env"
+        rpath_dir.mkdir()
+        env_dir.mkdir()
+        (self.root / "inner.c").write_text("int inner(void) { return 1; }\n")
+        (self.root / "outer.c").write_text("int inner(void);\nint outer(void) { return inner(); }\n")
+        (self.root / "main.c").write_text("int outer(void);\nint main(void) { return outer() == 1 ? 0 : 1; }\n")
+        for where in (rpath_dir, env_dir):
+            subprocess.run([GCC, "-shared", "-fPIC", "-o", str(where / "libinner.so"), str(self.root / "inner.c")],
+                           check=True)
+        # libouter has no run path of its own: it finds libinner through its loader's.
+        subprocess.run([GCC, "-shared", "-fPIC", "-o", str(rpath_dir / "libouter.so"), str(self.root / "outer.c"),
+                        f"-L{rpath_dir}", "-linner"], check=True)
+        prog = self.root / "order_prog"
+        subprocess.run([GCC, "-o", str(prog), str(self.root / "main.c"), f"-L{rpath_dir}", "-louter",
+                        f"-Wl,-rpath,{rpath_dir}", f"-Wl,-rpath-link,{rpath_dir}", "-Wl,--disable-new-dtags"],
+                       check=True)
+        run = self.check("--recursive", prog, LD_LIBRARY_PATH=str(env_dir))
+        self.assertIn(f"libinner.so => {rpath_dir}/libinner.so   [RPATH]", run.stdout, run.stdout + run.stderr)
+        self.assertNotIn(f"{env_dir}/libinner.so", run.stdout)
 
 
 if __name__ == "__main__":

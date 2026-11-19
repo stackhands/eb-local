@@ -20,7 +20,7 @@ These steps run them and read what they say.
     ```
 
     ```text
-    ok   eb-local 3.2.0
+    ok   eb-local 3.3.0
     ok   site file /usr/local/bin/config.toml
     ok   builds use the allocation's own xfs mount /local/%u.%j
     ok   installs go to /home/alice/eessi: a user install, prefix from default
@@ -144,7 +144,7 @@ See [Readiness probe](../reference/readiness.md) for every option and exit statu
 ## A path from outside the prefix
 
 A value left in the shell can point a build at the host's Perl, Python, R, CMake or pkg-config tree, or at a compiler wrapper that is not EESSI's.
-`eb-local doctor` names each entry of `PERL5LIB`, `PYTHONPATH`, `R_LIBS*`, `CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH`, and each compiler-wrapper variable, that resolves outside the EESSI repository, your prefix and `doctor.approved_prefixes`.
+`eb-local doctor` names each entry of `PERL5LIB`, `PYTHONPATH`, `R_LIBS*`, `JULIA_LOAD_PATH`, `JULIA_DEPOT_PATH`, `NODE_PATH`, `CMAKE_PREFIX_PATH` and `PKG_CONFIG_PATH`, and each compiler-wrapper variable, including a `CARGO_TARGET_*_LINKER` and `R_MAKEVARS_USER` or `R_MAKEVARS_SITE`, that resolves outside the EESSI repository, your prefix and `doctor.approved_prefixes`.
 It also names the timezone `/etc/localtime` resolves to, a bind mount of that file, and a host library directory a container runtime injected.
 
 ```bash

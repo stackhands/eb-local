@@ -43,7 +43,7 @@ const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
 /// The version `eb-local --version` prints, and the release it is.
-pub const version = "3.2.0";
+pub const version = "3.3.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
@@ -1054,9 +1054,11 @@ const host_ca_bundle =
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
-/// family's buildenv when Lmod has it, else the GCC one for CUDA (nvcc
-/// links through gcc), else eb-local's RPATH wrappers, so nothing links
-/// without run paths. Whichever loads, a clang that no wrapper covers then
+/// family's buildenv when Lmod has it, else the one at the compiler's own
+/// toolchain level (buildenv/default-NVHPC-26.9) when the site installed
+/// that, else the GCC one for CUDA (nvcc links through gcc), else eb-local's
+/// RPATH wrappers, so nothing links without run paths. A family the site set
+/// to "none" goes to the wrappers without asking Lmod. Whichever loads, a clang that no wrapper covers then
 /// gets one: the LLVM module sets EBROOTLLVM, not llvm-compilers' variable,
 /// so its clang comes with the GCC build environment, which does not wrap it.
 fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
@@ -1076,20 +1078,30 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     for (config.families) |f|
         add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
     add(a, &out, "case $eb_local_family in\n");
-    for (config.families, s.buildenv_for) |f, b|
-        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value) }));
-    add(a, &out, "    *) eb_local_buildenv= ;;\nesac\n");
+    for (config.families, s.buildenv_for) |f, b| {
+        // "none" from a site or the environment means the wrappers, with no
+        // level build environment tried; the built-in "none" (NVHPC) does try.
+        const refused = b.value.len == 0 and !std.mem.eql(u8, b.from, "default");
+        const level = if (f.compiler.len == 0 or refused)
+            "''"
+        else
+            str(a, "${{{s}:+buildenv/default-{s}-${s}}}", .{ f.version, f.compiler, f.version });
+        add(a, &out, str(a, "    {s}) eb_local_buildenv={s} eb_local_level={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value), level }));
+    }
+    add(a, &out, "    *) eb_local_buildenv= eb_local_level= ;;\nesac\n");
     add(a, &out, str(a,
         \\if [ "$eb_local_family" = gcc ]; then
         \\    module load {s}
         \\elif [ -n "$eb_local_buildenv" ] && module is-avail "$eb_local_buildenv" >/dev/null 2>&1; then
         \\    module load "$eb_local_buildenv"
+        \\elif [ -n "$eb_local_level" ] && module is-avail "$eb_local_level" >/dev/null 2>&1; then
+        \\    module load "$eb_local_level"
         \\elif [ "$eb_local_family" = cuda ]; then
         \\    module load {s}
         \\else
         \\    eval "$({s} rpath-wrappers --for "$eb_local_family")"
         \\fi
-        \\unset eb_local_family eb_local_buildenv
+        \\unset eb_local_family eb_local_buildenv eb_local_level
         \\
     , .{ gcc, gcc, exe }));
     add(a, &out, unwrapped);
@@ -1408,9 +1420,15 @@ fn reportElf(
         for (sr.dirs.items, sr.whence.items) |d, why| {
             if (std.mem.eql(u8, why, "RPATH")) child_rpath_list.append(a, d) catch oom();
         }
+        // ld.so reads the loaders' DT_RPATH right after the object's own and
+        // before LD_LIBRARY_PATH, so they go in at that place, not at the end:
+        // a library both lists hold is then found where the loader finds it.
+        var at: usize = 0;
+        while (at < sr.whence.items.len and std.mem.eql(u8, sr.whence.items[at], "RPATH")) at += 1;
         for (inherited_rpath) |d| {
-            sr.dirs.append(a, d) catch oom();
-            sr.whence.append(a, "RPATH") catch oom();
+            sr.dirs.insert(a, at, d) catch oom();
+            sr.whence.insert(a, at, "RPATH") catch oom();
+            at += 1;
             child_rpath_list.append(a, d) catch oom();
         }
     } else {
@@ -1861,7 +1879,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         return list(s.site_toolchains.value);
     } else if (std.mem.startsWith(u8, key, "build.node_types.")) {
         const name = key["build.node_types.".len..];
-        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        if (!config.validNodeTypeName(name)) die("unknown configuration key '{s}'", .{key});
         for (nodeTypes(s)) |t| {
             if (std.mem.eql(u8, t.name, name)) return scalar(t.sbatch);
         }
@@ -1904,7 +1922,7 @@ fn cmdConfigGet(c: Ctx, s: config.Settings, key: []const u8) u8 {
         return 1;
     } else if (std.mem.startsWith(u8, key, "secrets.")) {
         const name = key["secrets.".len..];
-        if (name.len == 0) die("unknown configuration key '{s}'", .{key});
+        if (!config.validSecretName(name)) die("unknown configuration key '{s}'", .{key});
         for (s.secrets.items) |sec| {
             if (std.mem.eql(u8, sec.name, name)) return scalar(sec.source);
         }
@@ -2926,7 +2944,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "# The script gets this environment without the install variables and") catch oom();
     for (shell_startup ++ host_loader) |name| out.print(a, " {s}", .{name}) catch oom();
     if (s.clear_foreign_prefixes.value)
-        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper variable that resolves outside them") catch oom();
+        out.appendSlice(a, ",\n# and, because build.clear_foreign_prefixes is set, without entries of PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH and PKG_CONFIG_PATH outside the approved prefixes, and without a compiler-wrapper, Cargo linker or Makevars variable that resolves outside them") catch oom();
     out.appendSlice(a, ",\n# and with these:\n") catch oom();
     for (buildVariables(a, "$W", d)) |kv| {
         if (std.mem.startsWith(u8, kv[1], "$W/")) {
@@ -3470,7 +3488,7 @@ fn reportForeign(c: Ctx, s: config.Settings, prefix: []const u8, out: *std.Array
     const prefs = foreign.approvedPrefixes(a, c.env, s.approved_prefixes.value, prefix) catch oom();
     const found = foreign.scan(a, c.env, prefs, s.clear_foreign_prefixes.value, mountinfoSoft(c)) catch oom();
     for (found) |f| switch (f.code) {
-        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper variable, points outside the approved prefixes", .{}),
+        .none => note(a, out, json_lines, "info", "no PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper, Cargo linker or Makevars variable, points outside the approved prefixes", .{}),
         .list_keep => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
         .list_drop => note(a, out, json_lines, "warn", "{s} entry {s} is outside the approved prefixes; a build drops it because build.clear_foreign_prefixes is set", .{ f.name, f.path }),
         .wrap_keep => note(a, out, json_lines, "warn", "{s} resolves to {s}, outside the approved prefixes; a build keeps it until build.clear_foreign_prefixes is set", .{ f.name, f.path }),
