@@ -44,3 +44,33 @@ jobs:
         run: |
           python3 tools/cli_assets.py --out out/share --tool "eb-local::./out/bin/eb-local"
           test -s out/share/man/eb-local.1
+
+  real-eb-stack:
+    # The tests that read EB_STACK_BIN skip without it, and no other job sets
+    # it. This one gives them the released eb-stack.
+    name: overlay against eb-stack 0.8.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install eb-stack 0.8.0
+        run: |
+          set -euo pipefail
+          archive=eb_stack-x86_64-unknown-linux-musl.tar.xz
+          curl --proto '=https' --tlsv1.2 -fsSLO "https://github.com/stackhands/eb-stack/releases/download/v0.8.0/$archive"
+          printf '%s  %s\n' 0df22a1371be00294ab9e0fa50b5966dda4b39a2d9bd77c9c31cff0627208555 "$archive" | sha256sum --check -
+          tar -xJf "$archive"
+          echo "EB_STACK_BIN=$PWD/eb_stack-x86_64-unknown-linux-musl/eb-stack" >> "$GITHUB_ENV"
+      - name: The binary is the release
+        run: '"$EB_STACK_BIN" --version | grep -Fx "eb-stack 0.8.0"'
+      - run: zig build --release=safe --prefix out
+      - name: overlay bump and plan run the real eb-stack
+        run: EB_LOCAL_BIN="$PWD/out/bin/eb-local" python3 -m unittest discover -s tests -p 'test_overlay_real_eb_stack.py' -v
