@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Prepare the tree for a release: the pre-bump hook of cog.toml.
+#
+# usage: tools/release-prepare NEW_VERSION
+#
+# `cog bump` runs this with the version it is about to tag, then commits what
+# changed and creates the tag. It does, for NEW_VERSION and the version that
+# build.zig.zon still names (OLD):
+#   - CHANGELOG.md: `towncrier build` writes the fragments of changelog.d/
+#     under a heading for NEW_VERSION and removes them;
+#   - build.zig.zon and src/main.zig: the version;
+#   - example output and download commands that print or name the version, in
+#     docs/orgmode, the doctor fixture and the version-line test;
+#   - docs/: the Markdown pages, exported again from their Org sources.
+#
+# Not done here, because it is prose: the paragraph of docs/orgmode/howto/install.org
+# that says what the previous release lacks, and the list of options added
+# since the previous release in docs/orgmode/reference/cli.org. Edit those in
+# a commit before the bump.
+#
+# Needs: towncrier (or uvx), emacs for docs/export.el. Exits non-zero, with the
+# tree as it found it, when the version is not X.Y.Z or is not new.
+set -euo pipefail
+
+new=${1:?usage: tools/release-prepare NEW_VERSION}
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+[[ ${new} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release-prepare: '${new}' is not X.Y.Z" >&2; exit 2; }
+old=$(sed -n 's/^ *\.version = "\([0-9.]*\)",$/\1/p' build.zig.zon)
+[ -n "${old}" ] || { echo "release-prepare: build.zig.zon names no version" >&2; exit 2; }
+[ "${old}" != "${new}" ] || { echo "release-prepare: build.zig.zon already names ${new}" >&2; exit 2; }
+grep -q "^pub const version = \"${old}\";$" src/main.zig ||
+    { echo "release-prepare: src/main.zig does not name ${old}" >&2; exit 2; }
+
+if command -v towncrier > /dev/null 2>&1; then
+    towncrier build --version "${new}" --yes
+else
+    uvx towncrier build --version "${new}" --yes
+fi
+
+old_re=${old//./\\.}
+sed -i "s/^\( *\.version = \)\"${old_re}\",\$/\1\"${new}\",/" build.zig.zon
+sed -i "s/^pub const version = \"${old_re}\";\$/pub const version = \"${new}\";/" src/main.zig
+
+# The version as programs print it and as a download names it. A sentence
+# about the old release ("Release 3.1.0 is older") keeps its number.
+mapfile -t pages < <(grep -rlE "eb-local ${old_re}( \(|\$)|v=${old_re};|eb-local-${old_re}-" docs/orgmode tests/fixtures || true)
+for page in "${pages[@]}"; do
+    sed -i -E \
+        -e "s/(ok +eb-local )${old_re}\$/\1${new}/" \
+        -e "s/^(eb-local )${old_re}( \()/\1${new}\2/" \
+        -e "s/(v=)${old_re};/\1${new};/" \
+        -e "s/(eb-local-)${old_re}(-[a-z0-9_]+-linux-musl: (OK|FAILED))/\1${new}\2/" \
+        "${page}"
+done
+# The version-line test names the version it expects.
+sed -i "s/\^eb-local ${old_re//\\/\\\\}/^eb-local ${new//./\\\\.}/" tests/test_overlay_cli.py
+
+emacs --batch -l docs/export.el > /dev/null 2>&1
+
+echo "release-prepare: ${old} -> ${new}"
+git status --short | awk '{print $1}' | sort | uniq -c

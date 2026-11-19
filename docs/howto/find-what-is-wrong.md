@@ -113,7 +113,7 @@ When you ask the site for help, include the output of `eb-local doctor` and of `
 ## Check the EESSI client and module order
 
 Before a site build, run the standalone, non-mutating readiness probe `eb-local-readiness`.
-Release 3.1.0 ships the `eb-local` binary only; the script is in the repository on `main`, not in the release archive.
+A release ships the `eb-local` binary only; the script is in the repository on `main`, not in the release archive.
 
 From a checkout, run it from the repository root:
 
