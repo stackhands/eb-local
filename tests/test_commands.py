@@ -599,6 +599,25 @@ class Commands(StorageFixture):
                 self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
                 self.assertIn(needle, err.stderr)
 
+    def test_clean_rejects_repeated_logs_older_than(self):
+        cases = (
+            (["clean", "--logs-older-than", "1", "--logs-older-than", "2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than=1", "--logs-older-than=2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than=2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than=1", "--logs-older-than", "2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than=abc", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than", "", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than="], "--logs-older-than needs a value"),
+        )
+        for args, msg in cases:
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual(
+                    (err.returncode, err.stdout, err.stderr),
+                    (2, "", f"eb-local: {msg}\n"),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

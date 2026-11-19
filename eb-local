@@ -58,6 +58,7 @@ clean_sources=false
 clean_workspaces=false
 dry_run=false
 allow_delete=false
+logs_days_set=false
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) usage; exit 0 ;;
@@ -92,13 +93,15 @@ while [ $# -gt 0 ]; do
                 clean)
                     case "$1" in
                         --logs-older-than)
+                            [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
                             [[ "${2:-}" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
-                            logs_days="$2"; shift 2 ;;
+                            logs_days="$2"; logs_days_set=true; shift 2 ;;
                         --logs-older-than=*)
                             logs_days="${1#--logs-older-than=}"
                             [ -n "$logs_days" ] || die "--logs-older-than needs a value"
+                            [ "$logs_days_set" = true ] && die "clean takes one --logs-older-than"
                             [[ "$logs_days" =~ ^[0-9]{1,5}$ ]] || die "--logs-older-than needs a number of days"
-                            shift ;;
+                            logs_days_set=true; shift ;;
                         --no-logs) clean_logs=false; shift ;;
                         --sources) clean_sources=true; shift ;;
                         --workspaces) clean_workspaces=true; shift ;;
