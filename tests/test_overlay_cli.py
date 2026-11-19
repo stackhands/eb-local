@@ -859,6 +859,39 @@ class OverlayCheckUnreadableOutputs(unittest.TestCase):
                     self.assertIn(needle, got.stderr)
                     self.assertFalse((root / "out").exists())
 
+    def test_stdout_enospc_reports_error_on_stderr(self):
+        dev_full = Path("/dev/full")
+        if not dev_full.exists():
+            self.skipTest("/dev/full is required")
+        base_bytes = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+        overlay_text = f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+        for mode_args in (["--dry-run"], ["--check"], []):
+            with self.subTest(mode_args=mode_args), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+                with dev_full.open("wb") as full_out:
+                    got = subprocess.run(
+                        [
+                            binary.BIN,
+                            "overlay",
+                            "materialize",
+                            "--overlay",
+                            "site.overlay.toml",
+                            "--base",
+                            "base.eb",
+                            "--out-dir",
+                            "out",
+                            *mode_args,
+                        ],
+                        cwd=root,
+                        stdout=full_out,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                self.assertEqual(got.returncode, 1, got.stderr)
+                self.assertIn("cannot write the result:", got.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
