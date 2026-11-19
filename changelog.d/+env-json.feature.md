@@ -1,0 +1,1 @@
+`eb-local env --json` and `eb-local dev --json` print the change their lines make to the environment (`set` and `unset`, as one line of JSON) in place of the lines, so a shell that cannot evaluate POSIX text, such as nushell, can apply it. The reference has a nushell wrapper.

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Black-box CLI behavior tests for `eb-local env` and `--env`."""
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -42,6 +43,38 @@ class EnvCliModes(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_json_is_the_change_the_lines_make_to_the_environment(self):
+        got = self.run_env(
+            ["env", "--json"],
+            EESSI_SITE_INSTALL="1",
+            EASYBUILD_PREFIX="/elsewhere",
+            KEPT="as it was",
+        )
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(got.stdout.count("\n"), 1, got.stdout)
+        change = json.loads(got.stdout)
+        self.assertEqual(change["schema_version"], 1)
+        self.assertEqual(change["kind"], "env")
+        names = [var["name"] for var in change["set"]]
+        self.assertEqual(names, sorted(names))
+        values = {var["name"]: var["value"] for var in change["set"]}
+        # what the lines export, and nothing the caller already had with that value
+        self.assertEqual(values["EESSI_USER_INSTALL"], str(self.prefix))
+        self.assertEqual(values["EESSI_CUSTOM_SITE_OPT"], "alpha")
+        self.assertNotIn("KEPT", values)
+        self.assertNotIn("HOME", values)
+        # what the lines unset
+        self.assertIn("EESSI_SITE_INSTALL", change["unset"])
+        self.assertIn("EASYBUILD_PREFIX", change["unset"])
+        self.assertNotIn("KEPT", change["unset"])
+        self.assertEqual(change["unset"], sorted(change["unset"]))
+        # bash's own bookkeeping and exported functions are not part of the change
+        for name in list(values) + change["unset"]:
+            self.assertNotIn(name, ("_", "SHLVL", "PWD", "OLDPWD"))
+            self.assertFalse(name.startswith("BASH_FUNC_"), name)
+        # the lines themselves are not printed
+        self.assertNotIn("module load", got.stdout)
 
     def test_global_env_flag_matches_env_subcommand(self):
         sub = self.run_env(["env"])

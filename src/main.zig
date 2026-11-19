@@ -62,15 +62,16 @@ const usage_text =
     \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
     \\                                       the script eb runs, with its arguments; runs nothing
-    \\  eb-local env [--strict]                lines that make your installed modules visible;
+    \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--buildenv MODULE] [MODULE...]
+    \\  eb-local dev [--strict] [--json] [--buildenv MODULE] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1);
-    \\                                       --buildenv names the build environment to load
+    \\                                       --buildenv names the build environment to load;
+    \\                                       --json prints the change as JSON, for env too
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -599,10 +600,91 @@ fn envStrict(c: Ctx, g: Global) bool {
     return v.len > 0 and !std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "false");
 }
 
+/// One variable of an `EnvChange`.
+const EnvVar = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// `env --json` and `dev --json`: what the lines change in the environment of
+/// the shell that evaluates them, for a shell that cannot evaluate them.
+/// Shell functions and aliases (Lmod's `module`) are not variables and are
+/// not in it.
+const EnvChange = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8,
+    /// Variables the lines add or change, by name.
+    set: []const EnvVar,
+    /// Variables the lines remove, by name.
+    unset: []const []const u8,
+};
+
+/// Variables bash keeps for itself; they say nothing about the lines.
+const shell_own = [_][]const u8{ "_", "SHLVL", "PWD", "OLDPWD", "BASH_EXECUTION_STRING" };
+
+fn shellOwn(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "BASH_FUNC_")) return true;
+    for (shell_own) |own| if (std.mem.eql(u8, name, own)) return true;
+    return false;
+}
+
+fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
+    return std.mem.lessThan(u8, x.name, y.name);
+}
+
+/// Run `lines` in a bash child and print, as one JSON document, how its
+/// environment then differs from this process's. The child's own output goes
+/// to stderr, so stdout carries the document alone.
+fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
+    const a = c.a;
+    const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
+    const script = str(a, "exec 3>&1 1>&2\n{s}\nenv -0 >&3\n", .{lines});
+    const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script }, c.envp, .{
+        .stdout_limit = 8 << 20,
+        .stderr_limit = 1 << 20,
+        .timeout_ms = 300_000,
+    }) catch |e| {
+        warn("could not run the {s} lines in bash: {s}", .{ kind, @errorName(e) });
+        return 1;
+    };
+    if (r.stderr.len > 0) cli.put(2, r.stderr);
+    if (r.term.code() != 0) {
+        warn("the {s} lines failed in bash (status {d}); no change is printed", .{ kind, r.term.code() });
+        return 1;
+    }
+    var set: std.ArrayList(EnvVar) = .empty;
+    var after: std.StringHashMapUnmanaged(void) = .empty;
+    var it = std.mem.splitScalar(u8, r.stdout, 0);
+    while (it.next()) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        const name = entry[0..eq];
+        const value = entry[eq + 1 ..];
+        if (name.len == 0 or shellOwn(name)) continue;
+        after.put(a, name, {}) catch oom();
+        if (c.env.get(name)) |before| {
+            if (std.mem.eql(u8, before, value)) continue;
+        }
+        set.append(a, .{ .name = name, .value = value }) catch oom();
+    }
+    var unset: std.ArrayList([]const u8) = .empty;
+    var before_it = c.env.iterator();
+    while (before_it.next()) |kv| {
+        const name = kv.key_ptr.*;
+        if (shellOwn(name) or after.contains(name)) continue;
+        unset.append(a, name) catch oom();
+    }
+    std.mem.sort(EnvVar, set.items, {}, envVarLess);
+    std.mem.sort([]const u8, unset.items, {}, lessThanStr);
+    jsonout.emit(a, EnvChange{ .kind = kind, .set = set.items, .unset = unset.items });
+    return 0;
+}
+
 fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const p = place(c, s);
+    const lines = environmentLines(c, s, p, envStrict(c, g));
+    if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    cli.put(1, environmentLines(c, s, p, envStrict(c, g)));
+    cli.put(1, lines);
     return 0;
 }
 
@@ -620,7 +702,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         } else mods.append(a, m) catch oom();
     };
     const installed = place(c, s);
-    evalHint(replay(a, "dev", s, g, installed.prefix, extra));
+    if (!g.json_out) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g))) catch oom();
     // The modules the program uses first, the build environment last, so
@@ -643,6 +725,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);
     if (nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
@@ -4537,6 +4620,8 @@ pub fn main(init: std.process.Init) u8 {
             .env => {
                 if (std.mem.eql(u8, x, "--strict")) {
                     g.env_strict = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
                 } else die("env takes only --project, --profile, --config and --strict; got '{s}'", .{x});
             },
             .profiles => {
@@ -4731,6 +4816,8 @@ pub fn main(init: std.process.Init) u8 {
             .dev => {
                 if (std.mem.eql(u8, x, "--strict")) {
                     g.env_strict = true;
+                } else if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
                 } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
                 } else if (joined(x, "--buildenv")) |v| {
