@@ -582,6 +582,23 @@ class Commands(StorageFixture):
                 self.assertEqual((run.returncode, run.stdout), (2, ""), run.stdout + run.stderr)
                 self.assertIn("needs a", run.stderr)
 
+    def test_clean_accepts_equals_logs_older_than(self):
+        self.with_rtrash()
+        old, new = self.logs(40, 1)
+        dry = self.run_wrapper(["clean", "--logs-older-than=7", "--dry-run"], SLURM_JOB_ID="")
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn(str(old), dry.stdout)
+        self.assertNotIn(str(new), dry.stdout)
+
+        for bad, needle in (
+            ("--logs-older-than=", "--logs-older-than needs a value"),
+            ("--logs-older-than=abc", "--logs-older-than needs a number of days"),
+        ):
+            with self.subTest(bad=bad):
+                err = self.run_wrapper(["clean", bad], SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
+                self.assertIn(needle, err.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
