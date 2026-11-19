@@ -341,13 +341,28 @@ const Parser = struct {
         return p.fail("{s} is not a value (strings are quoted)", .{word});
     }
 
+    /// A TOML decimal integer: an optional sign, then one digit, or a
+    /// non-zero digit followed by digits and single underscores. `1_000`
+    /// is 1000. `_1`, `1_`, `1__0`, `01` and `0_1` are not integers.
+    /// Hexadecimal, octal and binary forms stay unsupported.
     fn isInteger(word: []const u8) bool {
         var digits = word;
         if (digits.len > 0 and (digits[0] == '+' or digits[0] == '-')) digits = digits[1..];
         if (digits.len == 0) return false;
-        for (digits) |d| if (!std.ascii.isDigit(d)) return false;
-        // No leading zeros, as TOML says.
-        return !(digits.len > 1 and digits[0] == '0');
+        if (digits.len == 1) return std.ascii.isDigit(digits[0]);
+        // No leading zero, and an underscore sits between two digits.
+        if (digits[0] == '0' or digits[0] == '_' or digits[digits.len - 1] == '_') return false;
+        var underscore = false;
+        for (digits) |d| {
+            if (d == '_') {
+                if (underscore) return false;
+                underscore = true;
+                continue;
+            }
+            if (!std.ascii.isDigit(d)) return false;
+            underscore = false;
+        }
+        return true;
     }
 
     fn array(p: *Parser) Error!Value {
@@ -560,6 +575,13 @@ test "tables, dotted keys, strings, integers, booleans and arrays" {
     const gpu = t.get("profile").?.value.table.get("gpu").?.value.table;
     try std.testing.expectEqualStrings("CUDA/13.3.0", gpu.get("dev").?.value.table.get("modules").?.value.array[0].string);
     try std.testing.expectEqual(@as(i64, 7), gpu.get("clean").?.value.table.get("logs_older_than_days").?.value.int);
+    const grouped = try parseOk(arena.allocator(), "a = 1_000\nb = +1_2_3\nc = -1_000\nd = 0\ne = +0\nf = -0\n");
+    try std.testing.expectEqual(@as(i64, 1000), grouped.get("a").?.value.int);
+    try std.testing.expectEqual(@as(i64, 123), grouped.get("b").?.value.int);
+    try std.testing.expectEqual(@as(i64, -1000), grouped.get("c").?.value.int);
+    try std.testing.expectEqual(@as(i64, 0), grouped.get("d").?.value.int);
+    try std.testing.expectEqual(@as(i64, 0), grouped.get("e").?.value.int);
+    try std.testing.expectEqual(@as(i64, 0), grouped.get("f").?.value.int);
     try std.testing.expect(gpu.get("keep").?.value.boolean);
     try std.testing.expectEqualStrings("tab\there \u{e9}", gpu.get("quoted key").?.value.string);
     try std.testing.expectEqual(@as(usize, 10), gpu.get("dev").?.line);
@@ -582,6 +604,11 @@ test "every refusal names its line" {
     try expectInvalid("x = 1 2\n", 1, "after the value");
     try expectInvalid("ok = 1\nx = [1 2]\n", 2, "commas");
     try expectInvalid("x = 012\n", 1, "not a value");
+    try expectInvalid("x = 1_\n", 1, "not a value");
+    try expectInvalid("x = _1\n", 1, "not a value");
+    try expectInvalid("x = 1__0\n", 1, "not a value");
+    try expectInvalid("x = 0_1\n", 1, "not a value");
+    try expectInvalid("x = +\n", 1, "not a value");
     try expectInvalid("x = 99999999999999999999\n", 1, "out of range");
     try expectInvalid("= 1\n", 1, "cannot start a key");
     try expectInvalid("x = '''a'''\n", 1, "multi-line");
