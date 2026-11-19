@@ -294,7 +294,7 @@ When stdout is a terminal, it also says on stderr that the lines change nothing 
 
 | Option | Meaning |
 |---|---|
-| `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
+| `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). The `exit` is in the lines, so it ends the shell that evaluates them: meant for a job script, not an interactive shell. |
 
 ### dev
 
@@ -302,7 +302,7 @@ Print the lines `env` prints, then the lines that load the modules `dev.modules`
 
 | Option | Meaning |
 |---|---|
-| `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
+| `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). As for `env`, the `exit` ends the shell that evaluates the lines. |
 | `--buildenv MODULE` | Load MODULE as the build environment whatever the compilers, as `dev.buildenv` does. |
 
 A `MODULE` starts with a letter or digit and holds letters, digits, `.`, `_`, `+`, `-` and single slashes, with none at the end.
