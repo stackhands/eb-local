@@ -1051,6 +1051,14 @@ const host_ca_bundle =
     \\
 ;
 
+fn familyDetectLines(a: Allocator) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, "eb_local_family=gcc\n") catch oom();
+    for (config.families) |f|
+        out.appendSlice(a, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name })) catch oom();
+    return out.items;
+}
+
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
@@ -1072,9 +1080,7 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
-    add(a, &out, "eb_local_family=gcc\n");
-    for (config.families) |f|
-        add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
+    add(a, &out, familyDetectLines(a));
     add(a, &out, "case $eb_local_family in\n");
     for (config.families, s.buildenv_for) |f, b|
         add(a, &out, str(a, "    {s}) eb_local_buildenv={s} ;;\n", .{ f.name, if (b.value.len == 0) "''" else q(a, b.value) }));
