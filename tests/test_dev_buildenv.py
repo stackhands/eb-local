@@ -124,6 +124,37 @@ class DevBuildenv(StorageFixture):
         self.assertEqual(calls[-1], "load NVHPC/26.7")
         self.assertIn("RPATH wrappers for clang ld", replay.stderr)
 
+    def test_the_compilers_own_level_buildenv_when_the_site_installed_it(self):
+        # NVHPC has no build environment by default. A site that installs one
+        # at the compiler's toolchain level gets it without a site file.
+        calls, replay = self.dev("NVHPC/26.9", EBVERSIONNVHPC="26.9",
+                                 CONTROL_AVAILABLE="buildenv/default-NVHPC-26.9")
+        self.assertEqual(calls[-2:], ["is-avail buildenv/default-NVHPC-26.9", "load buildenv/default-NVHPC-26.9"])
+        self.assertNotIn("no build environment module", replay.stderr)
+
+    def test_the_level_buildenv_comes_after_the_familys_own(self):
+        # intel-compilers without the full intel toolchain installed: the
+        # family's build environment is missing, the compiler's own is there.
+        calls, _ = self.dev("intel-compilers/2025.3.3", EBVERSIONINTELMINCOMPILERS="2025.3.3",
+                            CONTROL_AVAILABLE="buildenv/default-intel-compilers-2025.3.3")
+        self.assertEqual(calls[-3:], ["is-avail buildenv/default-intel-2026.1",
+                                      "is-avail buildenv/default-intel-compilers-2025.3.3",
+                                      "load buildenv/default-intel-compilers-2025.3.3"])
+        both, _ = self.dev("intel-compilers/2025.3.3", EBVERSIONINTELMINCOMPILERS="2025.3.3",
+                           CONTROL_AVAILABLE="buildenv/default-intel-2026.1 buildenv/default-intel-compilers-2025.3.3")
+        self.assertEqual(both[-2:], ["is-avail buildenv/default-intel-2026.1", "load buildenv/default-intel-2026.1"])
+
+    def test_a_missing_level_buildenv_still_gets_rpath_wrappers(self):
+        calls, replay = self.dev("NVHPC/26.9", EBVERSIONNVHPC="26.9")
+        self.assertEqual(calls[-1], "is-avail buildenv/default-NVHPC-26.9")
+        self.assertIn("RPATH wrappers for clang ld", replay.stderr)
+
+    def test_a_family_set_to_none_asks_lmod_for_no_level_buildenv(self):
+        calls, replay = self.dev("NVHPC/26.9", EBVERSIONNVHPC="26.9", EB_LOCAL_DEV_BUILDENV_FOR_NVHPC="none",
+                                 CONTROL_AVAILABLE="buildenv/default-NVHPC-26.9")
+        self.assertEqual(calls[-1], "load NVHPC/26.9")
+        self.assertIn("RPATH wrappers for clang ld", replay.stderr)
+
     def test_a_later_dev_drops_the_previous_rpath_wrappers(self):
         first = self.run_wrapper(["dev", "NVHPC/26.7"])
         self.assertEqual(first.returncode, 0, first.stderr)

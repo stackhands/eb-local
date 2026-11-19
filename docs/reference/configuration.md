@@ -106,9 +106,9 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 | `stack.extend` | a module name | `EESSI-extend/2026.06-easybuild` | The EESSI-extend module. |
 | `dev.buildenv` | a module name | `buildenv/default-foss-2026.1` | The build environment `dev` loads for the GCC compilers. Set, it is loaded whatever the compilers. |
 | `dev.buildenv_for.cuda` | a module name, or `""` | `buildenv/default-foss-2026.1-CUDA-13.3.0` | The build environment for the CUDA compilers, when Lmod has it; otherwise, or when empty, the GCC one. |
-| `dev.buildenv_for.llvm` | a module name, or `""` | `buildenv/default-lfoss-2026.1` | The build environment for `llvm-compilers`, when Lmod has it; otherwise, or when empty, eb-local's RPATH wrappers. |
-| `dev.buildenv_for.intel` | a module name, or `""` | `buildenv/default-intel-2026.1` | The build environment for `intel-compilers`, when Lmod has it; otherwise, or when empty, eb-local's RPATH wrappers. |
-| `dev.buildenv_for.nvhpc` | a module name, or `""` | `(none: RPATH wrappers)` | The build environment for NVHPC, when Lmod has it; otherwise, or when empty, eb-local's RPATH wrappers. |
+| `dev.buildenv_for.llvm` | a module name, or `""` | `buildenv/default-lfoss-2026.1` | The build environment for `llvm-compilers`, when Lmod has it; otherwise `buildenv/default-llvm-compilers-VERSION` when Lmod has that, and eb-local's RPATH wrappers when it has neither. Empty means the wrappers. |
+| `dev.buildenv_for.intel` | a module name, or `""` | `buildenv/default-intel-2026.1` | The build environment for `intel-compilers`, when Lmod has it; otherwise `buildenv/default-intel-compilers-VERSION` when Lmod has that, and eb-local's RPATH wrappers when it has neither. Empty means the wrappers. |
+| `dev.buildenv_for.nvhpc` | a module name, or `""` | `(none: RPATH wrappers)` | The build environment for NVHPC, when Lmod has it; otherwise `buildenv/default-NVHPC-VERSION` when Lmod has that, and eb-local's RPATH wrappers when it has neither. Empty means the wrappers. |
 | `dev.modules` | an array of module names | `(none)` | Modules `dev` loads before those named on its command line. |
 | `build.allocation_hint` | a string | `(none)` | The allocation a build started outside a Slurm job suggests, such as `salloc -p cpu -n 16 -t 02:00:00`. |
 | `build.site_toolchains` | an array of `NAME/VERSION` | `(none)` | Toolchains EESSI's hooks accept besides foss and lfoss; EasyBuild gets them as `EESSI_SITE_TOP_LEVEL_TOOLCHAINS_<EESSI version>`. Site setting. |
