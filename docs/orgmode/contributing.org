@@ -38,7 +38,7 @@ zig build -Dtest-ops=true test
 =zig build unit= runs the unit tests in =src/=.
 =zig build test= runs them, and then the command-line suite in =tests/= against a debug binary that reads the mount table the tests give it.
 With =-Dtest-ops=true=, as the =zig= workflow runs it, that binary is the one the build installs; without, it is a build of its own.
-=python3 -m unittest discover -s tests= runs the same suite against the Bash script =eb-local= at the top of the repository, the 1.x command, until 4.0.0 removes it.
+=python3 -m unittest discover -s tests= runs the shared suite through the =eb-local= shim at the top of the repository and its build at =zig-out/bin/eb-local=.
 
 A release build carries no test seam, which the =zig= workflow checks on the binary this builds:
 
@@ -53,7 +53,7 @@ out/bin/eb-local --version
 
 The scripts in =tests/site/= run eb-local on a cluster with EESSI 2026.06, Lmod and Slurm.
 Each takes a directory, =EB_LOCAL_TEST_ROOT=, that holds the configuration as =eb-local.conf= and gets the installs in =eessi/=; remove it afterwards.
-=EB_LOCAL_BIN= names the eb-local under test; without it, =build-job.sh= and =dev-tasks.sh= test the Bash script, and =rtrash-job.sh= stops, as it does without =RTRASH=, the rtrash under test.
+=EB_LOCAL_BIN= names the eb-local under test; without it, =build-job.sh= and =dev-tasks.sh= test the repository shim, and =rtrash-job.sh= stops, as it does without =RTRASH=, the rtrash under test.
 
 | Script          | What it checks                                                                                                                                                                                      |
 |-----------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -111,7 +111,7 @@ The build fails on any Sphinx warning, and the =pages= workflow builds it the sa
 | =examples/sites/=        | a worked site file, for a site that does not exist                |
 | =tools/sbom.py=          | writes the CycloneDX SBOM of a release binary                     |
 | =changelog.d/=           | the news fragments of the next release                            |
-| =eb-local=               | the Bash script, the 1.x command, until 4.0.0                     |
+| =eb-local=               | the shell shim that delegates to the Zig program                 |
 
 The pages under =docs/reference/api/= are written as the site builds, and are not committed.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TOML configuration, profiles, EB_LOCAL_* overrides and secrets, through
-the command line of the Zig build (EB_LOCAL_BIN). The Bash script has none
-of these, so the tests run only against the binary.
+the command line of the Zig build (EB_LOCAL_BIN), so the tests run only
+against a directly named binary.
 """
 import json
 import os

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Site file templates, configuration carried in EB_LOCAL_* variables, and
 how nimvault is run, through the command line of the Zig build
-(EB_LOCAL_BIN). The Bash script has none of these.
+(EB_LOCAL_BIN).
 """
 import os
 from pathlib import Path
