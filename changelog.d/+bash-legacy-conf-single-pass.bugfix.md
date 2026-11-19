@@ -1,0 +1,1 @@
+`eb-local` parses `eb-local.conf` lines in a single pass before value validation by splitting on the first `=`, reporting `line N: cannot read the line` only when `=` is omitted and `line N: unknown setting` for unrecognized keys to match `legacyToToml` in `src/config.zig`.
