@@ -65,7 +65,7 @@ const usage_text =
     \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
+    \\  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [--lock | --locked] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
@@ -73,7 +73,9 @@ const usage_text =
     \\                                       --buildenv names the build environment to load;
     \\                                       --json prints the change as JSON, for env too;
     \\                                       --envrc writes that line to .envrc for direnv;
-    \\                                       --pure purges loaded modules and LD_* first
+    \\                                       --pure purges loaded modules and LD_* first;
+    \\                                       --lock records what loads in eb-local.lock,
+    \\                                       --locked loads exactly that again
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -379,6 +381,7 @@ fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, cano
     parts.append(a, command) catch oom();
     if (std.mem.eql(u8, command, "dev")) {
         if (g.pure) parts.append(a, "--pure") catch oom();
+        if (g.locked) parts.append(a, "--locked") catch oom();
         if (g.buildenv) |p| parts.appendSlice(a, &.{ "--buildenv", q(a, p) }) catch oom();
         for (extra) |m| parts.append(a, q(a, m)) catch oom();
     }
@@ -494,6 +497,10 @@ const Global = struct {
     envrc: bool = false,
     /// `dev --pure`: purge the loaded modules and the loader variables first.
     pure: bool = false,
+    /// `dev --lock`: write what the dev lines load to `eb-local.lock`.
+    lock: bool = false,
+    /// `dev --locked`: load the modules of `eb-local.lock`, and only those.
+    locked: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -652,7 +659,10 @@ fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
 /// Run `lines` in a bash child and print, as one JSON document, how its
 /// environment then differs from this process's. The child's own output goes
 /// to stderr, so stdout carries the document alone.
-fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
+/// Run `lines` in a bash child and return its environment afterwards, as
+/// `env -0` prints it. What the lines print goes to stderr. Null, with a
+/// message, when the child cannot run or the lines fail.
+fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
     const a = c.a;
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
     const script = str(a, "exec 3>&1 1>&2\n{s}\nenv -0 >&3\n", .{lines});
@@ -662,16 +672,32 @@ fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
         .timeout_ms = 300_000,
     }) catch |e| {
         warn("could not run the {s} lines in bash: {s}", .{ kind, @errorName(e) });
-        return 1;
+        return null;
     };
     if (r.stderr.len > 0) cli.put(2, r.stderr);
     if (r.term.code() != 0) {
-        warn("the {s} lines failed in bash (status {d}); no change is printed", .{ kind, r.term.code() });
-        return 1;
+        warn("the {s} lines failed in bash (status {d}); nothing is written", .{ kind, r.term.code() });
+        return null;
     }
+    return r.stdout;
+}
+
+/// The value of `name` in the output of `env -0`, or "" when it is not set.
+fn env0Value(env0: []const u8, name: []const u8) []const u8 {
+    var it = std.mem.splitScalar(u8, env0, 0);
+    while (it.next()) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        if (std.mem.eql(u8, entry[0..eq], name)) return entry[eq + 1 ..];
+    }
+    return "";
+}
+
+fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
+    const a = c.a;
+    const env0 = runLines(c, kind, lines) orelse return 1;
     var set: std.ArrayList(EnvVar) = .empty;
     var after: std.StringHashMapUnmanaged(void) = .empty;
-    var it = std.mem.splitScalar(u8, r.stdout, 0);
+    var it = std.mem.splitScalar(u8, env0, 0);
     while (it.next()) |entry| {
         const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
         const name = entry[0..eq];
@@ -750,6 +776,112 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
     return 0;
 }
 
+/// The file `dev --lock` writes and `dev --locked` reads, in the working directory.
+const lock_name = "eb-local.lock";
+
+/// What a dev environment resolved to: enough for a later shell to load the
+/// same modules, and to notice that it cannot.
+const DevLock = struct {
+    schema_version: u32 = jsonout.schema_version,
+    kind: []const u8 = "dev-lock",
+    /// `stack.module` when the lock was written.
+    stack: []const u8,
+    eessi_version: []const u8 = "",
+    /// EESSI_SOFTWARE_SUBDIR: the CPU target the modules were resolved for.
+    /// Nodes with the same CPU share it, whatever their accelerator.
+    cpu_target: []const u8,
+    accelerator_target: []const u8 = "",
+    /// LOADEDMODULES in load order: every module, each with its version.
+    modules: []const []const u8,
+};
+
+/// Create `name` in the working directory, or replace it atomically with its mode kept.
+fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
+    if (fsx.statAt(fsx.cwd, name, true)) |_| {
+        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+    } else |_| {
+        const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
+            die("cannot create {s} ({s})", .{ name, @errorName(e) });
+        defer sys.close(fd);
+        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+    }
+}
+
+/// `dev --lock`: run the dev lines in a bash child and record what loaded.
+fn writeLock(c: Ctx, s: config.Settings, lines: []const u8) u8 {
+    const a = c.a;
+    const env0 = runLines(c, "dev", lines) orelse return 1;
+    var modules: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, env0Value(env0, "LOADEDMODULES"), ':');
+    while (it.next()) |m| {
+        if (m.len > 0) modules.append(a, m) catch oom();
+    }
+    const cpu = env0Value(env0, "EESSI_SOFTWARE_SUBDIR");
+    if (cpu.len == 0 or modules.items.len == 0) {
+        warn("the dev lines loaded no module or set no EESSI_SOFTWARE_SUBDIR, so there is nothing to lock; {s} is not written", .{lock_name});
+        return 1;
+    }
+    const text = jsonout.renderLine(a, DevLock{
+        .stack = s.stack_module.value,
+        .eessi_version = env0Value(env0, "EESSI_VERSION"),
+        .cpu_target = cpu,
+        .accelerator_target = env0Value(env0, "EESSI_ACCELERATOR_TARGET"),
+        .modules = modules.items,
+    }) catch oom();
+    writeCwdFile(a, lock_name, text);
+    cli.err("eb-local: wrote {s}: {d} modules for {s}; `eb-local dev --locked` loads them again\n", .{ lock_name, modules.items.len, cpu });
+    return 0;
+}
+
+/// A CPU target as EESSI names one: path parts of letters, digits, `_`, `.` and `-`.
+fn validTarget(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '/' or ch == '_' or ch == '.' or ch == '-')) return false;
+    }
+    return true;
+}
+
+/// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
+/// from a purged shell, and that load nothing when this shell's CPU target is
+/// not the lock's. The same binaries serve every node with that CPU target,
+/// so a lock written on one node type loads on another that shares it.
+fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
+    const a = c.a;
+    const opened = fsx.openRegular(fsx.cwd, lock_name, true) catch
+        die("there is no {s} here; write one with `eb-local dev --lock MODULE...`", .{lock_name});
+    defer sys.close(opened.fd);
+    const text = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ lock_name, @errorName(e) });
+    const lock = std.json.parseFromSliceLeaky(DevLock, a, text, .{ .ignore_unknown_fields = true }) catch
+        die("{s} is not a lock eb-local wrote; write it again with `eb-local dev --lock MODULE...`", .{lock_name});
+    if (!std.mem.eql(u8, lock.kind, "dev-lock") or lock.schema_version != jsonout.schema_version)
+        die("{s} is not a dev lock of this eb-local (kind {s}, schema {d})", .{ lock_name, lock.kind, lock.schema_version });
+    if (!validTarget(lock.cpu_target)) die("{s} names no usable CPU target", .{lock_name});
+    if (lock.modules.len == 0) die("{s} lists no modules", .{lock_name});
+    for (lock.modules) |m| {
+        if (!config.validModule(m)) die("{s} lists '{s}', which is not a module name", .{ lock_name, m });
+    }
+    if (!std.mem.eql(u8, lock.stack, s.stack_module.value))
+        die("{s} was written with the stack {s}; this configuration loads {s}. Write the lock again, or select that stack", .{ lock_name, lock.stack, s.stack_module.value });
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), true)) catch oom();
+    out.appendSlice(a, str(a,
+        \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
+        \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
+        \\else
+        \\module load
+    , .{ q(a, lock.cpu_target), lock_name, q(a, lock.cpu_target) })) catch oom();
+    for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
+    out.append(a, '\n') catch oom();
+    out.appendSlice(a, host_ca_bundle) catch oom();
+    const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
+    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
+    if (g.json_out) return emitEnvChange(c, "dev", out.items);
+    evalHint("dev --locked");
+    cli.put(1, out.items);
+    return 0;
+}
+
 fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const a = c.a;
     // A module is loaded once, where it is first named; a chosen build
@@ -764,8 +896,13 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
         } else mods.append(a, m) catch oom();
     };
     const installed = place(c, s);
+    if (g.locked) {
+        if (extra.len > 0) die("dev --locked loads the modules of {s}; name none on the line", .{lock_name});
+        if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
+        return lockedLines(c, s, g, installed);
+    }
     if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
-    if (!g.json_out) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
+    if (!g.json_out and !g.lock) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), g.pure)) catch oom();
     // The modules the program uses first, the build environment last, so
@@ -788,6 +925,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);
     if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
@@ -4885,6 +5023,10 @@ pub fn main(init: std.process.Init) u8 {
                     g.envrc = true;
                 } else if (std.mem.eql(u8, x, "--pure")) {
                     g.pure = true;
+                } else if (std.mem.eql(u8, x, "--lock")) {
+                    g.lock = true;
+                } else if (std.mem.eql(u8, x, "--locked")) {
+                    g.locked = true;
                 } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
                 } else if (joined(x, "--buildenv")) |v| {

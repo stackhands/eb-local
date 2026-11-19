@@ -126,6 +126,94 @@ class DevCliModes(unittest.TestCase):
         self.assertIn("LD_LIBRARY_PATH is set", plain.stderr)
         self.assertNotIn("LD_LIBRARY_PATH is set", pure.stderr)
 
+    LOADED = "EESSI/2026.06:GCCcore/15.2.0:FFTW/3.3.10-GCC-15.2.0:buildenv/default-GCC-15.2.0"
+    RESOLVED = {"LOADEDMODULES": LOADED, "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"}
+
+    def test_lock_records_what_the_dev_lines_loaded(self):
+        lock = self.root / "eb-local.lock"
+        got = self.run_dev(["--lock", "FFTW/3.3.10-GCC-15.2.0"], **self.RESOLVED)
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("wrote eb-local.lock: 4 modules for x86_64/amd/zen4", got.stderr)
+        text = lock.read_text()
+        self.assertEqual(text.count("\n"), 1)
+        record = json.loads(text)
+        self.assertEqual(record["kind"], "dev-lock")
+        self.assertEqual(record["schema_version"], 1)
+        self.assertEqual(record["cpu_target"], "x86_64/amd/zen4")
+        self.assertEqual(record["eessi_version"], "2026.06")
+        self.assertEqual(record["accelerator_target"], "")
+        self.assertEqual(record["modules"], self.LOADED.split(":"))
+        self.assertTrue(record["stack"])
+
+        # a second lock replaces the first
+        again = self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES="EESSI/2026.06"))
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(lock.read_text())["modules"], ["EESSI/2026.06"])
+
+        # nothing loaded, nothing to lock: the file is left as it is
+        before = lock.read_text()
+        empty = self.run_dev(["--lock"], EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(empty.returncode, 1)
+        self.assertIn("nothing to lock", empty.stderr)
+        self.assertEqual(lock.read_text(), before)
+
+    def test_locked_loads_exactly_the_lock_and_checks_the_cpu_target(self):
+        lock = self.root / "eb-local.lock"
+        missing = self.run_dev(["--locked"])
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("there is no eb-local.lock here", missing.stderr)
+
+        self.assertEqual(self.run_dev(["--lock"], **self.RESOLVED).returncode, 0)
+        got = self.run_dev(["--locked"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        load = "module load " + " ".join(self.LOADED.split(":")) + "\n"
+        self.assertEqual(got.stdout.count(load), 1)
+        self.assertEqual(got.stdout.count("module load"), 2)  # the stack, then the lock
+        # purged first, and the lock's modules only on its own CPU target
+        self.assertLess(got.stdout.index("module purge"), got.stdout.index(load))
+        self.assertIn('if [ "${EESSI_SOFTWARE_SUBDIR-}" != x86_64/amd/zen4 ]; then', got.stdout)
+        self.assertIn("export EB_LOCAL_DEV_PREFIX=", got.stdout)
+
+        def run_lines(subdir):
+            return subprocess.run(
+                ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+                env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EESSI_SOFTWARE_SUBDIR": subdir,
+                     "EESSI_VERSION": "2026.06"},
+                capture_output=True, text=True,
+            )
+
+        other = run_lines("x86_64/intel/icelake")
+        self.assertIn("was written for the CPU target", other.stderr)
+        self.assertIn("this shell has x86_64/intel/icelake", other.stderr)
+        self.assertEqual(other.stdout, "unset")
+        same = run_lines("x86_64/amd/zen4")
+        self.assertNotIn("was written for the CPU target", same.stderr)
+        self.assertTrue(same.stdout.endswith("/dev/2026.06/x86_64/amd/zen4"), same.stdout)
+
+        # modules come from the lock, not from the line
+        named = self.run_dev(["--locked", "FFTW/3.3.10-GCC-15.2.0"])
+        self.assertNotEqual(named.returncode, 0)
+        self.assertIn("name none on the line", named.stderr)
+
+        # a lock of another stack, a lock that is not one, and a hostile module name are refused
+        record = json.loads(lock.read_text())
+        for change, message in (
+            ({"stack": "EESSI/2099.01"}, "was written with the stack EESSI/2099.01"),
+            ({"kind": "something-else"}, "is not a dev lock"),
+            ({"modules": ["ok/1.0", "bad;rm -rf /"]}, "is not a module name"),
+            ({"cpu_target": "x86_64/$(id)"}, "names no usable CPU target"),
+            ({"modules": []}, "lists no modules"),
+        ):
+            with self.subTest(change=change):
+                lock.write_text(json.dumps(dict(record, **change)) + "\n")
+                refused = self.run_dev(["--locked"])
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertEqual(refused.stdout, "")
+                self.assertIn(message, refused.stderr)
+        lock.write_text("not json\n")
+        self.assertIn("is not a lock eb-local wrote", self.run_dev(["--locked"]).stderr)
+
     def test_names_the_host_ca_bundle_without_replacing_one_the_shell_set(self):
         got = self.run_dev([])
         self.assertEqual(got.returncode, 0, got.stderr)
