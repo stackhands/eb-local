@@ -53,7 +53,7 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 | `XDG_CACHE_HOME` | Holds the RPATH wrappers, below `$XDG_CACHE_HOME/eb-local`. |
 | `SLURM_JOB_ID` | The job a build runs in, whose node-local mount it uses; without it, a build and `clean --workspaces` stop. |
 | `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL`, `EESSI_CVMFS_INSTALL` | Choose where `eb-local eb` installs. A build clears them, and warns about one left in the shell that is not the one it sets. |
-| `EESSI_CVMFS_REPO`, `EESSI_VERSION` | Name the EESSI repository (default `/cvmfs/software.eessi.io`) and version (default `2026.06`) for `eb`, `env`, `dev`, `doctor` and `list`. |
+| `EESSI_CVMFS_REPO`, `EESSI_VERSION` | Name the EESSI repository (default `/cvmfs/software.eessi.io`) and version (default `2026.06`) for `eb`, `doctor` and `list`. For `env` and `dev` they name only the Lmod init file a shell without `module` sources and the file `--strict` checks; the stack those lines load is `stack.module`. |
 | `EESSI_SOFTWARE_PATH`, `EESSI_SITE_SOFTWARE_PATH` | Checked by `eb-local eb` to confirm that EESSI-extend selected an install path inside the requested tree. |
 | `EESSI_SOFTWARE_SUBDIR`, `EESSI_ACCELERATOR_TARGET`, `EESSI_EPREFIX` | Used by `check`, `check --dev`, `list`, `rpath-wrappers` and `doctor` to identify the loaded CPU target, accelerator and compatibility layer. |
 | `LMOD_PKG`, `LMOD_CMD`, `MODULESHOME`, `MODULEPATH` | Checked by `doctor` and the emitted shell snippets to locate Lmod initialization and verify loaded module trees. |
