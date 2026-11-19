@@ -107,6 +107,94 @@ Each of the three extension tasks builds a module that calls GSL, then reads the
 The task passes when the module has a `DT_RPATH` entry naming the GSL directory and `readelf` shows no `DT_RUNPATH` entry.
 The task then imports the module with `env -i`, with no modules loaded.
 
+## Build language packages
+
+Use the `dev` path from the compiled-program example for the commands below.
+Name every module that provides a library on the `dev` line.  Before a native
+build, confirm that `command -v gcc` or `command -v g++` is under
+`rpath_wrappers`.
+
+### Python
+
+```bash
+eval "$(eb-local dev Python/3.14.2-GCCcore-15.2.0 GSL/2.8-GCC-15.2.0)"
+export PYTHONNOUSERSITE=1
+prefix="$HOME/eessi-python/$EESSI_SOFTWARE_SUBDIR"
+python3 -m venv "$prefix"
+source "$prefix/bin/activate"
+python3 -m pip install --no-user pip
+python3 -m pip install --no-build-isolation PACKAGE
+```
+
+For uv, use the interpreter already on `PATH` and refuse a download:
+
+```bash
+export UV_PYTHON_PREFERENCE=only-system
+export UV_PYTHON_DOWNLOADS=never
+uv venv --python "$(command -v python3)" \
+  "$HOME/eessi-uv/$EESSI_SOFTWARE_SUBDIR"
+```
+
+### R
+
+```bash
+eval "$(eb-local dev R/4.6.1-gfbf-2026.1 GSL/2.8-GCC-15.2.0)"
+export R_LIBS_USER="$HOME/eessi-R/$EESSI_SOFTWARE_SUBDIR"
+mkdir -p "$R_LIBS_USER" "$HOME/.R"
+cat > "$HOME/.R/Makevars" << 'EOF'
+CC = gcc
+CXX = g++
+FC = gfortran
+EOF
+R CMD INSTALL PACKAGE
+```
+
+The bare compiler names in `Makevars` ensure that R does not bypass the
+build environment with a compiler path recorded in its own configuration.
+
+### Rust
+
+```bash
+eval "$(eb-local dev Rust/1.94.1-GCCcore-15.2.0 GSL/2.8-GCC-15.2.0)"
+host=$(rustc -vV | sed -n 's/^host: //p')
+linker_var=CARGO_TARGET_$(printf '%s' "$host" | tr 'a-z-' 'A-Z_')_LINKER
+export "${linker_var}=$(command -v gcc)"
+cargo build --release
+```
+
+### Julia
+
+Julia 1.12.2 is on the 2025.06 stack.  Keep its depot per target while
+leaving the built-in depot visible:
+
+```bash
+eval "$(eb-local dev Julia/1.12.2 GSL/2.8-GCC-14.3.0)"
+export JULIA_DEPOT_PATH="$HOME/eessi-julia/$EESSI_SOFTWARE_SUBDIR:"
+julia -e 'println(DEPOT_PATH[1])'
+```
+
+### Node.js
+
+```bash
+eval "$(eb-local dev nodejs/24.16.0-GCCcore-15.2.0 GSL/2.8-GCC-15.2.0)"
+test -f "$EBROOTNODEJS/include/node/node_version.h"
+export npm_package_config_node_gyp_nodedir="$EBROOTNODEJS"
+npx node-gyp configure build --nodedir="$npm_package_config_node_gyp_nodedir"
+```
+
+`--nodedir` makes node-gyp use the headers belonging to the loaded Node.js.
+If the header check fails, pass a matching header tree instead of allowing a
+download.
+
+For every native extension, package shared object, or executable, check the
+link result:
+
+```bash
+readelf -d FILE | grep -E 'RPATH|RUNPATH'
+```
+
+The output contains `RPATH` entries for the linked library directories.
+
 ## Other compilers
 
 The modules on the `dev` line choose the build environment:
