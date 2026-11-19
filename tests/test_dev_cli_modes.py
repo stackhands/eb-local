@@ -69,7 +69,6 @@ class DevCliModes(unittest.TestCase):
         self.assertIn("mount EESSI with CVMFS", got.stdout)
         self.assertLess(got.stdout.index("mount EESSI with CVMFS"), got.stdout.index("module load Demo/1.0"))
 
-    @unittest.expectedFailure
     def test_strict_dev_exits_two_when_eessi_init_path_is_a_directory(self):
         repo = self.root / "repo"
         init_dir = repo / "versions" / "2026.06" / "init" / "lmod" / "bash"

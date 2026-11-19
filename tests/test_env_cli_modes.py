@@ -75,7 +75,6 @@ class EnvCliModes(unittest.TestCase):
         self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
         self.assertIn("env takes only", got.stderr)
 
-    @unittest.expectedFailure
     def test_strict_env_exits_two_when_eessi_init_path_is_a_directory(self):
         repo = self.root / "repo"
         init_dir = repo / "versions" / "2026.06" / "init" / "lmod" / "bash"

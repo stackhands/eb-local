@@ -281,6 +281,9 @@ const env_strict_prelude =
     \\if [[ ! -e $init ]]; then
     \\  echo "eb-local: missing ${init}; mount EESSI with CVMFS, use the EESSI container, or set EESSI_CVMFS_REPO and EESSI_VERSION." >&2
     \\  exit 2
+    \\elif [[ ! -f $init || ! -r $init ]]; then
+    \\  echo "eb-local: cannot read ${init}; mount EESSI with CVMFS, use the EESSI container, or set EESSI_CVMFS_REPO and EESSI_VERSION." >&2
+    \\  exit 2
     \\fi
     \\
 ;
