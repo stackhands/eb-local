@@ -1,1 +1,0 @@
-`eb-local eb` now normalizes repeated and trailing slashes on the expected install root and `EASYBUILD_INSTALLPATH` before comparing them, so `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_SOFTWARE_PATH`, and `EESSI_SOFTWARE_PATH` values with a trailing slash match Lmod's normalized install path.

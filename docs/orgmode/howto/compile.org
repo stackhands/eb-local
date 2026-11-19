@@ -96,7 +96,14 @@ The program runs without the FFTW module, and without =LD_LIBRARY_PATH=.
 | MPI                                          | =eval "$(eb-local dev)"=, then =mpicc=                                                      |
 | CMake against GSL                            | =eval "$(eb-local dev GSL/2.8-GCC-15.2.0 CMake/3.31.11-GCCcore-15.2.0)"=                     |
 | A Python virtual environment, with packages that compile C | =eval "$(eb-local dev Python/3.14.2-GCCcore-15.2.0)"=, then =python -m venv= and =pip install= |
+| A setuptools extension against GSL           | =eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0)"= |
+| A meson-python extension against GSL         | =eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0)"= |
+| A scikit-build-core extension against GSL    | =eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0 CMake/3.31.11-GCCcore-15.2.0)"= |
 | R packages, into a library of your own       | =eval "$(eb-local dev R/4.6.1-gfbf-2026.1)"=, then =install.packages()= into your library, which =R_LIBS= names |
+
+Each of the three extension tasks builds a module that calls GSL, then reads the module with =readelf=.
+The task passes when the module has a =DT_RPATH= entry naming the GSL directory and =readelf= shows no =DT_RUNPATH= entry.
+The task then imports the module with =env -i=, with no modules loaded.
 
 * Build language packages
 
@@ -198,7 +205,10 @@ The modules on the =dev= line choose the build environment:
 | =intel-compilers=           | =buildenv/default-intel-2026.1=                           |
 | NVHPC                       | none                                                      |
 
-When Lmod has no such module, =dev= writes RPATH wrappers for the compilers and linkers on =PATH= into =~/.cache/eb-local=, puts them first, and says so.
+When Lmod has no such module, =dev= looks for one at the compiler's own toolchain level: =buildenv/default-llvm-compilers-VERSION=, =buildenv/default-intel-compilers-VERSION= or =buildenv/default-NVHPC-VERSION=, with the version of the compiler module that is loaded.
+A site that builds =buildenv-default-NVHPC-26.9.eb= therefore gives its NVHPC users EasyBuild's own wrappers with no setting anywhere.
+
+When Lmod has neither, =dev= writes RPATH wrappers for the compilers and linkers on =PATH= into =~/.cache/eb-local=, puts them first, and says so.
 It does the same for each =clang=, =clang++=, =flang=, =flang-new= or =ld.lld= on =PATH= that no wrapper covers, whichever build environment loads:
 
 #+begin_example

@@ -1,1 +1,0 @@
-`--config=FILE` names a configuration file, as `--config FILE` does. A build passed it to `eb` and read the usual files, `env` refused it, and `eb-local --config=FILE config` ran a build of a recipe called `config`. An empty value after `=`, as in `--project=`, is refused as an empty one after a space is; an empty `--project=` made the current directory the project.

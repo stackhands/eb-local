@@ -106,6 +106,23 @@ class CheckCliFlags(unittest.TestCase):
         self.assertEqual(no_ver.returncode, 2, no_ver.stdout + no_ver.stderr)
         self.assertIn("has no version", no_ver.stderr)
 
+    def test_non_directory_prefix_and_dev_prefix_exit_two(self):
+        regular = self.root / "regular-file"
+        regular.write_text("not a directory\n", encoding="utf-8")
+        absent = self.root / "no-such-dir"
+
+        for target in (regular, absent):
+            with self.subTest(target=target):
+                got = self.run_check(["--prefix", str(target)])
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(f"check --prefix needs a directory; {target} is not one", got.stderr)
+
+        dev_file = self.run_check(["--dev"], EB_LOCAL_DEV_PREFIX=str(regular))
+        self.assertEqual(dev_file.returncode, 2, dev_file.stdout + dev_file.stderr)
+        self.assertEqual(dev_file.stdout, "")
+        self.assertIn(f"check --dev: {regular} is not a directory", dev_file.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

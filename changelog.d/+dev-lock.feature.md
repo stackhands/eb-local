@@ -1,1 +1,0 @@
-`eb-local dev --lock MODULE...` writes `eb-local.lock`: the stack, the EESSI version, the CPU and accelerator target and every loaded module with its version, in load order. `eb-local dev --locked` loads exactly that list from a purged shell, refuses a lock of another stack, and loads none of it on a different CPU target. Node types that share a CPU target share a lock.

@@ -78,7 +78,7 @@ The batch scripts go to =<install prefix>/.eb-local/jobs=, and each job's output
 |-----------------------------------------------------------------------------+--------------------------------------------------------------------------+----------------------------------------------------------------------------|
 | =--explain= prints no =sbatch= line                                          | The site file has no =[build.node_types]=.                               | Ask the site to list the node types, or build in an allocation on each.    |
 | =eb-local: FILE:LINE: build.node_types is a site setting; a user file or a profile cannot change it= | Your file, or a profile, sets node types. | Remove the table from it.                                                   |
-| =eb-local: FILE:LINE: unknown key build.node_types=                          | eb-local 3.1.0 reads a site file written for the main branch.            | Install eb-local from source, or name the table =[build.targets]= for 3.1.0. |
+| =eb-local: FILE:LINE: unknown key build.node_types=                          | eb-local 3.1.0 reads a site file written for 3.2.0.                      | Install release 3.2.0, or name the table =[build.targets]= for 3.1.0.        |
 | =eb-local: site FILE:LINE: [build.targets] is now [build.node_types]; eb-local reads the old name until 4.0.0= | The site file uses the table's name from before 3.2. | Rename the table.                                                          |
 
 * Related

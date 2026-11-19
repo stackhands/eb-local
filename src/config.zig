@@ -137,11 +137,18 @@ pub const Settings = struct {
 /// EBROOT variable of its compiler module, in rising precedence. GCC is the
 /// rest and uses dev.buildenv. The names are EasyBuild's: a hyphen in the
 /// software name becomes "min", so llvm-compilers sets EBROOTLLVMMINCOMPILERS.
-pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8 }{
+///
+/// `compiler` is the software name of the family's compiler module and
+/// `version` the variable that module sets to its version. Together they name
+/// the build environment a site installs at the compiler's own toolchain
+/// level, `buildenv/default-<compiler>-<version>`, which dev tries when the
+/// family's configured build environment is not installed. CUDA is not a
+/// toolchain and has none.
+pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8, compiler: []const u8 = "", version: []const u8 = "" }{
     .{ .name = "cuda", .ebroot = "EBROOTCUDA", .env = "EB_LOCAL_DEV_BUILDENV_FOR_CUDA" },
-    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM" },
-    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL" },
-    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC" },
+    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM", .compiler = "llvm-compilers", .version = "EBVERSIONLLVMMINCOMPILERS" },
+    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL", .compiler = "intel-compilers", .version = "EBVERSIONINTELMINCOMPILERS" },
+    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC", .compiler = "NVHPC", .version = "EBVERSIONNVHPC" },
 };
 
 /// The `EBROOT` name EasyBuild writes for `software`. `convert_name` replaces
@@ -855,6 +862,10 @@ pub fn load(
 /// dotted TOML key on the line it is on, so that `eb-local config` and the
 /// errors name that line.
 pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]const u8 {
+    if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) {
+        diag.message = try std.fmt.allocPrint(a, "line 1: the file starts with a UTF-8 BOM", .{});
+        return error.Invalid;
+    }
     const tables = [_][]const u8{ "storage", "stack", "build", "dev", "clean" };
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
@@ -863,6 +874,14 @@ pub fn legacyToToml(a: Allocator, text: []const u8, diag: *Diagnostic) Error![]c
     while (lines.next()) |raw| {
         n += 1;
         if (n > 1) try out.append(a, '\n');
+        if (std.mem.indexOfScalar(u8, raw, 0) != null) {
+            diag.message = try std.fmt.allocPrint(a, "line {d}: the file holds a NUL byte", .{n});
+            return error.Invalid;
+        }
+        if (!std.unicode.utf8ValidateSlice(raw)) {
+            diag.message = try std.fmt.allocPrint(a, "line {d}: the file is not UTF-8", .{n});
+            return error.Invalid;
+        }
         const no_comment = if (std.mem.indexOfScalar(u8, raw, '#')) |i| raw[0..i] else raw;
         const line = std.mem.trim(u8, no_comment, " \t\r");
         if (line.len == 0) continue;
@@ -1411,6 +1430,19 @@ test "the 1.x site file" {
     try std.testing.expectEqualStrings("site eb-local.conf:1", r.allocation_hint.from);
     try std.testing.expectEqualStrings("site eb-local.conf:4", r.node_local_root.from);
     try std.testing.expectEqualStrings("site eb-local.conf:5", r.node_local_mount.from);
+}
+
+test "legacyToToml rejects UTF-8 BOM and NUL or non-UTF-8 in comments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, legacyToToml(a, "\xef\xbb\xbfnode_local_root = /local\n", &d));
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "line 1: the file starts with a UTF-8 BOM") != null);
+    try std.testing.expectError(error.Invalid, legacyToToml(a, "node_local_root = /local\n# bad \x00\n", &d));
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "line 2: the file holds a NUL byte") != null);
+    try std.testing.expectError(error.Invalid, legacyToToml(a, "node_local_root = /local\n# bad \xff\n", &d));
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "line 2: the file is not UTF-8") != null);
 }
 
 test "each node type is where its own line is" {

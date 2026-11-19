@@ -1,1 +1,0 @@
-`tools/cli_assets.py` writes each completion and manpage asset through a staged temporary file that rejects symlinks and rolls back earlier writes on failure. Filesystem errors print a `cli_assets:` diagnostic on stderr and exit `1` instead of raising an unhandled traceback.

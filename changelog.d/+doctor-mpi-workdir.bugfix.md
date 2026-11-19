@@ -1,1 +1,0 @@
-`eb-local doctor --mpi` now builds its two-rank hello in a private temporary workspace under `$TMPDIR` or `/tmp` instead of `.zig-cache/` in the current working directory, leaving the working directory clean and working when it is read-only.

@@ -1,1 +1,0 @@
-An empty `~/.local/eessi` no longer replaces the default prefix `~/eessi`; only one that holds an install (`versions/` or `.eb-local/`) stays in use, so a user with an empty old directory no longer sees the pre-3.0 notice on every command.

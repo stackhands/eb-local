@@ -37,7 +37,7 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 
 ```sh
 salloc -p <partition> -n 16 -t 02:00:00   # on nodes with a node-local disk
-eb-local GSL-2.8-GCC-15.2.0.eb --robot
+eb-local pigz-2.8-GCCcore-15.2.0.eb --robot
 ```
 
 [Install software on top of EESSI with EasyBuild](docs/howto/install-software.md) has the steps, a build for a group, and what each failure means; [Load EESSI and the software you installed](docs/howto/load-eessi.md) loads the modules in a new shell or job.

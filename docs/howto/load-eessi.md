@@ -9,7 +9,7 @@ These steps load them in a shell and in a job script, and carry your eb-local se
 
 -   eb-local on `PATH`, as [Install eb-local](install.md) describes, and EESSI 2026.06 under `/cvmfs/software.eessi.io`.
     `env` needs no site file.
-    When CVMFS is not mounted yet, `eb-local doctor` names the missing init file, and `eb-local env --strict` or `EB_LOCAL_ENV_STRICT=1` refuses to print load lines until `/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash` exists.
+    When CVMFS is not mounted yet, `eb-local doctor` names the missing init file, and `eval "$(eb-local env --strict)"` or `EB_LOCAL_ENV_STRICT=1` stops with exit 2 before loading modules until `/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash` exists.
 -   A shell on the node type that runs the software, such as one in a Slurm job there: EESSI chooses the binaries for the CPU it finds when it loads.
 
 ## Load EESSI in a shell
@@ -20,10 +20,10 @@ These steps load them in a shell and in a job script, and carry your eb-local se
     eval "$(eb-local env)"
     ```
 
-    On a node where EESSI is not mounted, check first instead of loading nothing:
+    On a node where EESSI is not mounted, stop before loading modules instead of continuing into a failed `module load`:
 
     ```bash
-    eb-local env --strict
+    eval "$(eb-local env --strict)"
     ```
 
     ```text

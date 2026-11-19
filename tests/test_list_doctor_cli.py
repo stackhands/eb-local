@@ -222,8 +222,14 @@ class ListAndDoctor(StorageFixture):
                 "PERL5LIB", "PYTHONPATH", "R_LIBS", "R_LIBS_USER",
                 "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH", "LD_LIBRARY_PATH",
                 "LD_PRELOAD", "LD_AUDIT",
+                "JULIA_LOAD_PATH", "JULIA_DEPOT_PATH", "NODE_PATH",
+                "CARGO_BUILD_RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                "R_MAKEVARS_USER", "R_MAKEVARS_SITE", "RUSTFLAGS",
             )
         }
+        for key in os.environ:
+            if key.startswith("CARGO_TARGET_") and key.endswith(("_LINKER", "_RUSTFLAGS")):
+                clean[key] = ""
         run = self.run_tool(["doctor"], **clean)
         expected = DOCTOR_DEFAULT.read_text().format(
             root=self.root,
@@ -638,8 +644,14 @@ class ListAndDoctor(StorageFixture):
                 "PERL5LIB", "PYTHONPATH", "R_LIBS", "R_LIBS_USER",
                 "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH", "LD_LIBRARY_PATH",
                 "LD_PRELOAD", "LD_AUDIT",
+                "JULIA_LOAD_PATH", "JULIA_DEPOT_PATH", "NODE_PATH",
+                "CARGO_BUILD_RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                "R_MAKEVARS_USER", "R_MAKEVARS_SITE", "RUSTFLAGS",
             )
         }
+        for key in os.environ:
+            if key.startswith("CARGO_TARGET_") and key.endswith(("_LINKER", "_RUSTFLAGS")):
+                clean[key] = ""
         # Default doctor passes in raw bytes even when a warn line appears.
         argv, env = binary.command(self.script, ["doctor"], dict(self.env, **dict(clean, LD_LIBRARY_PATH="/host/lib")))
         default_warn = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)

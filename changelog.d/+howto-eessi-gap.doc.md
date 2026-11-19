@@ -1,1 +1,0 @@
-The how-to "Install the modules EESSI lacks, found with eb-stack" runs eb-stack's gap on a list of a site's modules against EESSI's module tree and EasyBuild's easyconfigs, and installs the recipes it names with one `eb-local` build each, pointing to eb-stack's guides for what the gap means.

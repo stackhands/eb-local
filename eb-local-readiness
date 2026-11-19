@@ -24,7 +24,7 @@ def under(path, root):
 
 
 def mount_for(path, mountinfo):
-    """Return the deepest (mount point, filesystem type) containing PATH."""
+    """Return the deepest (mount point, filesystem type, source) containing PATH."""
     best = None
     for line in mountinfo.splitlines():
         head, separator, tail = line.partition(" - ")
@@ -36,9 +36,19 @@ def mount_for(path, mountinfo):
             continue
         target = unescape_mount(fields[4])
         real_target = os.path.realpath(target)
+        source = unescape_mount(after[1]) if len(after) > 1 else ""
         if under(path, target) and (best is None or len(real_target) >= len(best[0])):
-            best = (real_target, after[0])
+            best = (real_target, after[0], source)
     return best
+
+
+def is_cvmfs_mount(fstype, source):
+    """Whether a mountinfo (fstype, source) pair is a CernVM-FS mount."""
+    if fstype in ("cvmfs", "fuse.cvmfs"):
+        return True
+    if fstype == "fuse":
+        return source == "cvmfs2" or source.startswith(("cvmfs2#", "cvmfs#"))
+    return False
 
 
 def default_prefix():
@@ -65,7 +75,7 @@ def check(repo, prefix, modulepath, mountinfo):
         mount = mount_for(repo, mountinfo)
         if mount is None:
             print("warn EESSI repository {} has no mount-table entry".format(repo))
-        elif mount[1] == "cvmfs":
+        elif is_cvmfs_mount(mount[1], mount[2]):
             print("ok   EESSI repository {} is mounted with cvmfs".format(repo))
         else:
             print(

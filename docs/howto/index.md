@@ -13,6 +13,7 @@ write-a-site-file
 set-site-defaults
 load-eessi
 compile
+nix
 install-software
 eb-without-a-site-file
 build-for-every-node-type
