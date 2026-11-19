@@ -637,6 +637,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // stays hidden behind the wrappers.
     out.appendSlice(a, drop_rpath_wrappers) catch oom();
     out.appendSlice(a, buildenvLines(c, s)) catch oom();
+    out.appendSlice(a, host_ca_bundle) catch oom();
     // A program linked here belongs to this shell's CPU (and GPU) target, so
     // its install directory names them; the shell fills them in once EESSI
     // has picked them.
@@ -744,6 +745,24 @@ const drop_rpath_wrappers =
     \\    PATH=$_eb_local_path
     \\    export PATH
     \\    unset EB_LOCAL_RPATH_WRAPPERS _eb_local_path _eb_local_rest _eb_local_ent
+    \\fi
+    \\
+;
+
+/// Name the host's CA bundle for the tools that take it from a variable.
+/// EESSI's cargo and curl look for the bundle where their own distribution
+/// keeps it. A host that keeps it elsewhere has no file there, and they
+/// refuse every HTTPS request. A variable the shell already set is kept.
+const host_ca_bundle =
+    \\if [ ! -r /etc/ssl/certs/ca-certificates.crt ]; then
+    \\    for _eb_local_ca in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem; do
+    \\        if [ -r "$_eb_local_ca" ]; then
+    \\            [ -n "${SSL_CERT_FILE-}" ] || export SSL_CERT_FILE="$_eb_local_ca"
+    \\            [ -n "${CARGO_HTTP_CAINFO-}" ] || export CARGO_HTTP_CAINFO="$_eb_local_ca"
+    \\            break
+    \\        fi
+    \\    done
+    \\    unset _eb_local_ca
     \\fi
     \\
 ;
