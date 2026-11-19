@@ -30,7 +30,9 @@ pub const self_linking = [_][]const u8{ "clang", "clang++", "flang", "flang-new"
 pub const marker = ".eb-local-rpath";
 
 /// One script for every name: it runs the next command of its own name on
-/// PATH. When that command links, it adds a run path for each absolute
+/// PATH. An empty entry is the current directory, including the one a
+/// trailing colon names, as execvp searches. When that command links, it
+/// adds a run path for each absolute
 /// library directory named with -L, and for a compiler driver for each
 /// LIBRARY_PATH entry, which EESSI's modules set and the driver passes to
 /// the linker; system and compatibility-layer directories are left out, as
@@ -41,9 +43,19 @@ pub const script =
     \\# RPATH wrapper written by eb-local; see `eb-local help`.
     \\name=${0##*/}
     \\real=
-    \\IFS=: read -r -a path_dirs <<< "$PATH"
+    \\# read drops a trailing colon, so an empty entry would disappear. Split
+    \\# on colons and keep every one. An empty entry is the current directory.
+    \\# An unset PATH is the default command search path, not the current directory.
+    \\path_dirs=()
+    \\if [ -n "${PATH+x}" ]; then _eb_path_rest="${PATH}:"; else _eb_path_rest="/bin:/usr/bin:"; fi
+    \\while [ -n "$_eb_path_rest" ]; do
+    \\    path_dirs+=("${_eb_path_rest%%:*}")
+    \\    _eb_path_rest="${_eb_path_rest#*:}"
+    \\done
+    \\unset _eb_path_rest
     \\for d in "${path_dirs[@]}"; do
-    \\    if [ -n "$d" ] && [ ! -e "$d/.eb-local-rpath" ] && [ -f "$d/$name" ] && [ -x "$d/$name" ]; then
+    \\    [ -n "$d" ] || d=.
+    \\    if [ ! -e "$d/.eb-local-rpath" ] && [ -f "$d/$name" ] && [ -x "$d/$name" ]; then
     \\        real=$d/$name
     \\        break
     \\    fi
