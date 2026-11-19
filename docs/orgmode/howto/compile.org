@@ -117,6 +117,8 @@ The modules on the =dev= line choose the build environment:
 | =intel-compilers=           | =buildenv/default-intel-2026.1=                           |
 | NVHPC                       | none                                                      |
 
+EESSI 2026.06 ships =buildenv/default-foss-2026.1= and has no =default-lfoss= or =default-intel= build environment yet, so =llvm-compilers= falls back to eb-local's RPATH wrappers for =clang=, =clang++=, =flang= and =flang-new=.
+
 When Lmod has no such module, =dev= writes RPATH wrappers for the compilers and linkers on =PATH= into =~/.cache/eb-local=, puts them first, and says so.
 It does the same for each =clang=, =clang++=, =flang=, =flang-new= or =ld.lld= on =PATH= that no wrapper covers, whichever build environment loads:
 
