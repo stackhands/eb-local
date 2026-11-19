@@ -80,7 +80,7 @@ while [ $# -gt 0 ]; do
                         esac
                     fi
                     args+=("$1"); shift ;;
-                env) die "env takes only --project; got '$1'" ;;
+                env) die "env takes only --project, --profile, --config and --strict; got '$1'" ;;
                 dev)
                     case "$1" in
                         --buildenv) [ -n "${2:-}" ] || die "--buildenv needs a module"; buildenv_override="$2"; shift 2 ;;

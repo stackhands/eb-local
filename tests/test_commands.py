@@ -307,7 +307,13 @@ class Commands(StorageFixture):
         new = self.run_wrapper(["env"], SLURM_JOB_ID="")
         old = self.run_wrapper(["--env"], SLURM_JOB_ID="")
         self.assertEqual((new.returncode, new.stdout), (0, old.stdout))
-        self.assertEqual(self.run_wrapper(["env", "extra"], SLURM_JOB_ID="").returncode, 2)
+        for bad in (["env", "extra"], ["env", "--bogus"]):
+            with self.subTest(bad=bad):
+                got = self.run_wrapper(bad, SLURM_JOB_ID="")
+                self.assertEqual(
+                    (got.returncode, got.stdout, got.stderr),
+                    (2, "", f"eb-local: env takes only --project, --profile, --config and --strict; got '{bad[1]}'\n"),
+                )
 
     def test_project_flag_before_subcommand_matches_after(self):
         proj = self.root / "proj-order"
