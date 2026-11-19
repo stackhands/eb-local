@@ -12,6 +12,7 @@ import subprocess
 import unittest
 
 import binary
+import support
 from test_storage import StorageFixture
 
 SITE_DEFAULTS = Path(__file__).resolve().parents[1] / "docs" / "orgmode" / "howto" / "set-site-defaults.org"
@@ -43,6 +44,7 @@ esac
 class ListAndDoctor(StorageFixture):
     def setUp(self):
         super().setUp()
+        self.env = support.isolated_env(self.env)
         # The module double stands in for Lmod's, whose init sets LMOD_CMD,
         # and EESSI's init puts the directory of the EESSI module on MODULEPATH.
         self.env["LMOD_CMD"] = "/usr/share/lmod/lmod/libexec/lmod"
@@ -229,6 +231,7 @@ class ListAndDoctor(StorageFixture):
             root=self.root,
             user=pwd.getpwuid(os.getuid()).pw_name,
             timezone=os.path.realpath("/etc/localtime"),
+            eessi_repo=support.MISSING_EESSI_REPO,
         )
         self.assertEqual((run.returncode, run.stdout.encode(), run.stderr.encode()),
                          (0, expected.encode(), b""))
