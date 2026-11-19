@@ -5,8 +5,8 @@
 Install the `eb-local` program for your account, from a release or from source.
 On a cluster whose site installs eb-local, load the site's module, or use the `eb-local` already on `PATH`, and skip this page.
 
-These pages describe release 3.2.0.
-Release 3.1.0 is older: it reads `[build.targets]` and refuses `[build.node_types]`, has no `build.secrets`, its `--explain` prints a summary of the commands a build runs rather than the script and no `sbatch` line for each node type, its user builds pass `--umask=022` to `eb`, and it has no `env --strict`, `lmod-cache`, or the `eb-local-readiness` script in the release archive, and `dev` there has no `--json`, `--envrc`, `--pure`, `--lock` or `--locked`.
+These pages describe release 3.3.0.
+Release 3.2.0 is older: its `dev` does not look for a build environment at the compiler's own toolchain level, such as `buildenv/default-NVHPC-26.9`, and its `doctor` does not name a host Cargo linker, R `Makevars` file or entry of `JULIA_LOAD_PATH`, `JULIA_DEPOT_PATH` or `NODE_PATH`. The [changelog](https://github.com/stackhands/eb-local/blob/main/CHANGELOG.md) lists what each earlier release lacks.
 A build from the main branch prints the version of the last release, with its own commit.
 [Find what is wrong before a build](find-what-is-wrong.md) copies `eb-local-readiness` from a pinned `main` commit when you use the release binary.
 
