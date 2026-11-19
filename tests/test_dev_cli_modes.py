@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Black-box CLI behavior tests for `eb-local dev` module validation and warnings."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -44,6 +45,17 @@ class DevCliModes(unittest.TestCase):
                 self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
                 self.assertEqual(got.stdout, "")
                 self.assertIn("is not a module name", got.stderr)
+
+    def test_json_is_the_change_the_dev_lines_make(self):
+        got = self.run_dev(["--json"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertEqual(got.stdout.count("\n"), 1, got.stdout)
+        change = json.loads(got.stdout)
+        self.assertEqual(change["kind"], "dev")
+        values = {var["name"]: var["value"] for var in change["set"]}
+        self.assertIn("EB_LOCAL_DEV_PREFIX", values)
+        self.assertTrue(values["EB_LOCAL_DEV_PREFIX"].startswith(str(self.prefix) + "/dev/"), values)
+        self.assertNotIn("module load", got.stdout)
 
     def test_names_the_host_ca_bundle_without_replacing_one_the_shell_set(self):
         got = self.run_dev([])

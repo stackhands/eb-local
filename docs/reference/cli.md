@@ -295,6 +295,21 @@ When stdout is a terminal, it also says on stderr that the lines change nothing 
 | Option | Meaning |
 |---|---|
 | `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
+| `--json` | Print, in place of the lines, the change they make to the environment, as one line of JSON. |
+
+With `--json`, eb-local runs the lines in a bash child and prints how that shell's environment then differs from the caller's: `{"schema_version":1,"kind":"env","set":[{"name":...,"value":...}],"unset":[...]}`, both lists sorted by name. A shell that cannot evaluate POSIX lines applies it; in nushell:
+
+```nu
+def --env --wrapped eb [...args] {
+  let change = (^eb-local ...$args --json | from json)
+  $change.set | reduce --fold {} {|var, acc| $acc | upsert $var.name $var.value } | load-env
+  hide-env --ignore-errors ...$change.unset
+}
+eb env
+eb dev FFTW/3.3.10-GCC-15.2.0
+```
+
+Only variables are in the change. Shell functions and aliases, such as Lmod's `module`, stay in the bash child, so a later `module load` in the other shell is not possible this way; name the modules on the `dev` line. What the lines print goes to stderr. If the lines fail in bash, nothing is printed and the status is 1.
 
 ### dev
 
@@ -303,6 +318,7 @@ Print the lines `env` prints, then the lines that load the modules `dev.modules`
 | Option | Meaning |
 |---|---|
 | `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
+| `--json` | Print the change the lines make to the environment as one line of JSON, as `env --json` does, with `kind` `dev`. |
 | `--buildenv MODULE` | Load MODULE as the build environment whatever the compilers, as `dev.buildenv` does. |
 
 A `MODULE` starts with a letter or digit and holds letters, digits, `.`, `_`, `+`, `-` and single slashes, with none at the end.
