@@ -18,7 +18,7 @@ def parsed_options():
     return list(dict.fromkeys(names))
 
 
-@unittest.skipUnless(binary.BIN, "the usage of the Zig build; the 1.x script's is frozen")
+@unittest.skipUnless(binary.BIN, "usage checks need a directly named Zig test build")
 class Usage(unittest.TestCase):
     def test_the_usage_names_every_option_the_parser_takes(self):
         run = subprocess.run([binary.BIN, "--help"], capture_output=True, text=True)

@@ -4,7 +4,7 @@
 
 `eb-local` builds and installs software with EasyBuild on top of EESSI 2026.06, into a directory you or your project own, and prints the shell lines that load EESSI and what you installed.
 This page describes the static binary on this branch's `main`.
-The 1.x Bash script, frozen until it is removed in 4.0.0, has a build, `env`, `dev` and `clean` only.
+The repository's shell shim delegates every command to this Zig program.
 
 ## Synopsis
 
@@ -190,6 +190,11 @@ unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
 site file when root or this program's owner owns it, otherwise in place of
 your ~/.config/eb-local/config.toml when you own it; the other file is
 still read, and only a site file may set the storage settings.
+
+The eb-local script in a source checkout resolves its real directory,
+tries zig-out/bin/eb-local there, then searches each PATH directory for
+another eb-local. When eb-local.conf is beside the script and
+EB_LOCAL_CONFIG is unset, the script passes that file to the Zig program.
 ```
 
 ## Arguments
@@ -198,7 +203,7 @@ The first word names the command.
 Without a command, the words go to `eb` in the order given, the easyconfig and `eb`'s own options, and eb-local builds.
 `--profile`, `--project`, `--config`, `-h` and `--help` are eb-local's wherever they come, and `--explain` is eb-local's before the first word that goes to `eb`.
 After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, every word does, so `eb-local eb -- --help` prints `eb`'s help.
-`--env` as the first word is `env`, as in the 1.x script.
+`--env` as the first word is an alias for `env`.
 
 ## Options
 
@@ -274,11 +279,12 @@ With more than one set, `eb` runs nothing and the command exits 3.
 | none | user | `$HOME/eessi`, which need not exist before the module loads | 077 |
 
 The module sets `EASYBUILD_UMASK` to the same end, with the sticky bit for a user prefix and the setgid bit for a project, and `eb` gets no `--umask`, so that value stands.
+User installs therefore change from umask 022 in the 1.x script to 077 in the Zig program, and other users can no longer read them.
 An argument of `eb`'s still overrides it: `--umask=022` is what a user-namespace build needs when Lmod, running as uid 0, skips a directory that others cannot search.
 The module's help text says `$HOME/EESSI`; on EESSI 2026.06 it uses `$HOME/eessi`.
 Before EESSI-extend loads, the script unsets host Rust and CMake wrappers, such as `RUSTC_WRAPPER` and `CMAKE_C_COMPILER_LAUNCHER`, and puts the compatibility layer's `usr/bin`, with its `ld`, first on `PATH`, even when `rustc` is not installed.
 EasyBuild builds under `$WORKING_DIR/easybuild`; the module sets `WORKING_DIR` to `/tmp/$USER` when it is not set, and `eb` leaves it as you set it.
-`--profile`, `--project` and `--config` are not options of `eb`, which stops with exit 2 when given one; the 1.x Bash script has no `eb` command.
+`--profile`, `--project` and `--config` are not options of `eb`, which stops with exit 2 when given one.
 
 Once EESSI-extend has loaded, the script exits 2 before `eb` runs when the install path the module set is outside the tree the install variable selects, or when `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` is set.
 Otherwise the command exits with `eb`'s status.
@@ -650,12 +656,14 @@ Refusals and usage errors still print on stderr; only the report on stdout becom
 Any invalid UTF-8 byte in a path or string field is replaced with `U+FFFD`, so non-UTF-8 strings do not round-trip.
 With `--json`, `check` still exits 1 for problems and 2 when a file cannot be read; `doctor` still exits 1 when `failed` is true in the document; `config --check --json` still exits 1 when `check_failed` is true.
 
-## The 1.x Bash script
+## The POSIX shell shim
 
-The Bash script `eb-local`, 1.x, is frozen: it gains no commands, and it is removed in 4.0.0, when the test suite's default run against it ends too.
-It needs GNU coreutils, util-linux `findmnt`, Lmod and an EESSI 2026.06 mount, and has no profiles or secrets.
-It reads one site file, `eb-local.conf`: the file `EB_LOCAL_CONFIG` names, else the one beside the script, else `/etc/eb-local.conf`, used only when it is a regular file, not a symbolic link, not writable by group or others, and owned by root, the script's owner or you.
-Its `key = value` lines are the 1.x keys [The configuration files](configuration.md) lists.
+The repository's `eb-local` file is a short POSIX shell shim, not a second implementation.
+It resolves its real directory, runs `zig-out/bin/eb-local` there when executable, then searches each `PATH` directory for another executable `eb-local`.
+It skips a `PATH` entry that is the same file or has the shim's marker, so two shim copies stop with exit 127 instead of executing each other forever.
+When `eb-local.conf` is beside the shim and `EB_LOCAL_CONFIG` is unset, the shim passes that file to Zig, preserving the checkout site file used by the 1.x script.
+It delegates the arguments, standard output, standard error and exit status unchanged; if no executable is found, it names the real directory, the Zig build path and every `PATH` directory searched, then exits 127.
+All commands, configuration and behavior belong to the Zig program.
 
 ## See also
 

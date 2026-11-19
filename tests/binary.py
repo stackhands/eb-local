@@ -1,11 +1,11 @@
-"""Run the command-line tests against the Zig build when EB_LOCAL_BIN names it.
+"""Run command-line tests through the shim or the Zig test build.
 
-The Bash tests replace findmnt and stat with shell functions. The binary
+The fixtures replace findmnt and stat with shell functions. The binary
 reads /proc/self/mountinfo and stats the job mount itself, so for it the
 same controls become a mount table file (EB_LOCAL_TEST_MOUNTINFO) and a uid
 (EB_LOCAL_TEST_UID), which only its -Dtest-ops test artifact reads. module
-and eb stay shell functions: the binary runs them in a bash child, which
-reads BASH_ENV as the script did. A build execs eb, and exec runs only a
+and eb stay shell functions: the binary runs them in a bash child. A build
+execs eb, and exec runs only a
 program, so a program named eb, first on PATH, runs the eb function. It
 goes in the test's CONTROL_ROOT, beside the doubles: a BASH_ENV a test
 passes on from its caller, such as Lmod's init, is in a directory the
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 BIN = os.environ.get("EB_LOCAL_BIN")
+BUILT = Path(__file__).resolve().parents[1] / "zig-out" / "bin" / "eb-local"
 
 
 def _escape(path):
@@ -23,9 +24,9 @@ def _escape(path):
 
 def command(script, arguments, env):
     """argv and environment that run `arguments` through the tool under test."""
-    if not BIN:
-        return ["bash", str(script)] + list(arguments), env
     env = dict(env)
+    if not BIN:
+        env["PATH"] = f"{BUILT.parent}:{env.get('PATH', '/usr/bin:/bin')}"
     # The release binary drops BASH_ENV (it is code bash runs before the
     # script). The test artifact sources this instead, and only then.
     prelude = env.pop("BASH_ENV", None)
@@ -51,4 +52,5 @@ def command(script, arguments, env):
     if owner:
         # The mount belongs to the caller; the caller is made someone else.
         env["EB_LOCAL_TEST_UID"] = str(os.getuid() + 1)
-    return [BIN] + list(arguments), env
+    program = [BIN] if BIN else ["sh", str(script)]
+    return program + list(arguments), env

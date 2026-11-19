@@ -194,6 +194,11 @@ const usage_text =
     \\your ~/.config/eb-local/config.toml when you own it; the other file is
     \\still read, and only a site file may set the storage settings.
     \\
+    \\The eb-local script in a source checkout resolves its real directory,
+    \\tries zig-out/bin/eb-local there, then searches each PATH directory for
+    \\another eb-local. When eb-local.conf is beside the script and
+    \\EB_LOCAL_CONFIG is unset, the script passes that file to the Zig program.
+    \\
 ;
 
 fn die(comptime fmt: []const u8, args: anytype) noreturn {

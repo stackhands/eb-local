@@ -181,8 +181,7 @@ class EnvironmentControls(unittest.TestCase):
             for sub in ("sources", "logs"):
                 self.assertEqual((self.prefix / ".eb-local" / sub).stat().st_mode & 0o070, 0o070, sub)
         else:
-            # The Bash 1.x script keeps passing --umask=022 for a user install.
-            self.assertEqual(built["argv"], arguments if binary.BIN else ["--umask=022"] + arguments)
+            self.assertEqual(built["argv"], arguments)
             self.assertEqual(built["umask"], 0o077)
         self.check_loads(mode)
 
