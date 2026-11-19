@@ -20,6 +20,10 @@ class DevCliModes(unittest.TestCase):
         self.site = self.root / "site.toml"
         self.site.write_text('[storage]\nnode_local_root = "/local"\n', encoding="utf-8")
         self.site.chmod(0o600)
+        # The lines refuse to change a shell with no module command. This
+        # stand-in is what BASH_ENV gives the bash child of --json and --lock.
+        self.module_sh = self.root / "module.sh"
+        self.module_sh.write_text("module() { return 0; }\n")
 
     def run_dev(self, args, **env_overrides):
         env = {
@@ -30,6 +34,7 @@ class DevCliModes(unittest.TestCase):
         }
         env.pop("LD_LIBRARY_PATH", None)
         env.update(env_overrides)
+        env.setdefault("BASH_ENV", str(self.module_sh))
         return subprocess.run(
             [binary.BIN, "dev", *args],
             env=env,
@@ -103,7 +108,7 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(self.run_dev(["--envrc"]).returncode, 0)
         # bash, as direnv runs it: the block evaluates this program's dev lines
         run = subprocess.run(
-            ["bash", "-c", 'source ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
+            ["bash", "-c", 'module() { return 0; }\nsource ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
             cwd=self.root,
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": str(self.site),
                  "EB_LOCAL_PREFIX": str(self.prefix)},
@@ -177,7 +182,7 @@ class DevCliModes(unittest.TestCase):
 
         def run_lines(subdir):
             return subprocess.run(
-                ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+                ["bash", "-c", 'module() { return 0; }\n' + got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
                 env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EESSI_SOFTWARE_SUBDIR": subdir,
                      "EESSI_VERSION": "2026.06"},
                 capture_output=True, text=True,

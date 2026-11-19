@@ -310,7 +310,18 @@ const pure_prelude =
     \\
 ;
 
-fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bool) []const u8 {
+/// After `lmod_init`. `return` leaves the function `shellApply` puts these
+/// lines in, before any unset or export, and the shell that evaluates them
+/// stays up. `--strict` is outside that function and still exits.
+const module_missing =
+    \\type module >/dev/null 2>&1 || {
+    \\    echo "eb-local: no module command found; the lines change nothing" >&2
+    \\    return 1
+    \\}
+    \\
+;
+
+fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8) []const u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
@@ -318,8 +329,9 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
             o.appendSlice(al, text) catch oom();
         }
     }.f;
-    if (strict) add(a, &out, env_strict_prelude);
     add(a, &out, lmod_init);
+    add(a, &out, module_missing);
+    add(a, &out, setup);
     if (pure) add(a, &out, pure_prelude);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
     add(a, &out,
@@ -357,6 +369,31 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
         , .{q(a, json)}));
     }
     return out.items;
+}
+
+/// Run `body` as one function. A `return` in the body then skips the rest
+/// and the last command is that status, so `eval` of the lines fails and
+/// errexit stops a script, while an interactive shell stays up. The status
+/// variable is removed before that last command.
+fn shellApply(a: Allocator, body: []const u8) []const u8 {
+    const nl = if (body.len == 0 or body[body.len - 1] != '\n') "\n" else "";
+    return str(a,
+        \\eb_local_apply() {{
+        \\{s}{s}}}
+        \\eb_local_apply
+        \\_eb_local_status=$?
+        \\unset -f eb_local_apply
+        \\eval "unset _eb_local_status; (exit $_eb_local_status)"
+        \\
+    , .{ body, nl });
+}
+
+/// `env` and `dev` lines. `--strict` stays in front, so its `exit` still
+/// ends the shell that evaluates the lines, before the function runs.
+fn emittedLines(a: Allocator, strict: bool, body: []const u8) []const u8 {
+    const applied = shellApply(a, body);
+    if (!strict) return applied;
+    return str(a, "{s}{s}", .{ env_strict_prelude, applied });
 }
 
 fn nowSecs() i64 {
@@ -676,7 +713,10 @@ fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
 fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
     const a = c.a;
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
-    const script = str(a, "exec 3>&1 1>&2\n{s}\nenv -0 >&3\n", .{lines});
+    // The lines' own status, before `env -0`. A failure there is success
+    // otherwise, and `--json` and `--lock` would report a shell the lines
+    // had already refused to change.
+    const script = str(a, "exec 3>&1 1>&2\n{s}_eb_local_lines_status=$?\n[ \"$_eb_local_lines_status\" -eq 0 ] || exit \"$_eb_local_lines_status\"\nenv -0 >&3\n", .{lines});
     const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script }, c.envp, .{
         .stdout_limit = 8 << 20,
         .stderr_limit = 1 << 20,
@@ -735,7 +775,7 @@ fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
 
 fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const p = place(c, s);
-    const lines = environmentLines(c, s, p, envStrict(c, g), false);
+    const lines = emittedLines(c.a, envStrict(c, g), environmentLines(c, s, p, false, ""));
     if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
     cli.put(1, lines);
@@ -1059,7 +1099,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     if (!std.mem.eql(u8, lock.stack, s.stack_module.value))
         die("{s} was written with the stack {s}; this configuration loads {s}. Write the lock again, or select that stack", .{ lock_name, lock.stack, s.stack_module.value });
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), true)) catch oom();
+    out.appendSlice(a, environmentLines(c, s, installed, true, "")) catch oom();
     out.appendSlice(a, str(a,
         \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
         \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
@@ -1071,9 +1111,10 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
-    if (g.json_out) return emitEnvChange(c, "dev", out.items);
+    const lines = emittedLines(a, envStrict(c, g), out.items);
+    if (g.json_out) return emitEnvChange(c, "dev", lines);
     evalHint("dev --locked");
-    cli.put(1, out.items);
+    cli.put(1, lines);
     return 0;
 }
 
@@ -1082,7 +1123,6 @@ fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
     if (!validModuleList(current))
         die("LOADEDMODULES contains a module name that cannot be replaced", .{});
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(c.a, lmod_init) catch oom();
     out.appendSlice(c.a, str(c.a, "export EB_LOCAL_DEV_SAVED={s}\n", .{q(c.a, saved.base)})) catch oom();
     var wrote_unload = false;
     var it = std.mem.splitScalar(u8, saved.active, ':');
@@ -1128,8 +1168,8 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
     if (!g.json_out and !g.lock) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
-    if (g.replace) out.appendSlice(a, replacePrelude(c, currentDevSaved(c))) catch oom();
-    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), g.pure)) catch oom();
+    const setup = if (g.replace) replacePrelude(c, currentDevSaved(c)) else "";
+    out.appendSlice(a, environmentLines(c, s, installed, g.pure, setup)) catch oom();
     // The modules the program uses first, the build environment last, so
     // its wrappers come first on PATH. When the program links, they record
     // a run path for each directory on LIBRARY_PATH, which the modules set
@@ -1151,9 +1191,10 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
-    if (g.lock) return writeLock(c, s, out.items);
-    if (g.json_out) return emitEnvChange(c, "dev", out.items);
-    cli.put(1, out.items);
+    const lines = emittedLines(a, envStrict(c, g), out.items);
+    if (g.lock) return writeLock(c, s, lines);
+    if (g.json_out) return emitEnvChange(c, "dev", lines);
+    cli.put(1, lines);
     if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
