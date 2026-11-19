@@ -101,6 +101,12 @@ class StorageFixture(unittest.TestCase):
         original = SCRIPT.read_text()
         self.assertNotRegex(original, "/scratch-nod[e]")
         self.script.write_text(original)
+        # dev prints src/dev-lang-dirs.sh from beside the script.
+        lang = SCRIPT.parent / "src" / "dev-lang-dirs.sh"
+        if lang.is_file():
+            dest = self.root / "src"
+            dest.mkdir(exist_ok=True)
+            (dest / "dev-lang-dirs.sh").write_text(lang.read_text(encoding="utf-8"), encoding="utf-8")
         # The site configuration names the mount namespace; probes remain real.
         self.config = self.root / "site.conf"
         write_config(self.config, self.nodes)

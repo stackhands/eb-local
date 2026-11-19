@@ -368,6 +368,11 @@ if [ "$command" = dev ]; then
     done
     [ ${#load[@]} -eq 0 ] || { printf 'module load'; printf ' %q' "${load[@]}"; printf '\n'; }
     printf 'module load %q\n' "$dev_buildenv"
+    # shellcheck disable=SC2016  # the evaluating shell fills in the target
+    printf 'export EB_LOCAL_DEV_PREFIX=%q"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}"\n' "$prefix/dev"
+    # src/main.zig dev_lang_dirs embeds src/dev-lang-dirs.sh.
+    # A copy of this script without src/ beside it prints no library lines.
+    [ ! -r "$script_dir/src/dev-lang-dirs.sh" ] || cat -- "$script_dir/src/dev-lang-dirs.sh"
     if [ -n "${LD_LIBRARY_PATH:-}" ]; then
         echo "eb-local: LD_LIBRARY_PATH is set in this shell; programs built here do not need it," >&2
         echo "  and it can mix host libraries into EESSI's. Unset it unless you know you need it." >&2
