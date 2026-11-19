@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 import binary
+import support
 
 
 @unittest.skipUnless(binary.BIN, "dev is a feature of the Zig build")
@@ -22,17 +23,18 @@ class DevCliModes(unittest.TestCase):
         self.site.chmod(0o600)
 
     def run_dev(self, args, **env_overrides):
-        env = {
-            "PATH": "/usr/bin:/bin",
-            "HOME": str(self.root),
-            "EB_LOCAL_CONFIG": str(self.site),
-            "EB_LOCAL_PREFIX": str(self.prefix),
-            "EESSI_VERSION": "2026.06",
-            "EESSI_SOFTWARE_SUBDIR": "x86_64/generic",
-            "EESSI_ACCELERATOR_TARGET": "",
-        }
-        env.pop("LD_LIBRARY_PATH", None)
-        env.update(env_overrides)
+        env = support.isolated_env(
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_CONFIG": str(self.site),
+                "EB_LOCAL_PREFIX": str(self.prefix),
+                "EESSI_VERSION": "2026.06",
+                "EESSI_SOFTWARE_SUBDIR": "x86_64/generic",
+                "EESSI_ACCELERATOR_TARGET": "",
+            },
+            **env_overrides,
+        )
         return subprocess.run(
             [binary.BIN, "dev", *args],
             env=env,
@@ -108,9 +110,15 @@ class DevCliModes(unittest.TestCase):
         run = subprocess.run(
             ["bash", "-c", 'source ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
             cwd=self.root,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": str(self.site),
-                 "EB_LOCAL_PREFIX": str(self.prefix), "EESSI_VERSION": "2026.06",
-                 "EESSI_SOFTWARE_SUBDIR": "x86_64/generic", "EESSI_ACCELERATOR_TARGET": ""},
+            env=support.isolated_env({
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_CONFIG": str(self.site),
+                "EB_LOCAL_PREFIX": str(self.prefix),
+                "EESSI_VERSION": "2026.06",
+                "EESSI_SOFTWARE_SUBDIR": "x86_64/generic",
+                "EESSI_ACCELERATOR_TARGET": "",
+            }),
             capture_output=True, text=True,
         )
         self.assertTrue(run.stdout.startswith(str(self.prefix) + "/dev/"), run.stdout + run.stderr)
@@ -182,8 +190,12 @@ class DevCliModes(unittest.TestCase):
         def run_lines(subdir):
             return subprocess.run(
                 ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
-                env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EESSI_SOFTWARE_SUBDIR": subdir,
-                     "EESSI_VERSION": "2026.06"},
+                env=support.isolated_env({
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.root),
+                    "EESSI_SOFTWARE_SUBDIR": subdir,
+                    "EESSI_VERSION": "2026.06",
+                }),
                 capture_output=True, text=True,
             )
 
