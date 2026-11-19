@@ -292,6 +292,10 @@ Print the shell lines that load EESSI and then EESSI-extend for the prefix, or t
 Run them with `eval "$(eb-local env)"`.
 When stdout is a terminal, it also says on stderr that the lines change nothing until the shell runs them.
 
+| Option | Meaning |
+|---|---|
+| `--strict` | Check that the EESSI init file exists in the emitted lines and exit 2 if absent (also when `EB_LOCAL_ENV_STRICT=1`). |
+
 ### dev
 
 Print the lines `env` prints, then the lines that load the modules `dev.modules` names and those named on the line, then a build environment, and that set `EB_LOCAL_DEV_PREFIX` to `<prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one.
