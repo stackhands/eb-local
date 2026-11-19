@@ -65,14 +65,15 @@ const usage_text =
     \\  eb-local env [--strict] [--json]       lines that make your installed modules visible;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1)
-    \\  eb-local dev [--strict] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
+    \\  eb-local dev [--strict] [--pure] [--json] [--buildenv MODULE] [--envrc] [MODULE...]
     \\                                       the same, plus MODULEs and a build environment,
     \\                                       so gcc, make, cmake and meson just work;
     \\                                       --strict exits when the EESSI init file is missing
     \\                                       (also when EB_LOCAL_ENV_STRICT=1);
     \\                                       --buildenv names the build environment to load;
     \\                                       --json prints the change as JSON, for env too;
-    \\                                       --envrc writes that line to .envrc for direnv
+    \\                                       --envrc writes that line to .envrc for direnv;
+    \\                                       --pure purges loaded modules and LD_* first
     \\  eb-local rpath-wrappers [--for FAMILY | --unwrapped]
     \\                                       lines that put RPATH wrappers for the compilers
     \\                                       on PATH first; dev uses them when no build
@@ -290,7 +291,16 @@ const env_strict_prelude =
     \\
 ;
 
-fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool) []const u8 {
+/// `dev --pure`: start from no loaded modules and no loader variables, so
+/// what the shell had before does not reach the build environment. Sticky
+/// modules stay, as `module purge` leaves them.
+const pure_prelude =
+    \\module purge >/dev/null 2>&1 || true
+    \\unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT
+    \\
+;
+
+fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bool) []const u8 {
     const a = c.a;
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
@@ -300,6 +310,7 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool) []const 
     }.f;
     if (strict) add(a, &out, env_strict_prelude);
     add(a, &out, lmod_init);
+    if (pure) add(a, &out, pure_prelude);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
     add(a, &out,
         \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
@@ -367,6 +378,7 @@ fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, cano
     if (s.project.value != null) parts.appendSlice(a, &.{ "--project", q(a, canonical_prefix) }) catch oom();
     parts.append(a, command) catch oom();
     if (std.mem.eql(u8, command, "dev")) {
+        if (g.pure) parts.append(a, "--pure") catch oom();
         if (g.buildenv) |p| parts.appendSlice(a, &.{ "--buildenv", q(a, p) }) catch oom();
         for (extra) |m| parts.append(a, q(a, m)) catch oom();
     }
@@ -480,6 +492,8 @@ const Global = struct {
     json_out: bool = false,
     /// `dev --envrc`: write the dev line to `.envrc` here, for direnv.
     envrc: bool = false,
+    /// `dev --pure`: purge the loaded modules and the loader variables first.
+    pure: bool = false,
 };
 
 fn nonEmpty(v: ?[]const u8) ?[]const u8 {
@@ -684,7 +698,7 @@ fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
 
 fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const p = place(c, s);
-    const lines = environmentLines(c, s, p, envStrict(c, g));
+    const lines = environmentLines(c, s, p, envStrict(c, g), false);
     if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
     cli.put(1, lines);
@@ -753,7 +767,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
     if (!g.json_out) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g))) catch oom();
+    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), g.pure)) catch oom();
     // The modules the program uses first, the build environment last, so
     // its wrappers come first on PATH. When the program links, they record
     // a run path for each directory on LIBRARY_PATH, which the modules set
@@ -776,7 +790,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/$EESSI_VERSION/$EESSI_SOFTWARE_SUBDIR${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     cli.put(1, out.items);
-    if (nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
+    if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
     }
@@ -4869,6 +4883,8 @@ pub fn main(init: std.process.Init) u8 {
                     g.json_out = true;
                 } else if (std.mem.eql(u8, x, "--envrc")) {
                     g.envrc = true;
+                } else if (std.mem.eql(u8, x, "--pure")) {
+                    g.pure = true;
                 } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
                 } else if (joined(x, "--buildenv")) |v| {
