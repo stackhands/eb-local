@@ -93,7 +93,8 @@ The program runs without the FFTW module, and without =LD_LIBRARY_PATH=.
 | Code                                         | The line before building                                                                    |
 |----------------------------------------------+---------------------------------------------------------------------------------------------|
 | C with FFTW and OpenMP                       | =eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"=                                             |
-| MPI                                          | =eval "$(eb-local dev)"=, then =mpicc=                                                      |
+| Fortran with OpenMP                          | =eval "$(eb-local dev)"=, then =gfortran -O2 -fopenmp=                                      |
+| MPI (C or Fortran)                           | =eval "$(eb-local dev)"=, then =mpicc= or =mpifort=                                         |
 | CMake against GSL                            | =eval "$(eb-local dev GSL/2.8-GCC-15.2.0 CMake/3.31.11-GCCcore-15.2.0)"=                     |
 | A Python virtual environment, with packages that compile C | =eval "$(eb-local dev Python/3.14.2-GCCcore-15.2.0)"=, then =python -m venv= and =pip install= |
 | A setuptools extension against GSL           | =eval "$(eb-local dev GSL/2.8-GCC-15.2.0 Python/3.14.2-GCCcore-15.2.0)"= |
