@@ -181,6 +181,13 @@ pub fn machineName(m: u16) []const u8 {
     };
 }
 
+/// The loader's root directory from `PT_INTERP` (`dirname(dirname(interp))`),
+/// or `"/"` when the interpreter path has fewer than two parent directories.
+pub fn loaderRoot(interp: []const u8) []const u8 {
+    const libdir = std.fs.path.dirname(interp) orelse return "/";
+    return std.fs.path.dirname(libdir) orelse "/";
+}
+
 fn isOriginWordChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
@@ -290,6 +297,15 @@ test "expandOrigin" {
     const suffix = try expandOrigin(a, "$ORIGIN_extra/lib:$ORIGIN2:$ORIGIN-extra/lib:${ORIGIN}_extra/lib", "/opt/p/bin");
     defer a.free(suffix);
     try std.testing.expectEqualStrings("$ORIGIN_extra/lib:$ORIGIN2:/opt/p/bin-extra/lib:/opt/p/bin_extra/lib", suffix);
+}
+
+test "loaderRoot extracts the parent of the interpreter's library directory" {
+    try std.testing.expectEqualStrings(
+        "/cvmfs/software.eessi.io/versions/2026.06/compat/linux/x86_64",
+        loaderRoot("/cvmfs/software.eessi.io/versions/2026.06/compat/linux/x86_64/lib64/ld-linux-x86-64.so.2"),
+    );
+    try std.testing.expectEqualStrings("/", loaderRoot("/lib64/ld-linux-x86-64.so.2"));
+    try std.testing.expectEqualStrings("/", loaderRoot("ld-linux-x86-64.so.2"));
 }
 
 test "host paths" {
