@@ -56,6 +56,30 @@ class DevCliModes(unittest.TestCase):
         self.assertIn("EB_LOCAL_DEV_PREFIX", values)
         self.assertTrue(values["EB_LOCAL_DEV_PREFIX"].startswith(str(self.prefix) + "/dev/"), values)
         self.assertNotIn("module load", got.stdout)
+
+    def test_missing_target_does_not_abort_under_nounset(self):
+        got = self.run_dev(
+            ["--buildenv", "buildenv/custom"],
+            EESSI_VERSION="",
+            EESSI_SOFTWARE_SUBDIR="",
+        )
+        self.assertEqual(got.returncode, 0, got.stderr)
+        run = subprocess.run(
+            [
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-uc",
+                "module() { :; }\n" + got.stdout + 'test -n "$EB_LOCAL_DEV_PREFIX"\n',
+            ],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("unbound variable", run.stderr)
+
     def test_envrc_writes_the_dev_line_and_updates_only_its_own_block(self):
         envrc = self.root / ".envrc"
         got = self.run_dev(["--envrc", "FFTW/3.3.10-GCC-15.2.0"])
@@ -242,7 +266,7 @@ class DevCliModes(unittest.TestCase):
         lock.write_text(json.dumps(record) + "\n")
         empty = self.run_dev(["--locked"])
         self.assertEqual(empty.returncode, 0, empty.stderr)
-        self.assertNotIn("EESSI_VERSION-", empty.stdout)
+        self.assertNotIn('elif [ "${EESSI_VERSION-}"', empty.stdout)
         loaded = subprocess.run(
             ["bash", "-c", empty.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
