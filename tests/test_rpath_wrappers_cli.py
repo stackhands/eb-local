@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import binary
+import hostile_fs
 
 
 @unittest.skipUnless(binary.BIN, "rpath-wrappers is a feature of the Zig build")
@@ -133,6 +134,44 @@ class RpathWrappersCli(unittest.TestCase):
                 " -Wl,-rpath,/opt/x/lib -Wl,-rpath,/opt/y/lib -Wl,--disable-new-dtags",
             ],
         )
+
+    def test_hostile_wrapper_destinations_exit_two(self):
+        ro_cache = self.root / "ro-cache"
+        (ro_cache / "eb-local").mkdir(parents=True)
+        with hostile_fs.readonly_dir(ro_cache / "eb-local"):
+            ro_got = self.run_cmd(["--for", "gcc"], XDG_CACHE_HOME=str(ro_cache))
+            self.assertEqual(ro_got.returncode, 2, ro_got.stdout + ro_got.stderr)
+            self.assertEqual(ro_got.stdout, "")
+            self.assertIn("Permission denied", ro_got.stderr)
+
+        ok = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        wrap_dir = Path(ok.stdout.splitlines()[1].split("=", 1)[1])
+
+        (wrap_dir / "gcc").unlink()
+        (wrap_dir / "gcc").mkdir()
+        dir_got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(dir_got.returncode, 2, dir_got.stdout + dir_got.stderr)
+        self.assertEqual(dir_got.stdout, "")
+        self.assertIn("Unsafe", dir_got.stderr)
+        (wrap_dir / "gcc").rmdir()
+
+        link, outside = hostile_fs.dangling_symlink(wrap_dir / "gcc", self.root / "outside-gcc")
+        sym_got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(sym_got.returncode, 2, sym_got.stdout + sym_got.stderr)
+        self.assertEqual(sym_got.stdout, "")
+        self.assertIn("Unsafe", sym_got.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(outside.exists())
+
+    def test_tmpfs_enospc_exits_two_and_cleans_wrapper_tree(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        got = self.run_cmd(["--for", "gcc"], XDG_CACHE_HOME=str(mnt))
+        self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("cannot write RPATH wrappers", got.stderr)
 
 
 if __name__ == "__main__":

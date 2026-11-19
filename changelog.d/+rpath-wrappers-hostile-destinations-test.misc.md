@@ -1,0 +1,1 @@
+Added CLI regression tests in `tests/test_rpath_wrappers_cli.py` using `tests/hostile_fs.py` to verify that `eb-local rpath-wrappers` refuses read-only parents, directory or dangling-symlink collisions at wrapper paths, and `ENOSPC` on a full tmpfs cleanly.
