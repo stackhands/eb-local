@@ -1,1 +1,0 @@
-Add opt-in `--json` to `list`, `check`, `doctor`, `config`, `profiles`, and `site list`, printing one line of JSON with `schema_version` 1 for scripts and automation.

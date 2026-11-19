@@ -96,6 +96,17 @@ class ConfigCliModes(unittest.TestCase):
         self.assertIn("export EB_LOCAL_SECRET_TOKEN=env:ABSENT_TOK\n", env_out.stdout)
         self.assertIn("export EESSI_FOO=bar\n", env_out.stdout)
 
+    def test_eessi_table_rejects_reserved_install_and_toolchain_variables(self):
+        for var in ("EESSI_USER_INSTALL", "EESSI_SITE_TOP_LEVEL_TOOLCHAINS_ZEN4"):
+            with self.subTest(var=var):
+                bad = self.root / f"bad-{var}.toml"
+                bad.write_text(f'[eessi]\n{var} = "val"\n', encoding="utf-8")
+                bad.chmod(0o600)
+                got = self.run_config(["config"], EB_LOCAL_CONFIG=str(bad))
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(f"eessi.{var}: [eessi] sets EESSI_* variables other than", got.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

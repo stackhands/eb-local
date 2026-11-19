@@ -1,1 +1,0 @@
-The worked example of a real site's file is gone from `examples/sites/`; a site keeps its own site file in a repository of its own, and installs it with `eb-local site install FILE` as before. `examples/sites/example.toml` is a worked example for a site that does not exist. The release notes of earlier releases no longer name the site.

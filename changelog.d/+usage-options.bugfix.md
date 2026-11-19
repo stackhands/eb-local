@@ -1,1 +1,0 @@
-`eb-local --help` names `dev --buildenv MODULE` and `clean --no-logs`, which the program took without listing them, and says that `eb` takes none of `--profile`, `--project` and `--config`, which it refuses.

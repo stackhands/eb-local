@@ -57,5 +57,20 @@ class ConfigurationReference(unittest.TestCase):
         self.assertEqual(sorted(set(rows) - set(checked)), ["default_profile", "project"])
 
 
+class SecretNamesDocumented(unittest.TestCase):
+    def test_refused_secret_names_documented(self):
+        config_zig = (Path(__file__).resolve().parents[1] / "src" / "config.zig").read_text()
+        m_names = re.search(r'const refused = \[_\]\[\]const u8\{([^}]+)\};', config_zig)
+        m_prefixes = re.search(r'const refused_prefixes = \[_\]\[\]const u8\{([^}]+)\};', config_zig)
+        self.assertIsNotNone(m_names)
+        self.assertIsNotNone(m_prefixes)
+        refused_names = re.findall(r'"([^"]+)"', m_names.group(1))
+        refused_prefixes = re.findall(r'"([^"]+)"', m_prefixes.group(1))
+        secrets_section = PAGE.read_text().split("\n** [secrets]\n", 1)[1].split("\n| Source", 1)[0]
+        documented = set(re.findall(r"=([A-Za-z0-9_]+)=", secrets_section))
+        for name in refused_names + refused_prefixes:
+            self.assertIn(name, documented, f"{PAGE} [secrets] does not list refused secret name {name}")
+
+
 if __name__ == "__main__":
     unittest.main()

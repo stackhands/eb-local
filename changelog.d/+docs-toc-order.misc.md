@@ -1,1 +1,0 @@
-The test that each Org source has its page in a table of contents compares both lists in one order, so a page whose name extends another's, such as `install-software` beside `install`, no longer fails it.

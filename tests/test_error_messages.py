@@ -104,6 +104,24 @@ class ErrorPathAndErrno(StorageFixture):
         finally:
             jobs.chmod(0o755)
 
+        meta = self.prefix / ".eb-local"
+        meta_jobs = meta / "jobs"
+        if meta_jobs.exists():
+            meta_jobs.rmdir()
+        meta.chmod(0o555)
+        try:
+            argv_m, env_m = binary.command(
+                self.script,
+                ["--config", str(site), "submit", "demo.eb"],
+                dict(self.env, PATH=f"{fake_bin}:{self.env['PATH']}"),
+            )
+            run_m = subprocess.run(argv_m, env=env_m, cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(run_m.returncode, 2, run_m.stdout + run_m.stderr)
+            self.assertIn(str(meta_jobs), run_m.stderr)
+            self.assertIn("[Errno 13] Permission denied", run_m.stderr)
+        finally:
+            meta.chmod(0o755)
+
     def test_rpath_wrappers_write_failure_names_path_and_errno(self):
         fake_bin = self.root / "rw-bin"
         fake_bin.mkdir(exist_ok=True)

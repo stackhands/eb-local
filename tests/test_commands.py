@@ -143,6 +143,23 @@ class Commands(StorageFixture):
         run = self.run_wrapper(["env"], SLURM_JOB_ID="", EB_LOCAL_PREFIX="relative/prefix")
         self.assertIn(f"export EESSI_USER_INSTALL={self.root}/relative/prefix", run.stdout)
 
+    def test_uncreated_project_mkdir_hint_quotes_special_paths(self):
+        for name in ("team space", "it's"):
+            target = str(self.root / name)
+            with self.subTest(name=name):
+                run = self.run_wrapper(["--project", target, "env"], SLURM_JOB_ID="")
+                q = shlex.quote(target)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (
+                        2,
+                        "",
+                        f"eb-local: project directory {target} does not exist.\n"
+                        "  The project owner creates it once, with the project group and g+s:\n"
+                        f"  mkdir -p {q} && chgrp <group> {q} && chmod 2770 {q}\n",
+                    ),
+                )
+
     @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
     def test_explain_prints_the_build_and_creates_nothing(self):
         run = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"], SLURM_JOB_ID="")
@@ -232,10 +249,19 @@ class Commands(StorageFixture):
 
     def test_dev_refuses_a_module_name_that_is_not_one(self):
         for name in ("GSL; touch injected", "$(touch injected)", "../x", "a b", "-x", "GSL/`id`"):
-            with self.subTest(name=name):
-                run = self.run_wrapper(["dev", name], SLURM_JOB_ID="")
-                self.assertEqual(run.returncode, 2, run.stdout)
-                self.assertEqual(run.stdout, "")
+            pos_err = (
+                "eb-local: dev does not know the option '-x'\n"
+                if name == "-x"
+                else f"eb-local: '{name}' is not a module name\n"
+            )
+            for args, expected_stderr in (
+                (["dev", name], pos_err),
+                (["dev", "--buildenv", name], f"eb-local: --buildenv: '{name}' is not a module name\n"),
+                (["dev", f"--buildenv={name}"], f"eb-local: --buildenv: '{name}' is not a module name\n"),
+            ):
+                with self.subTest(args=args):
+                    run = self.run_wrapper(args, SLURM_JOB_ID="")
+                    self.assertEqual((run.returncode, run.stdout, run.stderr), (2, "", expected_stderr))
         self.assertFalse((self.root / "injected").exists())
 
     def test_dev_buildenv_comes_from_the_option_or_the_configuration(self):
@@ -249,6 +275,65 @@ class Commands(StorageFixture):
                       "module load EESSI-extend/2026.06-easybuild\n", run.stdout)
         self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
 
+    def test_legacy_config_checks_all_lines_before_value_validation(self):
+        cases = (
+            ("caps_key", "node_local_root = /a/\nFoo = 1\n", "line 2: unknown setting 'Foo'"),
+            ("empty_key", "node_local_root = /a/\n = 1\n", "line 2: unknown setting ''"),
+            ("unknown_key", "node_local_root = /a/\nunknown_key = 1\n", "line 2: unknown setting 'unknown_key'"),
+            ("no_equals", "node_local_root = /a/\nbad line\n", "line 2: cannot read the line 'bad line'"),
+            # text=True turns the carriage return in the key into a newline.
+            ("cr_before_equals", "trash\r= none\n", "line 1: unknown setting 'trash\n'"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text)
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}: {suffix}\n"),
+                )
+        self.config.write_text("node_local_root = /a\r\n")
+        ok = self.run_wrapper(["env"], SLURM_JOB_ID="")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_legacy_config_rejects_duplicate_keys(self):
+        cases = (
+            ("same_after_bad", "node_local_root = /a/\ntrash = rm\nnode_local_root = /b\n", "3: 'storage.node_local_root' is set twice (first on line 1)"),
+            ("cross_table", "trash = auto\nnode_local_root = /a\ntrash = none\n", "3: 'clean.trash' is set twice (first on line 1)"),
+            ("stack_dup", "stack_module = EESSI/2026.06\nstack_module = EESSI/2026.06\n", "2: 'stack.module' is set twice (first on line 1)"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text)
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}:{suffix}\n"),
+                )
+
+    def test_legacy_config_validation_matches_zig(self):
+        cases = (
+            ("root_trail", "# c\nnode_local_root = /local/\n", "2: storage.node_local_root must be one absolute path without a trailing slash"),
+            ("mount_no_j", "node_local_root = /local\nnode_local_mount = %u\n", "2: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"),
+            ("fstype_empty", "node_local_root = /local\nnode_local_fstype =\n", "2: storage.node_local_fstype is empty"),
+            ("fstype_upper", "node_local_root = /local\nnode_local_fstype = XFS\n", "2: storage.node_local_fstype must be a file system type name"),
+            ("scratch_trail", "node_local_root = /local\nshared_scratch = /scratch/\n", "2: storage.shared_scratch takes absolute paths without a trailing slash"),
+            ("stack_bad", "node_local_root = /local\nstack_module = bad;mod\n", "2: stack.module 'bad;mod' is not a module name"),
+            ("extend_empty", "node_local_root = /local\nextend_module =\n", "2: stack.extend '' is not a module name"),
+            ("buildenv_bad", "node_local_root = /local\ndev_buildenv = bad;mod\n", "2: dev.buildenv 'bad;mod' is not a module name"),
+            ("trash_bad", "node_local_root = /local\ntrash = rm\n", "2: clean.trash is auto, rtrash or none"),
+            ("storage_table_first", "node_local_root = /a\ntrash = rm\nnode_local_mount = bad\n", "3: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"),
+            ("clean_table_first", "trash = rm\nnode_local_root = /a/\n", "1: clean.trash is auto, rtrash or none"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text)
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}:{suffix}\n"),
+                )
+
     def test_configured_module_names_are_checked(self):
         self.config.write_text(self.config.read_text() + "stack_module = EESSI;touch injected\n")
         run = self.run_wrapper(["env"], SLURM_JOB_ID="")
@@ -260,6 +345,43 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0)
         self.assertIn("LD_LIBRARY_PATH", run.stderr)
         self.assertNotIn("LD_LIBRARY_PATH", run.stdout)
+
+    def assert_subcommand_flag_refusals(self, cases):
+        for args, expected_stderr in cases:
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout, err.stderr), (2, "", expected_stderr))
+
+    def test_version_is_rejected_after_subcommands(self):
+        for args in (["--version"], ["--version", "extra"]):
+            with self.subTest(args=args):
+                top = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual(top.returncode, 0, top.stderr)
+                self.assertEqual(top.stderr, "")
+                self.assertIn("eb-local ", top.stdout)
+
+        self.assert_subcommand_flag_refusals(
+            (
+                (["--env", "--version"], "eb-local: env takes only --project, --profile, --config and --strict; got '--version'\n"),
+                (["env", "--version"], "eb-local: env takes only --project, --profile, --config and --strict; got '--version'\n"),
+                (["dev", "--version"], "eb-local: dev does not know the option '--version'\n"),
+                (["clean", "--version"], "eb-local: clean does not know '--version'\n"),
+            )
+        )
+
+        rec = self.run_wrapper(["recipe.eb", "--version"], SLURM_JOB_ID="")
+        self.assertEqual((rec.returncode, rec.stdout), (2, ""), rec.stdout + rec.stderr)
+        self.assertIn("not inside a Slurm job", rec.stderr)
+
+    def test_env_flag_after_subcommand_exits_two(self):
+        self.assert_subcommand_flag_refusals(
+            (
+                (["--env", "--env"], "eb-local: env takes only --project, --profile, --config and --strict; got '--env'\n"),
+                (["env", "--env"], "eb-local: env takes only --project, --profile, --config and --strict; got '--env'\n"),
+                (["dev", "--env"], "eb-local: dev does not know the option '--env'\n"),
+                (["clean", "--env", "--dry-run"], "eb-local: clean does not know '--env'\n"),
+            )
+        )
 
     @unittest.skipUnless(binary.BIN, "the lfoss warning is a feature of the Zig build")
     def test_dev_warns_when_an_lfoss_module_meets_the_foss_build_environment(self):
@@ -284,7 +406,25 @@ class Commands(StorageFixture):
         new = self.run_wrapper(["env"], SLURM_JOB_ID="")
         old = self.run_wrapper(["--env"], SLURM_JOB_ID="")
         self.assertEqual((new.returncode, new.stdout), (0, old.stdout))
-        self.assertEqual(self.run_wrapper(["env", "extra"], SLURM_JOB_ID="").returncode, 2)
+        for bad in (["env", "extra"], ["env", "--bogus"]):
+            with self.subTest(bad=bad):
+                got = self.run_wrapper(bad, SLURM_JOB_ID="")
+                self.assertEqual(
+                    (got.returncode, got.stdout, got.stderr),
+                    (2, "", f"eb-local: env takes only --project, --profile, --config and --strict; got '{bad[1]}'\n"),
+                )
+
+    def test_project_flag_before_subcommand_matches_after(self):
+        proj = self.root / "proj-order"
+        proj.mkdir()
+        for sub_args in (["env"], ["dev", "FFTW/3.3.10-GCC-15.2.0"], ["clean", "--dry-run"]):
+            with self.subTest(sub_args=sub_args):
+                after = self.run_wrapper([*sub_args, "--project", str(proj)], SLURM_JOB_ID="")
+                before_sep = self.run_wrapper(["--project", str(proj), *sub_args], SLURM_JOB_ID="")
+                before_eq = self.run_wrapper([f"--project={proj}", *sub_args], SLURM_JOB_ID="")
+                self.assertEqual(after.returncode, 0, after.stderr)
+                self.assertEqual((before_sep.returncode, before_sep.stdout), (0, after.stdout), before_sep.stderr)
+                self.assertEqual((before_eq.returncode, before_eq.stdout), (0, after.stdout), before_eq.stderr)
 
     # -- clean ---------------------------------------------------------------
 
@@ -338,6 +478,16 @@ class Commands(StorageFixture):
         self.assertIn(str(old), run.stdout)
         self.assertTrue(old.exists())
         self.assertFalse((self.root / "trashed").exists())
+
+    def test_clean_refuses_no_logs_with_logs_older_than(self):
+        for args in (
+            ["clean", "--no-logs", "--logs-older-than", "7", "--dry-run"],
+            ["clean", "--logs-older-than", "7", "--no-logs", "--dry-run"],
+        ):
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
+                self.assertIn("clean takes --no-logs or --logs-older-than, not both", err.stderr)
 
     def test_clean_does_not_follow_a_symlinked_log_directory(self):
         self.with_rtrash()
@@ -431,6 +581,96 @@ class Commands(StorageFixture):
                 run = self.run_wrapper(args, SLURM_JOB_ID="")
                 self.assertEqual((run.returncode, run.stdout), (2, ""), run.stdout + run.stderr)
                 self.assertIn("needs a", run.stderr)
+
+    def test_clean_accepts_equals_logs_older_than(self):
+        self.with_rtrash()
+        old, new = self.logs(40, 1)
+        dry = self.run_wrapper(["clean", "--logs-older-than=7", "--dry-run"], SLURM_JOB_ID="")
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn(str(old), dry.stdout)
+        self.assertNotIn(str(new), dry.stdout)
+
+        for bad, needle in (
+            ("--logs-older-than=", "--logs-older-than needs a value"),
+            ("--logs-older-than=abc", "--logs-older-than needs a number of days"),
+        ):
+            with self.subTest(bad=bad):
+                err = self.run_wrapper(["clean", bad], SLURM_JOB_ID="")
+                self.assertEqual((err.returncode, err.stdout), (2, ""), err.stdout + err.stderr)
+                self.assertIn(needle, err.stderr)
+
+    def test_clean_rejects_repeated_logs_older_than(self):
+        cases = (
+            (["clean", "--logs-older-than", "1", "--logs-older-than", "2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than=1", "--logs-older-than=2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than=2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than=1", "--logs-older-than", "2", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than=abc", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than", "", "--dry-run"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than"], "clean takes one --logs-older-than"),
+            (["clean", "--logs-older-than", "1", "--logs-older-than="], "--logs-older-than needs a value"),
+        )
+        for args, msg in cases:
+            with self.subTest(args=args):
+                err = self.run_wrapper(args, SLURM_JOB_ID="")
+                self.assertEqual(
+                    (err.returncode, err.stdout, err.stderr),
+                    (2, "", f"eb-local: {msg}\n"),
+                )
+
+    def test_empty_and_omitted_option_values_match_zig(self):
+        cases = (
+            (["env"], "--project"),
+            (["dev"], "--buildenv"),
+            (["clean"], "--logs-older-than"),
+        )
+        for prefix, opt in cases:
+            for tail in ([f"{opt}="], [opt, ""], [opt]):
+                argv = [*prefix, *tail]
+                with self.subTest(argv=argv):
+                    res = self.run_wrapper(argv, SLURM_JOB_ID="")
+                    self.assertEqual(
+                        (res.returncode, res.stdout, res.stderr),
+                        (2, "", f"eb-local: {opt} needs a value\n"),
+                    )
+
+    def test_locale_unicode_module_and_days_rejected_under_utf8(self):
+        utf8_env = {"LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "SLURM_JOB_ID": ""}
+        for mod in ("mod/café", "mod²/1.0", "É/1.0"):
+            with self.subTest(mod=mod):
+                run = self.run_wrapper(["dev", mod], **utf8_env)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: '{mod}' is not a module name\n"),
+                )
+        for flag in (["--buildenv=mod/café"], ["--buildenv", "mod/café"]):
+            with self.subTest(flag=flag):
+                run = self.run_wrapper(["dev", *flag], **utf8_env)
+                self.assertEqual((run.returncode, run.stdout), (2, ""), run.stdout + run.stderr)
+                self.assertIn("'mod/café' is not a module name\n", run.stderr)
+        for tail in (["--logs-older-than", "²"], ["--logs-older-than=²"], ["--logs-older-than", "¹"]):
+            with self.subTest(tail=tail):
+                run = self.run_wrapper(["clean", *tail, "--dry-run"], **utf8_env)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", "eb-local: --logs-older-than needs a number of days\n"),
+                )
+
+    def test_legacy_config_rejects_unicode_in_ascii_fields_under_utf8(self):
+        utf8_env = {"LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "SLURM_JOB_ID": ""}
+        cases = (
+            ("fstype_unicode", "node_local_root = /local\nnode_local_fstype = ext⁴\n", "2: storage.node_local_fstype must be a file system type name"),
+            ("mount_unicode", "node_local_root = /local\nnode_local_mount = %u.%j-café\n", "2: storage.node_local_mount must be one file name of letters, digits, '.', '_', '-', %u (the user) and %j (the job id), with %j in it"),
+            ("stack_unicode", "node_local_root = /local\nstack_module = mod/café\n", "2: stack.module 'mod/café' is not a module name"),
+        )
+        for name, text, suffix in cases:
+            with self.subTest(name=name):
+                self.config.write_text(text, encoding="utf-8")
+                run = self.run_wrapper(["env"], **utf8_env)
+                self.assertEqual(
+                    (run.returncode, run.stdout, run.stderr),
+                    (2, "", f"eb-local: {self.config}:{suffix}\n"),
+                )
 
 
 if __name__ == "__main__":

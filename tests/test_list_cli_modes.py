@@ -102,6 +102,24 @@ class ListCliModes(unittest.TestCase):
         self.assertEqual(got.returncode, 0, got.stderr)
         self.assertEqual(got.stdout, f"Nothing is installed in {self.prefix}.\n")
 
+    def test_json_reports_missing_on_node_when_node_target_has_no_tree(self):
+        tree = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen2"
+        (tree / "software" / "Demo" / "1.0").mkdir(parents=True)
+        mod = tree / "modules" / "all" / "Demo" / "1.0.lua"
+        mod.parent.mkdir(parents=True)
+        mod.write_text("-- demo\n", encoding="utf-8")
+
+        missing_cli = self.run_list(["--missing"], EESSI_VERSION="2026.06", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(missing_cli.returncode, 0, missing_cli.stderr)
+        self.assertEqual(missing_cli.stdout, "Demo/1.0\n")
+
+        doc_run = self.run_list(["--json"], EESSI_VERSION="2026.06", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(doc_run.returncode, 0, doc_run.stderr)
+        doc = json.loads(doc_run.stdout)
+        self.assertEqual(doc["node_target"], "x86_64/amd/zen4")
+        self.assertEqual(doc["missing_on_node"], ["Demo/1.0"])
+        self.assertIn("Nothing is built for this node's target, x86_64/amd/zen4, yet", doc["hint"])
+
 
 if __name__ == "__main__":
     unittest.main()

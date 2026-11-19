@@ -12,6 +12,7 @@ import subprocess
 import unittest
 
 import binary
+import hostile_fs
 import howto
 from test_storage import StorageFixture
 
@@ -233,6 +234,22 @@ class SitesCli(StorageFixture):
                 self.assertEqual(run.stdout, "")
                 self.assertIn("unclosed placeholder", run.stderr)
                 self.assertFalse(target.exists())
+
+    def test_template_placeholder_errors_report_line_numbers(self):
+        cases = {
+            "unclosed.toml": ('[storage]\nnode_local_root = "/local"\n[build]\nallocation_hint = "salloc -p {{partition"\n', ":4: unclosed placeholder"),
+            "badname.toml": ('[storage]\nnode_local_root = "/local"\n[build]\nallocation_hint = "salloc -p {{BAD}}"\n', ":4: invalid placeholder 'BAD'"),
+            "baddefault.toml": ('[storage]\nnode_local_root = "/local"\n[build]\nallocation_hint = "salloc -p {{partition:}}"\n', ":4: invalid default for 'partition'"),
+        }
+        for name, (body, needle) in cases.items():
+            with self.subTest(name=name):
+                tmpl = self.root / name
+                tmpl.write_text(body)
+                tmpl.chmod(0o644)
+                run = self.run_tool(["site", "show", f"./{name}"])
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn(f"template ./{name}{needle}", run.stderr)
 
     # -- configuration in the environment -------------------------------------
 
@@ -469,6 +486,18 @@ class SitesCli(StorageFixture):
                 self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
                 self.assertIn("is a symbolic link", got.stderr)
                 self.assertEqual(real_target.read_text(encoding="utf-8"), "keep\n")
+
+    def test_site_install_tmpfs_enospc_keeps_destination_clean(self):
+        mnt = hostile_fs.enter_full_tmpfs(self)
+        if mnt is None:
+            return
+        target = mnt / "config.toml"
+        got = self.run_tool(["site", "install", "slurm", *PATHS, "--to", str(target)])
+        self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+        self.assertEqual(got.stdout, "")
+        self.assertIn("No space left on device", got.stderr)
+        self.assertFalse(target.exists())
+        self.assertEqual([p.name for p in mnt.iterdir()], ["fill"])
 
 
 if __name__ == "__main__":

@@ -105,7 +105,7 @@ Once the checks of the install prefix below pass, and the secrets the build need
 When it cannot:
 
 ```text
-eb-local: cannot make a build workspace in the node-local mount /local/alice.4242 (NoSpace); nothing was built.
+eb-local: cannot make a build workspace in the node-local mount /local/alice.4242 ([Errno 28] No space left on device); nothing was built.
   The mount passed eb-local's checks, so it may be full or have changed since; df /local/alice.4242 shows its free space.
 ```
 

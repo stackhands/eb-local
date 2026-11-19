@@ -301,6 +301,20 @@ class ConfigCli(StorageFixture):
         self.assertIn("mine", run.stdout)
         self.assertIn("licensed", run.stdout)
 
+    def test_default_profile_type_checked_when_overridden(self):
+        self.user.write_text('default_profile = 123\n\n[profile.mine]\nprefix = "/tmp/p"\n')
+        for args, extra_env in (
+            (["config"], {}),
+            (["--profile", "mine", "config"], {}),
+            (["config"], {"EB_LOCAL_PROFILE": "mine"}),
+            (["config"], {"EB_LOCAL_PROFILE": ""}),
+        ):
+            with self.subTest(args=args, extra_env=extra_env):
+                got = self.run_tool(args, **extra_env)
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn("config.toml:1: default_profile must be a string, not an integer", got.stderr)
+
     def test_a_build_gets_its_secrets_and_its_log_does_not_keep_them(self):
         self.user.write_text(USER.format(token=self.token).replace(
             "[profile.licensed.secrets]", "[profile.licensed.secrets]"))
@@ -518,7 +532,7 @@ class ConfigCli(StorageFixture):
             + '[build.node_types]\ncpu = "-p cpu -n 16"\n'
             + '[dev.buildenv_for]\nllvm = "buildenv/site-llvm"\n'
             + '[doctor]\napproved_prefixes = ["/opt/site"]\nmpi_transports = ["ofi", "ucx"]\n'
-            + '[eessi]\nEESSI_CVMFS_REPO = "/cvmfs/custom"\n'
+            + '[eessi]\nEESSI_CVMFS_REPO = "/cvmfs/custom"\nEESSI_EMPTY = ""\n'
         )
 
         def get(key, *extra_args, **extra_env):
@@ -548,6 +562,7 @@ class ConfigCli(StorageFixture):
         self.assertEqual((get("clean.trash").returncode, get("clean.trash").stdout), (0, "auto\n"))
         self.assertEqual((get("clean.logs_older_than_days").returncode, get("clean.logs_older_than_days").stdout), (0, "30\n"))
         self.assertEqual((get("eessi.EESSI_CVMFS_REPO").returncode, get("eessi.EESSI_CVMFS_REPO").stdout), (0, "/cvmfs/custom\n"))
+        self.assertEqual((get("eessi.EESSI_EMPTY").returncode, get("eessi.EESSI_EMPTY").stdout), (1, ""))
         self.assertEqual((get("eessi.OTHER").returncode, get("eessi.OTHER").stdout), (1, ""))
 
         self.assertEqual((get("dev.modules").returncode, get("dev.modules").stdout), (0, "FFTW/3.3.10-GCC-15.2.0\n"))
@@ -576,6 +591,23 @@ class ConfigCli(StorageFixture):
         self.assertEqual(dup.returncode, 2, dup.stdout + dup.stderr)
         self.assertEqual(dup.stdout, "")
         self.assertIn("config takes one --get", dup.stderr)
+
+    def test_config_get_rejects_malformed_dynamic_keys(self):
+        for bad_key in (
+            "build.node_types.",
+            "build.node_types.bad!name",
+            "build.node_types." + ("x" * 33),
+            "secrets.",
+            "secrets.1BAD",
+            "secrets.PATH",
+            "secrets.LD_PRELOAD",
+            "secrets.a-b",
+        ):
+            with self.subTest(bad_key=bad_key):
+                got = self.run_tool(["config", "--config", str(self.site), "--get", bad_key])
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(f"unknown configuration key '{bad_key}'", got.stderr)
 
 
 if __name__ == "__main__":

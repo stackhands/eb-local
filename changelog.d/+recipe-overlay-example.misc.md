@@ -1,1 +1,0 @@
-Adds an example OpenMPI site overlay template under `examples/overlays/`.

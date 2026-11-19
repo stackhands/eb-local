@@ -13,7 +13,7 @@ This page says how `eb-local dev` gets them recorded, why `LD_LIBRARY_PATH` stay
 The build environment has to be loaded; when, relative to the libraries, does not matter, because the modules set `LIBRARY_PATH` and the wrappers read it when you link.
 On a cluster with EESSI 2026.06, GSL loaded before and after `buildenv/default-foss-2026.1` gives the same RPATH entries, and both programs run with no modules loaded; without the build environment the program cannot find `libgsl.so.28`.
 Its `gcc` and `ld` wrappers each record the run paths, so one real `gcc` or one real `ld` ahead of them on `PATH` does no harm.
-A program loses its run paths only when both are bypassed, or when its compiler has no wrapper.
+A program loses its run paths when the link never goes through either wrapper. A compiler that finds its own linker does that on its own, and so does a linker that is neither of those two programs.
 The link still succeeds, and the program fails when it starts; `eb-local check PROGRAM` shows this first.
 `check --dev`, `check --module NAME/VERSION` and `check --prefix DIR` apply that audit to every ELF file in the dev tree, an installed module or a directory, and skip a file that is not ELF.
 `dev` chooses the build environment from the compilers loaded when it runs, so the modules you link against go on the `dev` line, not after it.
@@ -29,8 +29,43 @@ The wrappers record `RPATH`, not `RUNPATH`: `LD_LIBRARY_PATH` overrides `RUNPATH
 
 `clang`, `clang++`, `flang`, `flang-new` and `ld.lld` find their linker themselves, so an `ld` wrapper never sees what they link.
 The `LLVM` module, which other modules also load, ships `clang` but is not `llvm-compilers`: with it, `dev` loads the GCC build environment, which wraps `gcc` and `ld` but not `clang`.
-So `dev` puts RPATH wrappers of its own first for each of those compilers on `PATH` that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded.
+So `dev` puts RPATH wrappers of its own first for each of those compilers on `PATH` that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded, neither the family's nor one at the compiler's own toolchain level.
 Like EasyBuild's wrappers, they add a run path for each library directory a link names with `-L` or finds through `LIBRARY_PATH`, and leave out the system's and the compatibility layer's directories.
+
+## Linkers the wrappers never see
+
+The wrappers cover `gcc`, `ld` and the compilers `dev` wraps because they find their own linker.
+Cargo, Julia, Node.js, R and a Python virtual environment can still link without them, or pick up a host compiler or a host library tree.
+`dev` leaves the variables named below as the shell had them. `eb-local eb` resets Cargo's.
+
+On x86\_64, `rustc` 1.90 and later links with `rust-lld`.
+That linker is not `gcc`, `ld` or `ld.lld`, so the build environment's wrappers never see the link and the program has no run path into EESSI's libraries.
+`eb-local eb` drops a host `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, drops every `CARGO_TARGET_*_LINKER` and `CARGO_TARGET_*_RUSTFLAGS`, and, when `rustc -vV` prints a host, sets `CARGO_TARGET_<target>_LINKER` to the shell's `CC`, or to `gcc` when `CC` is unset.
+Load `Rust/1.94.1-GCCcore-15.2.0` on the `dev` line.
+Its toolchain is GCCcore 15.2.0, so `dev` loads `buildenv/default-foss-2026.1`.
+The same assignment then points Cargo at that `gcc`.
+Leave a host `RUSTFLAGS` unset. It can name another linker.
+
+`Julia/1.13.2` is a tarball on the system toolchain.
+The `julia` command puts `$EBROOTJULIA/lib` and `$EBROOTJULIA/lib/julia` on `LD_LIBRARY_PATH` and runs `julia.bin`.
+A library you compile for it is still linked by the build environment.
+The module sets none of the compiler-family variables, so `dev` loads the GCC build environment and `gcc` records the run paths.
+Julia's depot defaults to `~/.julia`, one directory for every CPU target.
+Set `JULIA_DEPOT_PATH` under `EB_LOCAL_DEV_PREFIX` when it is unset.
+`JULIA_LOAD_PATH` names code Julia loads. A host entry there is a host tree.
+
+`nodejs/24.16.0-GCCcore-15.2.0` is the module name, with `nodejs` in lower case.
+A native addon is compiled with the build environment's `CC` and `CXX` when those are `gcc` and `g++`.
+Unset a host `NODE_PATH` before that build. It names a host module tree.
+
+R's Makeconf calls `gcc` unless `R_MAKEVARS_USER` or `R_MAKEVARS_SITE` names another file.
+Unset both when they point outside your prefix.
+`R/4.6.1-gfbf-2026.1` belongs to the gfbf toolchain, so `dev` loads the foss build environment for it.
+
+A virtual environment from `Python/3.14.2-GCCcore-15.2.0` compiles an extension with that `gcc` unless `CC` or `PYTHONPATH` still names the host.
+`dev` leaves both as the shell had them.
+
+`tests/site/lang-dev-tasks.sh` runs each of these, then runs the built program with no modules loaded.
 
 ## One build per CPU target
 

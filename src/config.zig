@@ -137,11 +137,18 @@ pub const Settings = struct {
 /// EBROOT variable of its compiler module, in rising precedence. GCC is the
 /// rest and uses dev.buildenv. The names are EasyBuild's: a hyphen in the
 /// software name becomes "min", so llvm-compilers sets EBROOTLLVMMINCOMPILERS.
-pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8 }{
+///
+/// `compiler` is the software name of the family's compiler module and
+/// `version` the variable that module sets to its version. Together they name
+/// the build environment a site installs at the compiler's own toolchain
+/// level, `buildenv/default-<compiler>-<version>`, which dev tries when the
+/// family's configured build environment is not installed. CUDA is not a
+/// toolchain and has none.
+pub const families = [_]struct { name: []const u8, ebroot: []const u8, env: []const u8, compiler: []const u8 = "", version: []const u8 = "" }{
     .{ .name = "cuda", .ebroot = "EBROOTCUDA", .env = "EB_LOCAL_DEV_BUILDENV_FOR_CUDA" },
-    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM" },
-    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL" },
-    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC" },
+    .{ .name = "llvm", .ebroot = "EBROOTLLVMMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_LLVM", .compiler = "llvm-compilers", .version = "EBVERSIONLLVMMINCOMPILERS" },
+    .{ .name = "intel", .ebroot = "EBROOTINTELMINCOMPILERS", .env = "EB_LOCAL_DEV_BUILDENV_FOR_INTEL", .compiler = "intel-compilers", .version = "EBVERSIONINTELMINCOMPILERS" },
+    .{ .name = "nvhpc", .ebroot = "EBROOTNVHPC", .env = "EB_LOCAL_DEV_BUILDENV_FOR_NVHPC", .compiler = "NVHPC", .version = "EBVERSIONNVHPC" },
 };
 
 /// The `EBROOT` name EasyBuild writes for `software`. `convert_name` replaces
@@ -223,7 +230,7 @@ pub fn validModule(name: []const u8) bool {
 pub fn validSecretName(name: []const u8) bool {
     if (name.len == 0 or !(std.ascii.isAlphabetic(name[0]) or name[0] == '_')) return false;
     for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_')) return false;
-    const refused = [_][]const u8{ "PATH", "HOME", "USER", "SHELL", "TMPDIR", "MODULEPATH", "PYTHONPATH", "BASH_ENV", "ENV" };
+    const refused = [_][]const u8{ "PATH", "HOME", "USER", "SHELL", "TMPDIR", "MODULEPATH", "PYTHONPATH", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" };
     for (refused) |r| if (std.mem.eql(u8, name, r)) return false;
     const refused_prefixes = [_][]const u8{ "LD_", "EESSI_", "EASYBUILD_", "LMOD_", "SLURM_", "EB_LOCAL_", "BASH_FUNC_" };
     for (refused_prefixes) |r| if (std.mem.startsWith(u8, name, r)) return false;
@@ -685,10 +692,12 @@ pub fn load(
     }
 
     // The profile: an option, then EB_LOCAL_PROFILE, then the last default_profile.
-    var profile: ?[]const u8 = cli.profile orelse env.get("EB_LOCAL_PROFILE");
-    if (profile == null) for (sources, tables.items) |src, t| {
-        if (try defaultProfile(&l, src, t)) |p| profile = p;
-    };
+    // Every default_profile is checked for type even when overridden.
+    var file_default: ?[]const u8 = null;
+    for (sources, tables.items) |src, t| {
+        if (try defaultProfile(&l, src, t)) |p| file_default = p;
+    }
+    var profile: ?[]const u8 = cli.profile orelse env.get("EB_LOCAL_PROFILE") orelse file_default;
     if (profile) |p| {
         if (p.len == 0) profile = null;
     }
@@ -1054,6 +1063,8 @@ test "refusals" {
     try r.one(&t, "[secrets]\nTOKEN = \"hunter2\"\n", .user, "never written");
     try r.one(&t, "[secrets]\nLD_PRELOAD = \"env:X\"\n", .user, "not a variable name");
     try r.one(&t, "[secrets]\nPATH = \"env:X\"\n", .user, "not a variable name");
+    try r.one(&t, "[secrets]\nSHELLOPTS = \"env:X\"\n", .user, "not a variable name");
+    try r.one(&t, "[secrets]\nBASHOPTS = \"env:X\"\n", .user, "not a variable name");
     try r.one(&t, "[secrets]\nT = \"file:relative\"\n", .user, "c.toml:2: secret T: file: takes an absolute path or one starting ~/");
     try r.one(&t, "[secrets]\nT = \"env:1X\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
     try r.one(&t, "[secrets]\nT = \"env:\"\n", .user, "c.toml:2: secret T: env: takes a variable name");
@@ -1459,4 +1470,22 @@ test "build.node_types" {
     try std.testing.expect(validNodeTypeName("gpu_cc90"));
     try std.testing.expect(!validNodeTypeName("a b"));
     try std.testing.expect(!validNodeTypeName(""));
+}
+
+test "default_profile must be a string even when overridden" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const sources = [_]Source{.{
+        .path = "c.toml",
+        .text = "default_profile = 123\n[profile.mine]\nprefix = \"/tmp/p\"\n",
+        .layer = .user,
+    }};
+    try t.refuse(&sources, "c.toml:1: default_profile must be a string, not an integer");
+    var d: Diagnostic = .{};
+    try std.testing.expectError(error.Invalid, config_load(t.arena.allocator(), &sources, &t.env, .{ .profile = "mine" }, &d));
+    try std.testing.expect(std.mem.indexOf(u8, d.message, "c.toml:1: default_profile must be a string, not an integer") != null);
+    try t.env.put("EB_LOCAL_PROFILE", "mine");
+    try t.refuse(&sources, "c.toml:1: default_profile must be a string, not an integer");
+    try t.env.put("EB_LOCAL_PROFILE", "");
+    try t.refuse(&sources, "c.toml:1: default_profile must be a string, not an integer");
 }
