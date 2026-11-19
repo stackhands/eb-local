@@ -1,0 +1,1 @@
+`src/rpath.zig` sets `link=0` in its generated wrapper script for LLVM and Intel info-only queries (`-help`, `--help-hidden`, `-version`, `-dumpmachine`, `-print-*`) and non-linking actions (`--analyze`, `--precompile`, `--preprocess`, `-emit-ast`, `-emit-pch`) even when combined with `--target=...`.

@@ -22,15 +22,21 @@ class RpathWrappersCli(unittest.TestCase):
         self.cache.mkdir()
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.lld_bin = self.root / "lld-bin"
+        self.lld_bin.mkdir()
         self.log = self.root / "calls.log"
-        for tool in ("gcc", "clang", "ld"):
-            p = self.bin / tool
-            p.write_text(
-                "#!/bin/sh\n"
-                f'printf "%s:%s\\n" "{tool}" "$*" >> "{self.log}"\n',
-                encoding="utf-8",
-            )
-            p.chmod(0o755)
+        for directory, tools in (
+            (self.bin, ("gcc", "clang", "ld", "icx", "ifx")),
+            (self.lld_bin, ("ld.lld",)),
+        ):
+            for tool in tools:
+                p = directory / tool
+                p.write_text(
+                    "#!/bin/sh\n"
+                    f'printf "%s:%s\\n" "{tool}" "$*" >> "{self.log}"\n',
+                    encoding="utf-8",
+                )
+                p.chmod(0o755)
 
     def run_cmd(self, args, **env_overrides):
         env = {
@@ -94,6 +100,53 @@ class RpathWrappersCli(unittest.TestCase):
         self.assertIn("does not wrap clang", bare.stderr)
         self.assertIn("export PATH=", bare.stdout)
         self.assertIn("export EB_LOCAL_RPATH_WRAPPERS=", bare.stdout)
+
+    def test_wrappers_bypass_llvm_intel_nonlinking_flags(self):
+        llvm_got = self.run_cmd(["--for", "llvm"], PATH=f"{self.lld_bin}:{self.bin}")
+        self.assertEqual(llvm_got.returncode, 0, llvm_got.stderr)
+        intel_got = self.run_cmd(["--for", "intel"])
+        self.assertEqual(intel_got.returncode, 0, intel_got.stderr)
+
+        script = (
+            llvm_got.stdout
+            + "clang --help-hidden\n"
+            + "clang --target=x86_64-linux-gnu -dumpmachine\n"
+            + "clang --target=x86_64-linux-gnu --print-resource-dir\n"
+            + "clang --analyze foo.c\n"
+            + "clang --precompile foo.hpp\n"
+            + "ld.lld -version\n"
+            + "ld.lld --help-hidden\n"
+            + intel_got.stdout
+            + "icx -help\n"
+            + "ifx -help\n"
+            + "clang -o prog a.o\n"
+        )
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={
+                "PATH": f"{self.lld_bin}:{self.bin}:/usr/bin:/bin",
+                "LIBRARY_PATH": "/opt/mylib",
+            },
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(
+            self.log.read_text(encoding="utf-8").splitlines(),
+            [
+                "clang:--help-hidden",
+                "clang:--target=x86_64-linux-gnu -dumpmachine",
+                "clang:--target=x86_64-linux-gnu --print-resource-dir",
+                "clang:--analyze foo.c",
+                "clang:--precompile foo.hpp",
+                "ld.lld:-version",
+                "ld.lld:--help-hidden",
+                "icx:-help",
+                "ifx:-help",
+                "clang:-o prog a.o -Wl,-rpath,/opt/mylib -Wl,--disable-new-dtags",
+            ],
+        )
 
     def test_generated_wrappers_skip_non_linking_flags_and_accept_library_path_flag(self):
         got = self.run_cmd(["--for", "llvm"])
