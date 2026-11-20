@@ -62,6 +62,28 @@ class EessiLmod(StorageFixture):
         self.assertNotIn("command not found", shell.stderr)
         self.assertEqual(shell.stdout, "x86_64/amd/zen4")
 
+    def test_init_that_defines_no_module_falls_through_to_eessi(self):
+        self.eessi_init()
+        host_init = self.root / "no-lmod" / "init" / "bash"
+        host_init.parent.mkdir(parents=True)
+        host_init.write_text("true\n")
+
+        build = self.run_wrapper()
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+        self.assertTrue((self.root / "eb.json").exists())
+
+        env_run = self.run_wrapper(["env"], SLURM_JOB_ID="")
+        shell = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", env_run.stdout + 'printf %s "$EESSI_SOFTWARE_SUBDIR"'],
+            env=self.env,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(shell.returncode, 0, shell.stderr)
+        self.assertNotIn("command not found", shell.stderr)
+        self.assertEqual(shell.stdout, "x86_64/amd/zen4")
+
     def test_doctor_names_the_init_a_build_sources_and_fails_without_one(self):
         run = self.run_wrapper(["doctor"])
         self.assertEqual(run.returncode, 1, run.stdout)
