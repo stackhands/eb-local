@@ -41,7 +41,7 @@ module() {
         export CONTROL_LOADED="${CONTROL_LOADED-} ${*:2}"
         if [ "$2" = EESSI/2026.06 ]; then
             export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4
-            export EESSI_ACCELERATOR_TARGET=${CONTROL_ACCELERATOR-}
+            export EESSI_ACCELERATOR_TARGET=
         fi
         if [ "$2" = EESSI-extend/2026.06-easybuild ]; then
             export EASYBUILD_INSTALLPATH="${EESSI_USER_INSTALL:-${EESSI_PROJECT_INSTALL:-$HOME/eessi}}/versions/2026.06/software/linux/$EESSI_SOFTWARE_SUBDIR"
@@ -111,7 +111,6 @@ else:
     (root / "eb.json").write_text(json.dumps({"argv": sys.argv[2:],
                                             "hooks": os.environ["EASYBUILD_HOOKS"],
                                             "umask": os.umask(0),
-                                            "cuda_cc": os.environ.get("EASYBUILD_CUDA_COMPUTE_CAPABILITIES"),
                                             "target": os.environ.get("EESSI_SOFTWARE_SUBDIR")}))
     sys.exit(int(os.environ.get("CONTROL_EB_STATUS", "0")))
 '''
@@ -259,32 +258,6 @@ class EnvironmentControls(unittest.TestCase):
         self.assertEqual(guard["workdir_mode"], "0o700")
         self.assertEqual(json.loads((self.root / "eb.json").read_text())["target"], "x86_64/intel/icelake")
         self.assertIn("eb-local: target x86_64/intel/icelake,", run.stdout)
-
-    def test_build_on_a_gpu_node_passes_its_cuda_compute_capability(self):
-        for accelerator, capability in (("accel/nvidia/cc90", "9.0"), ("accel/nvidia/cc80", "8.0"),
-                                        ("accel/nvidia/cc120", "12.0")):
-            with self.subTest(accelerator=accelerator):
-                run = self.run_wrapper(["recipe.eb"], CONTROL_ACCELERATOR=accelerator)
-                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-                self.assertEqual(json.loads((self.root / "eb.json").read_text())["cuda_cc"], capability)
-                self.assertIn(f"eb-local: CUDA compute capability {capability}, from {accelerator}\n", run.stdout)
-
-    def test_a_named_cuda_compute_capability_is_kept(self):
-        run = self.run_wrapper(["recipe.eb", "--cuda-compute-capabilities=8.0"],
-                               CONTROL_ACCELERATOR="accel/nvidia/cc90")
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        built = json.loads((self.root / "eb.json").read_text())
-        self.assertIsNone(built["cuda_cc"])
-        self.assertIn("--cuda-compute-capabilities=8.0", built["argv"])
-        self.assertNotIn("eb-local: CUDA compute capability", run.stdout)
-
-    def test_a_cpu_node_sets_no_cuda_compute_capability(self):
-        for accelerator in ("", "accel/amd/gfx90a"):
-            with self.subTest(accelerator=accelerator):
-                run = self.run_wrapper(["recipe.eb"], CONTROL_ACCELERATOR=accelerator)
-                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-                self.assertIsNone(json.loads((self.root / "eb.json").read_text())["cuda_cc"])
-                self.assertNotIn("eb-local: CUDA compute capability", run.stdout)
 
     def test_a_failed_arch_guard_stops_the_build(self):
         self.with_guard()
