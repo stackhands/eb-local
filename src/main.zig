@@ -457,7 +457,10 @@ fn openConfig(path: []const u8) Opened {
     const lst = fsx.statAt(fsx.cwd, path, false) catch |e| die("cannot open {s} ({s})", .{ path, storage.describeError(e) });
     if (lst.isLink()) die("{s} is a symbolic link; a configuration file must be a regular file", .{path});
     const opened = fsx.openRegular(fsx.cwd, path, false) catch |e| die("cannot open {s} ({s})", .{ path, storage.describeError(e) });
-    if (opened.stat.mode & 0o022 != 0) die("{s} is writable by group or others and is not used; chmod go-w it", .{path});
+    if (opened.stat.mode & 0o022 != 0) {
+        sys.close(opened.fd);
+        die("{s} is writable by group or others and is not used; chmod go-w it", .{path});
+    }
     return .{ .fd = opened.fd, .stat = opened.stat };
 }
 
@@ -942,12 +945,15 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
     var buf: [sys.path_max]u8 = undefined;
     const exe = selfExe(&buf) orelse "eb-local";
     const block = str(a, "{s} rerun `eb-local dev --envrc` to change these lines\neval \"$({s} {s})\"\n{s}\n", .{ envrc_begin, q(a, exe), words, envrc_end });
-    var exists_already = false;
-    const old: []const u8 = if (fsx.openRegular(fsx.cwd, ".envrc", true)) |opened| blk: {
+    const old: []const u8 = if (fsx.statAt(fsx.cwd, ".envrc", false)) |st| blk: {
+        if (st.isLink()) die("cannot write .envrc (refusing to replace a symlink)", .{});
+        const opened = fsx.openRegular(fsx.cwd, ".envrc", false) catch |e| die("cannot read .envrc ({s})", .{@errorName(e)});
         defer sys.close(opened.fd);
-        exists_already = true;
         break :blk fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read .envrc ({s})", .{@errorName(e)});
-    } else |_| "";
+    } else |e| switch (e) {
+        error.NotFound => "",
+        else => die("cannot read .envrc ({s})", .{@errorName(e)}),
+    };
     const text = if (std.mem.indexOf(u8, old, envrc_begin)) |at| blk: {
         const rest = std.mem.indexOfPos(u8, old, at, envrc_end) orelse
             die(".envrc has `{s}` without `{s}`; remove that line or add the end line, then run this again", .{ envrc_begin, envrc_end });
@@ -958,15 +964,7 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
         block
     else
         str(a, "{s}{s}{s}", .{ old, if (old[old.len - 1] == '\n') "" else "\n", block });
-    if (exists_already) {
-        // Written beside the old file and renamed over it, with its mode.
-        fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
-    } else {
-        const fd = sys.openat(fsx.cwd, ".envrc", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
-            die("cannot create .envrc ({s})", .{@errorName(e)});
-        defer sys.close(fd);
-        sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
-    }
+    writeCwdFile(a, ".envrc", text);
     cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
     return 0;
 }
@@ -990,16 +988,74 @@ const DevLock = struct {
     modules: []const []const u8,
 };
 
+fn tryWriteCwdFile(a: Allocator, name: []const u8, text: []const u8, why: *common.atomic.Why) common.atomic.Error!void {
+    const ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+    var prev: linux.Sigaction = undefined;
+    _ = linux.sigaction(.XFSZ, &ign, &prev);
+    defer _ = linux.sigaction(.XFSZ, &prev, null);
+    try common.atomic.atomicWrite(a, name, text, .{}, why);
+}
+
 /// Create `name` in the working directory, or replace it atomically with its mode kept.
 fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
-    if (fsx.statAt(fsx.cwd, name, true)) |_| {
-        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
-    } else |_| {
-        const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
-            die("cannot create {s} ({s})", .{ name, @errorName(e) });
-        defer sys.close(fd);
-        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    tryWriteCwdFile(a, name, text, &why) catch |e| {
+        const detail = if (why.msg.len > 0) why.msg else storage.describeError(e);
+        die("cannot write {s} ({s})", .{ name, detail });
+    };
+}
+
+fn testDevWriteCountFds() !usize {
+    const dir = try sys.openat(linux.AT.FDCWD, "/proc/self/fd", .{ .DIRECTORY = true }, 0);
+    defer sys.close(dir);
+    var count: usize = 0;
+    var dents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = linux.getdents64(dir, &dents, dents.len);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
+        var pos: usize = 0;
+        while (pos < n) {
+            const d: *align(1) const linux.dirent64 = @ptrCast(dents[pos..].ptr);
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(dents[pos + @offsetOf(linux.dirent64, "name") ..].ptr)));
+            pos += d.reclen;
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+        }
     }
+    return count - 1;
+}
+
+fn testFailEfbig(_: sys.fd_t, _: []const u8) usize {
+    return @bitCast(-@as(isize, @backingInt(linux.E.FBIG)));
+}
+
+test "tryWriteCwdFile rolls back temp file without fd leak on write failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/dev-write-fail-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer storage.removeTree(a, root) catch {};
+
+    const target = try std.fs.path.join(a, &.{ root, ".envrc" });
+    const tmp_new = try std.fs.path.join(a, &.{ root, "..envrc.new" });
+
+    const saved_ops = common.atomic.ops.*;
+    defer common.atomic.ops.* = saved_ops;
+    common.atomic.ops.write = testFailEfbig;
+
+    const before_fds = try testDevWriteCountFds();
+    var why: common.atomic.Why = .{};
+    defer why.deinit(a);
+    try std.testing.expectError(error.Unexpected, tryWriteCwdFile(a, target, "eval \"$(eb-local dev)\"\n", &why));
+    try std.testing.expectEqual(linux.E.FBIG, sys.last_errno);
+    try std.testing.expectEqual(before_fds, try testDevWriteCountFds());
+    try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, target, false));
+    try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, tmp_new, false));
 }
 
 /// `dev --lock`: run the dev lines in a bash child and record what loaded.

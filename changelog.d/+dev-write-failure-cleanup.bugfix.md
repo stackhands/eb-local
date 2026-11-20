@@ -1,0 +1,1 @@
+Stage new and updated `.envrc` and `eb-local.lock` files through temporary files with `SIGXFSZ` masked so write failures exit cleanly without leaving partial or temporary files in the working directory.
