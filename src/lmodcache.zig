@@ -308,6 +308,183 @@ fn isDir(path: []const u8) bool {
     return if (fsx.statAt(fsx.cwd, path, true)) |st| st.isDir() else |_| false;
 }
 
+const storage = @import("storage.zig");
+const writer_lock_signals = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT };
+var writer_lock_cancel = std.atomic.Value(bool).init(false);
+var writer_lock_signal = std.atomic.Value(u32).init(0);
+
+fn onWriterLockSignal(sig: linux.SIG, _: *const linux.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    _ = writer_lock_signal.cmpxchgStrong(0, @backingInt(sig), .seq_cst, .seq_cst);
+    writer_lock_cancel.store(true, .seq_cst);
+}
+
+const WriterCancelGuard = struct {
+    old: [writer_lock_signals.len]linux.Sigaction,
+    released: bool = false,
+
+    fn hold() WriterCancelGuard {
+        var g: WriterCancelGuard = .{ .old = undefined };
+        var during = linux.sigemptyset();
+        for (writer_lock_signals) |sig| linux.sigaddset(&during, sig);
+        const act: linux.Sigaction = .{
+            .handler = .{ .sigaction = onWriterLockSignal },
+            .mask = during,
+            .flags = linux.SA.SIGINFO,
+        };
+        writer_lock_signal.store(0, .seq_cst);
+        writer_lock_cancel.store(false, .seq_cst);
+        for (writer_lock_signals, 0..) |sig, i| {
+            _ = linux.sigaction(sig, null, &g.old[i]);
+            if (g.old[i].handler.handler != linux.SIG.IGN) _ = linux.sigaction(sig, &act, null);
+        }
+        return g;
+    }
+
+    fn release(g: *WriterCancelGuard) void {
+        if (g.released) return;
+        g.released = true;
+        for (writer_lock_signals, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
+    }
+
+    fn received(_: *const WriterCancelGuard) ?linux.SIG {
+        const v = writer_lock_signal.load(.seq_cst);
+        return if (v == 0) null else @fromBackingInt(@intCast(v));
+    }
+};
+
+fn reRaiseWriterSignal(g: *WriterCancelGuard, sig: linux.SIG) u8 {
+    g.release();
+    var old: linux.Sigaction = undefined;
+    _ = linux.sigaction(sig, null, &old);
+    if (old.handler.handler != linux.SIG.IGN) {
+        const dfl: linux.Sigaction = .{
+            .handler = .{ .handler = linux.SIG.DFL },
+            .mask = linux.sigemptyset(),
+            .flags = 0,
+        };
+        _ = linux.sigaction(sig, &dfl, null);
+        var set = linux.sigemptyset();
+        linux.sigaddset(&set, sig);
+        _ = linux.sigprocmask(linux.SIG.UNBLOCK, &set, null);
+        _ = linux.kill(linux.getpid(), sig);
+    }
+    return 128 +| @as(u8, @intCast(@min(@backingInt(sig), 127)));
+}
+
+fn existingAncestor(path: []const u8) []const u8 {
+    var probe = path;
+    while (probe.len > 1 and !isDir(probe)) {
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+    return if (probe.len == 0) "/" else probe;
+}
+
+const DirHold = struct {
+    fds: [3]sys.fd_t = .{ -1, -1, -1 },
+    devs: [3]u64 = .{ 0, 0, 0 },
+    inos: [3]u64 = .{ 0, 0, 0 },
+    len: usize = 0,
+
+    fn release(self: *DirHold) void {
+        while (self.len > 0) {
+            self.len -= 1;
+            const fd = self.fds[self.len];
+            if (fd >= 0) {
+                _ = linux.flock(fd, std.posix.LOCK.UN);
+                sys.close(fd);
+                self.fds[self.len] = -1;
+            }
+        }
+    }
+
+    fn contains(self: *const DirHold, dev: u64, ino: u64) bool {
+        for (0..self.len) |i| {
+            if (self.devs[i] == dev and self.inos[i] == ino) return true;
+        }
+        return false;
+    }
+
+    fn lockExistingDir(self: *DirHold, path: []const u8, timeout_ms: u32) error{ Canceled, TimedOut, LockFailed }!void {
+        if (self.len >= self.fds.len) return;
+        var tries: usize = 0;
+        while (tries < 8) : (tries += 1) {
+            if (writer_lock_cancel.load(.seq_cst)) return error.Canceled;
+            const dir_path = existingAncestor(path);
+            const fd = fsx.openDir(fsx.cwd, dir_path, true) catch |err| {
+                if (err == error.NotFound) continue;
+                fail("cannot open {s}: {s}", .{ dir_path, sys.describe(err) });
+                return error.LockFailed;
+            };
+            const st = fsx.fstat(fd) catch |err| {
+                sys.close(fd);
+                fail("cannot stat {s}: {s}", .{ dir_path, sys.describe(err) });
+                return error.LockFailed;
+            };
+            if (self.contains(st.dev, st.ino)) {
+                sys.close(fd);
+                return;
+            }
+            common.state.lockExclusiveCancel(fd, timeout_ms, &writer_lock_cancel) catch |err| switch (err) {
+                error.Canceled => {
+                    sys.close(fd);
+                    return error.Canceled;
+                },
+                error.TimedOut => {
+                    sys.close(fd);
+                    fail("timed out after {d} ms waiting for lock on {s}", .{ timeout_ms, dir_path });
+                    return error.TimedOut;
+                },
+                else => |se| {
+                    sys.close(fd);
+                    if (storage.flockUnsupported(se)) return;
+                    fail("cannot lock {s}: {s}", .{ dir_path, sys.describe(se) });
+                    return error.LockFailed;
+                },
+            };
+            const verify = fsx.statAt(fsx.cwd, dir_path, true) catch |err| switch (err) {
+                error.NotFound => {
+                    _ = linux.flock(fd, std.posix.LOCK.UN);
+                    sys.close(fd);
+                    continue;
+                },
+                else => {
+                    _ = linux.flock(fd, std.posix.LOCK.UN);
+                    sys.close(fd);
+                    return error.LockFailed;
+                },
+            };
+            if (verify.dev != st.dev or verify.ino != st.ino) {
+                _ = linux.flock(fd, std.posix.LOCK.UN);
+                sys.close(fd);
+                continue;
+            }
+            self.fds[self.len] = fd;
+            self.devs[self.len] = st.dev;
+            self.inos[self.len] = st.ino;
+            self.len += 1;
+            return;
+        }
+    }
+
+    fn lockPairOrdered(self: *DirHold, first_path: []const u8, second_path: []const u8, timeout_ms: u32) error{ Canceled, TimedOut, LockFailed }!void {
+        const a_dir = existingAncestor(first_path);
+        const b_dir = existingAncestor(second_path);
+        const st_a = fsx.statAt(fsx.cwd, a_dir, true) catch null;
+        const st_b = fsx.statAt(fsx.cwd, b_dir, true) catch null;
+        if (st_a != null and st_b != null) {
+            const sa = st_a.?;
+            const sb = st_b.?;
+            if (sb.dev < sa.dev or (sb.dev == sa.dev and sb.ino < sa.ino)) {
+                try self.lockExistingDir(b_dir, timeout_ms);
+                try self.lockExistingDir(a_dir, timeout_ms);
+                return;
+            }
+        }
+        try self.lockExistingDir(a_dir, timeout_ms);
+        try self.lockExistingDir(b_dir, timeout_ms);
+    }
+};
+
 fn dirHasAll(base: []const u8) bool {
     const all = std.fs.path.join(std.heap.page_allocator, &.{ base, "modules", "all" }) catch return false;
     defer std.heap.page_allocator.free(all);
@@ -591,6 +768,17 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     defer if (resolved[1]) a.free(resolved[0]);
     const update_cmd = resolved[0];
     for (targets) |t| {
+        var target_hold: DirHold = .{};
+        defer target_hold.release();
+        var cancel_guard = WriterCancelGuard.hold();
+        target_hold.lockExistingDir(t.cache_dir, storage.default_lock_timeout_ms) catch |err| switch (err) {
+            error.Canceled => return reRaiseWriterSignal(&cancel_guard, cancel_guard.received() orelse .TERM),
+            error.TimedOut, error.LockFailed => {
+                cancel_guard.release();
+                return 1;
+            },
+        };
+        cancel_guard.release();
         const code = runUpdate(io, a, update_cmd, t);
         if (code != 0) return code;
     }
@@ -857,6 +1045,25 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         fail("--timestamp {s} is not an absolute path", .{opts.timestamp});
         return 2;
     }
+    var lock_err: []const u8 = "";
+    const timeout_ms = storage.lockTimeoutMs(env, &lock_err) orelse {
+        fail("{s}", .{lock_err});
+        return 2;
+    };
+    var dir_hold: DirHold = .{};
+    defer dir_hold.release();
+    {
+        var cancel_guard = WriterCancelGuard.hold();
+        defer cancel_guard.release();
+        const stamp_parent = std.fs.path.dirname(opts.timestamp) orelse "/";
+        dir_hold.lockPairOrdered(opts.cache_dir, stamp_parent, timeout_ms) catch |err| switch (err) {
+            error.Canceled => {
+                dir_hold.release();
+                return reRaiseWriterSignal(&cancel_guard, cancel_guard.received() orelse .TERM);
+            },
+            error.TimedOut, error.LockFailed => return 1,
+        };
+    }
     const spider = if (opts.spider.len == 0) "spider" else opts.spider;
     const argv = spiderArgv(a, spider, dirs) catch return 1;
     const spider_exe = (common.proc.resolveExecutable(a, spider, env.get("PATH")) catch return 1) orelse {
@@ -903,6 +1110,21 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         fail("cannot create {s}: {s}", .{ opts.cache_dir, @errorName(err) });
         return 1;
     };
+    {
+        var cancel_guard = WriterCancelGuard.hold();
+        defer cancel_guard.release();
+        dir_hold.lockExistingDir(opts.cache_dir, timeout_ms) catch |err| switch (err) {
+            error.Canceled => {
+                if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
+                dir_hold.release();
+                return reRaiseWriterSignal(&cancel_guard, cancel_guard.received() orelse .TERM);
+            },
+            error.TimedOut, error.LockFailed => {
+                if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
+                return 1;
+            },
+        };
+    }
     const cleanup = struct {
         fn rollback(alloc: std.mem.Allocator, missing: ?[]const u8, path: []const u8, prev: ?[]const u8, wrote: bool) void {
             if (wrote) {
