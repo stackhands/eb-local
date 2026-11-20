@@ -14,6 +14,99 @@ const config = @import("config.zig");
 
 const tool = "eb-local";
 
+const cache_signals = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT };
+var active_pgid = std.atomic.Value(linux.pid_t).init(0);
+var first_signal = std.atomic.Value(u32).init(0);
+var active_env: ?*const std.process.Environ.Map = null;
+
+fn onCacheSignal(sig: linux.SIG, _: *const linux.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    _ = first_signal.cmpxchgStrong(0, @backingInt(sig), .seq_cst, .seq_cst);
+    common.proc.killGroup(active_pgid.load(.seq_cst), sig);
+}
+
+const CacheGuard = struct {
+    old: [cache_signals.len]linux.Sigaction,
+    released: bool = false,
+
+    fn hold() CacheGuard {
+        var g: CacheGuard = .{ .old = undefined };
+        var during = linux.sigemptyset();
+        for (cache_signals) |sig| linux.sigaddset(&during, sig);
+        const act: linux.Sigaction = .{
+            .handler = .{ .sigaction = onCacheSignal },
+            .mask = during,
+            .flags = linux.SA.SIGINFO,
+        };
+        active_pgid.store(0, .seq_cst);
+        first_signal.store(0, .seq_cst);
+        for (cache_signals, 0..) |sig, i| {
+            _ = linux.sigaction(sig, null, &g.old[i]);
+            if (g.old[i].handler.handler != linux.SIG.IGN) _ = linux.sigaction(sig, &act, null);
+        }
+        return g;
+    }
+
+    fn release(g: *CacheGuard) void {
+        if (g.released) return;
+        g.released = true;
+        for (cache_signals, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
+    }
+
+    fn received(_: *const CacheGuard) ?linux.SIG {
+        return receivedSignal();
+    }
+};
+
+fn receivedSignal() ?linux.SIG {
+    const v = first_signal.load(.seq_cst);
+    return if (v == 0) null else @fromBackingInt(@intCast(v));
+}
+
+fn reRaiseSignal(sig: linux.SIG) u8 {
+    var dfl: linux.Sigaction = .{
+        .handler = .{ .handler = linux.SIG.DFL },
+        .mask = linux.sigemptyset(),
+        .flags = 0,
+    };
+    var old: linux.Sigaction = undefined;
+    _ = linux.sigaction(sig, null, &old);
+    if (old.handler.handler != linux.SIG.IGN) {
+        _ = linux.sigaction(sig, &dfl, null);
+        var set = linux.sigemptyset();
+        linux.sigaddset(&set, sig);
+        _ = linux.sigprocmask(linux.SIG.UNBLOCK, &set, null);
+        _ = linux.kill(linux.getpid(), sig);
+    }
+    return 128 +| @as(u8, @intCast(@min(@backingInt(sig), 127)));
+}
+
+fn stopSignal(g: *CacheGuard, sig: linux.SIG) u8 {
+    g.release();
+    return reRaiseSignal(sig);
+}
+
+fn envpOf(a: std.mem.Allocator, map: *const std.process.Environ.Map) !common.proc.Envp {
+    var list: std.ArrayList(?[*:0]const u8) = .empty;
+    var it = map.iterator();
+    while (it.next()) |kv| {
+        const line = try std.fmt.allocPrintSentinel(a, "{s}={s}", .{ kv.key_ptr.*, kv.value_ptr.* }, 0);
+        try list.append(a, line.ptr);
+    }
+    try list.append(a, null);
+    const slice = try list.toOwnedSlice(a);
+    return @ptrCast(slice.ptr);
+}
+
+fn firstMissingAncestor(path: []const u8) ?[]const u8 {
+    var missing: ?[]const u8 = null;
+    var probe = path;
+    while (probe.len > 1 and !isDir(probe)) {
+        missing = probe;
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+    return missing;
+}
+
 /// One CPU target tree to refresh when walking `--prefix`.
 pub const Target = struct {
     archdir: []const u8,
@@ -384,26 +477,45 @@ fn updateArgv(a: std.mem.Allocator, cmd: []const u8, cache_dir: []const u8, modu
 
 /// Run Lmod's `update_lmod_system_cache_files` for one target.
 pub fn runUpdate(io: std.Io, a: std.mem.Allocator, update_cmd: []const u8, target: Target) u8 {
+    const first_missing = firstMissingAncestor(target.cache_dir);
     const argv = updateArgv(a, update_cmd, target.cache_dir, target.modulepath) catch return 1;
     defer {
         a.free(argv[4]);
         a.free(argv);
     }
-    const ran = std.process.run(a, io, .{
-        .argv = argv,
-        .stdout_limit = .limited(64 * 1024),
-        .stderr_limit = .limited(64 * 1024),
+    const path_env = if (active_env) |m| m.get("PATH") else null;
+    const exe = (common.proc.resolveExecutable(a, update_cmd, path_env) catch return 1) orelse {
+        fail("cannot run {s}: NotFound", .{update_cmd});
+        return 127;
+    };
+    defer a.free(exe);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const empty_envp = [_:null]?[*:0]const u8{null};
+    const envp: common.proc.Envp = if (active_env) |m| (envpOf(arena.allocator(), m) catch return 1) else @ptrCast(&empty_envp);
+    const ran = common.proc.run(arena.allocator(), exe, argv, envp, .{
+        .stdout_limit = 64 * 1024,
+        .stderr_limit = 64 * 1024,
+        .pgid_out = &active_pgid,
+        .wait_for_group = true,
+        .exec_error = true,
     }) catch |err| {
+        if (receivedSignal()) |sig| {
+            if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
+            return reRaiseSignal(sig);
+        }
         fail("cannot run {s}: {s}", .{ update_cmd, @errorName(err) });
         return 127;
     };
-    if (!ran.term.success()) {
+    if (receivedSignal()) |sig| {
+        if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
+        return reRaiseSignal(sig);
+    }
+    const raw_code = ran.term.code();
+    if (raw_code != 0) {
         const err_text = std.mem.trim(u8, ran.stderr, " \t\r\n");
         if (err_text.len > 0) std.debug.print("{s}\n", .{err_text});
-        const code: u8 = switch (ran.term) {
-            .exited => |exited| if (exited == 0) 1 else exited,
-            else => 1,
-        };
+        const code: u8 = @intCast(@min(raw_code, 255));
         fail("updating the Lmod cache failed for {s} using MODULEPATH: {s}", .{ target.archdir, target.modulepath });
         return code;
     }
@@ -486,7 +598,7 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
 }
 
 const InventoryError = error{InvalidInventory} || std.mem.Allocator.Error;
-const VerifyInventoryError = error{ModuleNotFound} || InventoryError || std.process.RunError;
+const VerifyInventoryError = error{ ModuleNotFound, Canceled } || InventoryError || common.proc.Error;
 
 fn inventoryLess(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.lessThan(u8, left, right);
@@ -573,12 +685,24 @@ fn readInventory(
     } else {
         _ = child_env.swapRemove("LMOD_IGNORE_CACHE");
     }
-    const ran = try std.process.run(a, io, .{
-        .argv = &.{ "bash", "--noprofile", "--norc", "-c", avail_script },
-        .environ_map = &child_env,
-        .stdout_limit = .limited(8 * 1024 * 1024),
-        .stderr_limit = .limited(8 * 1024 * 1024),
-    });
+    _ = io;
+    if (receivedSignal() != null) return error.Canceled;
+    const bash = (try common.proc.resolveExecutable(a, "bash", child_env.get("PATH"))) orelse return error.ModuleNotFound;
+    defer a.free(bash);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const envp = try envpOf(arena.allocator(), &child_env);
+    const ran = common.proc.run(arena.allocator(), bash, &.{ bash, "--noprofile", "--norc", "-c", avail_script }, envp, .{
+        .stdout_limit = 8 * 1024 * 1024,
+        .stderr_limit = 8 * 1024 * 1024,
+        .pgid_out = &active_pgid,
+        .wait_for_group = true,
+        .exec_error = true,
+    }) catch |err| {
+        if (receivedSignal() != null) return error.Canceled;
+        return err;
+    };
+    if (receivedSignal() != null) return error.Canceled;
     switch (ran.term) {
         .exited => |code| if (code == 127) return error.ModuleNotFound else if (code != 0) return error.InvalidInventory,
         else => return error.InvalidInventory,
@@ -652,6 +776,7 @@ fn installVerified(
         return 1;
     };
     const cached = readInventory(io, a, env, rc_path, opts.modulepath, false) catch |err| switch (err) {
+        error.Canceled => return 130,
         error.ModuleNotFound => {
             fail("module command not found; the cache was not changed", .{});
             return 127;
@@ -662,6 +787,7 @@ fn installVerified(
         },
     };
     const uncached = readInventory(io, a, env, rc_path, opts.modulepath, true) catch |err| switch (err) {
+        error.Canceled => return 130,
         error.ModuleNotFound => {
             fail("module command not found; the cache was not changed", .{});
             return 127;
@@ -675,6 +801,7 @@ fn installVerified(
         fail("candidate and uncached module inventories differ; the cache was not changed", .{});
         return 1;
     }
+    if (receivedSignal() != null) return 130;
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
     common.atomic.atomicWrite(a, cache_path, candidate, .{ .mode = 0o644 }, &why) catch |err| {
@@ -688,12 +815,18 @@ fn installVerified(
 /// A spider that cannot start, exits non-zero, or writes nothing leaves
 /// both files as they were. Returns the process exit status.
 pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map, opts: Options) u8 {
+    active_env = env;
+    defer active_env = null;
+    var guard = CacheGuard.hold();
+    defer guard.release();
     if (opts.prefix.len != 0) {
         if (opts.modulepath.len != 0 or opts.cache_dir.len != 0 or opts.timestamp.len != 0) {
             fail("lmod-cache takes either --prefix or --modulepath, --cache-dir and --timestamp", .{});
             return 2;
         }
-        return runPrefix(io, a, opts);
+        const code = runPrefix(io, a, opts);
+        if (guard.received()) |sig| return stopSignal(&guard, sig);
+        return code;
     }
     if (opts.dry_run) {
         fail("--dry-run applies only with --prefix", .{});
@@ -726,21 +859,28 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     }
     const spider = if (opts.spider.len == 0) "spider" else opts.spider;
     const argv = spiderArgv(a, spider, dirs) catch return 1;
-    const ran = std.process.run(a, io, .{
-        .argv = argv,
-        .stdout_limit = .limited(64 * 1024 * 1024),
-        .stderr_limit = .limited(64 * 1024),
+    const spider_exe = (common.proc.resolveExecutable(a, spider, env.get("PATH")) catch return 1) orelse {
+        fail("cannot run {s}: NotFound. Install Lmod and put spider on PATH, as https://lmod.readthedocs.io/en/latest/030_installing.html describes, or pass --spider with its path", .{spider});
+        return 127;
+    };
+    const envp = envpOf(a, env) catch return 1;
+    const ran = common.proc.run(a, spider_exe, argv, envp, .{
+        .stdout_limit = 64 * 1024 * 1024,
+        .stderr_limit = 64 * 1024,
+        .pgid_out = &active_pgid,
+        .wait_for_group = true,
+        .exec_error = true,
     }) catch |err| {
+        if (guard.received()) |sig| return stopSignal(&guard, sig);
         fail("cannot run {s}: {s}. Install Lmod and put spider on PATH, as https://lmod.readthedocs.io/en/latest/030_installing.html describes, or pass --spider with its path", .{ spider, @errorName(err) });
         return 127;
     };
-    if (!ran.term.success()) {
+    if (guard.received()) |sig| return stopSignal(&guard, sig);
+    const raw_code = ran.term.code();
+    if (raw_code != 0) {
         const err_text = std.mem.trim(u8, ran.stderr, " \t\r\n");
         if (err_text.len > 0) std.debug.print("{s}\n", .{err_text});
-        const code: u8 = switch (ran.term) {
-            .exited => |exited| if (exited == 0) 1 else exited,
-            else => 1,
-        };
+        const code: u8 = @intCast(@min(raw_code, 255));
         fail("{s} exited {d}; the cache was not changed", .{ spider, code });
         return code;
     }
@@ -780,6 +920,10 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     var cache_written = false;
     if (opts.verify) {
         const code = installVerified(io, a, env, opts, cache_path, ran.stdout);
+        if (guard.received()) |sig| {
+            cleanup(a, first_missing, cache_path, prev_cache, false);
+            return stopSignal(&guard, sig);
+        }
         if (code != 0) {
             if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
             return code;
