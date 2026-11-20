@@ -4387,7 +4387,9 @@ fn nodeTypes(s: config.Settings) []const config.NodeType {
 }
 
 fn sbatchValue(a: Allocator, v: []const u8) []const u8 {
-    if (std.mem.indexOfAny(u8, v, " \t\n\r\"\\") == null) return v;
+    if (std.mem.indexOfAny(u8, v, "\n\r") != null)
+        die("#SBATCH directive value {s} has a newline; #SBATCH directives are single lines", .{qSingleLine(a, v)});
+    if (std.mem.indexOfAny(u8, v, " \t\"\\") == null) return v;
     var out: std.ArrayList(u8) = .empty;
     out.append(a, '"') catch oom();
     for (v) |ch| switch (ch) {
@@ -4429,6 +4431,10 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         }
     }
     const p = place(c, s);
+    if (std.mem.indexOfAny(u8, p.prefix, "\n\r") != null)
+        die("installation prefix {s} has a newline; #SBATCH directives are single lines", .{qSingleLine(a, p.prefix)});
+    if (std.mem.indexOfAny(u8, c.cwd, "\n\r") != null)
+        die("working directory {s} has a newline; #SBATCH directives are single lines", .{qSingleLine(a, c.cwd)});
     const sbatch = (proc.which(a, "sbatch", c.env.get("PATH") orelse "") catch null) orelse
         if (o.print) "sbatch" else die("sbatch is not on PATH", .{});
     const command = jobCommand(c, s, g, p, args);
