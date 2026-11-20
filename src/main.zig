@@ -3138,6 +3138,7 @@ fn initDefinesModule(c: Ctx, envp: proc.Envp, file: []const u8) bool {
 }
 
 const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
+    \\trap 'trap - INT; kill -s INT "$$"' INT
     \\stack=$1 extend=$2 install_var=$3 prefix=$4 mode=$5
     \\shift 5
     \\keep=(WORKING_DIR TMPDIR TMP TEMP EASYBUILD_BUILDPATH EASYBUILD_TMPDIR XDG_CACHE_HOME CARGO_HOME EASYBUILD_SOURCEPATH EASYBUILD_TMP_LOGDIR)
@@ -3226,6 +3227,7 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\# sticky bit for a user one, 002 and the setgid bit for a project.
     \\# eb replaces this shell, so the program eb-local waits for, and passes
     \\# a signal on to, is EasyBuild, which writes the logs it then cleans.
+    \\trap - INT
     \\exec eb "$@"
 ;
 

@@ -162,6 +162,7 @@ pub fn initPath(a: Allocator, env: *const std.process.Environ.Map) Allocator.Err
 /// the install elsewhere.
 pub const script =
     \\set -eo pipefail
+    \\trap 'trap - INT; kill -s INT "$$"' INT
     \\unset EB_LOCAL_EESSI_EXTEND || true
     \\umask_bits=$1
     \\mode=$2
@@ -271,6 +272,7 @@ pub const script =
     \\  echo "  The install variable did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. ${see}" >&2
     \\  exit 2
     \\fi
+    \\trap - INT
     \\exec eb "$@"
 ;
 
