@@ -676,21 +676,40 @@ fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
 fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
     const a = c.a;
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
-    const script = str(a, "exec 3>&1 1>&2\n{s}\nenv -0 >&3\n", .{lines});
-    const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script }, c.envp, .{
-        .stdout_limit = 8 << 20,
+    const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
+    const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
+    const dir = storage.makeWorkspace(a, base) catch |e| {
+        warn("could not create a temporary directory in {s} for {s}: {s}", .{ base, kind, @errorName(e) });
+        return null;
+    };
+    defer storage.removeTree(a, dir) catch {};
+    const out_path = std.fs.path.join(a, &.{ dir, "env0" }) catch oom();
+    const script = str(a, "_eb_local_env0=$1\nshift\nexec 1>&2\n{s}\nenv -0 >\"$_eb_local_env0\"\n", .{lines});
+    const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script, "eb-local", out_path }, c.envp, .{
+        .stdout_limit = 4096,
         .stderr_limit = 1 << 20,
         .timeout_ms = 300_000,
+        .new_session = true,
+        .end_with_leader = true,
     }) catch |e| {
         warn("could not run the {s} lines in bash: {s}", .{ kind, @errorName(e) });
         return null;
     };
+    defer r.deinit(a);
     if (r.stderr.len > 0) cli.put(2, r.stderr);
     if (r.term.code() != 0) {
         warn("the {s} lines failed in bash (status {d}); nothing is written", .{ kind, r.term.code() });
         return null;
     }
-    return r.stdout;
+    const opened = fsx.openRegular(fsx.cwd, out_path, false) catch |e| {
+        warn("could not read captured {s} environment: {s}", .{ kind, @errorName(e) });
+        return null;
+    };
+    defer sys.close(opened.fd);
+    return fsx.readAll(a, opened.fd, 8 << 20) catch |e| {
+        warn("could not read captured {s} environment: {s}", .{ kind, @errorName(e) });
+        return null;
+    };
 }
 
 /// The value of `name` in the output of `env -0`, or "" when it is not set.
@@ -701,6 +720,68 @@ fn env0Value(env0: []const u8, name: []const u8) []const u8 {
         if (std.mem.eql(u8, entry[0..eq], name)) return entry[eq + 1 ..];
     }
     return "";
+}
+
+fn testSelfFdCount() !usize {
+    const dir = try sys.openat(linux.AT.FDCWD, "/proc/self/fd", .{ .DIRECTORY = true }, 0);
+    defer sys.close(dir);
+    var count: usize = 0;
+    var dents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = linux.getdents64(dir, &dents, dents.len);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
+        var pos: usize = 0;
+        while (pos < n) {
+            const d: *align(1) const linux.dirent64 = @ptrCast(dents[pos..].ptr);
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(dents[pos + @offsetOf(linux.dirent64, "name") ..].ptr)));
+            pos += d.reclen;
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+        }
+    }
+    return count - 1;
+}
+
+test "runLines cleans temporary directory and descriptors on failure and success" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const scratch = try std.fmt.allocPrint(a, "{s}/.zig-cache/runlines-{d}", .{ cwd, linux.getpid() });
+    try common.atomic.makedirs(scratch);
+    defer storage.removeTree(a, scratch) catch {};
+
+    var map: std.process.Environ.Map = .init(a);
+    try map.put("PATH", "/usr/bin:/bin");
+    try map.put("TMPDIR", scratch);
+    const ctx: Ctx = .{
+        .a = a,
+        .io = std.testing.io,
+        .cwd = cwd,
+        .env = &map,
+        .envp = envpOf(a, &map),
+    };
+
+    const before = try testSelfFdCount();
+    const failed_res = blk: {
+        const saved_rc = linux.fcntl(2, linux.F.DUPFD_CLOEXEC, @as(usize, 3));
+        if (linux.errno(saved_rc) != .SUCCESS) return error.Unexpected;
+        const saved_err: sys.fd_t = @intCast(saved_rc);
+        defer sys.close(saved_err);
+        const null_fd = try sys.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+        defer sys.close(null_fd);
+        _ = linux.dup2(null_fd, 2);
+        defer _ = linux.dup2(saved_err, 2);
+        break :blk runLines(ctx, "env", "exit 7");
+    };
+    try std.testing.expect(failed_res == null);
+    try std.testing.expectEqual(before, try testSelfFdCount());
+
+    const ok = runLines(ctx, "env", "export DEMO_KEY=ok") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ok", env0Value(ok, "DEMO_KEY"));
+    try std.testing.expectEqual(before, try testSelfFdCount());
 }
 
 fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
