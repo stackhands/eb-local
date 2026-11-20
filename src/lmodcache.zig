@@ -67,6 +67,122 @@ pub fn olderThan(cache: std.Io.Timestamp) std.Io.Timestamp {
     return cache.subDuration(.{ .nanoseconds = std.time.ns_per_s });
 }
 
+fn olderTimespec(cache_mtime: linux.timespec) linux.timespec {
+    return .{ .sec = cache_mtime.sec - 1, .nsec = cache_mtime.nsec };
+}
+
+fn writeTimestamp(stamp_path: []const u8, cache_mtime: linux.timespec) bool {
+    const existing: ?fsx.Stat = fsx.statAt(fsx.cwd, stamp_path, false) catch |err| switch (err) {
+        error.NotFound => null,
+        error.SymLink => {
+            fail("cannot write {s}: symlink is not followed", .{stamp_path});
+            return false;
+        },
+        else => {
+            fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
+            return false;
+        },
+    };
+    if (existing) |st| {
+        if (st.isLink()) {
+            fail("cannot write {s}: symlink is not followed", .{stamp_path});
+            return false;
+        }
+        if (!st.isReg()) {
+            fail("cannot write {s}: {s}", .{ stamp_path, if (st.isDir()) sys.describe(error.IsDir) else sys.describe(error.NotRegularFile) });
+            return false;
+        }
+    }
+    const parent = std.fs.path.dirname(stamp_path) orelse "/";
+    const base = std.fs.path.basename(stamp_path);
+    const parent_fd = fsx.openDir(fsx.cwd, parent, true) catch |err| {
+        fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
+        return false;
+    };
+    defer sys.close(parent_fd);
+
+    const older = olderTimespec(cache_mtime);
+    const times: [2]linux.timespec = .{ older, older };
+    const mode: u32 = if (existing) |st| st.perm() else 0o644;
+
+    var rnd: [6]u8 = undefined;
+    _ = sys.call(linux.getrandom, .{ &rnd, rnd.len, 0 }) catch {
+        fail("cannot write {s}: random failure", .{stamp_path});
+        return false;
+    };
+    var tmp_buf: [sys.path_max]u8 = undefined;
+    const tmp_name = std.fmt.bufPrint(&tmp_buf, ".{s}.{d}.{x}.tmp", .{
+        base,
+        linux.getpid(),
+        std.mem.readInt(u48, &rnd, .little),
+    }) catch {
+        fail("cannot write {s}: NameTooLong", .{stamp_path});
+        return false;
+    };
+
+    if (sys.openat(parent_fd, tmp_name, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+    }, mode)) |tmp_fd| {
+        if (existing != null) sys.fchmod(tmp_fd, mode) catch {};
+        if (sys.call(linux.utimensat, .{ tmp_fd, @as(?[*:0]const u8, null), &times, @as(u32, 0) })) |_| {} else |err| {
+            sys.close(tmp_fd);
+            sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+            fail("cannot set the time of {s}: {s}", .{ stamp_path, @errorName(err) });
+            return false;
+        }
+        sys.fsync(tmp_fd) catch |err| {
+            sys.close(tmp_fd);
+            sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+            fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
+            return false;
+        };
+        sys.close(tmp_fd);
+        if (fsx.statAt(parent_fd, base, false)) |cur| {
+            if (cur.isLink()) {
+                sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+                fail("cannot write {s}: symlink is not followed", .{stamp_path});
+                return false;
+            }
+            if (!cur.isReg()) {
+                sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+                fail("cannot write {s}: {s}", .{ stamp_path, sys.describe(error.IsDir) });
+                return false;
+            }
+        } else |err| if (err != error.NotFound) {
+            sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+            fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
+            return false;
+        }
+        sys.renameat(parent_fd, tmp_name, parent_fd, base) catch |err| {
+            sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+            fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
+            return false;
+        };
+        sys.fsync(parent_fd) catch {};
+        return true;
+    } else |open_err| {
+        if (existing != null and open_err == error.AccessDenied) {
+            const fd = sys.openat(parent_fd, base, .{ .ACCMODE = .RDWR, .NOFOLLOW = true }, 0) catch |err| {
+                const detail = if (err == error.SymLink) "symlink is not followed" else @errorName(err);
+                fail("cannot write {s}: {s}", .{ stamp_path, detail });
+                return false;
+            };
+            defer sys.close(fd);
+            if (existing.?.size > 0) _ = linux.ftruncate(fd, 0);
+            _ = sys.call(linux.utimensat, .{ fd, @as(?[*:0]const u8, null), &times, @as(u32, 0) }) catch |err| {
+                fail("cannot set the time of {s}: {s}", .{ stamp_path, @errorName(err) });
+                return false;
+            };
+            return true;
+        }
+        fail("cannot write {s}: {s}", .{ stamp_path, @errorName(open_err) });
+        return false;
+    }
+}
+
 fn fail(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(tool ++ ": " ++ fmt ++ "\n", args);
 }
@@ -518,16 +634,8 @@ fn installVerified(
         fail("cannot write {s}: {s}", .{ candidate_path, @errorName(err) });
         return 1;
     };
-    const stat = cwd.statFile(io, candidate_path, .{}) catch return 1;
-    const stamp = std.Io.Dir.createFileAbsolute(io, candidate_stamp, .{}) catch return 1;
-    stamp.setTimestamps(io, .{
-        .access_timestamp = .{ .new = olderThan(stat.mtime) },
-        .modify_timestamp = .{ .new = olderThan(stat.mtime) },
-    }) catch {
-        stamp.close(io);
-        return 1;
-    };
-    stamp.close(io);
+    const stat = fsx.statAt(fsx.cwd, candidate_path, false) catch return 1;
+    if (!writeTimestamp(candidate_stamp, stat.mtime)) return 1;
     const quoted_dir = luaQuote(a, tmp_dir) catch {
         fail("cannot write a temporary LMOD_RC; the cache was not changed", .{});
         return 1;
@@ -687,38 +795,15 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         };
         cache_written = true;
     }
-    const stat = cwd.statFile(io, cache_path, .{}) catch |err| {
+    const stat = fsx.statAt(fsx.cwd, cache_path, false) catch |err| {
         fail("cannot stat {s}: {s}", .{ cache_path, @errorName(err) });
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
-    var zb: [sys.path_max:0]u8 = undefined;
-    const zp = sys.z(&zb, opts.timestamp) catch |err| {
-        fail("cannot write {s}: {s}", .{ opts.timestamp, @errorName(err) });
+    if (!writeTimestamp(opts.timestamp, stat.mtime)) {
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
-    };
-    const stamp_fd: sys.fd_t = @intCast(sys.call(linux.openat, .{
-        linux.AT.FDCWD,
-        zp.ptr,
-        linux.O{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true },
-        @as(linux.mode_t, 0o644),
-    }) catch |err| {
-        const detail = if (err == error.SymLink or err == error.SymLinkLoop) "symlink is not followed" else @errorName(err);
-        fail("cannot write {s}: {s}", .{ opts.timestamp, detail });
-        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
-        return 1;
-    });
-    const stamp: std.Io.File = .{ .handle = stamp_fd, .flags = .{ .nonblocking = false } };
-    defer stamp.close(io);
-    stamp.setTimestamps(io, .{
-        .access_timestamp = .{ .new = olderThan(stat.mtime) },
-        .modify_timestamp = .{ .new = olderThan(stat.mtime) },
-    }) catch |err| {
-        fail("cannot set the time of {s}: {s}", .{ opts.timestamp, @errorName(err) });
-        cleanup(a, first_missing, cache_path, prev_cache, cache_written);
-        return 1;
-    };
+    }
     var line: std.ArrayList(u8) = .empty;
     line.print(a, "wrote {s}; {s} is older than it\n", .{ cache_path, opts.timestamp }) catch return 1;
     var out = std.Io.File.stdout();
@@ -751,6 +836,9 @@ test "spider is asked for spiderT and each directory" {
 test "the timestamp is one second before the cache" {
     const cache: std.Io.Timestamp = .{ .nanoseconds = 5 * std.time.ns_per_s + 20 };
     try std.testing.expectEqual(@as(i96, 4 * std.time.ns_per_s + 20), olderThan(cache).nanoseconds);
+    const ts = olderTimespec(.{ .sec = 5, .nsec = 20 });
+    try std.testing.expectEqual(@as(i64, 4), ts.sec);
+    try std.testing.expectEqual(@as(i64, 20), ts.nsec);
 }
 
 test "modulepath lists accelerators before the CPU tree" {
