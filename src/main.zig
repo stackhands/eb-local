@@ -1030,11 +1030,16 @@ fn writeLock(c: Ctx, s: config.Settings, lines: []const u8) u8 {
 
 /// A CPU target as EESSI names one: path parts of letters, digits, `_`, `.` and `-`.
 fn validTarget(text: []const u8) bool {
-    if (text.len == 0) return false;
-    for (text) |ch| {
-        if (!(std.ascii.isAlphanumeric(ch) or ch == '/' or ch == '_' or ch == '.' or ch == '-')) return false;
+    var parts = std.mem.splitScalar(u8, text, '/');
+    var any = false;
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        for (part) |ch| {
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '-')) return false;
+        }
+        any = true;
     }
-    return true;
+    return any;
 }
 
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
