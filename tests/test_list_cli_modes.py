@@ -42,9 +42,11 @@ class ListCliModes(unittest.TestCase):
         self.assertEqual(both.returncode, 2, both.stdout + both.stderr)
         self.assertIn("list takes --missing or --json, not both", both.stderr)
 
-        bad_filter = self.run_list(["bad;name"])
-        self.assertEqual(bad_filter.returncode, 2, bad_filter.stdout + bad_filter.stderr)
-        self.assertIn("is not a module name", bad_filter.stderr)
+        for bad in ("bad;name", "../escape/1.0", "Foo//1.0"):
+            with self.subTest(bad=bad):
+                bad_filter = self.run_list([bad])
+                self.assertEqual(bad_filter.returncode, 2, bad_filter.stdout + bad_filter.stderr)
+                self.assertIn("is not a module name", bad_filter.stderr)
 
     def test_multi_version_trees_disambiguate_column_labels_and_missing_output(self):
         for ver, mod_ver in (("2025.06", "1.0"), ("2026.06", "2.0")):
