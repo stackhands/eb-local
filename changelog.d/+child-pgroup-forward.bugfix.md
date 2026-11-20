@@ -1,0 +1,1 @@
+Forward `SIGINT`, `SIGTERM`, and `SIGHUP` from `Guard.run` to the child process group across `build`, `eb`, `submit`, and `clean`, isolating non-TTY children in a dedicated process group while preserving single-signal terminal `Ctrl-C` delivery.
