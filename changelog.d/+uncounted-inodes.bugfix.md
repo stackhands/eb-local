@@ -1,0 +1,1 @@
+A build, `eb-local eb` and `eb-local doctor` no longer refuse an installation prefix or a workspace on btrfs with `no space left on device (... 0 free inodes)`. btrfs has no inode table and reports zero total and zero free inodes; such a file system is full only when it has no free bytes. `doctor --workspace` says that the file system does not count inodes.

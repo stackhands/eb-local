@@ -504,8 +504,27 @@ test "makeLockedWorkspace locks workspace before publishing" {
 /// Capacity available to an unprivileged caller.
 pub const Capacity = struct {
     bytes: u64,
+    /// Free inodes; meaningful only while `inodes_counted` is true.
     inodes: u64,
+    /// False for a file system with no inode table to run out of. btrfs
+    /// allocates inodes on demand and statfs reports zero total and zero
+    /// free there, which is not a full file system.
+    inodes_counted: bool = true,
+
+    /// Whether nothing more can be written: no free bytes, or no free
+    /// inodes on a file system that counts them.
+    pub fn exhausted(self: Capacity) bool {
+        return self.bytes == 0 or (self.inodes_counted and self.inodes == 0);
+    }
 };
+
+test "a file system that does not count inodes is not full at zero free inodes" {
+    try testing.expect((Capacity{ .bytes = 0, .inodes = 10 }).exhausted());
+    try testing.expect((Capacity{ .bytes = 4096, .inodes = 0 }).exhausted());
+    try testing.expect(!(Capacity{ .bytes = 4096, .inodes = 0, .inodes_counted = false }).exhausted());
+    try testing.expect((Capacity{ .bytes = 0, .inodes = 0, .inodes_counted = false }).exhausted());
+    try testing.expect(!(Capacity{ .bytes = 4096, .inodes = 1 }).exhausted());
+}
 
 const StatFs = extern struct {
     fs_type: i64,
@@ -533,6 +552,7 @@ pub fn capacity(path: []const u8) sys.Error!Capacity {
     return .{
         .bytes = std.math.mul(u64, stat.blocks_available, size) catch std.math.maxInt(u64),
         .inodes = stat.files_free,
+        .inodes_counted = stat.files != 0,
     };
 }
 

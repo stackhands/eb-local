@@ -317,6 +317,20 @@ class ListAndDoctor(StorageFixture):
                 self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
                 self.assertIn(f"FAIL workspace {workspace} has no space left on device", run.stdout)
 
+    def test_doctor_workspace_accepts_a_file_system_that_does_not_count_inodes(self):
+        workspace = self.job / "btrfs-candidate"
+        workspace.mkdir(parents=True)
+        run = self.run_tool(
+            ["doctor", "--workspace", str(workspace)],
+            EB_LOCAL_TEST_WORKSPACE_CAPACITY="100:0:uncounted",
+            EB_LOCAL_TEST_WORKSPACE_EXEC="ok",
+        )
+        self.assertNotIn("no space left on device", run.stdout)
+        self.assertIn(
+            f"info workspace {workspace}: 100 free bytes; this file system does not count inodes\n",
+            run.stdout,
+        )
+
     def test_doctor_workspace_reports_real_noexec_mount_execution_failure(self):
         import shlex
         import tempfile

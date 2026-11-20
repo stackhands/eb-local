@@ -3450,15 +3450,23 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     return 0;
 }
 
+/// A test capacity, `BYTES:INODES`, or `BYTES:INODES:uncounted` for a file
+/// system that reports no inode table.
+fn capacityOverride(value: []const u8) ?storage.Capacity {
+    const suffix = ":uncounted";
+    const counted = !std.mem.endsWith(u8, value, suffix);
+    const pair = if (counted) value else value[0 .. value.len - suffix.len];
+    const split = std.mem.indexOfScalar(u8, pair, ':') orelse return null;
+    return .{
+        .bytes = std.fmt.parseInt(u64, pair[0..split], 10) catch return null,
+        .inodes = std.fmt.parseInt(u64, pair[split + 1 ..], 10) catch return null,
+        .inodes_counted = counted,
+    };
+}
+
 fn prefixCapacityOverride(c: Ctx) ?storage.Capacity {
     if (comptime build_options.test_ops) {
-        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| {
-            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
-            return .{
-                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
-                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
-            };
-        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| return capacityOverride(value);
     }
     return null;
 }
@@ -3505,7 +3513,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch |e| die("cannot resolve installation prefix {s} ({s})", .{ p.prefix, storage.describeError(e) })) catch oom();
     }
     if (prefixCapacity(c, p.prefix)) |cap| {
-        if (cap.bytes == 0 or cap.inodes == 0)
+        if (cap.exhausted())
             die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
     const d = durableDirs(c, p.prefix, "nothing was built");
@@ -4040,13 +4048,7 @@ const DoctorOpts = struct {
 
 fn workspaceCapacityOverride(c: Ctx) ?storage.Capacity {
     if (comptime build_options.test_ops) {
-        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_CAPACITY"))) |value| {
-            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
-            return .{
-                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
-                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
-            };
-        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_CAPACITY"))) |value| return capacityOverride(value);
     }
     return null;
 }
@@ -4119,10 +4121,12 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
         break :blk null;
     };
     if (available) |free| {
-        if (free.bytes == 0 or free.inodes == 0) {
+        if (free.exhausted()) {
             note(a, out, json_lines, "FAIL", "workspace {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ path, free.bytes, free.inodes });
             failed = true;
-        } else note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+        } else if (free.inodes_counted) {
+            note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+        } else note(a, out, json_lines, "info", "workspace {s}: {d} free bytes; this file system does not count inodes", .{ path, free.bytes });
     }
     if (storage.hasMountOption(mount.options, "noexec")) {
         note(a, out, json_lines, "FAIL", "workspace {s}: mount {s} has noexec", .{ path, mount.target });
@@ -4416,7 +4420,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
             note(a, &out, lines_ptr, "FAIL", "you cannot write to {s} ({s})", .{ p.prefix, sys.describeErrno(ae) });
             failed = true;
         } else if (prefixCapacity(c, p.prefix)) |cap| {
-            if (cap.bytes == 0 or cap.inodes == 0) {
+            if (cap.exhausted()) {
                 note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
                 failed = true;
             }
@@ -4447,7 +4451,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
                 note(a, &out, lines_ptr, "FAIL", "installation prefix {s} cannot be created under {s} ({s})", .{ p.prefix, ancestor, sys.describeErrno(ae) });
                 failed = true;
             } else if (prefixCapacity(c, ancestor)) |cap| {
-                if (cap.bytes == 0 or cap.inodes == 0) {
+                if (cap.exhausted()) {
                     note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
                     failed = true;
                 } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
