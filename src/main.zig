@@ -2470,6 +2470,87 @@ var waited_pid = std.atomic.Value(linux.pid_t).init(0);
 var waited_pgroup = std.atomic.Value(bool).init(false);
 var first_signal = std.atomic.Value(u32).init(0);
 
+/// Grace deadline in milliseconds for cooperative descendants in a signalled
+/// non-TTY process group to flush logs and exit on `SIGCHLD` before `SIGKILL`.
+/// Half a second accommodates Python and Lua signal teardown without delaying
+/// interactive cancellation past sub-second responsiveness when a descendant
+/// ignores `SIGINT`, `SIGTERM`, or `SIGHUP`.
+const group_settle_grace_ms: i64 = 500;
+
+fn monotonicMs() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+/// Reap any exited children in process group `pgid` without blocking; return
+/// whether live reparented children of this process remain in `pgid`.
+fn reapGroupState(pgid: linux.pid_t) bool {
+    if (pgid <= 0) return false;
+    var raw: i32 = 0;
+    while (true) {
+        const rc = linux.wait4(-pgid, &raw, linux.W.NOHANG, null);
+        switch (linux.errno(rc)) {
+            .SUCCESS => if (rc == 0) return true,
+            .INTR => continue,
+            else => return false,
+        }
+    }
+}
+
+fn drainSignalFd(sfd: sys.fd_t) void {
+    var buf: [8 * @sizeOf(linux.signalfd_siginfo)]u8 align(@alignOf(linux.signalfd_siginfo)) = undefined;
+    while (true) {
+        const rc = linux.read(sfd, &buf, buf.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => if (rc == 0) return,
+            .INTR => continue,
+            else => return,
+        }
+    }
+}
+
+/// Wait on `SIGCHLD` via `signalfd` and `poll` up to `group_settle_grace_ms`
+/// for reparented descendants in `pgid` to exit, then escalate to `SIGKILL`
+/// (`proc.stopGroup`) and reap remaining zombies.
+fn settleGroup(pgid: linux.pid_t) void {
+    if (pgid <= 0) return;
+    _ = reapGroupState(pgid);
+    if (!proc.groupAlive(pgid)) return;
+
+    var chld = linux.sigemptyset();
+    linux.sigaddset(&chld, .CHLD);
+    var old_mask: linux.sigset_t = undefined;
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &chld, &old_mask);
+    defer _ = linux.sigprocmask(linux.SIG.SETMASK, &old_mask, null);
+
+    const sfd_rc = linux.signalfd(-1, &chld, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
+    const sfd: ?sys.fd_t = if (linux.errno(sfd_rc) == .SUCCESS) @intCast(sfd_rc) else null;
+    defer if (sfd) |fd| sys.close(fd);
+
+    const deadline = monotonicMs() + group_settle_grace_ms;
+    while (true) {
+        if (sfd) |fd| drainSignalFd(fd);
+        const has_children = reapGroupState(pgid);
+        if (!proc.groupAlive(pgid)) return;
+        const rem = deadline - monotonicMs();
+        if (rem <= 0) break;
+        if (has_children and sfd != null) {
+            var pfd = [1]linux.pollfd{.{ .fd = sfd.?, .events = linux.POLL.IN, .revents = 0 }};
+            _ = linux.poll(&pfd, 1, @intCast(rem));
+        } else {
+            var empty: [1]linux.pollfd = undefined;
+            _ = linux.poll(&empty, 0, @intCast(@min(rem, 10)));
+        }
+    }
+
+    if (proc.groupAlive(pgid)) {
+        _ = linux.kill(-pgid, .CONT);
+        proc.stopGroup(pgid);
+    }
+    _ = reapGroupState(pgid);
+}
+
 fn selfPgrp() linux.pid_t {
     const rc: isize = @bitCast(linux.getpgid(0));
     return if (rc > 0) @intCast(rc) else 0;
@@ -2557,6 +2638,14 @@ const Guard = struct {
         }
         const self_pgrp = selfPgrp();
         const own_group = !isForegroundTty(self_pgrp);
+        var prev_subreaper: c_int = 0;
+        const set_subreaper = own_group and
+            linux.errno(linux.prctl(@backingInt(linux.PR.GET_CHILD_SUBREAPER), @intFromPtr(&prev_subreaper), 0, 0, 0)) == .SUCCESS and
+            prev_subreaper == 0 and
+            linux.errno(linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0)) == .SUCCESS;
+        defer if (set_subreaper) {
+            _ = linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 0, 0, 0, 0);
+        };
         const pid: isize = @bitCast(linux.fork());
         if (pid == 0) {
             if (own_group) _ = linux.setpgid(0, 0);
@@ -2596,6 +2685,13 @@ const Guard = struct {
             }
         }
         const status: u32 = @bitCast(raw);
+        if (own_group) {
+            if (g.received() != null or !linux.W.IFEXITED(status)) {
+                settleGroup(@intCast(pid));
+            } else {
+                _ = reapGroupState(@intCast(pid));
+            }
+        }
         if (linux.W.IFEXITED(status)) return .{ .exit = linux.W.EXITSTATUS(status) };
         if (linux.W.IFSIGNALED(status)) return .{ .signal = linux.W.TERMSIG(status) };
         return .{ .exit = 1 };
@@ -5904,6 +6000,85 @@ test "Guard.run does not launch child when a guarded signal already arrived" {
         }
         try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, marker, false));
     }
+}
+
+test "settleGroup wakes on SIGCHLD without leaking descriptors" {
+    const fds_before = try testSelfFdCount();
+    var prev_subreaper: c_int = 0;
+    try std.testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.prctl(@backingInt(linux.PR.GET_CHILD_SUBREAPER), @intFromPtr(&prev_subreaper), 0, 0, 0)),
+    );
+    if (prev_subreaper == 0) {
+        try std.testing.expectEqual(
+            linux.E.SUCCESS,
+            linux.errno(linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0)),
+        );
+    }
+    defer if (prev_subreaper == 0) {
+        _ = linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 0, 0, 0, 0);
+    };
+
+    var sync_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&sync_fds, .{ .CLOEXEC = true })));
+    var gate_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&gate_fds, .{ .CLOEXEC = true })));
+    const pid: isize = @bitCast(linux.fork());
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = linux.setpgid(0, 0);
+        const grand: isize = @bitCast(linux.fork());
+        if (grand == 0) {
+            sys.close(sync_fds[0]);
+            sys.close(sync_fds[1]);
+            sys.close(gate_fds[1]);
+            var pfd = [1]linux.pollfd{.{ .fd = gate_fds[0], .events = linux.POLL.IN, .revents = 0 }};
+            _ = linux.poll(&pfd, 1, 2000);
+            sys.close(gate_fds[0]);
+            linux.exit_group(0);
+        }
+        sys.close(gate_fds[0]);
+        sys.close(gate_fds[1]);
+        sys.close(sync_fds[0]);
+        _ = linux.write(sync_fds[1], "1", 1);
+        sys.close(sync_fds[1]);
+        linux.exit_group(15);
+    }
+    _ = linux.setpgid(@intCast(pid), @intCast(pid));
+    sys.close(gate_fds[0]);
+    sys.close(sync_fds[1]);
+    var one: [1]u8 = undefined;
+    _ = linux.read(sync_fds[0], &one, 1);
+    sys.close(sync_fds[0]);
+
+    var raw: i32 = 0;
+    while (linux.errno(linux.wait4(@intCast(pid), &raw, 0, null)) == .INTR) {}
+
+    const ReleaseCtx = struct {
+        gate_w: sys.fd_t,
+        baseline_fds: usize,
+        fn run(ctx: @This()) void {
+            const deadline = monotonicMs() + 250;
+            while (monotonicMs() < deadline) {
+                if ((testSelfFdCount() catch 0) > ctx.baseline_fds + 1) break;
+                var empty: [1]linux.pollfd = undefined;
+                _ = linux.poll(&empty, 0, 1);
+            }
+            sys.close(ctx.gate_w);
+        }
+    };
+    const releaser = try std.Thread.spawn(.{}, ReleaseCtx.run, .{ReleaseCtx{
+        .gate_w = gate_fds[1],
+        .baseline_fds = fds_before,
+    }});
+
+    const t0 = monotonicMs();
+    settleGroup(@intCast(pid));
+    const elapsed = monotonicMs() - t0;
+    releaser.join();
+    try std.testing.expect(!proc.groupAlive(@intCast(pid)));
+    try std.testing.expect(elapsed < 350);
+    try std.testing.expectEqual(fds_before, try testSelfFdCount());
 }
 
 test "shell quoting reads back as the same word" {

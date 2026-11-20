@@ -1,0 +1,1 @@
+Wait on reparented child-group `SIGCHLD` events via `PR_SET_CHILD_SUBREAPER` and `signalfd` with a 500 ms deadline before escalating to `SIGKILL` in `Guard.run`, ensuring descendants flush logs and exit before secret redaction and lock release.
