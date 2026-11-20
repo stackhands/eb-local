@@ -279,6 +279,31 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"FAIL workspace {workspace}: mount {workspace} has noexec\n", run.stdout)
         self.assertEqual(list(workspace.iterdir()), [])
 
+    def test_doctor_workspace_under_a_linked_shared_root_is_shared(self):
+        real = self.root / "gpfs" / "scratch"
+        workspace = real / "candidate"
+        workspace.mkdir(parents=True)
+        link = self.root / "scratch-link"
+        link.symlink_to(real)
+        site = self.root / "shared-link.toml"
+        site.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "%u.%j"\n'
+            'node_local_fstype = "xfs"\n'
+            f'shared_scratch = ["{link}"]\n',
+            encoding="utf-8",
+        )
+        site.chmod(0o644)
+        run = self.run_tool(
+            ["--config", str(site), "doctor", "--workspace", str(workspace)],
+            EB_LOCAL_TEST_WORKSPACE_CAPACITY="100:10",
+            EB_LOCAL_TEST_WORKSPACE_EXEC="ok",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(
+            f"info workspace {workspace}: ext4 file system, classified shared\n",
+            run.stdout,
+        )
+
     def test_doctor_workspace_fails_when_bytes_or_inodes_are_zero(self):
         workspace = self.job / "full-candidate"
         workspace.mkdir(parents=True)

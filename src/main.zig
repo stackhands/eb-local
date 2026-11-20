@@ -3831,7 +3831,12 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
             failed = true;
         }
     }
-    const class = storage.workspaceClass(path, mount.fstype, s.shared_scratch.value);
+    // The workspace path is canonical. A shared root is whatever the site
+    // file wrote, so a link or a dot component has to be resolved before the
+    // comparison or the workspace looks node-local.
+    var shared: std.ArrayList([]const u8) = .empty;
+    for (s.shared_scratch.value) |root| shared.append(a, storage.canonical(a, root, c.cwd) catch oom()) catch oom();
+    const class = storage.workspaceClass(path, mount.fstype, shared.items);
     note(a, out, json_lines, "info", "workspace {s}: {s} file system, classified {s}", .{ path, mount.fstype, class });
     const available: ?storage.Capacity = workspaceCapacityOverride(c) orelse storage.capacity(path) catch |err| blk: {
         note(a, out, json_lines, "FAIL", "workspace {s}: free bytes and inodes cannot be read ({s})", .{ path, @errorName(err) });
