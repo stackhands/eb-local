@@ -652,8 +652,17 @@ fn updateArgv(a: std.mem.Allocator, cmd: []const u8, cache_dir: []const u8, modu
     return argv;
 }
 
+fn writeStdout(bytes: []const u8) bool {
+    sys.writeAll(1, bytes) catch |err| {
+        fail("cannot write the result: {s}", .{sys.describe(err)});
+        return false;
+    };
+    return true;
+}
+
 /// Run Lmod's `update_lmod_system_cache_files` for one target.
 pub fn runUpdate(io: std.Io, a: std.mem.Allocator, update_cmd: []const u8, target: Target) u8 {
+    _ = io;
     const first_missing = firstMissingAncestor(target.cache_dir);
     const argv = updateArgv(a, update_cmd, target.cache_dir, target.modulepath) catch return 1;
     defer {
@@ -697,16 +706,12 @@ pub fn runUpdate(io: std.Io, a: std.mem.Allocator, update_cmd: []const u8, targe
         return code;
     }
     if (std.mem.trim(u8, ran.stdout, " \t\r\n").len > 0) {
-        var out = std.Io.File.stdout();
-        out.writeStreamingAll(io, ran.stdout) catch {};
+        if (!writeStdout(ran.stdout)) return 1;
     }
     var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(a);
     line.print(a, "updated the Lmod cache for {s} using MODULEPATH: {s}\n", .{ target.archdir, target.modulepath }) catch return 1;
-    var out = std.Io.File.stdout();
-    out.writeStreamingAll(io, line.items) catch |err| {
-        fail("cannot write the result: {s}", .{@errorName(err)});
-        return 1;
-    };
+    if (!writeStdout(line.items)) return 1;
     return 0;
 }
 
@@ -749,12 +754,12 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
         return 1;
     }
     if (opts.dry_run) {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(a);
         for (targets) |t| {
-            var line: std.ArrayList(u8) = .empty;
-            line.print(a, "{s}\n  cache-dir {s}\n  modulepath {s}\n", .{ t.archdir, t.cache_dir, t.modulepath }) catch return 1;
-            var out = std.Io.File.stdout();
-            out.writeStreamingAll(io, line.items) catch return 1;
+            out.print(a, "{s}\n  cache-dir {s}\n  modulepath {s}\n", .{ t.archdir, t.cache_dir, t.modulepath }) catch return 1;
         }
+        if (!writeStdout(out.items)) return 1;
         return 0;
     }
     const resolved = blk: {
@@ -1171,12 +1176,9 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         return 1;
     }
     var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(a);
     line.print(a, "wrote {s}; {s} is older than it\n", .{ cache_path, opts.timestamp }) catch return 1;
-    var out = std.Io.File.stdout();
-    out.writeStreamingAll(io, line.items) catch |err| {
-        fail("cannot write the result: {s}", .{@errorName(err)});
-        return 1;
-    };
+    if (!writeStdout(line.items)) return 1;
     return 0;
 }
 
