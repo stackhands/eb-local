@@ -4520,7 +4520,13 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     const stamp = nowSecs();
     var failed = false;
+    const guard: ?Guard = if (o.print) null else Guard.hold();
+    defer if (guard) |*g_ref| g_ref.release();
     for (chosen.items) |t| {
+        if (guard) |*g_ref| if (g_ref.received()) |sig| {
+            g_ref.release();
+            return stop(.{ .signal = sig });
+        };
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
         const chdir_val = sbatchValue(a, c.cwd);
         const script = str(a,
@@ -4546,17 +4552,41 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         defer why.deinit(a);
         common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
             die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
+        if (guard.?.received()) |sig| {
+            sys.unlinkat(fsx.cwd, path, 0) catch {};
+            guard.?.release();
+            return stop(.{ .signal = sig });
+        }
         say("eb-local: {s}:", .{t.name});
-        const run = runAttached(a, argv.items, c.envp);
-        switch (run) {
-            .exit => |code| if (code != 0) {
-                warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
-                failed = true;
+        const ran = guard.?.run(a, argv.items, c.envp);
+        switch (ran) {
+            .exit => |code| {
+                if (code != 0) {
+                    if (guard.?.received()) |sig| {
+                        sys.unlinkat(fsx.cwd, path, 0) catch {};
+                        guard.?.release();
+                        return stop(.{ .signal = sig });
+                    }
+                    warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
+                    failed = true;
+                }
+                if (guard.?.received()) |sig| {
+                    guard.?.release();
+                    return stop(.{ .signal = sig });
+                }
             },
-            .signal => return stop(run),
+            .signal => |sig| {
+                sys.unlinkat(fsx.cwd, path, 0) catch {};
+                guard.?.release();
+                return stop(.{ .signal = guard.?.received() orelse sig });
+            },
         }
     }
     if (o.print) return 0;
+    if (guard.?.received()) |sig| {
+        guard.?.release();
+        return stop(.{ .signal = sig });
+    }
     say("", .{});
     say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
     return if (failed) 1 else 0;
