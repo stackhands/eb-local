@@ -630,14 +630,14 @@ class ListAndDoctor(StorageFixture):
         self.assertNotIn("mirror-token-value", run.stdout + run.stderr)
 
     def without_a_site_file(self, **extra):
-        for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):
-            if Path(installed).exists():
-                self.skipTest(f"{installed} is this host's site file")
         repo = self.root / "repo"
         return self.run_tool(["doctor"], EB_LOCAL_CONFIG="", XDG_CONFIG_HOME=str(self.root / "xdg"),
                              SLURM_JOB_ID="", EESSI_CVMFS_REPO=str(repo), **extra)
 
     def test_doctor_without_a_site_file_judges_eb_local_eb(self):
+        import hostile_fs
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
+            return
         init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
         run = self.without_a_site_file()
         self.assertEqual(run.returncode, 1, run.stdout)

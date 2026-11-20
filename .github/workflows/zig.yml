@@ -1,6 +1,6 @@
 name: zig
-# The Zig build: its unit tests, and the command-line suite of the Bash
-# script run against the -Dtest-ops test artifact, on both architectures.
+# The Zig build: its unit tests, and the full command-line suite run with zero
+# skips against the -Dtest-ops test artifact, on both architectures.
 on: [push, pull_request]
 permissions:
   contents: read
@@ -21,13 +21,55 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.1
+      - name: Install host test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh emacs-nox
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install eb-stack 0.8.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)
+              archive=eb_stack-x86_64-unknown-linux-musl.tar.xz
+              sha256=0df22a1371be00294ab9e0fa50b5966dda4b39a2d9bd77c9c31cff0627208555
+              ;;
+            aarch64)
+              archive=eb_stack-aarch64-unknown-linux-gnu.tar.xz
+              sha256=99c8b76fca2b47d080c35c7e2d4d0379bc791a91d41341212918072e0daaaad8
+              ;;
+            *)
+              echo "unsupported architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          install_dir="${RUNNER_TEMP:-/tmp}/eb-stack-0.8.0"
+          rm -rf "$install_dir"
+          mkdir -p "$install_dir"
+          curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/stackhands/eb-stack/releases/download/v0.8.0/$archive" -o "$install_dir/$archive"
+          printf '%s  %s\n' "$sha256" "$install_dir/$archive" | sha256sum --check -
+          tar -xJf "$install_dir/$archive" -C "$install_dir"
+          rm -f "$install_dir/$archive"
+          bin_dir="$install_dir/${archive%.tar.xz}"
+          "$bin_dir/eb-stack" --version | grep -Fx "eb-stack 0.8.0"
+          echo "$bin_dir" >> "$GITHUB_PATH"
       - run: zig fmt --check src build.zig
       - run: zig build unit --summary all
-      - run: zig build -Dtest-ops=true test --summary all
+      - run: zig build -Dtest-ops=true
+      - name: Run full Python suite with zero skips
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          EB_LOCAL_BIN="$PWD/zig-out/bin/eb-local" python3 -m unittest discover -s tests -v 2>&1 | tee "$log"
+          ! grep -Eq '\.\.\. skipped |skipped=[0-9]+' "$log"
       - name: a release build carries no test seam
         run: |
           zig build --release=safe --prefix out
@@ -38,39 +80,11 @@ jobs:
           ! grep -aq EB_LOCAL_TEST_CVMFS_ERRNO out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_CVMFS_CONFIG out/bin/eb-local
           out/bin/eb-local --version
+      - name: overlay bump and plan run the real eb-stack on the release build
+        run: EB_LOCAL_BIN="$PWD/out/bin/eb-local" python3 -m unittest discover -s tests -p 'test_overlay_real_eb_stack.py' -v
       - name: completion and manpage generation is reproducible
         run: python3 tools/cli_assets.py --check-repro --tool "eb-local::./out/bin/eb-local"
       - name: generate completion and manpage assets
         run: |
           python3 tools/cli_assets.py --out out/share --tool "eb-local::./out/bin/eb-local"
           test -s out/share/man/eb-local.1
-
-  real-eb-stack:
-    # The tests that read EB_STACK_BIN skip without it, and no other job sets
-    # it. This one gives them the released eb-stack.
-    name: overlay against eb-stack 0.8.0
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.12"
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.1
-      - name: Install eb-stack 0.8.0
-        run: |
-          set -euo pipefail
-          archive=eb_stack-x86_64-unknown-linux-musl.tar.xz
-          curl --proto '=https' --tlsv1.2 -fsSLO "https://github.com/stackhands/eb-stack/releases/download/v0.8.0/$archive"
-          printf '%s  %s\n' 0df22a1371be00294ab9e0fa50b5966dda4b39a2d9bd77c9c31cff0627208555 "$archive" | sha256sum --check -
-          tar -xJf "$archive"
-          echo "EB_STACK_BIN=$PWD/eb_stack-x86_64-unknown-linux-musl/eb-stack" >> "$GITHUB_ENV"
-      - name: The binary is the release
-        run: '"$EB_STACK_BIN" --version | grep -Fx "eb-stack 0.8.0"'
-      - run: zig build --release=safe --prefix out
-      - name: overlay bump and plan run the real eb-stack
-        run: EB_LOCAL_BIN="$PWD/out/bin/eb-local" python3 -m unittest discover -s tests -p 'test_overlay_real_eb_stack.py' -v
