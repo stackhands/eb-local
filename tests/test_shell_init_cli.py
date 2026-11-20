@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import unittest
 
+import hostile_fs
 from test_storage import StorageFixture
 
 SOURCE_INIT = Path(__file__).resolve().parents[1] / "src" / "lmod-init.sh"
@@ -88,8 +89,8 @@ module() {{
         self.assert_shell_specific_init(self.host_lmod / "init")
 
     def test_clean_callers_source_their_eessi_initializer(self):
-        if Path("/etc/profile.d/lmod.sh").exists():
-            self.skipTest("the host Lmod profile takes precedence over EESSI's Bash initializer")
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/profile.d/lmod.sh",)):
+            return
         self.assert_shell_specific_init(self.eessi_lmod)
 
 
