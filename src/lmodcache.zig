@@ -1106,13 +1106,15 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = opts.cache_dir;
-        while (probe.len > 1 and !isDir(probe)) {
+        while (probe.len > 1) {
+            if (fsx.statAt(fsx.cwd, probe, false)) |_| break else |_| {}
             first_missing = probe;
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
     common.atomic.makedirs(opts.cache_dir) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.cache_dir, @errorName(err) });
+        if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
         return 1;
     };
     {
