@@ -2,7 +2,7 @@
 """eb-local check: a program's loader, run paths and libraries.
 
 The programs are built here with the host's gcc into fake EESSI trees, so
-the tests skip without gcc and for the Bash 1.x script, which has no check.
+the tests skip without gcc or a directly named Zig test build.
 """
 import json
 import os
