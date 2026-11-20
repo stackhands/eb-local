@@ -258,6 +258,7 @@ eb-local: done. To use the modules in a new shell or job:
 A failed build keeps its workspace until the job ends.
 A build exits with `eb`'s status.
 In a shell without a module command, a build, `env` and `dev` source the first Lmod init they can read: `$LMOD_PKG/init/bash`, or `/usr/share/lmod/lmod/init/bash` with `LMOD_PKG` unset, then `/etc/profile.d/lmod.sh`, then EESSI's own, the one `eb-local eb` sources; `eb-local doctor` names the one a build would source.
+In a shell whose module command finds no `stack.module` on `MODULEPATH`, such as one a distribution's Lmod package sets up, they first add EESSI's module directory, `init/modules` under `EESSI_CVMFS_REPO`, `/cvmfs/software.eessi.io` unless set.
 Stopped by a signal, it removes the secret values from the logs and then stops with the same signal.
 
 ### `--explain`
@@ -471,7 +472,7 @@ The hello for `ofi` is run with `OMPI_MCA_pml` set to cm and `OMPI_MCA_mtl` set 
 The hello for `ucx` is run with `OMPI_MCA_pml` set to ucx and `OMPI_MCA_mtl` set to ^ofi.
 Those variables are set only on that hello. A build does not set them, and it does not set `FI_PROVIDER`.
 Outside an allocation the hello is not compiled.
-Where the shell has a module command, a build keeps it and its `MODULEPATH`, so doctor checks that a directory on `MODULEPATH` holds `stack.module`.
+Where the shell has a module command, a build keeps it and its `MODULEPATH`, and adds EESSI's `init/modules` when no directory there holds `stack.module`, so doctor checks that one of them does.
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on `PATH`, as a build asks it, and shows the target it selects; a guard that cannot select one is a `warn`, since a build's own run of it decides.
 With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
 It changes nothing, and exits 1 when a line says `FAIL`.

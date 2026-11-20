@@ -1,0 +1,1 @@
+Add the `init/modules` directory of `EESSI` for builds, `eb-local env` and `eb-local dev` when a distribution's Lmod has no `EESSI` module on MODULEPATH, and say so in `eb-local doctor` instead of failing.
