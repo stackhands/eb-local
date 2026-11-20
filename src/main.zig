@@ -200,8 +200,7 @@ const usage_text =
     \\
     \\The eb-local script in a source checkout resolves its real directory,
     \\tries zig-out/bin/eb-local there, then searches each PATH directory for
-    \\another eb-local. When eb-local.conf is beside the script and
-    \\EB_LOCAL_CONFIG is unset, the script passes that file to the Zig program.
+    \\another eb-local.
     \\
 ;
 

@@ -198,8 +198,7 @@ still read, and only a site file may set the storage settings.
 
 The eb-local script in a source checkout resolves its real directory,
 tries zig-out/bin/eb-local there, then searches each PATH directory for
-another eb-local. When eb-local.conf is beside the script and
-EB_LOCAL_CONFIG is unset, the script passes that file to the Zig program.
+another eb-local.
 ```
 
 ## Arguments
@@ -675,8 +674,7 @@ With `--json`, `check` still exits 1 for problems and 2 when a file cannot be re
 The repository's `eb-local` file is a short POSIX shell shim, not a second implementation.
 It resolves its real directory, runs `zig-out/bin/eb-local` there when executable, then searches each `PATH` directory for another executable `eb-local`.
 It skips a `PATH` entry that is the same file or has the shim's marker, so two shim copies stop with exit 127 instead of executing each other forever.
-When `eb-local.conf` is beside the shim and `EB_LOCAL_CONFIG` is unset, the shim passes that file to Zig, preserving the checkout site file used by the 1.x script.
-It delegates the arguments, standard output, standard error and exit status unchanged; if no executable is found, it names the real directory, the Zig build path and every `PATH` directory searched, then exits 127.
+It delegates the arguments, environment, standard output, standard error and exit status unchanged; if no executable is found, it names the real directory, the Zig build path and every `PATH` directory searched, then exits 127.
 All commands, configuration and behavior belong to the Zig program.
 
 ## See also
