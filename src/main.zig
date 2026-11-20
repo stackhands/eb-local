@@ -4124,10 +4124,20 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     // Where installs go.
     const p = locate(c, s);
     note(a, &out, lines_ptr, "ok  ", "installs go to {s}: a {s} install, prefix from {s}", .{ p.prefix, if (p.project) "project" else "user", if (p.project) s.project.from else s.prefix.from });
-    for (refusedTrees(c, s, false)) |t| if (t.path.len > 0 and storage.under(p.prefix, t.path)) {
+    // The prefix is already canonical. Include the resolved roots a build
+    // refuses, and report a path once when the written form and the resolved
+    // form are the same directory.
+    var reported: std.ArrayList([]const u8) = .empty;
+    for (refusedTrees(c, s, true)) |t| {
+        if (t.path.len == 0 or !storage.under(p.prefix, t.path)) continue;
+        const seen = for (reported.items) |old| {
+            if (std.mem.eql(u8, old, t.path)) break true;
+        } else false;
+        if (seen) continue;
+        reported.append(a, t.path) catch oom();
         note(a, &out, lines_ptr, "FAIL", "the install prefix {s} [{s}] is under {s}, {s}; builds refuse it. " ++ outlive ++ "; " ++ prefix_fix, .{ p.prefix, prefixFrom(s, p), t.path, t.what });
         failed = true;
-    };
+    }
     if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| {
         var zb: [sys.path_max:0]u8 = undefined;
         const acc_err: ?linux.E = if (sys.z(&zb, p.prefix)) |zp| blk: {
