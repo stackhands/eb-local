@@ -685,6 +685,71 @@ fn writeStdout(io: std.Io, stdout: *std.Io.File, message: []const u8) bool {
     return true;
 }
 
+fn readErrorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.NotFound => "FileNotFound",
+        error.SymLink => "symlink is not followed",
+        else => @errorName(err),
+    };
+}
+
+fn readRegularFile(a: Allocator, path: []const u8, follow: bool, max_bytes: usize) ![]u8 {
+    const opened = try common.fsx.openRegular(common.fsx.cwd, path, follow);
+    defer common.sys.close(opened.fd);
+    return try common.fsx.readAll(a, opened.fd, max_bytes);
+}
+
+fn readOptionalRegular(a: Allocator, path: []const u8, max_bytes: usize) error{Refused}!?[]u8 {
+    if (common.fsx.statAt(common.fsx.cwd, path, false)) |st| {
+        if (st.isLink()) {
+            failMsg("cannot read {s}: symlink is not followed", .{path});
+            return error.Refused;
+        }
+    } else |_| {}
+    const opened = common.fsx.openRegular(common.fsx.cwd, path, false) catch |err| switch (err) {
+        error.NotFound => return null,
+        else => {
+            failMsg("cannot read {s}: {s}", .{ path, readErrorText(err) });
+            return error.Refused;
+        },
+    };
+    defer common.sys.close(opened.fd);
+    return common.fsx.readAll(a, opened.fd, max_bytes) catch |err| {
+        failMsg("cannot read {s}: {s}", .{ path, readErrorText(err) });
+        return error.Refused;
+    };
+}
+
+fn checkDryRunOutputs(out_dir: []const u8, recipe_path: []const u8, provenance_path: []const u8) bool {
+    var probe: []const u8 = out_dir;
+    while (probe.len > 0 and !std.mem.eql(u8, probe, ".") and !std.mem.eql(u8, probe, "/")) {
+        if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
+            if (!st.isDir()) {
+                failMsg("cannot write {s}: NotDir", .{recipe_path});
+                return false;
+            }
+            break;
+        } else |_| {}
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+    for ([_][]const u8{ recipe_path, provenance_path }) |p| {
+        if (common.fsx.statAt(common.fsx.cwd, p, false)) |st| {
+            if (st.isLink()) {
+                failMsg("cannot read {s}: symlink is not followed", .{p});
+                return false;
+            }
+            if (!st.isReg()) {
+                failMsg("cannot read {s}: {s}", .{ p, if (st.isDir()) "IsDir" else "NotRegularFile" });
+                return false;
+            }
+        } else |err| if (err != error.NotFound and err != error.NotDir) {
+            failMsg("cannot read {s}: {s}", .{ p, readErrorText(err) });
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Read overlay and base files, verify the digest, and write, preview, or check the outputs.
 pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     if (opts.dry_run and opts.check) {
@@ -699,10 +764,9 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         failMsg("overlay materialize needs --base PATH", .{});
         return 2;
     }
-    const cwd = std.Io.Dir.cwd();
     var od: Diagnostic = .{};
-    const overlay_text = cwd.readFileAlloc(io, opts.overlay_path, a, .limited(4 * 1024 * 1024)) catch |err| {
-        failMsg("cannot read {s}: {s}", .{ opts.overlay_path, @errorName(err) });
+    const overlay_text = readRegularFile(a, opts.overlay_path, true, 4 * 1024 * 1024) catch |err| {
+        failMsg("cannot read {s}: {s}", .{ opts.overlay_path, readErrorText(err) });
         return 2;
     };
     const spec = parseSpec(a, overlay_text, &od) catch |e| switch (e) {
@@ -717,8 +781,8 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         error.OutOfMemory => return 1,
         else => return 1,
     };
-    const base_text = cwd.readFileAlloc(io, opts.base_path, a, .limited(16 * 1024 * 1024)) catch |err| {
-        failMsg("cannot read {s}: {s}", .{ opts.base_path, @errorName(err) });
+    const base_text = readRegularFile(a, opts.base_path, true, 16 * 1024 * 1024) catch |err| {
+        failMsg("cannot read {s}: {s}", .{ opts.base_path, readErrorText(err) });
         return 2;
     };
     const recipe = materialize(a, base_text, spec, &od) catch |e| switch (e) {
@@ -740,29 +804,9 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     defer a.free(provenance);
     var stdout = std.Io.File.stdout();
     if (opts.check) {
-        for ([_][]const u8{ recipe_path, provenance_path }) |p| {
-            if (common.fsx.statAt(common.fsx.cwd, p, false)) |st| {
-                if (st.isLink()) {
-                    failMsg("cannot read {s}: symlink is not followed", .{p});
-                    return 2;
-                }
-            } else |_| {}
-        }
-        const existing_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => {
-                failMsg("cannot read {s}: {s}", .{ recipe_path, @errorName(err) });
-                return 2;
-            },
-        };
+        const existing_recipe = readOptionalRegular(a, recipe_path, 16 * 1024 * 1024) catch return 2;
         defer if (existing_recipe) |buf| a.free(buf);
-        const existing_prov = cwd.readFileAlloc(io, provenance_path, a, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => {
-                failMsg("cannot read {s}: {s}", .{ provenance_path, @errorName(err) });
-                return 2;
-            },
-        };
+        const existing_prov = readOptionalRegular(a, provenance_path, 4 * 1024 * 1024) catch return 2;
         defer if (existing_prov) |buf| a.free(buf);
         const up_to_date = if (existing_recipe) |er|
             if (existing_prov) |ep|
@@ -780,11 +824,12 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         return if (up_to_date) 0 else 1;
     }
     if (opts.dry_run) {
+        if (!checkDryRunOutputs(out_dir, recipe_path, provenance_path)) return 2;
         const message = std.fmt.allocPrint(a, "would write {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
         if (!writeStdout(io, &stdout, message)) return 1;
         return 0;
     }
-    const prev_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch null;
+    const prev_recipe = readRegularFile(a, recipe_path, false, 16 * 1024 * 1024) catch null;
     defer if (prev_recipe) |buf| a.free(buf);
     var first_missing: ?[]const u8 = null;
     {
