@@ -2986,6 +2986,21 @@ fn readable(path: []const u8) bool {
     return linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.R_OK, 0)) == .SUCCESS;
 }
 
+/// Whether sourcing `file` in the shell a build starts leaves a `module`
+/// command. Startup files are already out of `envp`, as they are out of
+/// that shell.
+fn initDefinesModule(c: Ctx, envp: proc.Envp, file: []const u8) bool {
+    const a = c.a;
+    const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
+    const script = ". \"$1\" >/dev/null || :\ntype module >/dev/null 2>&1\n";
+    const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script, "eb-local", file }, envp, .{
+        .stdout_limit = 4096,
+        .stderr_limit = 4096,
+        .timeout_ms = 30_000,
+    }) catch return false;
+    return r.term.code() == 0;
+}
+
 const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
     \\stack=$1 extend=$2 install_var=$3 prefix=$4 mode=$5
     \\shift 5
@@ -4256,13 +4271,28 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     } else |_| {}
     if (nonEmpty(c.env.get("LMOD_CMD")) == null and nonEmpty(c.env.get("MODULESHOME")) == null) {
         const inits = lmodInits(a, c.env);
+        // A build sources each readable initializer and keeps going until
+        // one defines the module command. Reading the file is not enough.
+        var env = c.env.clone(a) catch oom();
+        for (shell_startup) |name| _ = env.swapRemove(name);
+        const envp = envpOf(a, &env);
+        var defined: ?[]const u8 = null;
+        var any_readable = false;
         for (inits) |file| {
-            if (readable(file)) {
-                note(a, &out, lines_ptr, "info", "no module command in this shell; builds source {s}", .{file});
+            if (!readable(file)) continue;
+            any_readable = true;
+            if (initDefinesModule(c, envp, file)) {
+                defined = file;
                 break;
             }
-        } else {
+        }
+        if (defined) |file| {
+            note(a, &out, lines_ptr, "info", "no module command in this shell; builds source {s}", .{file});
+        } else if (!any_readable) {
             note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} can be read; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
+            if (site) failed = true;
+        } else {
+            note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no module command in this shell, and none of {s}, {s} or {s} defined one; builds stop there, and the module commands env and dev print do not run", .{ inits[0], inits[1], inits[2] });
             if (site) failed = true;
         }
     } else if (!onModulePath(a, c.env.get("MODULEPATH") orelse "", s.stack_module.value)) {
