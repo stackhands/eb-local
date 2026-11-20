@@ -737,12 +737,17 @@ pub fn acquireBoundedLockCancel(
     err_msg: *[]const u8,
 ) CancelLockResult {
     if (cancel) |c| if (c.load(.seq_cst)) return .canceled;
-    const fd = sys.openat(fsx.cwd, lock_path, .{
+    const raw_fd = sys.openat(fsx.cwd, lock_path, .{
         .ACCMODE = .RDWR,
         .CREAT = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0o666) catch |err| {
+        err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
+        return .failed;
+    };
+    const fd = sys.keepAboveStdio(raw_fd) catch |err| {
+        sys.close(raw_fd);
         err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
         return .failed;
     };
@@ -817,12 +822,16 @@ pub fn acquireBoundedLockCancel(
 /// Acquire a non-blocking exclusive lock on `path` without printing errors,
 /// returning null when it cannot be opened or locked.
 pub fn acquireOptionalLock(path: []const u8) ?sys.fd_t {
-    const fd = sys.openat(fsx.cwd, path, .{
+    const raw_fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .RDWR,
         .CREAT = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0o666) catch return null;
+    const fd = sys.keepAboveStdio(raw_fd) catch {
+        sys.close(raw_fd);
+        return null;
+    };
     const st = fsx.fstat(fd) catch {
         sys.close(fd);
         return null;
@@ -931,6 +940,43 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
     defer releaseLock(&held_for_cancel);
     var cancel = std.atomic.Value(bool).init(true);
     try testing.expectEqual(CancelLockResult.canceled, acquireBoundedLockCancel(a, lock_path, 5000, false, &cancel, &msg2));
+}
+
+test "lock descriptors stay above closed stdio slots" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-lock-stdio-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const lock_a = try std.fs.path.join(a, &.{ root, "a.lock" });
+    const lock_b = try std.fs.path.join(a, &.{ root, "b.lock" });
+
+    const pid: isize = @bitCast(linux.fork());
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = linux.close(1);
+        var msg: []const u8 = "";
+        var fd_a: ?sys.fd_t = switch (acquireBoundedLock(a, lock_a, 100, false, &msg)) {
+            .held => |fd| fd,
+            else => linux.exit_group(10),
+        };
+        if (fd_a.? <= 2) linux.exit_group(11);
+        const fd_b = acquireOptionalLock(lock_b) orelse linux.exit_group(12);
+        if (fd_b <= 2) linux.exit_group(13);
+        var ws = makeLockedWorkspace(a, root, &.{"tmp"}) catch linux.exit_group(14);
+        if (ws.lock == null or ws.lock.? <= 2) linux.exit_group(15);
+        releaseLock(&ws.lock);
+        removeTree(a, ws.path) catch {};
+        var opt: ?sys.fd_t = fd_b;
+        releaseLock(&opt);
+        releaseLock(&fd_a);
+        linux.exit_group(0);
+    }
+    var raw: i32 = 0;
+    while (linux.errno(linux.wait4(@intCast(pid), &raw, 0, null)) == .INTR) {}
+    const status: u32 = @bitCast(raw);
+    try testing.expect(linux.W.IFEXITED(status));
+    try testing.expectEqual(@as(u8, 0), linux.W.EXITSTATUS(status));
 }
 
 test "the mount a path lies on" {
