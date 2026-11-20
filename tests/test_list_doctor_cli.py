@@ -12,6 +12,7 @@ import subprocess
 import unittest
 
 import binary
+import hostile_fs
 from test_storage import StorageFixture
 
 SITE_DEFAULTS = Path(__file__).resolve().parents[1] / "docs" / "orgmode" / "howto" / "set-site-defaults.org"
@@ -554,6 +555,8 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
 
     def test_doctor_fails_where_no_directory_on_modulepath_holds_the_eessi_module(self):
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
+            return
         # A shell with Lmod but without EESSI's init: builds keep its
         # MODULEPATH, and Lmod cannot find EESSI/2026.06 there.
         repo = self.root / "repo"
@@ -583,6 +586,8 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("warn no directory on MODULEPATH in this shell holds stack.module", run.stdout)
 
     def test_doctor_fails_on_a_secret_every_build_would_stop_on(self):
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
+            return
         secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC")
         run = self.run_tool(["doctor"], **secret)
         self.assertEqual(run.returncode, 1, run.stdout)
@@ -635,7 +640,6 @@ class ListAndDoctor(StorageFixture):
                              SLURM_JOB_ID="", EESSI_CVMFS_REPO=str(repo), **extra)
 
     def test_doctor_without_a_site_file_judges_eb_local_eb(self):
-        import hostile_fs
         if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
             return
         init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
