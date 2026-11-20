@@ -159,6 +159,24 @@ class ForeignPrefixes(StorageFixture):
         self.assertEqual(refused.returncode, 2, refused.stderr)
         self.assertIn("doctor.approved_prefixes is a site setting", refused.stderr)
 
+    def test_approved_prefix_with_parent_component_is_refused(self):
+        approved = self.root / "real-approved"
+        (approved / "pkg").mkdir(parents=True)
+        # Keep the parent component in the spelling. Path resolution would hide it.
+        spelled = f"{self.root}/missing/../real-approved"
+        site = self.root / "parent-prefix.toml"
+        site.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "%u.%j"\n'
+            'node_local_fstype = "xfs"\nshared_scratch = ["/scratch"]\n'
+            f'[doctor]\napproved_prefixes = ["{spelled}"]\n',
+            encoding="utf-8",
+        )
+        site.chmod(0o644)
+        run = self.run_tool(["--config", str(site), "doctor"], PYTHONPATH=f"{approved}/pkg")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertEqual(run.stdout, "")
+        self.assertIn(f"doctor.approved_prefixes path '{spelled}' has a '..' component", run.stderr)
+
     def test_xdg_cache_home_wrapper_is_approved_without_home(self):
         cache = self.root / "xdg-cache"
         wrapper = cache / "eb-local" / "rpath-0123456789abcdef" / "gcc"
