@@ -227,6 +227,8 @@ class DevCliModes(unittest.TestCase):
             ({"kind": "something-else"}, "is not a dev lock"),
             ({"modules": ["ok/1.0", "bad;rm -rf /"]}, "is not a module name"),
             ({"cpu_target": "x86_64/$(id)"}, "names no usable CPU target"),
+            ({"cpu_target": "../escape"}, "names no usable CPU target"),
+            ({"cpu_target": "x86_64//zen4"}, "names no usable CPU target"),
             ({"modules": []}, "lists no modules"),
         ):
             with self.subTest(change=change):
