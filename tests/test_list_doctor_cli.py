@@ -477,6 +477,32 @@ class ListAndDoctor(StorageFixture):
                       "with prefix in your eb-local configuration, EB_LOCAL_PREFIX, or --project DIR for a project\n",
                       run.stdout)
 
+    def test_doctor_refuses_a_prefix_under_a_linked_node_local_root(self):
+        real = self.root / "real-nodes"
+        real.mkdir()
+        link = self.root / "nodes-link"
+        link.symlink_to(real)
+        prefix = real / "install"
+        site = self.root / "linked-root.toml"
+        site.write_text(
+            f'[storage]\nnode_local_root = "{link}"\nnode_local_mount = "%u.%j"\n'
+            'node_local_fstype = "xfs"\nshared_scratch = ["/scratch"]\n',
+            encoding="utf-8",
+        )
+        site.chmod(0o644)
+        run = self.run_tool(
+            ["--config", str(site), "doctor"],
+            EB_LOCAL_PREFIX=str(prefix),
+            SLURM_JOB_ID="",
+        )
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn(
+            f"FAIL the install prefix {prefix} [environment EB_LOCAL_PREFIX] is under {real}, ",
+            run.stdout,
+        )
+        self.assertIn("node-local storage below storage.node_local_root", run.stdout)
+        self.assertEqual(run.stdout.count("FAIL the install prefix"), 1)
+
     def test_doctor_fails_on_a_project_directory_others_can_write(self):
         project = self.root / "durable" / "project"
         project.mkdir(parents=True)
