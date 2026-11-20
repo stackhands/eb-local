@@ -84,6 +84,35 @@ class EessiLmod(StorageFixture):
         self.assertNotIn("command not found", shell.stderr)
         self.assertEqual(shell.stdout, "x86_64/amd/zen4")
 
+    def test_doctor_fails_when_a_readable_init_defines_no_module(self):
+        host_init = self.root / "no-lmod" / "init" / "bash"
+        host_init.parent.mkdir(parents=True)
+        host_init.write_text("true\n")
+
+        doctor = self.run_wrapper(["doctor"])
+        self.assertEqual(doctor.returncode, 1, doctor.stdout + doctor.stderr)
+        self.assertIn(
+            f"FAIL no module command in this shell, and none of {self.tried} defined one; builds stop there",
+            doctor.stdout,
+        )
+        self.assertNotIn(f"builds source {host_init}", doctor.stdout)
+        self.assertTrue(doctor.stdout.rstrip().endswith("Something above says FAIL; builds stop there."), doctor.stdout)
+
+        build = self.run_wrapper()
+        self.assertEqual(build.returncode, 1, build.stdout + build.stderr)
+        self.assertIn(f"eb-local: no module command found; none of {self.tried} defined one\n", build.stderr)
+
+    def test_doctor_names_the_init_that_defines_module(self):
+        self.eessi_init()
+        host_init = self.root / "no-lmod" / "init" / "bash"
+        host_init.parent.mkdir(parents=True)
+        host_init.write_text("true\n")
+
+        run = self.run_wrapper(["doctor"])
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn(f"info no module command in this shell; builds source {self.init}\n", run.stdout)
+        self.assertNotIn(f"builds source {host_init}", run.stdout)
+
     def test_doctor_names_the_init_a_build_sources_and_fails_without_one(self):
         run = self.run_wrapper(["doctor"])
         self.assertEqual(run.returncode, 1, run.stdout)
