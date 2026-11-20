@@ -571,14 +571,17 @@ pub fn probeWorkspace(
     a: Allocator,
     path: []const u8,
     execute_result: ?bool,
-) (fsx.Error || sys.Error || std.process.RunError || Allocator.Error)!WorkspaceProbe {
+) (fsx.Error || sys.Error || common.proc.Error || Allocator.Error)!WorkspaceProbe {
+    _ = io;
     const dir = try fsx.openDir(fsx.cwd, path, false);
     defer sys.close(dir);
     var random: [8]u8 = undefined;
     if (linux.getrandom(&random, random.len, 0) != random.len) return error.Unexpected;
     const first = try std.fmt.allocPrint(a, ".eb-local-doctor-{x}.probe", .{std.mem.readInt(u64, &random, .little)});
     const renamed = try std.fmt.allocPrint(a, "{s}.run", .{first});
-    const absolute = try std.fs.path.join(a, &.{ path, renamed });
+    var real_buf: [sys.path_max]u8 = undefined;
+    const real_dir = if (std.fs.path.isAbsolute(path)) path else try fsx.realpath(fsx.cwd, path, &real_buf);
+    const absolute = try std.fs.path.join(a, &.{ real_dir, renamed });
     var result: WorkspaceProbe = .{};
     const fd = try sys.openat(dir, first, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o700);
     result.created = true;
@@ -593,15 +596,18 @@ pub fn probeWorkspace(
     current = renamed;
     result.renamed = true;
     result.executed = execute_result orelse blk: {
-        const ran = std.process.run(a, io, .{
-            .argv = &.{absolute},
-            .stdout_limit = .limited(4096),
-            .stderr_limit = .limited(4096),
+        const empty_env: common.proc.Envp = &[_:null]?[*:0]const u8{};
+        const ran = common.proc.run(a, absolute, &.{absolute}, empty_env, .{
+            .stdout_limit = 4096,
+            .stderr_limit = 4096,
+            .timeout_ms = 30_000,
+            .exec_error = true,
         }) catch |err| switch (err) {
-            error.AccessDenied, error.PermissionDenied => break :blk false,
+            error.AccessDenied => break :blk false,
             else => return err,
         };
-        break :blk ran.term.success();
+        defer ran.deinit(a);
+        break :blk ran.term.code() == 0;
     };
     try sys.unlinkat(dir, renamed, 0);
     result.removed = true;
@@ -1205,4 +1211,37 @@ test "removeTree removes read-only subdirectories owned by the caller" {
     _ = linux.fchmodat(linux.AT.FDCWD, (try sys.z(&zb, root)).ptr, 0o555);
     try removeTree(a, root);
     try testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, root, false));
+}
+
+fn testStorageFdCount() !usize {
+    const dir = try sys.openat(linux.AT.FDCWD, "/proc/self/fd", .{ .DIRECTORY = true }, 0);
+    defer sys.close(dir);
+    var count: usize = 0;
+    var dents: [4096]u8 align(8) = undefined;
+    while (true) {
+        const n = linux.getdents64(dir, &dents, dents.len);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
+        var pos: usize = 0;
+        while (pos < n) {
+            const d: *align(1) const linux.dirent64 = @ptrCast(dents[pos..].ptr);
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(dents[pos + @offsetOf(linux.dirent64, "name") ..].ptr)));
+            pos += d.reclen;
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+        }
+    }
+    return count - 1;
+}
+
+test "probeWorkspace leaves parent /proc/self/fd count unchanged" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-probe-ws-");
+    defer removeTree(a, root) catch {};
+
+    const before = try testStorageFdCount();
+    const res = try probeWorkspace(testing.io, a, root, null);
+    try testing.expect(res.executed);
+    try testing.expectEqual(before, try testStorageFdCount());
 }
