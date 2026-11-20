@@ -3301,12 +3301,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         warn("secret {s} is shorter than {d} bytes and is not removed from logs", .{ v.name, secrets.min_redacted_len });
 
     const guard = Guard.hold();
-    const work = storage.makeWorkspace(a, job_root) catch |e| workspaceFailed(a, job_root, e);
-    for ([_][]const u8{ "build", "tmp", "cache", "cargo", "source-index" }) |sub|
-        common.atomic.makedirs(std.fs.path.join(a, &.{ work, sub }) catch oom()) catch |e| {
-            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
-            workspaceFailed(a, job_root, e);
-        };
+    const ws_held = storage.makeLockedWorkspace(a, job_root, &.{ "build", "tmp", "cache", "cargo", "source-index" }) catch |e| workspaceFailed(a, job_root, e);
+    const work = ws_held.path;
+    var ws_lock: ?sys.fd_t = ws_held.lock;
+    defer storage.releaseLock(&ws_lock);
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
@@ -3391,9 +3389,6 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         };
     };
     defer storage.releaseLock(&prefix_lock);
-    const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
-    var ws_lock: ?sys.fd_t = storage.acquireOptionalLock(ws_lock_path);
-    defer storage.releaseLock(&ws_lock);
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -3449,6 +3444,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
     if (rc == 0 and !keep) {
+        storage.releaseLock(&ws_lock);
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e|
             warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
     } else {

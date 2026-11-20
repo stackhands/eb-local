@@ -415,6 +415,10 @@ fn removeOnDevice(a: Allocator, dir: sys.fd_t, name: []const u8, dev: u64) (fsx.
 
 /// A new eb-local.XXXXXXXX directory, mode 0700, in `job_root`.
 pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator.Error)![]const u8 {
+    return makeNamedWorkspace(a, job_root, "eb-local.");
+}
+
+fn makeNamedWorkspace(a: Allocator, job_root: []const u8, prefix_name: []const u8) (fsx.Error || Allocator.Error)![]const u8 {
     const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     var tries: usize = 0;
     while (tries < 100) : (tries += 1) {
@@ -422,7 +426,7 @@ pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator
         if (linux.getrandom(&raw, raw.len, 0) != raw.len) return error.Unexpected;
         var name: [8]u8 = undefined;
         for (raw, 0..) |b, i| name[i] = alphabet[b % alphabet.len];
-        const path = try std.fmt.allocPrint(a, "{s}/eb-local.{s}", .{ job_root, name });
+        const path = try std.fmt.allocPrint(a, "{s}/{s}{s}", .{ job_root, prefix_name, name });
         var zb: [sys.path_max:0]u8 = undefined;
         const zp = try sys.z(&zb, path);
         // mkdir applies the process umask. With umask 0777 the directory
@@ -436,6 +440,65 @@ pub fn makeWorkspace(a: Allocator, job_root: []const u8) (fsx.Error || Allocator
         } else |e| if (e != error.Exists) return e;
     }
     return error.Exists;
+}
+
+/// A newly created workspace directory and its held `.eb-local.lock` descriptor.
+pub const LockedWorkspace = struct {
+    path: []const u8,
+    lock: ?sys.fd_t,
+};
+
+/// Create a workspace directory in `job_root` whose `.eb-local.lock` and
+/// subdirectories exist and are locked before `eb-local.XXXXXXXX` becomes
+/// visible to `clean --workspaces`.
+pub fn makeLockedWorkspace(a: Allocator, job_root: []const u8, subdirs: []const []const u8) (fsx.Error || Allocator.Error)!LockedWorkspace {
+    var tries: usize = 0;
+    while (tries < 100) : (tries += 1) {
+        const staging = try makeNamedWorkspace(a, job_root, ".eb-local-init.");
+        const suffix = staging[job_root.len + 1 + ".eb-local-init.".len ..];
+        const final_path = try std.fmt.allocPrint(a, "{s}/eb-local.{s}", .{ job_root, suffix });
+        if (fsx.statAt(fsx.cwd, final_path, false)) |_| {
+            removeTree(a, staging) catch {};
+            continue;
+        } else |err| if (err != error.NotFound) {
+            removeTree(a, staging) catch {};
+            return err;
+        }
+        var lock: ?sys.fd_t = null;
+        errdefer {
+            releaseLock(&lock);
+            removeTree(a, staging) catch {};
+        }
+        const lock_path = try std.fmt.allocPrint(a, "{s}/.eb-local.lock", .{staging});
+        lock = acquireOptionalLock(lock_path);
+        for (subdirs) |sub| {
+            try common.atomic.makedirs(try std.fs.path.join(a, &.{ staging, sub }));
+        }
+        sys.renameat(fsx.cwd, staging, fsx.cwd, final_path) catch |err| switch (err) {
+            error.Exists, error.NotEmpty => {
+                releaseLock(&lock);
+                removeTree(a, staging) catch {};
+                continue;
+            },
+            else => return err,
+        };
+        return .{ .path = final_path, .lock = lock };
+    }
+    return error.Exists;
+}
+
+test "makeLockedWorkspace locks workspace before publishing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-ws-stage-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    var locked_ws = try makeLockedWorkspace(a, root, &.{ "build", "tmp" });
+    defer {
+        releaseLock(&locked_ws.lock);
+        removeTree(a, locked_ws.path) catch {};
+    }
+    try testing.expect(!tryLockFree(try std.fmt.allocPrint(a, "{s}/.eb-local.lock", .{locked_ws.path})));
 }
 
 /// Capacity available to an unprivileged caller.
