@@ -3351,9 +3351,39 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
         };
         const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
-        break :blk switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &lock_err)) {
+        const lock_cancel = blk_lc: {
+            var block = linux.sigemptyset();
+            for (passed_on) |sig| linux.sigaddset(&block, sig);
+            var prev_mask: linux.sigset_t = undefined;
+            _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &prev_mask);
+            if (guard.received()) |sig| {
+                _ = linux.sigprocmask(linux.SIG.SETMASK, &prev_mask, null);
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                guard.release();
+                return stop(.{ .signal = sig });
+            }
+            const lc = storage.LockCancel.hold();
+            _ = linux.sigprocmask(linux.SIG.SETMASK, &prev_mask, null);
+            break :blk_lc lc;
+        };
+        const acquired = storage.acquireBoundedLockCancel(a, lock_path, timeout_ms, true, lock_cancel.flag(), &lock_err);
+        var post_block = linux.sigemptyset();
+        for (passed_on) |sig| linux.sigaddset(&post_block, sig);
+        var post_mask: linux.sigset_t = undefined;
+        _ = linux.sigprocmask(linux.SIG.BLOCK, &post_block, &post_mask);
+        const canceled_sig = lock_cancel.received();
+        lock_cancel.release();
+        if (canceled_sig) |sig| _ = first_signal.cmpxchgStrong(0, @backingInt(sig), .seq_cst, .seq_cst);
+        _ = linux.sigprocmask(linux.SIG.SETMASK, &post_mask, null);
+        break :blk switch (acquired) {
             .held => |fd| fd,
             .unlocked => null,
+            .canceled => {
+                const sig = canceled_sig orelse guard.received() orelse .TERM;
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                guard.release();
+                return stop(.{ .signal = sig });
+            },
             .failed => {
                 if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
                 die("{s}", .{lock_err});
