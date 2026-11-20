@@ -410,8 +410,13 @@ const DirHold = struct {
         while (tries < 8) : (tries += 1) {
             if (writer_lock_cancel.load(.seq_cst)) return error.Canceled;
             const dir_path = existingAncestor(path);
-            const fd = fsx.openDir(fsx.cwd, dir_path, true) catch |err| {
+            const raw_fd = fsx.openDir(fsx.cwd, dir_path, true) catch |err| {
                 if (err == error.NotFound) continue;
+                fail("cannot open {s}: {s}", .{ dir_path, sys.describe(err) });
+                return error.LockFailed;
+            };
+            const fd = sys.keepAboveStdio(raw_fd) catch |err| {
+                sys.close(raw_fd);
                 fail("cannot open {s}: {s}", .{ dir_path, sys.describe(err) });
                 return error.LockFailed;
             };
