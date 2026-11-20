@@ -1,0 +1,1 @@
+Name `eb-local eb`, with the same arguments, when a build is refused outside a Slurm job where no site file sets `storage.node_local_root`, as on a laptop or workstation, instead of asking for an allocation that would not help.

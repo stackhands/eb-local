@@ -3476,6 +3476,25 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     if (g.explain) return explainBuild(c, s, g, args);
     if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.", .{});
+        if (s.node_local_root.value.len == 0) {
+            // eb takes no --project and reads no prefix, so the line keeps
+            // the destination with the install variable env exports for it.
+            // The default user prefix is the module's own and needs none.
+            const p = locate(c, s);
+            const default_prefix = if (nonEmpty(c.env.get("HOME"))) |home|
+                std.mem.eql(u8, storage.canonical(a, std.fs.path.join(a, &.{ home, "eessi" }) catch oom(), c.cwd) catch oom(), p.prefix)
+            else
+                false;
+            var line: std.ArrayList(u8) = .empty;
+            if (p.project or !default_prefix)
+                line.print(a, "{s}={s} ", .{ if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", qSingleLine(a, p.prefix) }) catch oom();
+            line.appendSlice(a, "eb-local eb --") catch oom();
+            for (args) |arg| line.print(a, " {s}", .{qSingleLine(a, arg)}) catch oom();
+            cli.err("  No site file sets storage.node_local_root, so no allocation would do either;\n", .{});
+            cli.err("  eb-local eb builds on this machine with EESSI-extend, with no site file or Slurm job:\n", .{});
+            cli.err("  {s}\n", .{line.items});
+            return 2;
+        }
         cli.err("  Software is built for the CPU of the node that runs eb-local, so build\n", .{});
         cli.err("  inside an allocation on the node type that will run it{s}\n", .{if (s.allocation_hint.value.len > 0) ", for example:" else ""});
         if (s.allocation_hint.value.len > 0) cli.err("  {s}\n", .{s.allocation_hint.value});

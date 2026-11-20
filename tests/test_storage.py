@@ -426,6 +426,39 @@ class RefusalWording(StorageFixture):
                                 "job's node-local mount; nothing was built.")
         self.assertIn("--config FILE or EB_LOCAL_CONFIG=FILE", fix)
 
+    def test_no_job_and_no_node_local_root_names_eb_local_eb(self):
+        # No allocation would do without storage.node_local_root, as on a
+        # workstation, where `eb-local eb` builds. eb takes no --project and
+        # reads no prefix, so the line names the install variable env exports.
+        args = ["recipe.eb", "--robot"]
+        lines = self.refusal(args, SLURM_JOB_ID="")
+        self.assertIn("inside an allocation on the node type that will run it", "\n".join(lines))
+        self.assertNotIn("eb-local eb", "\n".join(lines))
+        home = self.root / "home"
+        project = self.root / "it's a\nproject"
+        project.mkdir()
+        default = dict(HOME=str(home), EB_LOCAL_PREFIX="~/eessi")
+        hostile = ["recipe with space.eb", "--try-amend=description=it's \"quoted\"", "line1\nline2", "it's\nboth"]
+        for name, words, extra, suggestion in (
+                ("default prefix", args, default, "eb-local eb -- recipe.eb --robot"),
+                ("user prefix", args, {}, f"EESSI_USER_INSTALL='{self.prefix}' eb-local eb -- recipe.eb --robot"),
+                ("project", ["--project", str(project)] + args, default,
+                 f"EESSI_PROJECT_INSTALL=$'{self.root}/it\\'s a\\nproject' eb-local eb -- recipe.eb --robot"),
+                ("spaces, quotes and newlines", hostile, default,
+                 "eb-local eb -- 'recipe with space.eb' '--try-amend=description=it'\"'\"'s \"quoted\"' "
+                 "$'line1\\nline2' $'it\\'s\\nboth'"),
+        ):
+            for site in (dict(EB_LOCAL_CONFIG="", XDG_CONFIG_HOME=str(self.root / "xdg")), {}):
+                with self.subTest(name, site_file=not site):
+                    self.config.write_text("node_local_fstype = xfs\n")
+                    lines = self.refusal(words, SLURM_JOB_ID="", **extra, **site)
+                    self.assertEqual(lines, [
+                        "eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.",
+                        "  No site file sets storage.node_local_root, so no allocation would do either;",
+                        "  eb-local eb builds on this machine with EESSI-extend, with no site file or Slurm job:",
+                        f"  {suggestion}",
+                    ])
+
     def test_a_prefix_on_shared_scratch_or_in_job_storage_names_where_each_was_set(self):
         for prefix, tree, what in (
                 (self.root / "shared" / "install", self.root / "shared",

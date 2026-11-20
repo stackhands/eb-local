@@ -50,6 +50,24 @@ eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was bu
 The example is `build.allocation_hint`.
 When the site file lists `[build.node_types]`, the same build as a batch job for each type follows.
 
+Where no site file sets `storage.node_local_root`, as on a laptop or workstation, no allocation would do, and the refusal names `eb-local eb` with the same arguments instead:
+
+```text
+eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.
+  No site file sets storage.node_local_root, so no allocation would do either;
+  eb-local eb builds on this machine with EESSI-extend, with no site file or Slurm job:
+  eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot
+```
+
+`eb` takes no `--project` and reads no `prefix`, so the line keeps the destination with the install variable `eb-local env` exports for it: `EESSI_PROJECT_INSTALL` for a project, and `EESSI_USER_INSTALL` for a prefix other than `$HOME/eessi`, which is EESSI-extend's own default and needs none.
+For `eb-local --project /groups/chem/eessi pigz-2.8-GCCcore-15.2.0.eb --robot`, the last line is:
+
+```text
+EESSI_PROJECT_INSTALL=/groups/chem/eessi eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot
+```
+
+Each word is quoted for the shell, and a word with a newline is written as `$'...'`, so the line is one line that runs as shown.
+
 `eb-local clean --workspaces` removes only the workspaces of the job it runs in:
 
 ```text
