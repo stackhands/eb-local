@@ -2473,14 +2473,10 @@ fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
 }
 
 fn envpOf(a: Allocator, map: *const std.process.Environ.Map) proc.Envp {
-    var list: std.ArrayList(?[*:0]const u8) = .empty;
+    var b: common.env.Builder = .init(a);
     var it = map.iterator();
-    while (it.next()) |kv| {
-        const line = std.fmt.allocPrintSentinel(a, "{s}={s}", .{ kv.key_ptr.*, kv.value_ptr.* }, 0) catch oom();
-        list.append(a, line.ptr) catch oom();
-    }
-    list.append(a, null) catch oom();
-    return @ptrCast(list.items.ptr);
+    while (it.next()) |kv| b.set(kv.key_ptr.*, kv.value_ptr.*) catch oom();
+    return b.envp() catch oom();
 }
 
 /// The line for eessi-arch-guard, whose target builds, env and dev load
