@@ -182,9 +182,10 @@ const usage_text =
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
     \\
-    \\Configuration: the site file (the first of config.toml beside this program,
-    \\/etc/eb-local/config.toml, eb-local.conf beside this program and
-    \\/etc/eb-local.conf), then ~/.config/eb-local/config.toml,
+    \\Configuration: the site file (the first of config.toml beside this program
+    \\or its checkout root, /etc/eb-local/config.toml, eb-local.conf beside this
+    \\program or its checkout root, and /etc/eb-local.conf), then
+    \\~/.config/eb-local/config.toml,
     \\then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
     \\then options. Builds use the allocation's own
     \\node-local mount; a successful build removes its workspace unless
@@ -519,6 +520,33 @@ fn nonEmpty(v: ?[]const u8) ?[]const u8 {
     return if (x.len > 0) x else null;
 }
 
+/// When the binary sits at `<checkout>/zig-out/bin/eb-local`, the
+/// checkout directory `<checkout>`, else `null`.
+fn checkoutRoot(dir: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, std.fs.path.basename(dir), "bin")) return null;
+    const zig_out = std.fs.path.dirname(dir) orelse return null;
+    if (!std.mem.eql(u8, std.fs.path.basename(zig_out), "zig-out")) return null;
+    const root = std.fs.path.dirname(zig_out) orelse return null;
+    return if (root.len > 0) root else null;
+}
+
+/// Ordered site-layer candidates for a binary in `dir`. A build inside
+/// `<checkout>/zig-out/bin` also checks `<checkout>` before `/etc`.
+fn siteConfigCandidates(a: Allocator, dir: []const u8) []const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    list.append(a, std.fs.path.join(a, &.{ dir, "config.toml" }) catch oom()) catch oom();
+    if (checkoutRoot(dir)) |root| {
+        list.append(a, std.fs.path.join(a, &.{ root, "config.toml" }) catch oom()) catch oom();
+    }
+    list.append(a, "/etc/eb-local/config.toml") catch oom();
+    list.append(a, std.fs.path.join(a, &.{ dir, "eb-local.conf" }) catch oom()) catch oom();
+    if (checkoutRoot(dir)) |root| {
+        list.append(a, std.fs.path.join(a, &.{ root, "eb-local.conf" }) catch oom()) catch oom();
+    }
+    list.append(a, "/etc/eb-local.conf") catch oom();
+    return list.items;
+}
+
 /// The configuration files in force, site first.
 fn configSources(c: Ctx, g: Global) []const config.Source {
     var sources: std.ArrayList(config.Source) = .empty;
@@ -531,14 +559,7 @@ fn configSources(c: Ctx, g: Global) []const config.Source {
     if (explicit_trust == .site) {
         sources.append(c.a, sourceFrom(c, explicit.?, .site)) catch oom();
     } else {
-        const dir = selfDir(c.a);
-        const candidates = [_][]const u8{
-            std.fs.path.join(c.a, &.{ dir, "config.toml" }) catch oom(),
-            "/etc/eb-local/config.toml",
-            std.fs.path.join(c.a, &.{ dir, "eb-local.conf" }) catch oom(),
-            "/etc/eb-local.conf",
-        };
-        for (candidates) |p| if (exists(p)) {
+        for (siteConfigCandidates(c.a, selfDir(c.a))) |p| if (exists(p)) {
             sources.append(c.a, sourceFrom(c, p, .site)) catch oom();
             break;
         };
@@ -5720,4 +5741,26 @@ test "shell quoting reads back as the same word" {
     try std.testing.expectEqualStrings("'owned space'", try shellQuote(a, "owned space"));
     try std.testing.expectEqualStrings("'a'\"'\"'b $(x)'", try shellQuote(a, "a'b $(x)"));
     try std.testing.expectEqualStrings("''", try shellQuote(a, ""));
+}
+
+test "siteConfigCandidates checks checkout root when running from zig-out/bin" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const installed = siteConfigCandidates(a, "/opt/eb-local/bin");
+    try std.testing.expectEqual(@as(usize, 4), installed.len);
+    try std.testing.expectEqualStrings("/opt/eb-local/bin/config.toml", installed[0]);
+    try std.testing.expectEqualStrings("/etc/eb-local/config.toml", installed[1]);
+    try std.testing.expectEqualStrings("/opt/eb-local/bin/eb-local.conf", installed[2]);
+    try std.testing.expectEqualStrings("/etc/eb-local.conf", installed[3]);
+
+    const checkout = siteConfigCandidates(a, "/work/eb-local/zig-out/bin");
+    try std.testing.expectEqual(@as(usize, 6), checkout.len);
+    try std.testing.expectEqualStrings("/work/eb-local/zig-out/bin/config.toml", checkout[0]);
+    try std.testing.expectEqualStrings("/work/eb-local/config.toml", checkout[1]);
+    try std.testing.expectEqualStrings("/etc/eb-local/config.toml", checkout[2]);
+    try std.testing.expectEqualStrings("/work/eb-local/zig-out/bin/eb-local.conf", checkout[3]);
+    try std.testing.expectEqualStrings("/work/eb-local/eb-local.conf", checkout[4]);
+    try std.testing.expectEqualStrings("/etc/eb-local.conf", checkout[5]);
 }

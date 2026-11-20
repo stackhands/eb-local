@@ -1,0 +1,1 @@
+Discover `config.toml` and `eb-local.conf` in `<checkout>` directly from the Zig binary when running out of `<checkout>/zig-out/bin/eb-local`, without relying on `EB_LOCAL_CONFIG` from the shell shim.

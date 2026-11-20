@@ -9,7 +9,7 @@ eb-local reads its settings from up to two TOML files, from `EB_LOCAL_*` variabl
 
 | File | Layer |
 |---|---|
-| The site file: the first that exists of `config.toml` beside the program, `/etc/eb-local/config.toml`, `eb-local.conf` beside the program and `/etc/eb-local.conf` | site |
+| The site file: the first that exists of `config.toml` beside the program (or at the checkout root when running from `zig-out/bin`), `/etc/eb-local/config.toml`, `eb-local.conf` beside the program (or at the checkout root) and `/etc/eb-local.conf` | site |
 | `$XDG_CONFIG_HOME/eb-local/config.toml`, or `$HOME/.config/eb-local/config.toml` when `XDG_CONFIG_HOME` is unset or empty | user |
 
 `--config FILE`, or `EB_LOCAL_CONFIG=FILE` without it, names a file to read in place of one of the two: in place of the site file when root or the owner of the program owns FILE, and in place of the user file when you do.
