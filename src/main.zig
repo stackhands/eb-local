@@ -446,7 +446,7 @@ fn readTrusted(c: Ctx, path: []const u8, kind: Trust) []const u8 {
         .user => if (uid != linux.getuid())
             die("{s} is owned by uid {d} and is not used: your configuration file belongs to you (uid {d})", .{ path, uid, linux.getuid() }),
     }
-    return fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, @errorName(e) });
+    return fsx.readAll(c.a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ path, storage.describeError(e) });
 }
 
 const Opened = struct { fd: sys.fd_t, stat: fsx.Stat };
@@ -946,7 +946,7 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
     const old: []const u8 = if (fsx.openRegular(fsx.cwd, ".envrc", true)) |opened| blk: {
         defer sys.close(opened.fd);
         exists_already = true;
-        break :blk fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read .envrc ({s})", .{@errorName(e)});
+        break :blk fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read .envrc ({s})", .{storage.describeError(e)});
     } else |_| "";
     const text = if (std.mem.indexOf(u8, old, envrc_begin)) |at| blk: {
         const rest = std.mem.indexOfPos(u8, old, at, envrc_end) orelse
@@ -960,12 +960,12 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
         str(a, "{s}{s}{s}", .{ old, if (old[old.len - 1] == '\n') "" else "\n", block });
     if (exists_already) {
         // Written beside the old file and renamed over it, with its mode.
-        fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+        fsx.replaceContents(a, fsx.cwd, ".envrc", text) catch |e| die("cannot write .envrc ({s})", .{storage.describeError(e)});
     } else {
         const fd = sys.openat(fsx.cwd, ".envrc", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
-            die("cannot create .envrc ({s})", .{@errorName(e)});
+            die("cannot create .envrc ({s})", .{storage.describeError(e)});
         defer sys.close(fd);
-        sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{@errorName(e)});
+        sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{storage.describeError(e)});
     }
     cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
     return 0;
@@ -993,12 +993,12 @@ const DevLock = struct {
 /// Create `name` in the working directory, or replace it atomically with its mode kept.
 fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
     if (fsx.statAt(fsx.cwd, name, true)) |_| {
-        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
     } else |_| {
         const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
-            die("cannot create {s} ({s})", .{ name, @errorName(e) });
+            die("cannot create {s} ({s})", .{ name, storage.describeError(e) });
         defer sys.close(fd);
-        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, @errorName(e) });
+        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
     }
 }
 
@@ -1053,7 +1053,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     const opened = fsx.openRegular(fsx.cwd, lock_name, true) catch
         die("there is no {s} here; write one with `eb-local dev --lock MODULE...`", .{lock_name});
     defer sys.close(opened.fd);
-    const text = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ lock_name, @errorName(e) });
+    const text = fsx.readAll(a, opened.fd, 1 << 20) catch |e| die("cannot read {s} ({s})", .{ lock_name, storage.describeError(e) });
     const lock = std.json.parseFromSliceLeaky(DevLock, a, text, .{ .ignore_unknown_fields = true }) catch
         die("{s} is not a lock eb-local wrote; write it again with `eb-local dev --lock MODULE...`", .{lock_name});
     if (!std.mem.eql(u8, lock.kind, "dev-lock") or lock.schema_version != jsonout.schema_version)
@@ -1748,7 +1748,7 @@ fn auditFile(
     inherited_rpath: []const []const u8,
 ) bool {
     const opened = fsx.openRegular(fsx.cwd, path, !skip_non_elf) catch |e| {
-        warn("cannot open {s} ({s})", .{ path, @errorName(e) });
+        warn("cannot open {s} ({s})", .{ path, storage.describeError(e) });
         unreadable.* = true;
         return false;
     };
@@ -1803,7 +1803,7 @@ fn walkElfs(c: Ctx, root: []const u8, quiet: bool, k: *Check, unreadable: *bool,
         return;
     }
     const fd = fsx.openDir(fsx.cwd, root, false) catch |e| {
-        warn("cannot open {s} ({s})", .{ root, @errorName(e) });
+        warn("cannot open {s} ({s})", .{ root, storage.describeError(e) });
         unreadable.* = true;
         return;
     };
@@ -1812,7 +1812,7 @@ fn walkElfs(c: Ctx, root: []const u8, quiet: bool, k: *Check, unreadable: *bool,
     var it = fsx.DirIter.init(c.a, fd) catch oom();
     while (true) {
         const entry = it.next() catch |e| {
-            warn("cannot read {s} ({s})", .{ root, @errorName(e) });
+            warn("cannot read {s} ({s})", .{ root, storage.describeError(e) });
             unreadable.* = true;
             break;
         } orelse break;
@@ -1823,7 +1823,7 @@ fn walkElfs(c: Ctx, root: []const u8, quiet: bool, k: *Check, unreadable: *bool,
     for (names.items) |name| {
         const st = fsx.statAt(fd, name, false) catch |e| {
             const path = std.fs.path.join(c.a, &.{ root, name }) catch oom();
-            warn("cannot stat {s} ({s})", .{ path, @errorName(e) });
+            warn("cannot stat {s} ({s})", .{ path, storage.describeError(e) });
             unreadable.* = true;
             continue;
         };
@@ -2888,7 +2888,7 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
     for (spaces.items) |w| {
         if (storage.removeTree(a, w)) |_| {
             removed_ws += 1;
-        } else |e| warn("cannot remove {s} ({s})", .{ w, @errorName(e) });
+        } else |e| warn("cannot remove {s} ({s})", .{ w, storage.describeError(e) });
     }
     if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
     var removed_items: usize = 0;
@@ -2916,11 +2916,11 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
                 if (t.dir) {
                     if (storage.removeTree(a, t.path)) |_| {
                         removed_items += 1;
-                    } else |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
+                    } else |e| warn("cannot remove {s} ({s})", .{ t.path, storage.describeError(e) });
                 } else {
                     if (sys.unlinkat(fsx.cwd, t.path, 0)) |_| {
                         removed_items += 1;
-                    } else |e| warn("cannot remove {s} ({s})", .{ t.path, @errorName(e) });
+                    } else |e| warn("cannot remove {s} ({s})", .{ t.path, storage.describeError(e) });
                 }
             }
             action = "deleted";
@@ -3263,7 +3263,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     common.atomic.makedirs(p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
     {
         var zb: [sys.path_max:0]u8 = undefined;
-        const zp = sys.z(&zb, p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, @errorName(e) });
+        const zp = sys.z(&zb, p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
         const acc_err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
         if (acc_err != .SUCCESS)
             die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
@@ -3814,7 +3814,7 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
         return true;
     };
     const stat = fsx.statAt(fsx.cwd, path, true) catch |err| {
-        note(a, out, json_lines, "FAIL", "workspace {s} cannot be read ({s})", .{ path, @errorName(err) });
+        note(a, out, json_lines, "FAIL", "workspace {s} cannot be read ({s})", .{ path, storage.describeError(err) });
         return true;
     };
     if (!stat.isDir()) {
@@ -3827,7 +3827,7 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
     };
     var failed = false;
     const probe: ?storage.WorkspaceProbe = storage.probeWorkspace(c.io, a, path, workspaceExecuteOverride(c)) catch |err| blk: {
-        note(a, out, json_lines, "FAIL", "workspace {s} probe could not complete ({s})", .{ path, @errorName(err) });
+        note(a, out, json_lines, "FAIL", "workspace {s} probe could not complete ({s})", .{ path, storage.describeError(err) });
         failed = true;
         break :blk null;
     };
@@ -3854,7 +3854,7 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
     const class = storage.workspaceClass(path, mount.fstype, shared.items);
     note(a, out, json_lines, "info", "workspace {s}: {s} file system, classified {s}", .{ path, mount.fstype, class });
     const available: ?storage.Capacity = workspaceCapacityOverride(c) orelse storage.capacity(path) catch |err| blk: {
-        note(a, out, json_lines, "FAIL", "workspace {s}: free bytes and inodes cannot be read ({s})", .{ path, @errorName(err) });
+        note(a, out, json_lines, "FAIL", "workspace {s}: free bytes and inodes cannot be read ({s})", .{ path, storage.describeError(err) });
         failed = true;
         break :blk null;
     };

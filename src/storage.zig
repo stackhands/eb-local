@@ -326,7 +326,7 @@ pub fn jobRoot(
     const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ nl.root, try mountName(a, nl.mount, user, job_id) });
     const st = fsx.statAt(fsx.cwd, path, false) catch |e| return switch (e) {
         error.NotFound => refuse(a, r, "the node-local mount {s} does not exist", .{path}, where_fix, whereArgs(nl)),
-        else => refuse(a, r, "the node-local mount {s} cannot be read ({s})", .{ path, @errorName(e) }, where_fix, whereArgs(nl)),
+        else => refuse(a, r, "the node-local mount {s} cannot be read ({s})", .{ path, describeError(e) }, where_fix, whereArgs(nl)),
     };
     if (st.isLink()) return refuse(a, r, "the node-local mount {s} is a symbolic link", .{path}, link_fix ++
         "build in an allocation whose node-local mount is a directory of its own", .{});
@@ -337,7 +337,7 @@ pub fn jobRoot(
         return refuse(a, r, "the node-local mount {s} is not writable by you", .{path}, where_fix, whereArgs(nl));
     var buf: [sys.path_max]u8 = undefined;
     const real = fsx.realpath(fsx.cwd, path, &buf) catch |e|
-        return refuse(a, r, "the node-local mount {s} cannot be resolved ({s})", .{ path, @errorName(e) }, where_fix, whereArgs(nl));
+        return refuse(a, r, "the node-local mount {s} cannot be resolved ({s})", .{ path, describeError(e) }, where_fix, whereArgs(nl));
     if (!std.mem.eql(u8, real, path)) {
         var root_buf: [sys.path_max]u8 = undefined;
         const real_root = fsx.realpath(fsx.cwd, nl.root, &root_buf) catch nl.root;
