@@ -11,6 +11,7 @@ const common = @import("zig_common");
 const fsx = common.fsx;
 const sys = common.sys;
 const config = @import("config.zig");
+const storage = @import("storage.zig");
 
 const tool = "eb-local";
 
@@ -509,7 +510,7 @@ fn installVerified(
             return 1;
         },
     };
-    defer fsx.deleteTree(a, fsx.cwd, tmp_dir) catch {};
+    defer storage.removeTree(a, tmp_dir) catch {};
     const candidate_path = std.fs.path.join(a, &.{ tmp_dir, "spiderT.lua" }) catch return 1;
     const candidate_stamp = std.fs.path.join(a, &.{ tmp_dir, "timestamp" }) catch return 1;
     const rc_path = std.fs.path.join(a, &.{ tmp_dir, "lmodrc.lua" }) catch return 1;
@@ -519,15 +520,14 @@ fn installVerified(
         return 1;
     };
     const stat = cwd.statFile(io, candidate_path, .{}) catch return 1;
-    const stamp = std.Io.Dir.createFileAbsolute(io, candidate_stamp, .{}) catch return 1;
-    stamp.setTimestamps(io, .{
-        .access_timestamp = .{ .new = olderThan(stat.mtime) },
-        .modify_timestamp = .{ .new = olderThan(stat.mtime) },
-    }) catch {
-        stamp.close(io);
-        return 1;
-    };
-    stamp.close(io);
+    {
+        const stamp = std.Io.Dir.createFileAbsolute(io, candidate_stamp, .{}) catch return 1;
+        defer stamp.close(io);
+        stamp.setTimestamps(io, .{
+            .access_timestamp = .{ .new = olderThan(stat.mtime) },
+            .modify_timestamp = .{ .new = olderThan(stat.mtime) },
+        }) catch return 1;
+    }
     const quoted_dir = luaQuote(a, tmp_dir) catch {
         fail("cannot write a temporary LMOD_RC; the cache was not changed", .{});
         return 1;
@@ -666,14 +666,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
                     sys.unlinkat(fsx.cwd, path, 0) catch {};
                 }
             }
-            if (missing) |dir| fsx.deleteTree(alloc, fsx.cwd, dir) catch {};
+            if (missing) |dir| storage.removeTree(alloc, dir) catch {};
         }
     }.rollback;
     var cache_written = false;
     if (opts.verify) {
         const code = installVerified(io, a, env, opts, cache_path, ran.stdout);
         if (code != 0) {
-            if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
+            if (first_missing) |dir| storage.removeTree(a, dir) catch {};
             return code;
         }
         cache_written = true;

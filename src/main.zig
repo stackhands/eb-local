@@ -2495,7 +2495,7 @@ fn noteGuard(c: Ctx, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(Doctor
     const base = if (fsx.statAt(fsx.cwd, tmp, true)) |st| (if (st.isDir()) tmp else "/tmp") else |_| "/tmp";
     const dir = storage.makeWorkspace(a, base) catch
         return note(a, out, json_lines, "warn", "eessi-arch-guard was not asked: doctor could not make a private directory in {s}", .{base});
-    defer fsx.deleteTree(a, fsx.cwd, dir) catch {};
+    defer storage.removeTree(a, dir) catch {};
     var env = c.env.clone(a) catch oom();
     env.put("EESSI_ARCH_GUARD_WORKDIR", dir) catch oom();
     const r = proc.run(a, guard, &.{ guard, "--strict", "--shell" }, envpOf(a, &env), .{ .stdout_limit = 1 << 20, .stderr_limit = 64 << 10, .timeout_ms = 120_000 }) catch |e|
@@ -4003,7 +4003,7 @@ fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*
         note(a, out, json_lines, "warn", "MPI hello was not compiled; {s} could not be created", .{base});
         return;
     };
-    defer fsx.deleteTree(a, fsx.cwd, work) catch {};
+    defer storage.removeTree(a, work) catch {};
     var seen_ofi = false;
     var seen_ucx = false;
     for (s.mpi_transports.value) |name| {

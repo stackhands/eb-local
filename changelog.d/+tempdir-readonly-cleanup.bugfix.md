@@ -1,0 +1,1 @@
+Remove temporary directories via `storage.removeTree` in `doctor`, `doctor --mpi`, and `lmod-cache --verify` so read-only subdirectories left behind by failing helper processes do not leak scratch directories.
