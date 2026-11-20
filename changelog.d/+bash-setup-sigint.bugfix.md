@@ -1,0 +1,1 @@
+Terminate `build_script` and `extend.script` immediately on `SIGINT` during module and target setup instead of letting GNU Bash wait-and-cooperative-exit drop `SIGINT` when a foreground setup helper catches `SIGINT` and exits normally.
