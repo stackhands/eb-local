@@ -2381,18 +2381,49 @@ const passed_on = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT };
 /// for Ctrl-C to the whole foreground process group.
 const si_kernel: i32 = 0x80;
 
-/// The program being waited for, 0 for none, and the first signal of
-/// `passed_on` received while a `Guard` was held. Atomics only: the handler
-/// can run between any two instructions.
+/// The program being waited for, 0 for none, whether it leads a dedicated
+/// non-TTY process group, and the first signal of `passed_on` received while
+/// a `Guard` was held. Atomics only: the handler can run between any two
+/// instructions.
 var waited_pid = std.atomic.Value(linux.pid_t).init(0);
+var waited_pgroup = std.atomic.Value(bool).init(false);
 var first_signal = std.atomic.Value(u32).init(0);
+
+fn selfPgrp() linux.pid_t {
+    const rc: isize = @bitCast(linux.getpgid(0));
+    return if (rc > 0) @intCast(rc) else 0;
+}
+
+/// Whether standard input, output or error is a controlling terminal whose
+/// foreground process group is `pgrp`.
+fn isForegroundTty(pgrp: linux.pid_t) bool {
+    if (pgrp <= 0) return false;
+    for ([_]sys.fd_t{ 0, 1, 2 }) |fd| {
+        var fg: linux.pid_t = 0;
+        if (linux.errno(linux.ioctl(fd, linux.T.IOCGPGRP, @intFromPtr(&fg))) == .SUCCESS and fg == pgrp)
+            return true;
+    }
+    return false;
+}
 
 fn passOn(sig: linux.SIG, info: *const linux.siginfo_t, _: ?*anyopaque) callconv(.c) void {
     _ = first_signal.cmpxchgStrong(0, @backingInt(sig), .seq_cst, .seq_cst);
     // From the terminal, the signal reached the program too.
     if (info.code == si_kernel) return;
     const pid = waited_pid.load(.seq_cst);
-    if (pid > 0) _ = linux.kill(pid, sig);
+    if (pid <= 0) return;
+    if (waited_pgroup.load(.seq_cst)) {
+        proc.killGroup(pid, sig);
+        return;
+    }
+    const self_pid: linux.pid_t = @intCast(linux.getpid());
+    if (info.code <= 0 and info.fields.common.first.piduid.pid == self_pid) return;
+    const pgrp = selfPgrp();
+    if (pgrp == self_pid) {
+        proc.killGroup(pgrp, sig);
+    } else {
+        _ = linux.kill(pid, sig);
+    }
 }
 
 /// While a guard is held, a signal of `passed_on` does not stop eb-local.
@@ -2443,15 +2474,22 @@ const Guard = struct {
             _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
             return .{ .signal = sig };
         }
+        const self_pgrp = selfPgrp();
+        const own_group = !isForegroundTty(self_pgrp);
         const pid: isize = @bitCast(linux.fork());
         if (pid == 0) {
+            if (own_group) _ = linux.setpgid(0, 0);
             for (passed_on, 0..) |sig, i| _ = linux.sigaction(sig, &g.old[i], null);
             _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
             const rc = linux.execve(zargv[0].?, zargv.ptr, envp);
             cli.err("eb-local: cannot run {s} ({s})\n", .{ argv[0], sys.describeErrno(linux.errno(rc)) });
             linux.exit_group(127);
         }
-        if (pid > 0) waited_pid.store(@intCast(pid), .seq_cst);
+        if (pid > 0) {
+            if (own_group) _ = linux.setpgid(@intCast(pid), @intCast(pid));
+            waited_pgroup.store(own_group, .seq_cst);
+            waited_pid.store(@intCast(pid), .seq_cst);
+        }
         _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
         if (pid < 0) die("cannot start {s}", .{argv[0]});
         // Waited for without reaping, so that its pid cannot be reused
@@ -2466,6 +2504,7 @@ const Guard = struct {
             }
         }
         waited_pid.store(0, .seq_cst);
+        waited_pgroup.store(false, .seq_cst);
         var raw: i32 = 0;
         while (true) {
             const rc = linux.wait4(@intCast(pid), &raw, 0, null);
