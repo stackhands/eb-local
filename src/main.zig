@@ -3319,6 +3319,24 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\unset EB_LOCAL_SITE_TOOLCHAINS
     \\echo "eb-local: installing into $prefix ($mode)"
     \\echo "eb-local: target $EESSI_SOFTWARE_SUBDIR${EESSI_ACCELERATOR_TARGET:+ + $EESSI_ACCELERATOR_TARGET}, build space ${saved[EASYBUILD_BUILDPATH]%/build}"
+    \\# EESSI names the node's NVIDIA compute capability in its accelerator
+    \\# target, and EasyBuild reads it as cuda-compute-capabilities. Without
+    \\# one an easyblock such as Kokkos' leaves its CUDA backend off and
+    \\# installs a host library under the CUDA module name, so a build on a
+    \\# GPU node passes the node's own, unless the caller named one.
+    \\case ${EESSI_ACCELERATOR_TARGET-} in
+    \\accel/nvidia/cc[0-9][0-9]*)
+    \\    cc=${EESSI_ACCELERATOR_TARGET##*/cc}
+    \\    named=${EASYBUILD_CUDA_COMPUTE_CAPABILITIES-}
+    \\    for arg in "$@"; do
+    \\        case $arg in --cuda-compute-capabilities | --cuda-compute-capabilities=*) named=$arg ;; esac
+    \\    done
+    \\    if [ -z "$named" ] && [[ $cc =~ ^[0-9]+$ ]]; then
+    \\        export EASYBUILD_CUDA_COMPUTE_CAPABILITIES="${cc%?}.${cc: -1}"
+    \\        echo "eb-local: CUDA compute capability $EASYBUILD_CUDA_COMPUTE_CAPABILITIES, from $EESSI_ACCELERATOR_TARGET"
+    \\    fi
+    \\    ;;
+    \\esac
     \\# EasyBuild keeps the umask EESSI-extend sets for the install, 077 and the
     \\# sticky bit for a user one, 002 and the setgid bit for a project.
     \\# eb replaces this shell, so the program eb-local waits for, and passes
