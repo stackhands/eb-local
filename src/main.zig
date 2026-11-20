@@ -3264,6 +3264,12 @@ fn listedLess(_: void, x: Listed, y: Listed) bool {
     return std.mem.lessThan(u8, x.module, y.module);
 }
 
+fn validListFilter(filter: []const u8) bool {
+    if (std.mem.endsWith(u8, filter, "/"))
+        return filter.len > 1 and config.validModule(filter[0 .. filter.len - 1]);
+    return config.validModule(filter);
+}
+
 fn matchesFilter(module: []const u8, filters: []const []const u8) bool {
     if (filters.len == 0) return true;
     for (filters) |f| {
@@ -5046,7 +5052,7 @@ pub fn main(init: std.process.Init) u8 {
                 } else if (x.len > 0 and x[0] == '-') {
                     die("list does not know '{s}'", .{x});
                 } else {
-                    if (std.mem.indexOfAny(u8, x, " \t\n;$`\\") != null) die("'{s}' is not a module name", .{x});
+                    if (!validListFilter(x)) die("'{s}' is not a module name", .{x});
                     rest.append(a, x) catch oom();
                 }
             },
