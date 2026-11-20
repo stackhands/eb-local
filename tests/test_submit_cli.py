@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import textwrap
+import time
 import unittest
 
 import binary
@@ -266,6 +267,28 @@ class Submit(StorageFixture):
         self.assertEqual(len(calls), 2, calls)
         self.assertTrue(calls[0].startswith("-p cpu "), calls[0])
         self.assertTrue(calls[1].startswith("-p gpu "), calls[1])
+
+    def test_repeated_submit_in_one_second_keeps_each_job_script(self):
+        jobs = self.prefix / ".eb-local" / "jobs"
+        for _ in range(10):
+            if jobs.exists():
+                for path in jobs.iterdir():
+                    path.unlink()
+            second = int(time.time())
+            first = self.run_tool(["submit", "--on", "cpu", "recipe.eb", "--first"], SLURM_JOB_ID="")
+            second_run = self.run_tool(["submit", "--on", "cpu", "recipe.eb", "--second"], SLURM_JOB_ID="")
+            if int(time.time()) == second:
+                break
+        else:
+            self.fail("could not run two submit commands within one second")
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second_run.returncode, 0, second_run.stdout + second_run.stderr)
+        scripts = sorted(jobs.iterdir())
+        self.assertEqual(len(scripts), 2, scripts)
+        commands = [path.read_text().rstrip().splitlines()[-1] for path in scripts]
+        self.assertTrue(any("--first" in command for command in commands), commands)
+        self.assertTrue(any("--second" in command for command in commands), commands)
 
     def test_sbatch_directives_quote_paths_containing_spaces(self):
         spaced_cwd = self.root / "work dir"

@@ -4430,7 +4430,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
     }
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
-    const stamp = nowSecs();
+    const stamp = str(a, "{d}.{d}", .{ nowSecs(), linux.getpid() });
     var failed = false;
     for (chosen.items) |t| {
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
@@ -4443,7 +4443,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
             \\{s}
             \\
         , .{ t.name, recipe, log_out, chdir_val, command });
-        const path = std.fs.path.join(a, &.{ jobs, str(a, "{d}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
+        const path = std.fs.path.join(a, &.{ jobs, str(a, "{s}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
         var argv: std.ArrayList([]const u8) = .empty;
         argv.append(a, sbatch) catch oom();
         var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
