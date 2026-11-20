@@ -555,6 +555,64 @@ pub const LockResult = union(enum) {
     failed,
 };
 
+/// Outcome of acquiring a bounded exclusive lock with signal cancellation.
+pub const CancelLockResult = union(enum) {
+    held: sys.fd_t,
+    unlocked,
+    canceled,
+    failed,
+};
+
+const lock_signals = [_]linux.SIG{ .INT, .TERM, .HUP, .QUIT };
+var lock_canceled = std.atomic.Value(bool).init(false);
+var lock_signal = std.atomic.Value(u32).init(0);
+
+fn onLockSignal(sig: linux.SIG, _: *const linux.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    _ = lock_signal.cmpxchgStrong(0, @backingInt(sig), .seq_cst, .seq_cst);
+    lock_canceled.store(true, .seq_cst);
+}
+
+/// Captures non-ignored termination signals while waiting on a contended lock
+/// so `acquireBoundedLockCancel` aborts immediately and the caller can clean up.
+pub const LockCancel = struct {
+    old: [lock_signals.len]linux.Sigaction,
+
+    /// Install cancellation handlers for non-ignored termination signals.
+    pub fn hold() LockCancel {
+        var lc: LockCancel = .{ .old = undefined };
+        var during = linux.sigemptyset();
+        for (lock_signals) |sig| linux.sigaddset(&during, sig);
+        const act: linux.Sigaction = .{
+            .handler = .{ .sigaction = onLockSignal },
+            .mask = during,
+            .flags = linux.SA.SIGINFO,
+        };
+        lock_signal.store(0, .seq_cst);
+        lock_canceled.store(false, .seq_cst);
+        for (lock_signals, 0..) |sig, i| {
+            _ = linux.sigaction(sig, null, &lc.old[i]);
+            if (lc.old[i].handler.handler != linux.SIG.IGN) _ = linux.sigaction(sig, &act, null);
+        }
+        return lc;
+    }
+
+    /// Restore the signal actions that were in effect before `hold`.
+    pub fn release(lc: *const LockCancel) void {
+        for (lock_signals, 0..) |sig, i| _ = linux.sigaction(sig, &lc.old[i], null);
+    }
+
+    /// Return the first guarded signal received since `hold`, or `null`.
+    pub fn received(_: *const LockCancel) ?linux.SIG {
+        const v = lock_signal.load(.seq_cst);
+        return if (v == 0) null else @fromBackingInt(@intCast(v));
+    }
+
+    /// Return the atomic cancellation flag observed by `lockExclusiveCancel`.
+    pub fn flag(_: *const LockCancel) *const std.atomic.Value(bool) {
+        return &lock_canceled;
+    }
+};
+
 /// Resolve the lock wait timeout in milliseconds from `EB_LOCAL_LOCK_TIMEOUT_MS`.
 pub fn lockTimeoutMs(env: ?*const std.process.Environ.Map, err_msg: *[]const u8) ?u32 {
     const map = env orelse return default_lock_timeout_ms;
@@ -591,6 +649,25 @@ pub fn flockUnsupported(e: sys.Error) bool {
 /// `EOPNOTSUPP`, `ENOSYS`), prints one warning on stderr when `notify` is
 /// true and returns `.unlocked`.
 pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, notify: bool, err_msg: *[]const u8) LockResult {
+    return switch (acquireBoundedLockCancel(a, lock_path, timeout_ms, notify, null, err_msg)) {
+        .held => |fd| .{ .held = fd },
+        .unlocked => .unlocked,
+        .canceled => unreachable,
+        .failed => .failed,
+    };
+}
+
+/// Like `acquireBoundedLock`, also returning `.canceled` when `cancel` is set
+/// while waiting on a contended lock via `common.state.lockExclusiveCancel`.
+pub fn acquireBoundedLockCancel(
+    a: Allocator,
+    lock_path: []const u8,
+    timeout_ms: u32,
+    notify: bool,
+    cancel: ?*const std.atomic.Value(bool),
+    err_msg: *[]const u8,
+) CancelLockResult {
+    if (cancel) |c| if (c.load(.seq_cst)) return .canceled;
     const fd = sys.openat(fsx.cwd, lock_path, .{
         .ACCMODE = .RDWR,
         .CREAT = true,
@@ -617,12 +694,24 @@ pub fn acquireBoundedLock(a: Allocator, lock_path: []const u8, timeout_ms: u32, 
             return .unlocked;
         }
     }
+    if (cancel) |c| if (c.load(.seq_cst)) {
+        sys.close(fd);
+        return .canceled;
+    };
     if (common.state.lockExclusive(fd, 0)) |_| {
         return .{ .held = fd };
     } else |err| switch (err) {
         error.TimedOut => {
+            if (cancel) |c| if (c.load(.seq_cst)) {
+                sys.close(fd);
+                return .canceled;
+            };
             if (notify) common.cli.err("eb-local: waiting for lock {s}; another eb-local run holds it\n", .{lock_path});
-            common.state.lockExclusive(fd, timeout_ms) catch |wait_err| switch (wait_err) {
+            common.state.lockExclusiveCancel(fd, timeout_ms, cancel) catch |wait_err| switch (wait_err) {
+                error.Canceled => {
+                    sys.close(fd);
+                    return .canceled;
+                },
                 error.TimedOut => {
                     sys.close(fd);
                     err_msg.* = std.fmt.allocPrint(a, "timed out after {d} ms waiting for lock {s}", .{ timeout_ms, lock_path }) catch "timed out waiting for lock";
@@ -765,6 +854,14 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
     try testing.expect(std.mem.indexOf(u8, fifo_msg, "not a regular file") != null);
     try testing.expect(acquireOptionalLock(fifo_lock) == null);
     try testing.expect(!tryLockFree(fifo_lock));
+
+    var held_for_cancel: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg)) {
+        .held => |fd| fd,
+        else => return error.TestUnexpectedResult,
+    };
+    defer releaseLock(&held_for_cancel);
+    var cancel = std.atomic.Value(bool).init(true);
+    try testing.expectEqual(CancelLockResult.canceled, acquireBoundedLockCancel(a, lock_path, 5000, false, &cancel, &msg2));
 }
 
 test "the mount a path lies on" {
