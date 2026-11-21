@@ -223,6 +223,26 @@ fn warn(comptime fmt: []const u8, args: anytype) void {
 
 var stdout: cli.Stdout = .{ .tool = tool };
 
+/// Set in main from EB_LOCAL_TEST_STDOUT_WRITES, only in the test artifact:
+/// that many writes to standard output succeed, and the next one and every
+/// one after it fail as a full disk would, so a test can fail the write that
+/// follows any given one.
+var test_stdout_writes: ?usize = null;
+
+fn emit(bytes: []const u8) bool {
+    if (comptime build_options.test_ops) {
+        if (test_stdout_writes) |left| {
+            if (left == 0) {
+                stdout.fd = sys.openat(linux.AT.FDCWD, "/dev/full", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0) catch stdout.fd;
+                test_stdout_writes = null;
+            } else {
+                test_stdout_writes = left - 1;
+            }
+        }
+    }
+    return stdout.write(bytes);
+}
+
 /// `fmt` and a newline in `buf`, or on `a` when `buf` is too small. Running
 /// out of memory is an error to the caller, not a failed write.
 fn formatLine(a: Allocator, buf: []u8, comptime fmt: []const u8, args: anytype) error{OutOfMemory}![]const u8 {
@@ -235,7 +255,7 @@ fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = formatLine(std.heap.page_allocator, &buf, fmt, args) catch oom();
     defer if (@intFromPtr(s.ptr) != @intFromPtr(&buf)) std.heap.page_allocator.free(s);
-    _ = stdout.write(s);
+    _ = emit(s);
 }
 
 test "formatLine reports running out of memory instead of a failed write" {
@@ -908,7 +928,7 @@ fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const lines = environmentLines(c, s, p, envStrict(c, g), false);
     if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    return if (stdout.write(lines)) 0 else 1;
+    return if (emit(lines)) 0 else 1;
 }
 
 const dev_saved_names = [_][]const u8{
@@ -1111,7 +1131,7 @@ fn cmdLeave(c: Ctx) u8 {
     }
     out.appendSlice(c.a, "unset EB_LOCAL_DEV_SAVED\n") catch oom();
     evalHint("leave");
-    return if (stdout.write(out.items)) 0 else 1;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// The first and last line of the lines `dev --envrc` owns in `.envrc`.
@@ -1278,7 +1298,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     evalHint("dev --locked");
-    return if (stdout.write(out.items)) 0 else 1;
+    return if (emit(out.items)) 0 else 1;
 }
 
 fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
@@ -1358,7 +1378,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
-    if (!stdout.write(out.items)) return 1;
+    if (!emit(out.items)) return 1;
     if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
@@ -1617,7 +1637,7 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
         warn("no build environment module for the {s} compilers is available;", .{family});
         cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
     }
-    return if (stdout.write(str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }))) 0 else 1;
+    return if (emit(str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }))) 0 else 1;
 }
 
 // ---- check ----------------------------------------------------------------
@@ -2312,7 +2332,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
     for (s.eessi.items) |e| line(a, &out, e.name, e.value);
-    return if (stdout.write(out.items)) 0 else 1;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// Print the resolved value(s) of one configuration key for scripts and
@@ -2507,7 +2527,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
     checkSiteConfig(a, label, text);
     if (show) {
-        return if (stdout.write(text)) 0 else 1;
+        return if (emit(text)) 0 else 1;
     }
     if (fsx.statAt(fsx.cwd, target, false)) |st| {
         if (st.isDir()) {
@@ -3935,7 +3955,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{build_script}) catch oom();
-    return if (stdout.write(out.items)) 0 else 1;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// A test capacity, `BYTES:INODES`, or `BYTES:INODES:uncounted` for a file
@@ -4393,7 +4413,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
                 out.append(a, '\n') catch oom();
             }
         }
-        return if (stdout.write(out.items)) 0 else 1;
+        return if (emit(out.items)) 0 else 1;
     }
 
     if (json) {
@@ -4440,7 +4460,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     }.f;
     if (trees.items.len == 0 or rows.items.len == 0) {
         add(a, &out, str(a, "Nothing{s} is installed in {s}.\n", .{ if (filters.len > 0) " that matches" else "", p.prefix }));
-        return if (stdout.write(out.items)) 0 else 1;
+        return if (emit(out.items)) 0 else 1;
     }
 
     var width: usize = "MODULE".len;
@@ -4478,7 +4498,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     } else {
         add(a, &out, "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.\n");
     }
-    return if (stdout.write(out.items)) 0 else 1;
+    return if (emit(out.items)) 0 else 1;
 }
 
 // ---- doctor ---------------------------------------------------------------
@@ -5174,7 +5194,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     out.appendSlice(a, "\n") catch oom();
     out.appendSlice(a, summary) catch oom();
     out.appendSlice(a, "\n") catch oom();
-    if (!stdout.write(out.items)) return 1;
+    if (!emit(out.items)) return 1;
     return if (any_failed) 1 else 0;
 }
 
@@ -5346,7 +5366,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         argv.append(a, path) catch oom();
         if (o.print) {
             say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
-            if (!stdout.write(script)) return 1;
+            if (!emit(script)) return 1;
             continue;
         }
         var why: common.atomic.Why = .{};
@@ -5882,6 +5902,7 @@ fn runMain(init: std.process.Init) u8 {
     const cwd = a.dupe(u8, fsx.realpath(fsx.cwd, ".", &cwd_buf) catch "/") catch oom();
     const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_STDOUT_WRITES"))) |v| test_stdout_writes = std.fmt.parseInt(usize, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FLOCK_ERRNO"))) |v| {
             if (std.mem.eql(u8, v, "ENOLCK")) {
@@ -5906,10 +5927,10 @@ fn runMain(init: std.process.Init) u8 {
     if (args.len > 0) {
         const first: []const u8 = args[0];
         if (std.mem.eql(u8, first, "help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
-            return if (stdout.write(usage_text)) 0 else 1;
+            return if (emit(usage_text)) 0 else 1;
         }
         if (std.mem.eql(u8, first, "--version")) {
-            return if (stdout.write(comptime cli.versionLine(tool, version, build_options.commit))) 0 else 1;
+            return if (emit(comptime cli.versionLine(tool, version, build_options.commit))) 0 else 1;
         }
         if (std.meta.stringToEnum(Command, first)) |cmd| {
             if (cmd != .build) {
@@ -5984,7 +6005,7 @@ fn runMain(init: std.process.Init) u8 {
             continue;
         }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
-            return if (stdout.write(usage_text)) 0 else 1;
+            return if (emit(usage_text)) 0 else 1;
         } else if (std.mem.eql(u8, x, "--project")) {
             g.project = value(args, &i, "--project");
         } else if (joined(x, "--project")) |v| {
@@ -6530,7 +6551,7 @@ fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
-    return if (stdout.write(out.items)) 0 else 1;
+    return if (emit(out.items)) 0 else 1;
 }
 
 test "extendEnvironment always populates the selected install variable" {
