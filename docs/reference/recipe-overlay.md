@@ -16,12 +16,14 @@ It names the SHA-256 digest of an upstream easyconfig and lists only the paramet
 
 ## Edit tables
 
-| [replace] |  | Maps parameter names to the right-hand side that should replace the first matching assignment in the easyconfig. |
+| [add] |  | Maps parameter names to typed TOML values for new top-level assignments. Materialization refuses if the easyconfig already assigns that name; use `[replace]` instead. |
 |---|---|---|
+| [replace] |  | Maps parameter names to the right-hand side that should replace the first matching assignment in the easyconfig. |
 | [patches] |  | Maps a patch label to a patch file path; each becomes `('label', 'file')` appended to `patches`. |
 | [dependencies.add] |  | Maps a dependency name to a full tuple literal appended to `dependencies`. |
 | [dependencies.replace] |  | Maps a dependency name to the tuple that replaces the first `('name', ...)` entry. |
 
+Values in `[add]` use typed TOML syntax and become safe Python literals. Values in `[replace]` retain the existing string containing a Python right-hand side.
 No Python hooks or easyblocks are allowed in an overlay; only declarative edits the format above can express.
 When an edit target or delimiter cannot be resolved in the base easyconfig, `eb-local overlay materialize` exits 2 and reports the failing parameter, dependency, or list on stderr.
 
@@ -44,6 +46,27 @@ site = "OpenMPI-Slurm-PMI.patch"
 [dependencies.add]
 zlib = "('zlib', '1.2.13-GCCcore-13.3.0')"
 ```
+
+## Kokkos PIC variants
+
+To make PIC variants of both the `zen4` and `icelake` Kokkos recipes, create one digest-pinned overlay beside each upstream easyconfig.
+The architecture remains in each base recipe; both overlay files add the same assignments:
+
+```text
+overlay_version = 1
+base_easyconfig = "Kokkos-4.5.01-zen4.eb"
+base_digest = "0123...64 hex chars..."
+rationale = "Build the zen4 Kokkos variant as position-independent code."
+
+[add]
+versionsuffix = "-PIC"
+
+[add.toolchainopts]
+pic = true
+```
+
+For the Ice Lake overlay, use its own `base_easyconfig`, digest, and rationale (for example `Kokkos-4.5.01-icelake.eb`); the `[add]` assignments are identical.
+The materialized recipes define `versionsuffix = '-PIC'` and `toolchainopts = {'pic': True}` directly, so no `kokkos_pic.py` hook is needed.
 
 ## Provenance record
 
