@@ -290,6 +290,26 @@ class Submit(StorageFixture):
         self.assertTrue(any("--first" in command for command in commands), commands)
         self.assertTrue(any("--second" in command for command in commands), commands)
 
+    def test_forced_submit_script_collision_keeps_both(self):
+        jobs = self.prefix / ".eb-local" / "jobs"
+        jobs.mkdir(parents=True)
+        stamp = "1700000000.42"
+        planted = jobs / f"{stamp}-cpu-recipe.eb.sh"
+        planted.write_text("#!/bin/bash\n# planted\n", encoding="utf-8")
+        planted.chmod(0o700)
+        run = self.run_tool(
+            ["submit", "--on", "cpu", "recipe.eb", "--marker"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_TEST_SUBMIT_STAMP=stamp,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        scripts = sorted(p.name for p in jobs.iterdir())
+        self.assertEqual(scripts, sorted([planted.name, f"{stamp}-cpu-recipe.eb-2.sh"]), scripts)
+        self.assertEqual(planted.read_text(encoding="utf-8"), "#!/bin/bash\n# planted\n")
+        kept = (jobs / f"{stamp}-cpu-recipe.eb-2.sh").read_text(encoding="utf-8")
+        self.assertIn("--marker", kept)
+        self.assertNotIn("# planted", kept)
+
     def test_sbatch_directives_quote_paths_containing_spaces(self):
         spaced_cwd = self.root / "work dir"
         spaced_cwd.mkdir()

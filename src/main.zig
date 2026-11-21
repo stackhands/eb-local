@@ -4430,7 +4430,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
     }
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
-    const stamp = str(a, "{d}.{d}", .{ nowSecs(), linux.getpid() });
+    const stamp = submitStamp(a, c);
     var failed = false;
     for (chosen.items) |t| {
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
@@ -4444,20 +4444,25 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
             \\
         , .{ t.name, recipe, log_out, chdir_val, command });
         const path = std.fs.path.join(a, &.{ jobs, str(a, "{s}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
-        var argv: std.ArrayList([]const u8) = .empty;
-        argv.append(a, sbatch) catch oom();
-        var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
-        while (words.next()) |w| argv.append(a, w) catch oom();
-        argv.append(a, path) catch oom();
         if (o.print) {
+            var argv: std.ArrayList([]const u8) = .empty;
+            argv.append(a, sbatch) catch oom();
+            var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
+            while (words.next()) |w| argv.append(a, w) catch oom();
+            argv.append(a, path) catch oom();
             say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
             cli.put(1, script);
             continue;
         }
-        var why: common.atomic.Why = .{};
-        defer why.deinit(a);
-        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
-            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
+        // A seconds.PID name can already exist: PIDs recycle and realtime can
+        // step back. Create the final path exclusively and take a suffix
+        // rather than replacing the script an earlier job retained.
+        const written = retainSubmitScript(a, path, script);
+        var argv: std.ArrayList([]const u8) = .empty;
+        argv.append(a, sbatch) catch oom();
+        var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
+        while (words.next()) |w| argv.append(a, w) catch oom();
+        argv.append(a, written) catch oom();
         say("eb-local: {s}:", .{t.name});
         const run = runAttached(a, argv.items, c.envp);
         switch (run) {
@@ -4472,6 +4477,91 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     say("", .{});
     say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
     return if (failed) 1 else 0;
+}
+
+/// The stamp in a retained submit script's name. The test artifact may pin
+/// it, so a collision can be forced; a release build always uses seconds and
+/// the process id.
+fn submitStamp(a: Allocator, c: Ctx) []const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_SUBMIT_STAMP"))) |s| {
+            if (std.mem.indexOfAny(u8, s, "/\x00") == null) return s;
+        }
+    }
+    return str(a, "{d}.{d}", .{ nowSecs(), linux.getpid() });
+}
+
+/// `preferred` with `-N` before a trailing `.sh`, for the Nth collision.
+fn submitScriptSuffix(a: Allocator, path: []const u8, n: usize) []const u8 {
+    if (std.mem.endsWith(u8, path, ".sh"))
+        return str(a, "{s}-{d}.sh", .{ path[0 .. path.len - 3], n });
+    return str(a, "{s}-{d}", .{ path, n });
+}
+
+/// Create `path` and write `body` with mode 0700. False when that final path
+/// already exists, is a directory, or is a symbolic link: the caller then
+/// tries another name. `O_EXCL` is what makes the collision visible.
+fn createExclusiveScript(path: []const u8, body: []const u8) bool {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+    }, 0o700) catch |e| switch (e) {
+        error.Exists, error.SymLink, error.IsDir => return false,
+        else => die("cannot create {s} ({s})", .{ path, storage.describeError(e) }),
+    };
+    sys.fchmod(fd, 0o700) catch |e| {
+        sys.close(fd);
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        die("cannot set the mode of {s} ({s})", .{ path, storage.describeError(e) });
+    };
+    sys.writeAll(fd, body) catch |e| {
+        sys.close(fd);
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        die("cannot write {s} ({s})", .{ path, storage.describeError(e) });
+    };
+    sys.close(fd);
+    return true;
+}
+
+/// Write `script` at `preferred`, or at that path with a `-2`, `-3`, ...
+/// suffix when the final path is already taken. An earlier job's script is
+/// never replaced.
+fn retainSubmitScript(a: Allocator, preferred: []const u8, script: []const u8) []const u8 {
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        const path = if (n == 0) preferred else submitScriptSuffix(a, preferred, n + 1);
+        if (createExclusiveScript(path, script)) return path;
+    }
+    die("cannot write {s}: the name and its suffixes are already taken", .{preferred});
+}
+
+fn readRetainedScript(a: Allocator, path: []const u8) ![]const u8 {
+    const opened = try fsx.openRegular(fsx.cwd, path, true);
+    defer sys.close(opened.fd);
+    return fsx.readAll(a, opened.fd, 1 << 16);
+}
+
+test "a forced collision keeps both retained submit scripts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-collision-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const preferred = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe.sh", .{root});
+    const first = retainSubmitScript(a, preferred, "#!/bin/bash\n# first\n");
+    const second = retainSubmitScript(a, preferred, "#!/bin/bash\n# second\n");
+    try std.testing.expectEqualStrings(preferred, first);
+    const suffixed = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe-2.sh", .{root});
+    try std.testing.expectEqualStrings(suffixed, second);
+    try std.testing.expectEqualStrings("#!/bin/bash\n# first\n", try readRetainedScript(a, first));
+    try std.testing.expectEqualStrings("#!/bin/bash\n# second\n", try readRetainedScript(a, second));
+    const st = try fsx.statAt(fsx.cwd, first, false);
+    try std.testing.expectEqual(@as(u32, 0o700), st.perm());
 }
 
 // ---- uninstall ------------------------------------------------------------

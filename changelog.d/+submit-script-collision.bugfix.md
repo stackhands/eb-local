@@ -1,1 +1,1 @@
-Keep every submitted job script when matching submit commands run within one second.
+`eb-local submit` keeps every job script, and writes the new script beside one whose path is already taken.
