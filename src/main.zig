@@ -5906,25 +5906,13 @@ fn targetRoot(c: Ctx, path: []const u8) bool {
     return isDirAt(fd, "software") and isDirAt(fd, "modules");
 }
 
-/// Brings back from the trash what uninstall moved there, for every CPU
-/// target, and makes each installation read-only again: rtrash restore
-/// alone brings one back with the writable directories rtrash needs.
-fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+/// What `restore` would bring back, in the order it comes back: installations,
+/// module files in `modules/all`, and EasyBuild's links to them.
+const Restoring = [3]std.ArrayList(Trashed);
+
+fn restorePlan(c: Ctx, p: Place, versions: []const u8, rtrash: []const u8, modules: []const []const u8) Restoring {
     const a = c.a;
-    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
-    const p = place(c, s);
-    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
-        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
-    } else |_| die("nothing was installed in {s}", .{p.prefix});
-    var prefix_lock: ?sys.fd_t = if (dry_run) null else acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
-    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
-        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
-    // Installations, the module files in modules/all, and EasyBuild's links
-    // to them from modules/<class>/, in the order they come back: nothing
-    // is back before what it needs.
     var found = [_]std.ArrayList(Trashed){ .empty, .empty, .empty };
     for (modules, 0..) |m, idx| {
         if (listed(modules[0..idx], m)) continue;
@@ -5958,10 +5946,48 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
             die("{s} exists; restore replaces nothing, so nothing was restored", .{e.original});
         } else |_| {}
     };
+    return found;
+}
+
+/// Whether everything `self` names is still in `now`.
+fn restoringHolds(self: Restoring, now: Restoring) bool {
+    for (self, 0..) |list, kind| for (list.items) |e| {
+        const there = for (now[kind].items) |f| {
+            if (std.mem.eql(u8, e.original, f.original) and std.mem.eql(u8, e.trash_dir, f.trash_dir)) break true;
+        } else false;
+        if (!there) return false;
+    };
+    return true;
+}
+
+/// Brings back from the trash what uninstall moved there, for every CPU
+/// target, and makes each installation read-only again: rtrash restore
+/// alone brings one back with the writable directories rtrash needs.
+fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
+    } else |_| die("nothing was installed in {s}", .{p.prefix});
+    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
+        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
+    const found = restorePlan(c, p, versions, rtrash, modules);
     for (found, 0..) |list, kind| for (list.items) |e| say("  {s}{s}", .{ e.original, if (kind == 0) "/" else "" });
+    if (stdout.failed) return unlisted("restored");
     if (dry_run) {
         say("eb-local: dry run, nothing restored", .{});
         return 0;
+    }
+    // The list is out. Only now does restore take the prefix lock, which makes
+    // `.eb-local/.lock`, and check under it that the trash still holds what it
+    // listed and that nothing is in the way.
+    var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
+    if (!restoringHolds(found, restorePlan(c, p, versions, rtrash, modules))) {
+        warn("what restore listed changed while it waited for the prefix lock; nothing was restored. Run it again.", .{});
+        return 1;
     }
     // rtrash restore takes no --; every path is absolute.
     for (found, 0..) |list, kind| for (list.items) |e| {

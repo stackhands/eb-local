@@ -76,7 +76,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
         )
         self.assertFalse((self.prefix / ".eb-local").exists())
 
-    def test_restore_closed_stdout_keeps_lock_file_empty(self):
+    def test_restore_closed_stdout_makes_no_lock(self):
         arch = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
         (arch / "software").mkdir(parents=True)
         (arch / "modules" / "all").mkdir(parents=True)
@@ -105,8 +105,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
             env=self.base_env(),
             cwd=self.root,
         )
-        lock_file = self.prefix / ".eb-local" / ".lock"
-        self.assertEqual(lock_file.read_bytes(), b"")
+        self.assertFalse((self.prefix / ".eb-local").exists())
 
 
 if __name__ == "__main__":

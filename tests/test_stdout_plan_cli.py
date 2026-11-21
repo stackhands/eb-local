@@ -313,6 +313,34 @@ class PlanBeforeChange(unittest.TestCase):
         )
         self.check_every_write("uninstall (rtrash)", trashing, ["uninstall", "Demo/1.0"], listed=2, nothing="removed")
 
+    def test_restore_lists_before_it_restores_anything(self):
+        def trashed(test):
+            scene = test.scene()
+            scene.trashed_install()
+            return scene
+
+        self.check_unchanged(
+            "restore", trashed, ["restore", "Restored/1.0"], changed=lambda s: s.marker.exists(), nothing="restored"
+        )
+
+    def test_restore_reads_the_trash_again_once_it_has_the_lock(self):
+        for front_end in self.front_ends:
+            with self.subTest(front_end=front_end):
+                scene = self.scene()
+                scene.trashed_install(lists_once=True)
+                code, err, _ = self.run_scene(scene, front_end, "ok", ["restore", "Restored/1.0"])
+                self.assertEqual(code, 2, err)
+                self.assertIn("is not in the trash", err)
+                self.assertEqual(scene.calls(), [], "nothing may be restored")
+
+    def test_restore_reports_after_it_has_changed_everything(self):
+        def trashed(test):
+            scene = test.scene()
+            scene.trashed_install()
+            return scene
+
+        self.check_every_write("restore", trashed, ["restore", "Restored/1.0"], listed=2, nothing="restored")
+
 
 if __name__ == "__main__":
     unittest.main()

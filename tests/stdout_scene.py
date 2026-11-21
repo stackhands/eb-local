@@ -168,8 +168,11 @@ class Scene:
             directory.chmod(0o555)
         return tree, module
 
-    def trashed_install(self):
-        """Restored/1.0 in the trash, and an rtrash that lists it and records restores."""
+    def trashed_install(self, *, lists_once=False):
+        """Restored/1.0 in the trash, and an rtrash that lists it and records restores.
+
+        With LISTS_ONCE the trash is empty by the time it is listed a second time.
+        """
         target = self.prefix / "versions" / "2023.06" / "software" / "linux" / "x86_64" / "intel" / "skylake_avx512"
         (target / "software").mkdir(parents=True)
         (target / "modules" / "all").mkdir(parents=True)
@@ -182,8 +185,13 @@ class Scene:
         write_executable(
             self.bins / "rtrash",
             "#!/bin/sh\n"
-            f"if [ \"$1\" = list ]; then printf '%s\\n' '{listing}'; exit 0; fi\n"
-            f"printf '%s\\n' \"$*\" >> '{self.marker}'\n"
+            + (
+                f"if [ \"$1\" = list ] && [ -e '{self.root / 'listed'}' ]; then printf '[]\\n'; exit 0; fi\n"
+                f"if [ \"$1\" = list ]; then : > '{self.root / 'listed'}'; printf '%s\\n' '{listing}'; exit 0; fi\n"
+                if lists_once
+                else f"if [ \"$1\" = list ]; then printf '%s\\n' '{listing}'; exit 0; fi\n"
+            )
+            + f"printf '%s\\n' \"$*\" >> '{self.marker}'\n"
             "exit 0\n",
         )
 
