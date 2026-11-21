@@ -6028,11 +6028,8 @@ fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain eb: the script eb-local eb runs, with its arguments. Nothing was run.\n") catch oom();
     const name = extend.variable(sel.mode);
-    if (env.get(name)) |v| {
-        out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, q(a, v), @tagName(sel.mode), sel.umask }) catch oom();
-    } else {
-        out.print(a, "# No install variable is set: a user install into the module's default, $HOME/eessi; the process umask is {s}.\n", .{sel.umask}) catch oom();
-    }
+    const val = env.get(name).?;
+    out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, qSingleLine(a, val), @tagName(sel.mode), sel.umask }) catch oom();
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
     out.appendSlice(a, " \"$SCRIPT\"") catch oom();
@@ -6042,6 +6039,63 @@ fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
     cli.put(1, out.items);
     return 0;
+}
+
+test "extendEnvironment always populates the selected install variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // No install variable in caller env -> configured user prefix is added.
+    {
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
+        var s: config.Settings = .{};
+        s.prefix = .{ .value = "/srv/user-prefix", .from = "test" };
+        var env = extendEnvironment(c, s);
+        defer env.deinit();
+        const sel = try extend.select(&env);
+        try std.testing.expectEqual(extend.Mode.user, sel.mode);
+        try std.testing.expectEqualStrings("/srv/user-prefix", env.get(extend.variable(sel.mode)).?);
+    }
+
+    // Configured project -> EESSI_PROJECT_INSTALL is added.
+    {
+        var cwd_buf: [sys.path_max]u8 = undefined;
+        const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+        const proj = try std.fmt.allocPrint(a, "{s}/.zig-cache/extend-env-project-{d}", .{ cwd, linux.getpid() });
+        try common.atomic.makedirs(proj);
+        defer storage.removeTree(a, proj) catch {};
+        var zb: [sys.path_max:0]u8 = undefined;
+        const zp = try sys.z(&zb, proj);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.fchmodat(linux.AT.FDCWD, zp.ptr, 0o2770)));
+
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = cwd };
+        var s: config.Settings = .{};
+        s.project = .{ .value = proj, .from = "test" };
+        var env = extendEnvironment(c, s);
+        defer env.deinit();
+        const sel = try extend.select(&env);
+        try std.testing.expectEqual(extend.Mode.project, sel.mode);
+        try std.testing.expectEqualStrings(proj, env.get(extend.variable(sel.mode)).?);
+    }
+
+    // Explicit install variable (even empty) -> preserved as the selected variable.
+    {
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        try map.put("EESSI_SITE_INSTALL", "");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
+        const s: config.Settings = .{};
+        var env = extendEnvironment(c, s);
+        defer env.deinit();
+        const sel = try extend.select(&env);
+        try std.testing.expectEqual(extend.Mode.site, sel.mode);
+        try std.testing.expectEqualStrings("", env.get(extend.variable(sel.mode)).?);
+    }
 }
 
 test "a build has the process umask eb-local eb has for the same install" {
