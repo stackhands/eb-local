@@ -42,13 +42,13 @@ eb-local pigz-2.8-GCCcore-15.2.0.eb --robot
 
 [Install software on top of EESSI with EasyBuild](docs/howto/install-software.md) has the steps, a build for a group, and what each failure means; [Load EESSI and the software you installed](docs/howto/load-eessi.md) loads the modules in a new shell or job.
 
-## EESSI-extend, without a site file
+## EESSI-extend, without a Slurm job
 
 ```sh
-eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot   # no site file or Slurm job; installs into $HOME/eessi
+eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot   # configured prefix, no Slurm job
 ```
 
-`eb-local eb` sources the EESSI init, loads `EESSI-extend`, and runs `eb`, where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced.
+`eb-local eb` sources the EESSI init, loads `EESSI-extend`, and runs `eb` without a Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced. It uses the configured prefix or project unless an install variable is already exported.
 [Run EasyBuild through EESSI-extend without a site file](docs/howto/eb-without-a-site-file.md) has the steps, and [Where EESSI-extend installs](docs/explanation/install-variables.md) says where each install variable sends an install and what eb-local checks.
 `eb-local --explain RECIPE` prints the script a build runs, and `eb-local --explain eb -- ARGS` the one `eb-local eb` runs; [The eb-local command](docs/reference/cli.md) says what each holds.
 

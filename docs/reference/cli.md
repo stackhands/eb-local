@@ -51,11 +51,11 @@ directory you own.
   eb-local --explain <easyconfig> [eb options]
                                        the commands that build runs, as shell lines,
                                        its checks as comments; creates and runs nothing
-  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
+  eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
                                        At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
                                        EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
-                                       present empty value counts as set; with none set, the
-                                       module uses $HOME/eessi and nothing is exported.
+                                       present empty value counts as set; with none set,
+                                       configuration selects a user or project install.
                                        eb runs only if the module's install path is in the
                                        tree that variable selects
   eb-local --explain eb [--] [eb options]
@@ -174,8 +174,9 @@ directory you own.
                                        run eb-stack package bump or plan by subprocess only
   eb-local help | --version
 
-Every command but eb takes --profile NAME, --project DIR (a shared project
-directory instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
+Every configured command, including eb, takes --profile NAME, --project DIR
+(a shared project directory instead of $HOME/eessi) and --config FILE.
+Use env and dev with eval:
 
   eval "$(eb-local env)"
   eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -223,7 +224,7 @@ After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, eve
 
 Each option that takes a value also takes it after an equals sign, as in `--profile=gpu`.
 An empty value is refused either way, with `OPTION needs a value`.
-`eb` refuses `--profile`, `--project` and `--config`, since it reads the install mode from the environment; `site`, `check` and `rpath-wrappers` take them and do not use them.
+`eb` applies `--profile`, `--project` and `--config` through the same configuration selection as `env`; `site`, `check` and `rpath-wrappers` take them and do not use them.
 
 The version line names the program, its version, the target and optimize mode of the build, the Zig version, and the commit given to `zig build` as `-Dcommit`, or `unknown`.
 Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
@@ -272,7 +273,9 @@ With `W` set to a workspace a build made, which holds `build`, `cache`, `cargo`,
 
 ### eb
 
-Load EESSI and EESSI-extend in a bash with no profile and no rc file, and run `eb` with the arguments, with no site file and no Slurm job.
+Load EESSI and EESSI-extend in a bash with no profile and no rc file, and run `eb` with the arguments, with no Slurm job.
+With no install variable set, it exports `EESSI_USER_INSTALL` for the configured `prefix`, or `EESSI_PROJECT_INSTALL` for the configured `project`, exactly as `env` does.
+An install variable already in the environment remains authoritative.
 EESSI-extend takes the install mode from the install variables, of which at most one of `EESSI_USER_INSTALL`, `EESSI_PROJECT_INSTALL`, `EESSI_SITE_INSTALL` and `EESSI_CVMFS_INSTALL` may be set; a present, empty one counts.
 With more than one set, `eb` runs nothing and the command exits 3.
 
@@ -282,7 +285,7 @@ With more than one set, `eb` runs nothing and the command exits 3.
 | `EESSI_PROJECT_INSTALL` | project | not created; its owner sets the group and the setgid bit | 002 |
 | `EESSI_SITE_INSTALL` | site | the init's site software path | 022 |
 | `EESSI_CVMFS_INSTALL` | cvmfs | the EESSI software path | 022 |
-| none | user | `$HOME/eessi`, which need not exist before the module loads | 077 |
+| none | user or project | the configured `prefix` (by default `$HOME/eessi`) or `project` | 077 or 002 |
 
 The module sets `EASYBUILD_UMASK` to the same end, with the sticky bit for a user prefix and the setgid bit for a project, and `eb` gets no `--umask`, so that value stands.
 User installs therefore change from umask 022 in the 1.x script to 077 in the Zig program, and other users can no longer read them.
@@ -290,7 +293,9 @@ An argument of `eb`'s still overrides it: `--umask=022` is what a user-namespace
 The module's help text says `$HOME/EESSI`; on EESSI 2026.06 it uses `$HOME/eessi`.
 Before EESSI-extend loads, the script unsets host Rust and CMake wrappers, such as `RUSTC_WRAPPER` and `CMAKE_C_COMPILER_LAUNCHER`, and puts the compatibility layer's `usr/bin`, with its `ld`, first on `PATH`, even when `rustc` is not installed.
 EasyBuild builds under `$WORKING_DIR/easybuild`; the module sets `WORKING_DIR` to `/tmp/$USER` when it is not set, and `eb` leaves it as you set it.
-`--profile`, `--project` and `--config` are not options of `eb`, which stops with exit 2 when given one.
+Downloaded source archives stay in `<install-prefix>/.eb-local/sources`, rather than below that temporary working directory, unless the shell already exports `EASYBUILD_SOURCEPATH`.
+Configured `[eessi]` variables and `build.site_toolchains` reach the EESSI hooks; an exported variable of the same name takes precedence.
+`--profile`, `--project` and `--config` select the same settings for `eb` as for `env`.
 
 Once EESSI-extend has loaded, the script exits 2 before `eb` runs when the install path the module set is outside the tree the install variable selects, or when `EASYBUILD_INSTALLPATH_SOFTWARE` or `EASYBUILD_INSTALLPATH_MODULES` is set.
 Otherwise the command exits with `eb`'s status.

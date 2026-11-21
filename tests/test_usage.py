@@ -30,12 +30,9 @@ class Usage(unittest.TestCase):
                    and not re.search(rf"(?<![\w-]){re.escape(o)}(?![\w-])", run.stdout)]
         self.assertEqual(missing, [])
 
-    def test_the_usage_says_eb_takes_none_of_the_global_options(self):
+    def test_the_usage_says_eb_takes_the_global_options(self):
         usage = subprocess.run([binary.BIN, "--help"], capture_output=True, text=True).stdout
-        self.assertIn("Every command but eb takes --profile NAME, --project DIR", usage)
-        run = subprocess.run([binary.BIN, "eb", "--profile", "x"], capture_output=True, text=True)
-        self.assertEqual(run.returncode, 2)
-        self.assertIn("not from --profile, --project or --config", run.stderr)
+        self.assertIn("Every configured command, including eb, takes --profile NAME, --project DIR", usage)
 
 
 if __name__ == "__main__":
