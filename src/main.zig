@@ -282,6 +282,12 @@ fn configuredInstall(p: Place) ConfiguredInstall {
     return .{ .prefix = p.prefix, .mode = if (p.project) .project else .user };
 }
 
+fn matchesConfiguredInstall(c: Ctx, configured: ConfiguredInstall, selected: extend.Selection, value: []const u8) bool {
+    if (selected.mode != configured.mode) return false;
+    const explicit = storage.canonical(c.a, value, c.cwd) catch return false;
+    return std.mem.eql(u8, explicit, configured.prefix);
+}
+
 /// What `eb-local env` set, if NAME=VALUE is that: its install variable,
 /// naming P's prefix, or, when the extension env loads for a prefix that
 /// exists is loaded, the install path it chose in the prefix's versions
@@ -4541,7 +4547,21 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
             if (sel.mode == .project and !isDir(v)) {
                 note(a, &out, lines_ptr, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
                 if (!site) failed = true;
-            } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+            } else {
+                const configured = configuredInstall(p);
+                if (matchesConfiguredInstall(c, configured, sel, v)) {
+                    note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+                } else {
+                    note(a, &out, lines_ptr, "warn", "`eb-local eb` keeps explicitly exported {s}={s}, a {s} install that does not match configured {s}={s}; unset {s} to use configuration", .{
+                        name,
+                        q(a, v),
+                        @tagName(sel.mode),
+                        configured.variable(),
+                        q(a, configured.prefix),
+                        name,
+                    });
+                }
+            }
         } else {
             const install = configuredInstall(p);
             note(a, &out, lines_ptr, "ok  ", "`eb-local eb` exports {s}={s}, the {s} selected by configuration", .{

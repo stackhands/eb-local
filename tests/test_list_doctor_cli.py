@@ -682,7 +682,7 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"FAIL EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
                       "and `eb-local eb` stops", run.stdout)
         project.mkdir()
-        run = self.without_a_site_file(EESSI_PROJECT_INSTALL=str(project))
+        run = self.without_a_site_file(EB_LOCAL_PROJECT=str(project), EESSI_PROJECT_INSTALL=str(project))
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertIn(f"ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL={project}", run.stdout)
 
@@ -690,6 +690,36 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("FAIL more than one of EESSI_USER_INSTALL", run.stdout)
         self.assertIn("so `eb-local eb` refuses to run", run.stdout)
+
+    def test_doctor_warns_only_for_an_explicit_install_that_mismatches_configuration(self):
+        init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        init.parent.mkdir(parents=True)
+        init.write_text("")
+        project = self.root / "project"
+        project.mkdir()
+
+        for matching in (
+            {},
+            dict(EESSI_USER_INSTALL=str(self.prefix)),
+            dict(EB_LOCAL_PROJECT=str(project), EESSI_PROJECT_INSTALL=str(project)),
+        ):
+            with self.subTest(matching=matching):
+                run = self.without_a_site_file(**matching)
+                self.assertEqual(run.returncode, 0, run.stdout)
+                self.assertNotIn("does not match configured", run.stdout)
+
+        for explicit, mode in (
+            (dict(EESSI_USER_INSTALL=str(self.root / "other")), "user"),
+            (dict(EESSI_PROJECT_INSTALL=str(project)), "project"),
+            (dict(EESSI_SITE_INSTALL=""), "site"),
+            (dict(EESSI_CVMFS_INSTALL=""), "cvmfs"),
+        ):
+            with self.subTest(explicit=explicit):
+                run = self.without_a_site_file(**explicit)
+                self.assertEqual(run.returncode, 0, run.stdout)
+                self.assertIn(f", a {mode} install that does not match configured "
+                              f"EESSI_USER_INSTALL={shlex.quote(str(self.prefix))};", run.stdout)
+                self.assertIn("warn `eb-local eb` keeps explicitly exported ", run.stdout)
 
     def test_doctor_with_a_site_file_judges_builds_and_warns_for_eb_local_eb(self):
         run = self.run_tool(["doctor"], EESSI_CVMFS_REPO=str(self.root / "repo"),
