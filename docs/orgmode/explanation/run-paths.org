@@ -29,6 +29,7 @@ The wrappers record =RPATH=, not =RUNPATH=: =LD_LIBRARY_PATH= overrides =RUNPATH
 The =LLVM= module, which other modules also load, ships =clang= but is not =llvm-compilers=: with it, =dev= loads the GCC build environment, which wraps =gcc= and =ld= but not =clang=.
 So =dev= puts RPATH wrappers of its own first for each of those compilers on =PATH= that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded, neither the family's nor one at the compiler's own toolchain level.
 Like EasyBuild's wrappers, they add a run path for each library directory a link names with =-L= or finds through =LIBRARY_PATH=, and leave out the system's and the compatibility layer's directories.
+Unlike them, they also add one for the directory of a shared library the link names by its full path, as CMake and pkg-config often do, and they read the arguments in a response file, =@FILE=, where Meson and CMake put a long link line: EasyBuild's wrappers see neither, so a library named that way outside =LIBRARY_PATH= has no run path from a build, and a compile in a response file gets run path options it does not need.
 
 * Linkers the wrappers never see
 

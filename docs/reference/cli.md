@@ -382,6 +382,8 @@ The names it wraps are `gcc`, `g++`, `c++`, `cc`, `gfortran`, `clang`, `clang++`
 
 Without `--unwrapped`, finding nothing to wrap is exit 1.
 
+A wrapper adds a run path, when its command links, for each directory named with `-L` or `--library-path`, for the directory of each shared library named by its absolute path, and for each `LIBRARY_PATH` entry when it wraps a compiler driver. The arguments in a response file, `@FILE`, count as its own; one it cannot read is passed on unchanged.
+
 ### check
 
 For each `FILE`, print its machine, its program interpreter (the loader), its `RPATH` or `RUNPATH`, and where each library it needs resolves, ignoring `LD_LIBRARY_PATH`, then one line for all of them:

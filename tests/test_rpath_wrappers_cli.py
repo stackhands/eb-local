@@ -240,6 +240,50 @@ class RpathWrappersCli(unittest.TestCase):
             ],
         )
 
+    def test_response_files_and_libraries_named_by_path_get_run_paths(self):
+        got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        libs = self.root / "libs"
+        (libs / "a").mkdir(parents=True)
+        (libs / "b").mkdir()
+        (libs / "c").mkdir()
+        (libs / "b" / "libfoo.so.3").write_text("", encoding="utf-8")
+        (libs / "c" / "libbar.so").write_text("", encoding="utf-8")
+        # Meson and CMake put a long link line in a response file, quoted
+        # as a shell would quote it.
+        (self.root / "link.rsp").write_text(
+            f'-L{libs}/a main.o {libs}/b/libfoo.so.3 -o "prog one"\n',
+            encoding="utf-8",
+        )
+        (self.root / "compile.rsp").write_text("-c foo.c -o foo.o\n", encoding="utf-8")
+        script = (
+            got.stdout
+            + "gcc @link.rsp\n"
+            + "gcc @compile.rsp\n"
+            + f"gcc main.o {libs}/c/libbar.so -o two\n"
+            + f"gcc main.o {libs}/c/libnone.so -o three\n"
+        )
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": f"{self.bin}:/usr/bin:/bin"},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            lines,
+            [
+                f"gcc:@link.rsp -Wl,-rpath,{libs}/a -Wl,-rpath,{libs}/b -Wl,--disable-new-dtags",
+                # A compile in a response file is not a link.
+                "gcc:@compile.rsp",
+                f"gcc:main.o {libs}/c/libbar.so -o two -Wl,-rpath,{libs}/c -Wl,--disable-new-dtags",
+                # A path that names no file adds nothing.
+                f"gcc:main.o {libs}/c/libnone.so -o three -Wl,--disable-new-dtags",
+            ],
+        )
+
     def test_hostile_wrapper_destinations_exit_two(self):
         ro_cache = self.root / "ro-cache"
         (ro_cache / "eb-local").mkdir(parents=True)

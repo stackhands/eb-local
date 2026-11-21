@@ -33,11 +33,14 @@ pub const marker = ".eb-local-rpath";
 /// PATH. An empty entry is the current directory, including the one a
 /// trailing colon names, as execvp searches. When that command links, it
 /// adds a run path for each absolute
-/// library directory named with -L, and for a compiler driver for each
+/// library directory named with -L, for the directory of each shared
+/// library named by its absolute path, and for a compiler driver for each
 /// LIBRARY_PATH entry, which EESSI's modules set and the driver passes to
 /// the linker; system and compatibility-layer directories are left out, as
-/// the loader finds those itself. --disable-new-dtags writes RPATH rather
-/// than RUNPATH, so LD_LIBRARY_PATH cannot override it, as in EasyBuild.
+/// the loader finds those itself. The arguments of a response file, @FILE,
+/// count as arguments of the command: Meson and CMake put a long link line
+/// in one. --disable-new-dtags writes RPATH rather than RUNPATH, so
+/// LD_LIBRARY_PATH cannot override it, as in EasyBuild.
 pub const script =
     \\#!/bin/bash
     \\# RPATH wrapper written by eb-local; see `eb-local help`.
@@ -68,12 +71,16 @@ pub const script =
     \\link=1 info_only=1 want_dir=0
     \\[ $# -eq 0 ] && link=0
     \\dirs=()
-    \\for arg in "$@"; do
+    \\scan() {
+    \\    local arg=$1
     \\    if [ $want_dir = 1 ]; then
     \\        dirs+=("$arg")
     \\        want_dir=0
-    \\        continue
+    \\        return
     \\    fi
+    \\    case $arg in
+    \\        /*.so | /*.so.*) [ -f "$arg" ] && dirs+=("${arg%/*}") ;;
+    \\    esac
     \\    case $arg in
     \\        -c | -S | -E | -M | -MM | -fsyntax-only | --analyze | --precompile | --preprocess | -emit-ast | -emit-pch) [ $linker = 0 ] && link=0 ;;
     \\        -i) [ $linker = 1 ] && link=0 ;;
@@ -86,6 +93,23 @@ pub const script =
     \\        -v | -V | --version | -qversion | --help | --help=* | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
     \\        *) info_only=0 ;;
     \\    esac
+    \\}
+    \\for arg in "$@"; do
+    \\    case $arg in
+    \\        @?*)
+    \\            # A response file holds more arguments, quoted as a shell
+    \\            # would; xargs splits them the same way. One that cannot be
+    \\            # read is passed on untouched, as the driver reads it.
+    \\            if [ -r "${arg#@}" ] && command -v xargs >/dev/null 2>&1; then
+    \\                info_only=0
+    \\                while IFS= read -r -d '' word; do
+    \\                    scan "$word"
+    \\                done < <(xargs printf '%s\0' < "${arg#@}" 2>/dev/null)
+    \\                continue
+    \\            fi
+    \\            ;;
+    \\    esac
+    \\    scan "$arg"
     \\done
     \\[ $info_only = 1 ] && link=0
     \\[ $link = 1 ] || exec "$real" "$@"
