@@ -5426,20 +5426,11 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const root = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
     const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
     const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
-    if (!o.print) {
-        common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
-        common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
-    }
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     const stamp = nowSecs();
-    var failed = false;
-    const guard: ?Guard = if (o.print) null else Guard.hold();
-    defer if (guard) |*g_ref| g_ref.release();
+    const Job = struct { name: []const u8, script: []const u8, path: []const u8, argv: []const []const u8 };
+    var plan: std.ArrayList(Job) = .empty;
     for (chosen.items) |t| {
-        if (guard) |*g_ref| if (g_ref.received()) |sig| {
-            g_ref.release();
-            return stop(.{ .signal = sig });
-        };
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
         const chdir_val = sbatchValue(a, c.cwd);
         const script = str(a,
@@ -5456,52 +5447,69 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
         while (words.next()) |w| argv.append(a, w) catch oom();
         argv.append(a, path) catch oom();
-        if (o.print) {
-            say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
-            if (!emit(script)) return 1;
-            continue;
+        plan.append(a, .{ .name = t.name, .script = script, .path = path, .argv = argv.items }) catch oom();
+    }
+    if (o.print) {
+        for (plan.items) |job| {
+            say("# {s}: {s}", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() });
+            if (!emit(job.script)) return 1;
         }
-        var why: common.atomic.Why = .{};
-        defer why.deinit(a);
-        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
-            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
-        if (guard.?.received()) |sig| {
-            sys.unlinkat(fsx.cwd, path, 0) catch {};
-            guard.?.release();
+        return 0;
+    }
+    // Every job is named before the first directory or script exists and
+    // before the first sbatch runs, so a stdout that cannot take the list
+    // changes nothing, and no later line of ours interleaves with sbatch's.
+    {
+        var plan_text: std.ArrayList(u8) = .empty;
+        for (plan.items) |job| plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() }) catch oom();
+        if (!emit(plan_text.items)) return unlisted("submitted");
+    }
+    common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
+    common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
+    var failed = false;
+    const guard = Guard.hold();
+    defer guard.release();
+    for (plan.items) |job| {
+        if (guard.received()) |sig| {
+            guard.release();
             return stop(.{ .signal = sig });
         }
-        say("eb-local: {s}:", .{t.name});
-        if (stdout.failed) {
+        const path = job.path;
+        var why: common.atomic.Why = .{};
+        defer why.deinit(a);
+        common.atomic.atomicWrite(a, path, job.script, .{ .mode = 0o700 }, &why) catch |e|
+            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
+        if (guard.received()) |sig| {
             sys.unlinkat(fsx.cwd, path, 0) catch {};
-            return 1;
+            guard.release();
+            return stop(.{ .signal = sig });
         }
-        const ran = guard.?.run(a, argv.items, c.envp);
+        const ran = guard.run(a, job.argv, c.envp);
         switch (ran) {
             .exit => |code| {
                 if (code != 0) {
-                    if (guard.?.received()) |sig| {
+                    if (guard.received()) |sig| {
                         sys.unlinkat(fsx.cwd, path, 0) catch {};
-                        guard.?.release();
+                        guard.release();
                         return stop(.{ .signal = sig });
                     }
-                    warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
+                    warn("sbatch refused the {s} job (exit {d})", .{ job.name, code });
                     failed = true;
                 }
-                if (guard.?.received()) |sig| {
-                    guard.?.release();
+                if (guard.received()) |sig| {
+                    guard.release();
                     return stop(.{ .signal = sig });
                 }
             },
             .signal => |sig| {
                 sys.unlinkat(fsx.cwd, path, 0) catch {};
-                guard.?.release();
-                return stop(.{ .signal = guard.?.received() orelse sig });
+                guard.release();
+                return stop(.{ .signal = guard.received() orelse sig });
             },
         }
     }
-    if (o.print) return 0;
-    if (guard.?.received()) |sig| {
-        guard.?.release();
+    if (guard.received()) |sig| {
+        guard.release();
         return stop(.{ .signal = sig });
     }
     say("", .{});

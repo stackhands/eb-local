@@ -73,14 +73,14 @@ class PlanBeforeChange(unittest.TestCase):
                 if len(seen) == len(self.front_ends):
                     self.assertEqual(seen["zig"], seen["shell"])
 
-    def check_every_write(self, name, make, args, *, listed, nothing):
+    def check_every_write(self, name, make, args, *, listed, nothing, writes=None):
         """Fail standard output after each number of writes; the tree is never half done.
 
         A run with a working stdout shows what the command does and how many
         writes it makes. LISTED of them are the plan. Failing any of those
         leaves the tree and the doubles as they were. Failing a later one leaves
         the command done, because the plan was out before it began, and still
-        exits 1.
+        exits 1. A write is a line unless WRITES says how many the command makes.
         """
         for front_end in self.front_ends:
             control = make(self)
@@ -93,9 +93,9 @@ class PlanBeforeChange(unittest.TestCase):
             finished = snapshot(control.root)
             finished_calls = [call.replace(str(control.root), "<root>") for call in control.calls()]
             self.assertNotEqual(finished, before, "the control run must do the work")
-            writes = len(done.stdout.decode().splitlines())
-            self.assertGreaterEqual(writes, listed)
-            for n in range(writes + 1):
+            made = writes if writes is not None else len(done.stdout.decode().splitlines())
+            self.assertGreaterEqual(made, listed)
+            for n in range(made + 1):
                 with self.subTest(command=name, front_end=front_end, writes_that_succeed=n):
                     scene = make(self)
                     before = snapshot(scene.root)
@@ -113,8 +113,8 @@ class PlanBeforeChange(unittest.TestCase):
                         self.assertEqual(snapshot(scene.root), finished)
                         self.assertEqual(calls, finished_calls)
                         self.assertNotIn(f"nothing was {nothing}", err)
-                    self.assertEqual(run.returncode, 1 if n < writes else 0, err)
-                    if n < writes:
+                    self.assertEqual(run.returncode, 1 if n < made else 0, err)
+                    if n < made:
                         self.assertIn("cannot write output ([Errno 28]", err)
 
     def check_changed_under_the_lock(self, name, make, args, *, listed, change, kept, code, message):
@@ -426,6 +426,28 @@ class PlanBeforeChange(unittest.TestCase):
                 self.assertEqual((document["action"], document["removed_items"]), ("trashed", 1))
                 self.assertEqual(scene.calls(), [f"stdout-bytes {len(out.read_bytes())}"])
                 scene.old_log()
+
+    def test_submit_names_every_job_before_it_changes_anything(self):
+        self.check_unchanged(
+            "submit", self.two_node_types, ["submit", "recipe.eb"], changed=self.submitted, nothing="submitted"
+        )
+
+    def test_submit_reports_after_the_last_job_is_submitted(self):
+        self.check_every_write(
+            "submit", self.two_node_types, ["submit", "recipe.eb"], listed=1, writes=3, nothing="submitted"
+        )
+
+    @staticmethod
+    def submitted(scene):
+        return (scene.prefix / ".eb-local").exists() or bool(scene.calls())
+
+    @staticmethod
+    def two_node_types(test):
+        site = '[build.node_types]\ncpu = "-p cpu -n 16"\ngpu = "-p gpu -n 8"\n'
+        scene = test.scene(site=site)
+        scene.recorder("sbatch")
+        (scene.root / "recipe.eb").write_text("name = 'Demo'\n", encoding="utf-8")
+        return scene
 
     def test_build_says_what_it_runs_before_it_makes_the_prefix(self):
         def in_a_job(test):
