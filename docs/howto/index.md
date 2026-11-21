@@ -15,6 +15,7 @@ load-eessi
 compile
 nix
 install-software
+install-your-own-recipe
 eb-without-a-site-file
 build-for-every-node-type
 install-what-eessi-lacks

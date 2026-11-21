@@ -111,6 +111,7 @@ The column marked =*= is this node's CPU target.
 * Related
 
 - [[file:load-eessi.org][Load EESSI and the software you installed]]
+- [[file:install-your-own-recipe.org][Install a recipe of your own, and prebuilt software]]
 - [[file:eb-without-a-site-file.org][Run EasyBuild through EESSI-extend without a site file]]
 - [[file:build-for-every-node-type.org][Build for every node type]]
 - [[file:install-what-eessi-lacks.org][Install the modules EESSI lacks, found with eb-stack]]
