@@ -304,7 +304,7 @@ With `EB_LOCAL_EESSI_EXTEND` set, not empty and not `0`, every argument of `eb-l
 
 ### `--explain eb`
 
-Print the script `eb` runs, after a `set --` line with its arguments, and run nothing.
+Print the configured environment exports and the script `eb` runs, after a `set --` line with its arguments, and run nothing.
 With more than one install variable set, it prints nothing on stdout and exits 3.
 
 ### env

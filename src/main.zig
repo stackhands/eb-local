@@ -5967,60 +5967,79 @@ test "a build script selects no MPI transport" {
 const extend_source_var = "EBLOCAL_EB_SOURCEPATH";
 const extend_toolchains_var = "EBLOCAL_EB_SITE_TOOLCHAINS";
 
+const ExtendEnv = struct {
+    env: std.process.Environ.Map,
+    exports: []const [2][]const u8,
+
+    fn deinit(self: *ExtendEnv) void {
+        self.env.deinit();
+    }
+};
+
 /// Add the configuration that `env` would select to an `eb` launch, without
 /// replacing choices the caller already exported.
-fn extendEnvironment(c: Ctx, s: config.Settings) std.process.Environ.Map {
+fn extendEnvironment(c: Ctx, s: config.Settings) ExtendEnv {
     var env = c.env.clone(c.a) catch oom();
-    const selected = extend.select(&env) catch return env;
+    var exports: std.ArrayList([2][]const u8) = .empty;
+    const selected = extend.select(&env) catch return .{ .env = env, .exports = &.{} };
     const selected_name = extend.variable(selected.mode);
     if (env.get(selected_name) == null) {
         const install = configuredInstall(place(c, s));
         env.put(install.variable(), install.prefix) catch oom();
+        exports.append(c.a, .{ install.variable(), install.prefix }) catch oom();
     }
-    for (s.eessi.items) |v| if (env.get(v.name) == null)
+    for (s.eessi.items) |v| if (env.get(v.name) == null) {
         env.put(v.name, v.value) catch oom();
-    if (s.site_toolchains.value.len > 0)
-        env.put(extend_toolchains_var, config.toolchainsJson(c.a, s.site_toolchains.value) catch oom()) catch oom();
+        exports.append(c.a, .{ v.name, v.value }) catch oom();
+    };
+    if (s.site_toolchains.value.len > 0) {
+        const json = config.toolchainsJson(c.a, s.site_toolchains.value) catch oom();
+        env.put(extend_toolchains_var, json) catch oom();
+        exports.append(c.a, .{ extend_toolchains_var, json }) catch oom();
+    }
 
     if (env.get("EASYBUILD_SOURCEPATH") == null) {
         const install_root = env.get("EESSI_USER_INSTALL") orelse env.get("EESSI_PROJECT_INSTALL");
         if (install_root) |root| {
             if (root.len > 0) {
                 const prefix = storage.canonical(c.a, root, c.cwd) catch oom();
-                env.put(extend_source_var, std.fs.path.join(c.a, &.{ prefix, ".eb-local", "sources" }) catch oom()) catch oom();
+                const sources = std.fs.path.join(c.a, &.{ prefix, ".eb-local", "sources" }) catch oom();
+                env.put(extend_source_var, sources) catch oom();
+                exports.append(c.a, .{ extend_source_var, sources }) catch oom();
             }
         }
     }
-    return env;
+    return .{ .env = env, .exports = exports.items };
 }
 
 fn cmdExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    var env = extendEnvironment(c, s);
-    defer env.deinit();
-    const sel = extend.select(&env) catch |err| switch (err) {
+    var ext = extendEnvironment(c, s);
+    defer ext.deinit();
+    const sel = extend.select(&ext.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}", .{extend.tooMany(c.a, &env) catch oom()});
+            cli.err("{s}", .{extend.tooMany(c.a, &ext.env) catch oom()});
             return 3;
         },
     };
-    extend.apply(&env);
-    for (shell_startup) |name| _ = env.swapRemove(name);
+    extend.apply(&ext.env);
+    for (shell_startup) |name| _ = ext.env.swapRemove(name);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
-    return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
+    return stop(runAttached(c.a, argv, envpOf(c.a, &ext.env)));
 }
 
-/// What eb-local eb would run: the launcher's own script after a `set --`
-/// line with the arguments it would get, so the text runs as the launcher
-/// does. Nothing runs and nothing is created.
+/// What eb-local eb would run: the configured environment exports and the
+/// launcher's own script after a `set --` line with the arguments it would
+/// get, so the text runs as the launcher does. Nothing runs and nothing is
+/// created.
 fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const a = c.a;
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    var env = extendEnvironment(c, s);
-    defer env.deinit();
-    const sel = extend.select(&env) catch |err| switch (err) {
+    var ext = extendEnvironment(c, s);
+    defer ext.deinit();
+    const sel = extend.select(&ext.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}", .{extend.tooMany(a, &env) catch oom()});
+            cli.err("{s}", .{extend.tooMany(a, &ext.env) catch oom()});
             return 3;
         },
     };
@@ -6028,8 +6047,12 @@ fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain eb: the script eb-local eb runs, with its arguments. Nothing was run.\n") catch oom();
     const name = extend.variable(sel.mode);
-    const val = env.get(name).?;
+    const val = ext.env.get(name).?;
     out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, qSingleLine(a, val), @tagName(sel.mode), sel.umask }) catch oom();
+    if (ext.exports.len > 0) {
+        out.appendSlice(a, "# The script gets these environment variables:\n") catch oom();
+        for (ext.exports) |kv| out.print(a, "export {s}={s}\n", .{ kv[0], q(a, kv[1]) }) catch oom();
+    }
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
     out.appendSlice(a, " \"$SCRIPT\"") catch oom();
@@ -6053,11 +6076,16 @@ test "extendEnvironment always populates the selected install variable" {
         const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
         var s: config.Settings = .{};
         s.prefix = .{ .value = "/srv/user-prefix", .from = "test" };
-        var env = extendEnvironment(c, s);
-        defer env.deinit();
-        const sel = try extend.select(&env);
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
         try std.testing.expectEqual(extend.Mode.user, sel.mode);
-        try std.testing.expectEqualStrings("/srv/user-prefix", env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqualStrings("/srv/user-prefix", ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 2), ext.exports.len);
+        try std.testing.expectEqualStrings("EESSI_USER_INSTALL", ext.exports[0][0]);
+        try std.testing.expectEqualStrings("/srv/user-prefix", ext.exports[0][1]);
+        try std.testing.expectEqualStrings(extend_source_var, ext.exports[1][0]);
+        try std.testing.expectEqualStrings("/srv/user-prefix/.eb-local/sources", ext.exports[1][1]);
     }
 
     // Configured project -> EESSI_PROJECT_INSTALL is added.
@@ -6076,25 +6104,30 @@ test "extendEnvironment always populates the selected install variable" {
         const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = cwd };
         var s: config.Settings = .{};
         s.project = .{ .value = proj, .from = "test" };
-        var env = extendEnvironment(c, s);
-        defer env.deinit();
-        const sel = try extend.select(&env);
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
         try std.testing.expectEqual(extend.Mode.project, sel.mode);
-        try std.testing.expectEqualStrings(proj, env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqualStrings(proj, ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 2), ext.exports.len);
+        try std.testing.expectEqualStrings("EESSI_PROJECT_INSTALL", ext.exports[0][0]);
+        try std.testing.expectEqualStrings(proj, ext.exports[0][1]);
+        try std.testing.expectEqualStrings(extend_source_var, ext.exports[1][0]);
     }
 
-    // Explicit install variable (even empty) -> preserved as the selected variable.
+    // Explicit install variable (even empty) -> preserved as the selected variable without re-exporting.
     {
         var map: std.process.Environ.Map = .init(a);
         try map.put("HOME", "/home/alice");
         try map.put("EESSI_SITE_INSTALL", "");
         const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
         const s: config.Settings = .{};
-        var env = extendEnvironment(c, s);
-        defer env.deinit();
-        const sel = try extend.select(&env);
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
         try std.testing.expectEqual(extend.Mode.site, sel.mode);
-        try std.testing.expectEqualStrings("", env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqualStrings("", ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 0), ext.exports.len);
     }
 }
 
