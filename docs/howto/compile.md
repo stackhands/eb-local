@@ -208,6 +208,8 @@ The modules on the `dev` line choose the build environment:
 | `intel-compilers` | `buildenv/default-intel-2026.1` |
 | NVHPC | none |
 
+EESSI 2026.06 ships `buildenv/default-foss-2026.1` and has no `default-lfoss` or `default-intel` build environment yet.
+
 When Lmod has no such module, `dev` looks for one at the compiler's own toolchain level: `buildenv/default-llvm-compilers-VERSION`, `buildenv/default-intel-compilers-VERSION` or `buildenv/default-NVHPC-VERSION`, with the version of the compiler module that is loaded.
 A site that builds `buildenv-default-NVHPC-26.9.eb` therefore gives its NVHPC users EasyBuild's own wrappers with no setting anywhere.
 
