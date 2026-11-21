@@ -162,8 +162,12 @@ class ForeignPrefixes(StorageFixture):
     def test_approved_prefix_with_parent_component_is_refused(self):
         approved = self.root / "real-approved"
         (approved / "pkg").mkdir(parents=True)
-        # Keep the parent component in the spelling. Path resolution would hide it.
+        missing = self.root / "missing"
+        missing.mkdir()
+        # Keep the parent component in the spelling. With `missing` present the
+        # path resolves, and that resolution would hide the parent component.
         spelled = f"{self.root}/missing/../real-approved"
+        self.assertEqual(os.path.realpath(spelled), os.path.realpath(approved))
         site = self.root / "parent-prefix.toml"
         site.write_text(
             f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "%u.%j"\n'
@@ -176,6 +180,22 @@ class ForeignPrefixes(StorageFixture):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertEqual(run.stdout, "")
         self.assertIn(f"doctor.approved_prefixes path '{spelled}' has a '..' component", run.stderr)
+
+    def test_root_equivalent_approved_prefix_is_refused(self):
+        for spelled in ("/.", "/./."):
+            with self.subTest(spelled=spelled):
+                site = self.root / "root-prefix.toml"
+                site.write_text(
+                    f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "%u.%j"\n'
+                    'node_local_fstype = "xfs"\nshared_scratch = ["/scratch"]\n'
+                    f'[doctor]\napproved_prefixes = ["{spelled}"]\n',
+                    encoding="utf-8",
+                )
+                site.chmod(0o644)
+                run = self.run_tool(["--config", str(site), "doctor"], PYTHONPATH="/opt/host/pkg")
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn(f"doctor.approved_prefixes path '{spelled}' is the root directory", run.stderr)
 
     def test_xdg_cache_home_wrapper_is_approved_without_home(self):
         cache = self.root / "xdg-cache"

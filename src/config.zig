@@ -382,6 +382,17 @@ fn hasParentComponent(path: []const u8) bool {
     return false;
 }
 
+/// True when removing empty and `.` components leaves `/`. `foreign` drops
+/// such a prefix, so `/.` and `/./.` would approve nothing while naming the root.
+fn isRootEquivalent(path: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        return false;
+    }
+    return true;
+}
+
 const Loader = struct {
     a: Allocator,
     s: *Settings,
@@ -538,6 +549,8 @@ const Loader = struct {
                                 return l.fail("{s}:{d}: doctor.approved_prefixes takes absolute paths without a trailing slash", .{ src.path, f.line });
                             if (hasParentComponent(p))
                                 return l.fail("{s}:{d}: doctor.approved_prefixes path '{s}' has a '..' component", .{ src.path, f.line, p });
+                            if (isRootEquivalent(p))
+                                return l.fail("{s}:{d}: doctor.approved_prefixes path '{s}' is the root directory", .{ src.path, f.line, p });
                         }
                         l.s.approved_prefixes = .{ .value = v, .from = try l.where(src, f.line, null) };
                     } else if (std.mem.eql(u8, f.key, "cvmfs_parallel")) {
@@ -1349,6 +1362,8 @@ test "clear_foreign_prefixes is off unless set, and approved prefixes are site-o
     try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/\"]\n", .layer = .site }}, "trailing slash");
     try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/../etc\"]\n", .layer = .site }}, "'..' component");
     try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/..\"]\n", .layer = .site }}, "'..' component");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/.\"]\n", .layer = .site }}, "root directory");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/./.\"]\n", .layer = .site }}, "root directory");
     try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "maybe");
     try t.refuse(&none, "true or false");
 }

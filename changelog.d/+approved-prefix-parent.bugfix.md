@@ -1,1 +1,1 @@
-An approved prefix containing a parent component is refused, so doctor and a build that clears foreign prefixes do not ignore the directory that spelling names.
+`doctor.approved_prefixes` refuses a path with a parent component or a spelling of the root directory, so `eb-local doctor` and a build with `build.clear_foreign_prefixes` do not treat that spelling as an approved prefix.
