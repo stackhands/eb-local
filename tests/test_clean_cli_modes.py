@@ -43,7 +43,6 @@ class CleanCliModes(unittest.TestCase):
             (["clean", "--logs-older-than", "100000"], "--logs-older-than needs a number of days"),
             (["clean", "--logs-older-than", "abc"], "--logs-older-than needs a number of days"),
             (["clean", "--unknown"], "clean does not know"),
-            (["clean", "--workspaces"], "SLURM_JOB_ID is unset or empty"),
             (["--explain", "clean"], "--explain goes with a recipe or with eb"),
         )
         for args, msg in cases:
@@ -52,6 +51,10 @@ class CleanCliModes(unittest.TestCase):
                 self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
                 self.assertEqual(got.stdout, "")
                 self.assertIn(msg, got.stderr)
+
+        local = self.run_clean(["clean", "--workspaces"])
+        self.assertEqual(local.returncode, 0, local.stdout + local.stderr)
+        self.assertIn("nothing to clean", local.stdout)
 
     def test_trash_rtrash_without_rtrash_on_path_exits_two(self):
         got = self.run_clean(["clean"], EB_LOCAL_TRASH="rtrash")

@@ -48,6 +48,8 @@ pub const version = "3.3.0";
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
     \\directory you own.
+    \\  Global: --workstation forces managed recipe builds onto private local
+    \\          storage on this machine, even when Slurm is present.
     \\
     \\  eb-local <easyconfig> [eb options]   build and install with EasyBuild
     \\  eb-local --explain <easyconfig> [eb options]
@@ -177,7 +179,8 @@ const usage_text =
     \\  eb-local help | --version
     \\
     \\Every configured command, including eb, takes --profile NAME, --project DIR
-    \\(a shared project directory instead of $HOME/eessi) and --config FILE.
+    \\(a shared project directory instead of $HOME/eessi), --config FILE and
+    \\--workstation. The last forces managed builds onto this machine's disk.
     \\Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
@@ -188,8 +191,9 @@ const usage_text =
     \\program or its checkout root, and /etc/eb-local.conf), then
     \\~/.config/eb-local/config.toml,
     \\then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
-    \\then options. Builds use the allocation's own
-    \\node-local mount; a successful build removes its workspace unless
+    \\then options. Without sbatch on PATH or a nonempty SLURM_* variable,
+    \\managed builds use private workstation storage automatically. Otherwise
+    \\they use the allocation's own node-local mount; a successful build removes its workspace unless
     \\EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
     \\written during a build are cleaned of them. A build gets every secret,
     \\unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
@@ -526,6 +530,8 @@ const Global = struct {
     buildenv: ?[]const u8 = null,
     /// Print what a build would run, as shell commands, and run nothing.
     explain: bool = false,
+    /// Force a managed build to use this machine's private local storage.
+    workstation: bool = false,
     /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
@@ -2097,6 +2103,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool, json: bool) u8 {
     row(&settings, a, json, "clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row(&settings, a, json, "nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
     row(&settings, a, json, "nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
+    row(&settings, a, json, "storage.mode", @tagName(s.storage_mode.value), s.storage_mode.from);
     row(&settings, a, json, "storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
     row(&settings, a, json, "storage.node_local_mount", s.node_local_mount.value, s.node_local_mount.from);
     row(&settings, a, json, "storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
@@ -2834,6 +2841,13 @@ fn callerUid(c: Ctx) linux.uid_t {
     return linux.getuid();
 }
 
+fn tmpdirUid(c: Ctx, actual: linux.uid_t) linux.uid_t {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_TMPDIR_UID"))) |v| return std.fmt.parseInt(linux.uid_t, v, 10) catch actual;
+    }
+    return actual;
+}
+
 fn nodeLocal(s: config.Settings) storage.NodeLocal {
     return .{
         .root = s.node_local_root.value,
@@ -2851,7 +2865,7 @@ fn checkedJobRoot(c: Ctx, s: config.Settings, undone: []const u8) []const u8 {
     if (s.node_local_root.value.len == 0)
         die("no site file sets storage.node_local_root, the directory that holds each job's node-local mount; {s}.\n" ++
             "  Set it in the site file, which eb-local site install slurm --set node_local_root=DIR writes, or name a site file " ++
-            "that root or this program's owner owns with --config FILE or EB_LOCAL_CONFIG=FILE. eb-local eb needs no site file.", .{undone});
+            "that root or this program's owner owns with --config FILE or EB_LOCAL_CONFIG=FILE. To build deliberately on this machine, pass --workstation.", .{undone});
     var r: storage.Refusal = .{};
     const job_id = c.env.get("SLURM_JOB_ID") orelse "";
     const jr = storage.jobRoot(c.a, nodeLocal(s), job_id, userName(c, s, undone), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
@@ -2859,6 +2873,180 @@ fn checkedJobRoot(c: Ctx, s: config.Settings, undone: []const u8) []const u8 {
         error.OutOfMemory => oom(),
     };
     return jr.path;
+}
+
+fn slurmEnvironment(c: Ctx) bool {
+    var it = c.env.iterator();
+    while (it.next()) |kv| {
+        if (std.mem.startsWith(u8, kv.key_ptr.*, "SLURM_") and kv.value_ptr.*.len > 0) return true;
+    }
+    return false;
+}
+
+fn schedulerPresent(c: Ctx) bool {
+    return slurmEnvironment(c) or (proc.which(c.a, "sbatch", c.env.get("PATH") orelse "") catch null) != null;
+}
+
+fn localStorage(s: config.Settings, c: Ctx, g: Global) bool {
+    return g.workstation or s.storage_mode.value == .local or !schedulerPresent(c);
+}
+
+fn localFilesystemAllowed(c: Ctx, s: config.Settings, path: []const u8) bool {
+    const m = storage.mountOf(c.a, mountinfoText(c), path) catch oom() orelse return false;
+    if (std.mem.eql(u8, m.fstype, "tmpfs") or std.mem.eql(u8, m.fstype, "ramfs"))
+        return false;
+    if (std.mem.eql(u8, storage.workspaceClass(path, m.fstype, s.shared_scratch.value), "shared"))
+        return false;
+    for (s.shared_scratch.value) |shared| {
+        const canonical_shared = storage.canonical(c.a, shared, c.cwd) catch oom();
+        if (storage.under(path, canonical_shared)) return false;
+    }
+    return true;
+}
+
+const PrivateChild = union(enum) {
+    fd: sys.fd_t,
+    missing,
+    refused: []const u8,
+};
+
+fn openPrivateChild(c: Ctx, parent: sys.fd_t, name: []const u8, path: []const u8, create: bool) PrivateChild {
+    var made = false;
+    if (fsx.statAt(parent, name, false)) |st| {
+        if (st.isLink()) return .{ .refused = str(c.a, "workstation workspace parent {s} is a symbolic link", .{path}) };
+    } else |e| switch (e) {
+        error.NotFound => {
+            if (!create) return .missing;
+            var zbuf: [sys.path_max:0]u8 = undefined;
+            const zname = sys.z(&zbuf, name) catch return .{ .refused = str(c.a, "workstation workspace parent {s} is too long", .{path}) };
+            const previous: linux.mode_t = @intCast(linux.syscall1(.umask, 0));
+            const rc = linux.mkdirat(parent, zname.ptr, 0o700);
+            _ = linux.syscall1(.umask, previous);
+            if (sys.result(rc)) |_| made = true else |se| if (se != error.Exists)
+                return .{ .refused = str(c.a, "cannot create workstation workspace parent {s} ({s})", .{ path, storage.describeError(se) }) };
+        },
+        else => return .{ .refused = str(c.a, "cannot inspect workstation workspace parent {s} ({s})", .{ path, storage.describeError(e) }) },
+    }
+    const fd = sys.openat(parent, name, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0) catch |e|
+        return .{ .refused = str(c.a, "cannot securely open workstation workspace parent {s} ({s})", .{ path, storage.describeError(e) }) };
+    const st = fsx.fstat(fd) catch |e| {
+        sys.close(fd);
+        return .{ .refused = str(c.a, "cannot inspect workstation workspace parent {s} ({s})", .{ path, storage.describeError(e) }) };
+    };
+    if (!st.isDir() or st.uid != callerUid(c) or st.mode & 0o022 != 0) {
+        sys.close(fd);
+        return .{ .refused = str(c.a, "workstation workspace parent {s} must be a directory you own and must not be writable by group or others", .{path}) };
+    }
+    if (made or st.perm() != 0o700) sys.fchmod(fd, 0o700) catch |e| {
+        sys.close(fd);
+        return .{ .refused = str(c.a, "cannot make workstation workspace parent {s} private ({s})", .{ path, storage.describeError(e) }) };
+    };
+    return .{ .fd = fd };
+}
+
+fn privateChildOrDie(c: Ctx, parent: sys.fd_t, name: []const u8, path: []const u8, create: bool, undone: []const u8) ?sys.fd_t {
+    return switch (openPrivateChild(c, parent, name, path, create)) {
+        .fd => |fd| fd,
+        .missing => null,
+        .refused => |why| die("{s}; {s}.", .{ why, undone }),
+    };
+}
+
+const LocalRoot = struct {
+    path: []const u8,
+    capacity_path: []const u8,
+    refused_fstype: ?[]const u8 = null,
+    refused_reason: ?[]const u8 = null,
+};
+
+/// Select and securely validate every eb-local-owned workspace parent.
+/// Doctor calls this with create=false; builds call it with create=true.
+fn checkedLocalRoot(c: Ctx, s: config.Settings, undone: []const u8, create: bool) LocalRoot {
+    const a = c.a;
+    var base: ?[]const u8 = null;
+    var first: []const u8 = "eb-local";
+    if (nonEmpty(c.env.get("TMPDIR"))) |tmp| {
+        if (std.fs.path.isAbsolute(tmp)) {
+            if (fsx.statAt(fsx.cwd, tmp, false)) |st| {
+                const owner = tmpdirUid(c, st.uid);
+                const owner_ok = owner == callerUid(c) or owner == 0;
+                const writable_ok = st.mode & 0o022 == 0 or st.mode & 0o1000 != 0;
+                if (st.isDir() and owner_ok and writable_ok) {
+                    const canonical_tmp = storage.canonical(a, tmp, c.cwd) catch oom();
+                    if (localFilesystemAllowed(c, s, canonical_tmp)) {
+                        base = canonical_tmp;
+                        first = std.fmt.allocPrint(a, "eb-local-{d}", .{callerUid(c)}) catch oom();
+                    }
+                }
+            } else |_| {}
+        }
+    }
+    if (base == null) {
+        const cache = rpath.cacheHome(a, c.env) catch
+            die("a workstation build needs an absolute XDG_CACHE_HOME or HOME; {s}.", .{undone});
+        if (create) common.atomic.makedirs(cache) catch |e|
+            die("cannot create workstation cache directory {s} ({s}); {s}.", .{ cache, storage.describeError(e), undone });
+        base = storage.canonical(a, cache, c.cwd) catch oom();
+    }
+    const first_path = std.fs.path.join(a, &.{ base.?, first }) catch oom();
+    const root = std.fs.path.join(a, &.{ first_path, "work" }) catch oom();
+    if (!localFilesystemAllowed(c, s, base.?)) {
+        const m = storage.mountOf(a, mountinfoText(c), base.?) catch oom();
+        if (!create) return .{
+            .path = root,
+            .capacity_path = nearestExistingParent(base.?),
+            .refused_fstype = if (m) |mount| mount.fstype else "an unknown file system",
+        };
+        die("workstation workspace directory {s} is on {s}, which is memory-backed, network or shared storage; {s}.\n" ++
+            "  Set XDG_CACHE_HOME to a directory on this workstation's local disk.", .{ base.?, if (m) |mount| mount.fstype else "an unknown file system", undone });
+    }
+    if (!create) {
+        if (fsx.statAt(fsx.cwd, base.?, false)) |_| {} else |_| {
+            return .{ .path = root, .capacity_path = nearestExistingParent(base.?) };
+        }
+    }
+    const base_fd = sys.openat(fsx.cwd, base.?, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch |e| {
+        const why = str(a, "cannot open workstation workspace directory {s} ({s})", .{ base.?, storage.describeError(e) });
+        if (!create) return .{ .path = root, .capacity_path = nearestExistingParent(base.?), .refused_reason = why };
+        die("{s}; {s}.", .{ why, undone });
+    };
+    defer sys.close(base_fd);
+    const first_result = openPrivateChild(c, base_fd, first, first_path, create);
+    const first_fd = switch (first_result) {
+        .fd => |fd| fd,
+        .missing => return .{ .path = std.fs.path.join(a, &.{ first_path, "work" }) catch oom(), .capacity_path = base.? },
+        .refused => |why| {
+            if (!create) return .{ .path = root, .capacity_path = base.?, .refused_reason = why };
+            die("{s}; {s}.", .{ why, undone });
+        },
+    };
+    defer sys.close(first_fd);
+    const work_result = openPrivateChild(c, first_fd, "work", root, create);
+    const work_fd = switch (work_result) {
+        .fd => |fd| fd,
+        .missing => return .{ .path = root, .capacity_path = first_path },
+        .refused => |why| {
+            if (!create) return .{ .path = root, .capacity_path = first_path, .refused_reason = why };
+            die("{s}; {s}.", .{ why, undone });
+        },
+    };
+    sys.close(work_fd);
+    return .{ .path = root, .capacity_path = root };
+}
+
+fn nearestExistingParent(path: []const u8) []const u8 {
+    var current = path;
+    while (true) {
+        if (fsx.statAt(fsx.cwd, current, false)) |st| {
+            if (st.isDir()) return current;
+        } else |_| {}
+        if (std.mem.eql(u8, current, "/")) return "/";
+        current = std.fs.path.dirname(current) orelse "/";
+    }
+}
+
+fn checkedWorkspaceRoot(c: Ctx, s: config.Settings, g: Global, undone: []const u8) []const u8 {
+    return if (localStorage(s, c, g)) checkedLocalRoot(c, s, undone, true).path else checkedJobRoot(c, s, undone);
 }
 
 /// Where the prefix in force was set, as `eb-local config` shows it.
@@ -2933,8 +3121,8 @@ fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
 /// The stop when the checked node-local mount takes no workspace.
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
-    die("cannot make a build workspace in the node-local mount {s} ({s}); nothing was built.\n" ++
-        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, storage.describeError(e), q(a, job_root) });
+    die("cannot make a build workspace in {s} ({s}); nothing was built.\n" ++
+        "  The directory passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, storage.describeError(e), q(a, job_root) });
 }
 
 // ---- clean ----------------------------------------------------------------
@@ -3056,6 +3244,94 @@ const CleanReport = struct {
     removed_workspaces: usize,
 };
 
+const WorkspaceRootRecord = struct {
+    path: []const u8,
+    dir_fd: ?sys.fd_t = null,
+    name: []const u8 = "",
+};
+
+fn workspaceRegistryName(a: Allocator, root: []const u8) []const u8 {
+    return std.fmt.allocPrint(a, "{x}", .{std.hash.Wyhash.hash(0, root)}) catch oom();
+}
+
+fn workspaceRegistryDir(c: Ctx, prefix: []const u8, create: bool) ?sys.fd_t {
+    const state = std.fs.path.join(c.a, &.{ prefix, ".eb-local" }) catch oom();
+    const state_fd = sys.openat(fsx.cwd, state, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch |e| switch (e) {
+        error.NotFound => return null,
+        else => die("cannot open durable state directory {s} ({s})", .{ state, storage.describeError(e) }),
+    };
+    defer sys.close(state_fd);
+    const name = std.fmt.allocPrint(c.a, "workspace-roots-{d}", .{callerUid(c)}) catch oom();
+    const path = std.fs.path.join(c.a, &.{ state, name }) catch oom();
+    return privateChildOrDie(c, state_fd, name, path, create, "the workspace-root registry was not opened");
+}
+
+fn recordWorkspaceRoot(c: Ctx, prefix: []const u8, root: []const u8) void {
+    const dir = workspaceRegistryDir(c, prefix, true) orelse die("cannot create the workspace-root registry", .{});
+    defer sys.close(dir);
+    const name = workspaceRegistryName(c.a, root);
+    const fd = sys.openat(dir, name, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o600) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
+    defer sys.close(fd);
+    const st = fsx.fstat(fd) catch |e| die("cannot inspect workstation workspace-root registry ({s})", .{storage.describeError(e)});
+    if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0)
+        die("workstation workspace-root registry entry {s} must be a private regular file you own", .{name});
+    sys.writeAll(fd, root) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
+    sys.fsync(fd) catch {};
+}
+
+fn recordedWorkspaceRoots(c: Ctx, prefix: []const u8) []const WorkspaceRootRecord {
+    const dir = workspaceRegistryDir(c, prefix, false) orelse return &.{};
+    var out: std.ArrayList(WorkspaceRootRecord) = .empty;
+    var it = fsx.DirIter.init(c.a, dir) catch {
+        sys.close(dir);
+        return &.{};
+    };
+    while (it.next() catch null) |entry| {
+        const fd = sys.openat(dir, entry.name, .{ .NOFOLLOW = true, .CLOEXEC = true }, 0) catch continue;
+        const st = fsx.fstat(fd) catch {
+            sys.close(fd);
+            continue;
+        };
+        if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0) {
+            sys.close(fd);
+            continue;
+        }
+        const root = fsx.readAll(c.a, fd, sys.path_max) catch {
+            sys.close(fd);
+            continue;
+        };
+        sys.close(fd);
+        if (!std.fs.path.isAbsolute(root)) continue;
+        out.append(c.a, .{ .path = root, .dir_fd = dir, .name = c.a.dupe(u8, entry.name) catch oom() }) catch oom();
+    }
+    if (out.items.len == 0) sys.close(dir);
+    return out.items;
+}
+
+fn rootHasOwnWorkspace(c: Ctx, root: []const u8) bool {
+    const fd = fsx.openDir(fsx.cwd, root, false) catch return false;
+    defer sys.close(fd);
+    var it = fsx.DirIter.init(c.a, fd) catch return false;
+    while (it.next() catch null) |entry| {
+        const full = std.fs.path.join(c.a, &.{ root, entry.name }) catch oom();
+        if (storage.ownWorkspace(root, full, callerUid(c))) return true;
+    }
+    return false;
+}
+
+fn forgetWorkspaceRootIfEmpty(c: Ctx, prefix: []const u8, root: []const u8) void {
+    if (rootHasOwnWorkspace(c, root)) return;
+    const dir = workspaceRegistryDir(c, prefix, false) orelse return;
+    defer sys.close(dir);
+    sys.unlinkat(dir, workspaceRegistryName(c.a, root), 0) catch {};
+}
+
 fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) void {
     var items: std.ArrayList(CleanItemJson) = .empty;
     for (targets) |t| items.append(a, .{ .path = t.path, .kind = if (t.dir) "dir" else "file" }) catch oom();
@@ -3070,18 +3346,25 @@ fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []cons
     });
 }
 
-fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
+fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 {
     const a = c.a;
-    var job_root: ?[]const u8 = null;
-    if (o.workspaces) {
-        if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null)
-            die("clean --workspaces works only inside the Slurm job that made the workspaces, and SLURM_JOB_ID is unset or empty; nothing was removed.\n" ++
-                "  A build workspace is in its job's node-local mount, which goes when the job ends; run eb-local clean --workspaces inside that job, " ++
-                "in its batch script or with srun --jobid=JOBID --overlap.", .{});
-        job_root = checkedJobRoot(c, s, "nothing was removed");
-    }
     const p = place(c, s);
     const d = durableDirs(c, p.prefix, "nothing was removed");
+    var roots: std.ArrayList(WorkspaceRootRecord) = .empty;
+    if (o.workspaces) {
+        roots.appendSlice(a, recordedWorkspaceRoots(c, p.prefix)) catch oom();
+        if (nonEmpty(c.env.get("SLURM_JOB_ID")) != null and s.node_local_root.value.len > 0) {
+            roots.append(a, .{ .path = checkedJobRoot(c, s, "nothing was removed") }) catch oom();
+        } else if (localStorage(s, c, g) and roots.items.len == 0) {
+            const local = checkedLocalRoot(c, s, "nothing was removed", false).path;
+            if (fsx.statAt(fsx.cwd, local, false)) |st| {
+                if (st.isDir()) roots.append(a, .{ .path = local }) catch oom();
+            } else |_| {}
+        } else if (roots.items.len == 0) {
+            die("clean --workspaces found no recorded workstation roots and is not inside a Slurm job that made workspaces; nothing was removed.", .{});
+        }
+    }
+    defer if (roots.items.len > 0 and roots.items[0].dir_fd != null) sys.close(roots.items[0].dir_fd.?);
     var trash = s.trash.value;
     const rtrash = proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null;
     switch (trash) {
@@ -3104,8 +3387,15 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
     if (o.logs) collect.aged(d.logs, now - (days + 1) * 86400 + 1);
     if (o.sources) collect.files(d.sources);
     var spaces: std.ArrayList([]const u8) = .empty;
-    if (job_root) |jr| {
-        const fd = fsx.openDir(fsx.cwd, jr, false) catch die("cannot read {s}", .{jr});
+    for (roots.items) |record| {
+        const jr = record.path;
+        const fd = fsx.openDir(fsx.cwd, jr, false) catch |e| switch (e) {
+            error.NotFound => {
+                if (!o.dry_run) if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
+                continue;
+            },
+            else => die("cannot read {s} ({s})", .{ jr, storage.describeError(e) }),
+        };
         defer sys.close(fd);
         var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
         while (it.next() catch null) |e| {
@@ -3118,6 +3408,9 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
     }
     const targets = collect.out.items;
     if (targets.len == 0 and spaces.items.len == 0) {
+        if (!o.dry_run) for (roots.items) |record| if (record.dir_fd) |dir| {
+            if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
+        };
         if (json) {
             emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces.items, 0, 0);
         } else {
@@ -3142,14 +3435,16 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
         if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces.items, 0, 0);
         return 1;
     }
-    // Build workspaces are node-local scratch the scheduler removes anyway;
-    // they are deleted, not trashed.
+    // Build workspaces are disposable scratch; they are deleted, not trashed.
     var removed_ws: usize = 0;
     for (spaces.items) |w| {
         if (storage.removeTree(a, w)) |_| {
             removed_ws += 1;
         } else |e| warn("cannot remove {s} ({s})", .{ w, storage.describeError(e) });
     }
+    for (roots.items) |record| if (record.dir_fd) |dir| {
+        if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
+    };
     if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
     var removed_items: usize = 0;
     var action: []const u8 = "workspaces-only";
@@ -3433,7 +3728,7 @@ fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []cons
 /// and a `set --` line with its arguments, and the checks eb-local makes
 /// first as comments. Nothing is created and nothing runs, so it also works
 /// outside an allocation. $W stands for the workspace a build makes in the
-/// allocation's node-local mount.
+/// selected local workspace root.
 fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     const p = place(c, s);
@@ -3444,12 +3739,15 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.print(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
         @tagName(install.mode), install.prefix, if (install.mode == .project) s.project.from else s.prefix.from,
     }) catch oom();
-    if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
+    if (localStorage(s, c, g)) {
+        out.appendSlice(a, "# Checks first: a private workspace on this workstation's local disk,\n") catch oom();
+    } else if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         out.print(a, "# Checks first: Slurm job {s}, its own node-local {s} mount under {s},\n", .{ job, s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     } else {
         out.appendSlice(a, "# Checks first: a Slurm job (there is none here, so a build would stop now),\n") catch oom();
         if (s.allocation_hint.value.len > 0) out.print(a, "#   for example: {s}\n", .{s.allocation_hint.value}) catch oom();
-        out.print(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }) catch oom();
+        if (s.node_local_root.value.len > 0)
+            out.print(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     }
     out.appendSlice(a, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n") catch oom();
     const jobs = batchLines(c, s, g, p, args);
@@ -3457,7 +3755,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
         out.appendSlice(a, "# On each node type the site file lists in [build.node_types], the same build as a batch job:\n") catch oom();
         for (jobs) |line| out.print(a, "#   {s}\n", .{line}) catch oom();
     }
-    out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
+    out.appendSlice(a, "# W is a new private workspace eb-local makes there; it is removed after a good build.\n") catch oom();
     for (s.secrets.items) |sec| {
         if (config.buildGets(s, sec.name)) {
             out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
@@ -3527,8 +3825,20 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         return 2;
     }
     if (g.explain) return explainBuild(c, s, g, args);
-    if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
+    if (!localStorage(s, c, g) and nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.", .{});
+        if (s.node_local_root.value.len == 0) {
+            cli.err("  Slurm is present, but no site file sets storage.node_local_root, the directory\n", .{});
+            cli.err("  that holds each job's node-local mount. Install the site file, or explicitly\n", .{});
+            var command: std.ArrayList([]const u8) = .empty;
+            command.append(a, "eb-local") catch oom();
+            appendConfigurationOptions(c, s, g, locate(c, s), &command);
+            command.append(a, "--workstation") catch oom();
+            for (args) |arg| command.append(a, qSingleLine(a, arg)) catch oom();
+            cli.err("  opt in to this machine's local disk with: {s}", .{std.mem.join(a, " ", command.items) catch oom()});
+            cli.err("\n", .{});
+            return 2;
+        }
         cli.err("  Software is built for the CPU of the node that runs eb-local, so build\n", .{});
         cli.err("  inside an allocation on the node type that will run it{s}\n", .{if (s.allocation_hint.value.len > 0) ", for example:" else ""});
         if (s.allocation_hint.value.len > 0) cli.err("  {s}\n", .{s.allocation_hint.value});
@@ -3537,7 +3847,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         for (jobs) |line| cli.err("  {s}\n", .{line});
         return 2;
     }
-    const job_root = checkedJobRoot(c, s, "nothing was built");
+    const job_root = checkedWorkspaceRoot(c, s, g, "nothing was built");
     var p = place(c, s);
     // The process umask EESSI-extend gives the install, as `eb-local eb`
     // sets it: 002 for a project, so that every member can write the
@@ -3680,6 +3990,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         };
     };
     defer storage.releaseLock(&prefix_lock);
+    if (localStorage(s, c, g)) recordWorkspaceRoot(c, p.prefix, job_root);
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -3736,10 +4047,18 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
     if (rc == 0 and !keep) {
         storage.releaseLock(&ws_lock);
-        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e|
-            warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e| {
+            if (localStorage(s, c, g))
+                warn("cannot remove {s} ({s}); run eb-local clean --workspaces", .{ work, @errorName(e) })
+            else
+                warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
+        };
+        if (localStorage(s, c, g)) forgetWorkspaceRootIfEmpty(c, p.prefix, job_root);
     } else {
-        warn("build workspace kept at {s}; it goes when the allocation ends,", .{work});
+        if (localStorage(s, c, g))
+            warn("build workspace kept at {s};", .{work})
+        else
+            warn("build workspace kept at {s}; it goes when the allocation ends,", .{work});
         cli.err("  or now with: eb-local clean --workspaces --no-logs\n", .{});
     }
     if (rc == 0) {
@@ -4402,11 +4721,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     // Configuration.
     const sources = configSources(c, g);
     for (sources) |src| note(a, &out, lines_ptr, "ok  ", "{s} file {s}", .{ @tagName(src.layer), src.path });
+    const local = localStorage(s, c, g);
     const site = s.node_local_root.value.len > 0;
-    if (site) {
+    if (local) {
+        note(a, &out, lines_ptr, "ok  ", "builds use a private workspace on this workstation's local disk", .{});
+    } else if (site) {
         note(a, &out, lines_ptr, "ok  ", "builds use the allocation's own {s} mount {s}/{s}", .{ s.node_local_fstype.value, s.node_local_root.value, s.node_local_mount.value });
     } else {
-        note(a, &out, lines_ptr, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
+        note(a, &out, lines_ptr, "info", "no workspace storage is configured for this Slurm job; set storage.node_local_root or storage.mode = \"local\"", .{});
     }
 
     // A build reads each secret it gets before it starts, so one of those
@@ -4563,7 +4885,26 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     reportForeign(c, s, p.prefix, &out, lines_ptr);
 
     // The allocation.
-    if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
+    if (local) {
+        const lr = checkedLocalRoot(c, s, "doctor checks no further", false);
+        if (lr.refused_reason) |why| {
+            note(a, &out, lines_ptr, "FAIL", "{s}; builds refuse it", .{why});
+            failed = true;
+        } else if (lr.refused_fstype) |fstype| {
+            note(a, &out, lines_ptr, "FAIL", "workstation workspace directory {s} is on {s}, which is memory-backed, network or shared storage; builds refuse it. Set XDG_CACHE_HOME to a directory on this workstation's local disk", .{ lr.path, fstype });
+            failed = true;
+        } else if (workspaceCapacityOverride(c) orelse storage.capacity(lr.capacity_path) catch null) |cap| {
+            if (cap.exhausted()) {
+                note(a, &out, lines_ptr, "FAIL", "workstation build space {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ lr.path, cap.bytes, cap.inodes });
+                failed = true;
+            } else if (cap.inodes_counted) {
+                note(a, &out, lines_ptr, "ok  ", "workstation build space {s}: {d} free bytes, {d} free inodes", .{ lr.path, cap.bytes, cap.inodes });
+            } else note(a, &out, lines_ptr, "ok  ", "workstation build space {s}: {d} free bytes; this file system does not count inodes", .{ lr.path, cap.bytes });
+        } else {
+            note(a, &out, lines_ptr, "FAIL", "workstation build space {s}: free bytes and inodes cannot be read", .{lr.path});
+            failed = true;
+        }
+    } else if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         if (s.node_local_root.value.len > 0) {
             var r: storage.Refusal = .{};
             if (storage.jobRoot(a, nodeLocal(s), job, userName(c, s, "doctor checks no further"), mountinfoText(c), callerUid(c), &r)) |jr| {
@@ -4655,11 +4996,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     const warned = hasDoctorWarning(out.items, json_lines.items, g.json_out);
     const strict_fail = opts.strict and warned;
     const any_failed = failed or strict_fail;
+    const managed_build = site or local;
     const summary = if (failed)
-        (if (site) "Something above says FAIL; builds stop there." else "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.")
+        (if (managed_build) "Something above says FAIL; builds stop there." else "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.")
     else if (strict_fail)
         "Something above says warn (--strict); warnings fail under --strict."
-    else if (site)
+    else if (managed_build)
         "Nothing above stops a build."
     else
         "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.";
@@ -4714,6 +5056,14 @@ fn qSingleLine(a: Allocator, s: []const u8) []const u8 {
     return out.items;
 }
 
+/// Append the global options that selected this configuration.
+fn appendConfigurationOptions(c: Ctx, s: config.Settings, g: Global, p: Place, line: *std.ArrayList([]const u8)) void {
+    const a = c.a;
+    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", qSingleLine(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
+    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
+    if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
+}
+
 /// The command a batch job runs to build: this program, the options that
 /// chose this configuration, and the recipe with its eb options as given.
 fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []const u8) []const u8 {
@@ -4722,9 +5072,7 @@ fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []c
     const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
     var line: std.ArrayList([]const u8) = .empty;
     line.appendSlice(a, &.{ "exec", qSingleLine(a, self) }) catch oom();
-    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", qSingleLine(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
-    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
-    if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
+    appendConfigurationOptions(c, s, g, p, &line);
     for (args) |x| line.append(a, qSingleLine(a, x)) catch oom();
     return std.mem.join(a, " ", line.items) catch oom();
 }
@@ -5487,6 +5835,8 @@ pub fn main(init: std.process.Init) u8 {
             g.config_file = value(args, &i, "--config");
         } else if (joined(x, "--config")) |v| {
             g.config_file = v;
+        } else if (std.mem.eql(u8, x, "--workstation")) {
+            g.workstation = true;
         } else if (std.mem.eql(u8, x, "--env") and command == .build and rest.items.len == 0) {
             command = .env;
         } else if (std.mem.eql(u8, x, "--explain") and command == .build and rest.items.len == 0) {
@@ -5873,7 +6223,7 @@ pub fn main(init: std.process.Init) u8 {
         },
         .clean => blk: {
             if (!clean.logs and clean.logs_days != null) die("clean takes --no-logs or --logs-older-than, not both", .{});
-            break :blk cmdClean(c, s, clean, g.json_out);
+            break :blk cmdClean(c, s, g, clean, g.json_out);
         },
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),

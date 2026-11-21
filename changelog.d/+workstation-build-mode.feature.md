@@ -1,0 +1,1 @@
+Build managed EasyBuild recipes automatically when Slurm is absent, or explicitly with `--workstation`/`storage.mode = "local"`, using securely opened private local workspace roots that `clean --workspaces` can find after `$TMPDIR` changes.

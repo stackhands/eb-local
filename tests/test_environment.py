@@ -320,6 +320,7 @@ class EnvironmentControls(unittest.TestCase):
     def test_allocation_is_required(self):
         env = dict(self.env)
         env.pop("SLURM_JOB_ID")
+        env["SLURM_CLUSTER_NAME"] = "cluster"
         argv, env = binary.command(SCRIPT, ["recipe.eb"], env)
         run = subprocess.run(argv, env=env, cwd=self.root, text=True, capture_output=True)
         self.assertEqual(run.returncode, 2, run.stderr)

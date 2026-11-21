@@ -1,0 +1,15 @@
+# eb-local site file for one Linux workstation with EESSI mounted through
+# CVMFS. Managed builds use private local scratch and need no Slurm job.
+
+prefix = "{{prefix:~/eessi}}"
+
+[storage]
+mode = "local"
+
+[build]
+# Additional top-level toolchains accepted by EESSI's EasyBuild hooks:
+# site_toolchains = ["intel-compilers/2025.3.3"]
+
+# Extra EESSI variables for this machine:
+# [eessi]
+# EESSI_EXAMPLE = "value"
