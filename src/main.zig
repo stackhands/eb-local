@@ -2485,10 +2485,27 @@ fn monotonicMs() i64 {
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
+/// Stand-in for `wait4(-pgid, WNOHANG)` and the group scan, compiled only
+/// into a `-Dtest-ops` build. `phase` 0 makes `wait4` report a live child;
+/// `phase` 1 makes it report `ECHILD`. While installed, the scan reports no
+/// live member. `entered` is written once `settleGroup` commits to waiting,
+/// and a byte on `wake` releases that wait.
+const SettleProbe = struct {
+    phase: *std.atomic.Value(u8),
+    entered: i32,
+    wake: i32,
+    told: std.atomic.Value(u8) = .init(0),
+};
+
+var settle_probe: ?*SettleProbe = null;
+
 /// Reap any exited children in process group `pgid` without blocking; return
 /// whether live reparented children of this process remain in `pgid`.
 fn reapGroupState(pgid: linux.pid_t) bool {
     if (pgid <= 0) return false;
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| return probe.phase.load(.acquire) == 0;
+    }
     var raw: i32 = 0;
     while (true) {
         const rc = linux.wait4(-pgid, &raw, linux.W.NOHANG, null);
@@ -2498,6 +2515,28 @@ fn reapGroupState(pgid: linux.pid_t) bool {
             else => return false,
         }
     }
+}
+
+fn settleScan(pgid: linux.pid_t) bool {
+    if (comptime build_options.test_ops) {
+        if (settle_probe != null) return false;
+    }
+    return proc.groupAlive(pgid);
+}
+
+/// Block until the test releases the probe. True when the probe handled the
+/// wait, so the caller checks `wait4` again.
+fn probeWait() bool {
+    if (comptime !build_options.test_ops) return false;
+    const probe = settle_probe orelse return false;
+    if (probe.told.swap(1, .acq_rel) == 0) {
+        _ = linux.write(probe.entered, "e", 1);
+    }
+    var pfd = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+    while (linux.errno(linux.poll(&pfd, 1, -1)) == .INTR) {}
+    var buf: [16]u8 = undefined;
+    while (linux.errno(linux.read(probe.wake, &buf, buf.len)) == .INTR) {}
+    return true;
 }
 
 fn drainSignalFd(sfd: sys.fd_t) void {
@@ -2517,8 +2556,10 @@ fn drainSignalFd(sfd: sys.fd_t) void {
 /// (`proc.stopGroup`) and reap remaining zombies.
 fn settleGroup(pgid: linux.pid_t) void {
     if (pgid <= 0) return;
-    _ = reapGroupState(pgid);
-    if (!proc.groupAlive(pgid)) return;
+    // wait4 is authoritative for children of this process. The /proc scan
+    // can miss a live member, and returning then orphans it when stop()
+    // re-raises the signal.
+    if (!reapGroupState(pgid) and !settleScan(pgid)) return;
 
     var chld = linux.sigemptyset();
     linux.sigaddset(&chld, .CHLD);
@@ -2533,11 +2574,12 @@ fn settleGroup(pgid: linux.pid_t) void {
     const deadline = monotonicMs() + group_settle_grace_ms;
     while (true) {
         if (sfd) |fd| drainSignalFd(fd);
-        const has_children = reapGroupState(pgid);
-        if (!proc.groupAlive(pgid)) return;
+        const live = reapGroupState(pgid);
+        if (!live and !settleScan(pgid)) return;
         const rem = deadline - monotonicMs();
         if (rem <= 0) break;
-        if (has_children and sfd != null) {
+        if (live and probeWait()) continue;
+        if (live and sfd != null) {
             var pfd = [1]linux.pollfd{.{ .fd = sfd.?, .events = linux.POLL.IN, .revents = 0 }};
             _ = linux.poll(&pfd, 1, @intCast(rem));
         } else {
@@ -2546,11 +2588,11 @@ fn settleGroup(pgid: linux.pid_t) void {
         }
     }
 
-    if (proc.groupAlive(pgid)) {
+    if (reapGroupState(pgid) or settleScan(pgid)) {
         _ = linux.kill(-pgid, .CONT);
         proc.stopGroup(pgid);
+        _ = reapGroupState(pgid);
     }
-    _ = reapGroupState(pgid);
 }
 
 fn selfPgrp() linux.pid_t {
@@ -6108,6 +6150,75 @@ test "settleGroup wakes on SIGCHLD without leaking descriptors" {
     try std.testing.expect(!proc.groupAlive(@intCast(pid)));
     try std.testing.expect(elapsed < 350);
     try std.testing.expectEqual(fds_before, try testSelfFdCount());
+}
+
+test "settleGroup waits while wait4 reports a child the scan missed" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    const Runner = struct {
+        done_fd: i32,
+        fn run(ctx: @This()) void {
+            settleGroup(2147483646);
+            _ = linux.write(ctx.done_fd, "d", 1);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{Runner{ .done_fd = done[1] }});
+    defer {
+        // A failed assertion must still release the wait, or join blocks.
+        phase.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    var pfds = [2]linux.pollfd{
+        .{ .fd = entered[0], .events = linux.POLL.IN, .revents = 0 },
+        .{ .fd = done[0], .events = linux.POLL.IN, .revents = 0 },
+    };
+    while (true) {
+        const rc = linux.poll(&pfds, 2, -1);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        break;
+    }
+    const entered_ready = pfds[0].revents & linux.POLL.IN != 0;
+    const done_ready = pfds[1].revents & linux.POLL.IN != 0;
+    try std.testing.expect(entered_ready);
+    try std.testing.expect(!done_ready);
+
+    phase.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const n = linux.read(done[0], &byte, 1);
+        if (linux.errno(n) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(n));
+        try std.testing.expectEqual(@as(usize, 1), n);
+        break;
+    }
 }
 
 test "shell quoting reads back as the same word" {
