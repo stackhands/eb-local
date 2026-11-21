@@ -39,13 +39,15 @@ eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
 eb-local help | -h | --help | --version
 ```
 
-`OPTION` is one of `--profile NAME`, `--project DIR` and `--config FILE`, which the options below describe.
+`OPTION` is one of `--profile NAME`, `--project DIR`, `--config FILE` and `--workstation`, which the options below describe.
 
 `eb-local --help` prints:
 
 ```text
 eb-local: install and build software on top of EESSI 2026.06, into a
 directory you own.
+  Global: --workstation forces managed recipe builds onto private local
+          storage on this machine, even when Slurm is present.
 
   eb-local <easyconfig> [eb options]   build and install with EasyBuild
   eb-local --explain <easyconfig> [eb options]
@@ -175,7 +177,8 @@ directory you own.
   eb-local help | --version
 
 Every configured command, including eb, takes --profile NAME, --project DIR
-(a shared project directory instead of $HOME/eessi) and --config FILE.
+(a shared project directory instead of $HOME/eessi), --config FILE and
+--workstation. The last forces managed builds onto this machine's disk.
 Use env and dev with eval:
 
   eval "$(eb-local env)"
@@ -186,8 +189,9 @@ or its checkout root, /etc/eb-local/config.toml, eb-local.conf beside this
 program or its checkout root, and /etc/eb-local.conf), then
 ~/.config/eb-local/config.toml,
 then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
-then options. Builds use the allocation's own
-node-local mount; a successful build removes its workspace unless
+then options. Without sbatch on PATH or a nonempty SLURM_* variable,
+managed builds use private workstation storage automatically. Otherwise
+they use the allocation's own node-local mount; a successful build removes its workspace unless
 EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
 written during a build are cleaned of them. A build gets every secret,
 unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
@@ -216,6 +220,7 @@ After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, eve
 |---|---|
 | `--profile NAME` | Use the profile NAME, in place of `EB_LOCAL_PROFILE` and `default_profile`. |
 | `--project DIR` | Install into, and load from, the project directory DIR instead of the prefix, as the `project` setting does. |
+| `--workstation` | Force managed recipe builds to use private local workspace storage on this machine, even when Slurm is present. |
 | `--config FILE` | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of `~/.config/eb-local/config.toml`, when you own it. The other file is still read. |
 | `--explain` | Before an easyconfig, or before `eb`: print what would run, and create and run nothing. |
 | `-h`, `--help`, `help` | Print the usage on stdout and exit 0. |

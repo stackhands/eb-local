@@ -73,7 +73,7 @@ class BuildCliModes(unittest.TestCase):
         self.assertEqual(missing_cfg.returncode, 2, missing_cfg.stdout + missing_cfg.stderr)
 
     def test_recipe_outside_slurm_job_exits_two_and_prints_sbatch_hints(self):
-        got = self.run_cli(["zlib.eb", "--robot"])
+        got = self.run_cli(["zlib.eb", "--robot"], SLURM_CLUSTER_NAME="cluster")
         self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
         self.assertEqual(got.stdout, "")
         self.assertIn("SLURM_JOB_ID is unset or empty", got.stderr)
