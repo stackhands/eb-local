@@ -1901,7 +1901,7 @@ fn reportElf(
             }
             if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{needed_path});
+                k.problem(a, "NEEDED library {s} cannot be resolved for {s}", .{ n, path });
             } else k.enqueue(a, needed_path, effective_loader_root, child_rpath_list.items);
             continue;
         }
@@ -1916,7 +1916,7 @@ fn reportElf(
                 k.problem(a, "{s} is found only through LD_LIBRARY_PATH", .{n});
             } else {
                 if (!quiet) say("  needs    {s} => not found", .{n});
-                k.problem(a, "{s} is not found", .{n});
+                k.problem(a, "NEEDED library {s} cannot be resolved for {s}", .{ n, path });
             }
             continue;
         };
