@@ -355,6 +355,52 @@ class DevCliModes(unittest.TestCase):
         self.assertIn("module load buildenv/default-foss-2026.1\n", got.stdout)
         self.assertIn("export EB_LOCAL_DEV_PREFIX=", got.stdout)
 
+    def test_locked_wrapper_failure_exports_neither_prefix_nor_wrappers(self):
+        compilers = self.root / "compilers"
+        compilers.mkdir()
+        # `--for` wraps gcc; `--unwrapped` wraps clang. Either one makes
+        # rpath-wrappers ask for a cache directory.
+        for name in ("gcc", "clang"):
+            tool = compilers / name
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(0o755)
+        cases = (
+            ("buildenv", self.LOADED),
+            ("no-buildenv", "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"),
+        )
+        trap = (
+            "trap 'rc=$?; printf \"prefix=%s\\nwrappers=%s\\n\" "
+            "\"${EB_LOCAL_DEV_PREFIX-unset}\" \"${EB_LOCAL_RPATH_WRAPPERS-unset}\"; "
+            "exit $rc' EXIT\n"
+        )
+        for label, modules in cases:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=modules)).returncode,
+                    0,
+                )
+                got = self.run_dev(["--locked"])
+                self.assertEqual(got.returncode, 0, got.stderr)
+                run = subprocess.run(
+                    ["/bin/bash", "--noprofile", "--norc", "-c", trap + "module() { return 0; }\n" + got.stdout],
+                    env={
+                        "PATH": str(compilers),
+                        "HOME": str(self.root),
+                        "XDG_CACHE_HOME": "relative-cache",
+                        "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4",
+                        "EESSI_VERSION": "2026.06",
+                    },
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("absolute XDG_CACHE_HOME", run.stderr)
+                self.assertIn("prefix=unset\n", run.stdout)
+                self.assertIn("wrappers=unset\n", run.stdout)
+                self.assertNotRegex(got.stdout, r'eval "\$\([^"]*rpath-wrappers')
+                self.assertLess(got.stdout.rindex('eval "$_eb_local_unwrapped"'), got.stdout.index("export EB_LOCAL_DEV_PREFIX"))
+
     def test_strict_prepends_cvmfs_init_check_before_module_loads(self):
         got = self.run_dev(["--strict", "--buildenv", "buildenv/custom", "Demo/1.0"])
         self.assertEqual(got.returncode, 0, got.stderr)

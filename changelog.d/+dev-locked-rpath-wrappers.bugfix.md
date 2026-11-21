@@ -1,1 +1,1 @@
-Emit `drop_rpath_wrappers` and `rpath-wrappers` after loading locked modules in `eb-local dev --locked`, covering compiler families without a `buildenv` module such as `llvm-compilers` on EESSI 2026.06.
+Emit `drop_rpath_wrappers` and `rpath-wrappers` after loading locked modules in `eb-local dev --locked`, covering compiler families without a `buildenv` module such as `llvm-compilers` on EESSI 2026.06. Each `rpath-wrappers` command is checked, and `EB_LOCAL_DEV_PREFIX` is exported only after those commands succeed.

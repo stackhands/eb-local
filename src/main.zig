@@ -1378,16 +1378,45 @@ fn hasBuildenvModule(s: config.Settings, modules: []const []const u8) bool {
     return false;
 }
 
+/// Shell that stores `eb-local rpath-wrappers ARGS` in `name` and returns
+/// that command's status when it fails. The lines run inside `eb_local_apply`,
+/// so a failure returns from that function instead of exiting the shell.
+/// `eval "$(...)"` would discard the status and let the function continue.
+fn rpathCapture(a: Allocator, exe: []const u8, args: []const u8, name: []const u8) []const u8 {
+    return str(a, "{s}=$({s} rpath-wrappers {s}) || return $?\n", .{ name, exe, args });
+}
+
+/// The `rpath-wrappers` lines for a locked dev shell. Every command is
+/// captured and checked before any of them is evaluated, so one failure
+/// leaves `EB_LOCAL_RPATH_WRAPPERS` unset. The caller exports
+/// `EB_LOCAL_DEV_PREFIX` only after these lines, which return on failure.
 fn lockedRpathWrapperLines(c: Ctx, s: config.Settings, modules: []const []const u8) []const u8 {
     const a = c.a;
     var exe_buf: [sys.path_max]u8 = undefined;
     const exe = q(a, selfExe(&exe_buf) orelse tool);
-    const unwrapped = str(a, "eval \"$({s} rpath-wrappers --unwrapped)\"\n", .{exe});
-    if (hasBuildenvModule(s, modules)) return unwrapped;
+    const cap_unwrapped = rpathCapture(a, exe, "--unwrapped", "_eb_local_unwrapped");
+    const scratch =
+        \\local _eb_local_for _eb_local_unwrapped
+        \\
+    ;
+    if (hasBuildenvModule(s, modules)) return str(a, "{s}{s}{s}", .{
+        scratch,
+        cap_unwrapped,
+        \\eval "$_eb_local_unwrapped"
+        \\unset _eb_local_unwrapped
+        \\
+    });
     var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, scratch) catch oom();
     out.appendSlice(a, familyDetectLines(a)) catch oom();
-    out.appendSlice(a, str(a, "eval \"$({s} rpath-wrappers --for \"$eb_local_family\")\"\nunset eb_local_family\n", .{exe})) catch oom();
-    out.appendSlice(a, unwrapped) catch oom();
+    out.appendSlice(a, rpathCapture(a, exe, "--for \"$eb_local_family\"", "_eb_local_for")) catch oom();
+    out.appendSlice(a, cap_unwrapped) catch oom();
+    out.appendSlice(a,
+        \\eval "$_eb_local_for"
+        \\eval "$_eb_local_unwrapped"
+        \\unset _eb_local_for _eb_local_unwrapped eb_local_family
+        \\
+    ) catch oom();
     return out.items;
 }
 
