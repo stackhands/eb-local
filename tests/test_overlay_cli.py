@@ -320,6 +320,130 @@ class OverlayMaterialize(unittest.TestCase):
         self.assertIn("site MPI", prov)
         self.assertIn(digest_of(content), prov)
 
+    def test_add_typed_pic_assignments_for_kokkos_variants(self):
+        for architecture in ("zen4", "icelake"):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                base_bytes = (
+                    "name = 'Kokkos'\n"
+                    "version = '4.5.01'\n"
+                    f"kokkos_arch = '{architecture}'\n"
+                ).encode()
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(
+                    f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                    "\n[add]\n"
+                    'versionsuffix = "-PIC"\n'
+                    "\n[add.toolchainopts]\n"
+                    "pic = true\n",
+                    encoding="utf-8",
+                )
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+                recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+                namespace = {}
+                exec(compile(recipe, "materialized-base.eb", "exec"), namespace)
+                self.assertEqual(namespace["versionsuffix"], "-PIC")
+                self.assertEqual(namespace["toolchainopts"], {"pic": True})
+                self.assertEqual(namespace["kokkos_arch"], architecture)
+                self.assertNotIn("kokkos_pic.py", recipe)
+
+    def test_add_refuses_invalid_names_before_assignment_lookup(self):
+        base_bytes = b"name = 'Kokkos'\n"
+        cases = (
+            ("foo bar", "invalid Python identifier"),
+            ("class", "Python keyword"),
+            ("x' = 1", "invalid Python identifier"),
+            ('x" = 1', "invalid Python identifier"),
+            ("x\nname", "invalid Python identifier"),
+            ("x; name", "invalid Python identifier"),
+        )
+        for index, (name, message) in enumerate(cases):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                escaped_name = name.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+                (root / "site.overlay.toml").write_text(
+                    f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                    f'\n[add]\n"{escaped_name}" = "value"\n',
+                    encoding="utf-8",
+                )
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", f"out-{index}"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(message, got.stderr)
+                self.assertNotIn("already has parameter", got.stderr)
+                self.assertFalse((root / f"out-{index}").exists())
+
+    def test_add_refuses_newline_strings_and_existing_assignments(self):
+        base_bytes = b"name = 'Kokkos'\n"
+        cases = (
+            ('versionsuffix = "line\\nsecond"\n', "must not contain a newline"),
+            ('name = "Other"\n', "already has parameter 'name'; use [replace]"),
+        )
+        for index, (assignment, message) in enumerate(cases):
+            with self.subTest(assignment=assignment), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "base.eb").write_bytes(base_bytes)
+                (root / "site.overlay.toml").write_text(
+                    f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                    f"\n[add]\n{assignment}",
+                    encoding="utf-8",
+                )
+                got = run(
+                    ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", f"out-{index}"],
+                    cwd=root,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn(message, got.stderr)
+                self.assertFalse((root / f"out-{index}").exists())
+
+    def test_add_emits_quote_and_backslash_strings_safely(self):
+        base_bytes = b"name = 'Kokkos'\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                "\n[add]\n"
+                '''configopts = "quote ' and backslash \\\\"\n''',
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            recipe = (root / "out" / "materialized-base.eb").read_text(encoding="utf-8")
+            namespace = {}
+            exec(compile(recipe, "materialized-base.eb", "exec"), namespace)
+            self.assertEqual(namespace["configopts"], "quote ' and backslash \\")
+
+    def test_replace_typo_still_fails(self):
+        base_bytes = b"versionsuffix = ''\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(
+                f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+                "\n[replace]\nversionsufix = \"'-PIC'\"\n",
+                encoding="utf-8",
+            )
+            got = run(
+                ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", "out"],
+                cwd=root,
+            )
+            self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+            self.assertIn("has no parameter 'versionsufix' to replace", got.stderr)
+            self.assertFalse((root / "out").exists())
+
     def test_replace_multiline_parameter_consumes_all_continuation_lines(self):
         base_bytes = (
             b"easyblock = 'ConfigureMake'\n"
