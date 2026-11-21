@@ -333,6 +333,8 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
     // [eessi] settings before the stack loads: the EESSI module and its
     // hooks read them then.
     for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
+    add(a, &out, str(a, "eb_local_stack={s}\n", .{q(a, s.stack_module.value)}));
+    add(a, &out, eessi_modules ++ "unset eb_local_stack\n");
     // Lmod finds every module of a load before it loads any, and the
     // extension is on MODULEPATH only once the stack is loaded, so each has
     // a load of its own. EESSI-extend refuses an install directory that does
@@ -3186,6 +3188,18 @@ const test_prelude =
 /// What a shell without a module command sources for one.
 const lmod_init = @embedFile("lmod-init.sh");
 
+/// A shell whose `module` is a host Lmod, such as a distribution's package
+/// sets up in every login shell, sourced no init that puts EESSI's modules
+/// on MODULEPATH. Where `$eb_local_stack` is not on MODULEPATH, EESSI's own
+/// module directory goes first; a site's directory that holds it stays as is.
+const eessi_modules =
+    \\if ! module is-avail "$eb_local_stack" >/dev/null 2>&1 &&
+    \\    [ -d "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/init/modules" ]; then
+    \\    module use "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/init/modules" || :
+    \\fi
+    \\
+;
+
 /// The files an internal Bash build tries, in order. Doctor reports this list
 /// for builds; env and dev select the evaluating shell through `lmod_init`.
 fn lmodInits(a: Allocator, env: *const std.process.Environ.Map) [3][]const u8 {
@@ -3256,6 +3270,9 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\    echo "eb-local: no module command found; none of ${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash, /etc/profile.d/lmod.sh or ${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash defined one" >&2
     \\    exit 1
     \\}
+    \\eb_local_stack=$stack
+    \\
+++ eessi_modules ++
     \\# EESSI-extend reads the variables when it loads, so it is loaded fresh.
     \\module unload "$extend" >/dev/null 2>&1 || true
     \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
@@ -4576,10 +4593,16 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         }
     } else if (!onModulePath(a, c.env.get("MODULEPATH") orelse "", s.stack_module.value)) {
         // A build keeps the shell's module command, and with it MODULEPATH,
-        // and sources no init that would put EESSI's modules there.
+        // and sources no init that would put EESSI's modules there; it adds
+        // EESSI's module directory when that holds the stack.
         const repo = nonEmpty(c.env.get("EESSI_CVMFS_REPO")) orelse "/cvmfs/software.eessi.io";
-        note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
-        if (site) failed = true;
+        const eessi_dir = std.fs.path.join(a, &.{ repo, "init", "modules" }) catch oom();
+        if (onModulePath(a, eessi_dir, s.stack_module.value)) {
+            note(a, &out, lines_ptr, "info", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}]; builds, env and dev add {s}, which does", .{ s.stack_module.value, s.stack_module.from, eessi_dir });
+        } else {
+            note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
+            if (site) failed = true;
+        }
     }
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, lines_ptr, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
