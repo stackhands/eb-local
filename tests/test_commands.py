@@ -162,7 +162,10 @@ class Commands(StorageFixture):
 
     @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
     def test_explain_prints_the_build_and_creates_nothing(self):
-        run = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"], SLURM_JOB_ID="")
+        run = self.run_wrapper(
+            ["--explain", "recipe with space.eb", "--robot"],
+            SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+        )
         self.assertEqual(run.returncode, 0, run.stderr)
         out = run.stdout
         self.assertIn("there is none here, so a build would stop now", out)
@@ -369,7 +372,10 @@ class Commands(StorageFixture):
             )
         )
 
-        rec = self.run_wrapper(["recipe.eb", "--version"], SLURM_JOB_ID="")
+        rec = self.run_wrapper(
+            ["recipe.eb", "--version"],
+            SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+        )
         self.assertEqual((rec.returncode, rec.stdout), (2, ""), rec.stdout + rec.stderr)
         self.assertIn("not inside a Slurm job", rec.stderr)
 
@@ -571,9 +577,10 @@ class Commands(StorageFixture):
         self.assertTrue(other.is_dir())
         self.assertTrue(lookalike.is_symlink())
 
-    def test_clean_workspaces_needs_the_allocation(self):
+    def test_clean_workspaces_without_an_allocation_checks_recorded_local_roots(self):
         run = self.run_wrapper(["clean", "--workspaces"], SLURM_JOB_ID="")
-        self.assertEqual(run.returncode, 2)
+        self.assertEqual(run.returncode, 0)
+        self.assertIn("nothing to clean", run.stdout)
 
     def test_empty_equals_value_options_are_refused(self):
         for args in (["--project=", "env"], ["dev", "--buildenv="]):

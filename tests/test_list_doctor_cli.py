@@ -559,12 +559,18 @@ class ListAndDoctor(StorageFixture):
 
     def test_doctor_outside_an_allocation_and_with_modules_off_modulepath(self):
         self.install("x86_64/amd/zen2", "GSL/2.8-GCC-15.2.0")
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}")
+        run = self.run_tool(
+            ["doctor"], SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+            MODULEPATH=f"/somewhere/else:{self.eessi_modules}",
+        )
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertIn("info not in a Slurm job", run.stdout)
         self.assertIn("warn your modules are not on MODULEPATH", run.stdout)
         inside = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen2" / "modules" / "all"
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}:{inside}")
+        run = self.run_tool(
+            ["doctor"], SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+            MODULEPATH=f"/somewhere/else:{self.eessi_modules}:{inside}",
+        )
         self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
 
@@ -656,8 +662,7 @@ class ListAndDoctor(StorageFixture):
         init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
         run = self.without_a_site_file()
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn("info no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; "
-                      "`eb-local eb` does not.", run.stdout)
+        self.assertIn("ok   builds use a private workspace on this workstation's local disk", run.stdout)
         self.assertIn(f"FAIL {init} is missing, so `eb-local eb` stops", run.stdout)
         self.assertEqual(run.stdout.count("FAIL"), 2, run.stdout)
 
@@ -673,7 +678,7 @@ class ListAndDoctor(StorageFixture):
             run.stdout,
         )
         self.assertTrue(run.stdout.rstrip().endswith(
-            "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file."), run.stdout)
+            "Nothing above stops a build."), run.stdout)
 
         # EESSI-extend refuses to load for a project directory that is not there.
         project = self.root / "project"

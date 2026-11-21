@@ -3,6 +3,7 @@ import json
 import os
 import pwd
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -131,8 +132,379 @@ class StorageFixture(unittest.TestCase):
 
 
 class StorageControls(StorageFixture):
-    def test_missing_allocation_creates_no_prefix_or_workspace(self):
-        self.refused(SLURM_JOB_ID="")
+    def with_sbatch(self, **extra):
+        bindir = self.root / "scheduler-bin"
+        bindir.mkdir(exist_ok=True)
+        sbatch = bindir / "sbatch"
+        sbatch.write_text("#!/bin/sh\nexit 0\n")
+        sbatch.chmod(0o755)
+        return dict(PATH=f"{bindir}:{self.env.get('PATH', '/usr/bin:/bin')}", **extra)
+
+    def test_workstation_build_uses_private_cache_workspace_and_removes_it(self):
+        cache = self.root / "cache"
+        self.config.write_text("# workstation: no node-local root\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR="", XDG_CACHE_HOME=str(cache),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        work_root = cache / "eb-local" / "work"
+        for name in MUTABLE:
+            self.assertTrue(Path(built["paths"][name]).is_relative_to(work_root))
+        self.assertEqual(work_root.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(work_root.iterdir()), [])
+        registry = self.prefix / ".eb-local" / f"workspace-roots-{os.getuid()}"
+        self.assertEqual(list(registry.iterdir()), [])
+        for name in DURABLE:
+            self.assertTrue(Path(built["paths"][name]).is_relative_to(self.prefix))
+
+    def test_explicit_local_mode_works_even_with_slurm_storage_configured(self):
+        cache = self.root / "cache"
+        local_config = self.root / "local.toml"
+        local_config.write_text(
+            '[storage]\nmode = "local"\n'
+            f'node_local_root = "{self.nodes}"\n'
+        )
+        local_config.chmod(0o600)
+        run = self.run_wrapper(
+            EB_LOCAL_CONFIG=str(local_config), TMPDIR="",
+            XDG_CACHE_HOME=str(cache),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        self.assertTrue(
+            Path(built["paths"]["EASYBUILD_BUILDPATH"]).is_relative_to(
+                cache / "eb-local" / "work"
+            )
+        )
+
+    def test_workstation_workspace_refuses_network_storage(self):
+        cache = self.root / "cache"
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR="", XDG_CACHE_HOME=str(cache),
+            CONTROL_JOB_ROOT=str(cache), CONTROL_FSTYPE="nfs",
+        )
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("network or shared storage", run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+
+    def test_doctor_refuses_the_same_network_workstation_storage(self):
+        cache = self.root / "cache"
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            ["doctor"], SLURM_JOB_ID="", TMPDIR="",
+            XDG_CACHE_HOME=str(cache), CONTROL_JOB_ROOT=str(cache),
+            CONTROL_FSTYPE="nfs",
+        )
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("network or shared storage", run.stdout + run.stderr)
+
+    def test_tmpdir_foreign_owned_workspace_parent_is_refused(self):
+        tmpdir = self.root / "tmp"
+        tmpdir.mkdir()
+        fake_uid = os.getuid() + 1
+        (tmpdir / f"eb-local-{fake_uid}").mkdir()
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+            EB_LOCAL_TEST_UID=str(fake_uid),
+            EB_LOCAL_TEST_TMPDIR_UID=str(fake_uid),
+        )
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("directory you own", run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+
+    def test_unsafe_tmpdir_bases_fall_back_to_the_private_cache(self):
+        cache = self.root / "cache"
+        self.config.write_text("# workstation\n")
+        cases = {}
+        nonsticky = self.root / "nonsticky-tmp"
+        nonsticky.mkdir()
+        nonsticky.chmod(0o777)
+        cases["non-sticky writable"] = (nonsticky, {})
+        foreign = self.root / "foreign-tmp"
+        foreign.mkdir()
+        cases["foreign-owned"] = (
+            foreign,
+            {"EB_LOCAL_TEST_TMPDIR_UID": str(os.getuid() + 1)},
+        )
+        for name, (tmpdir, extra) in cases.items():
+            with self.subTest(name=name):
+                (self.root / "eb.json").unlink(missing_ok=True)
+                run = self.run_wrapper(
+                    SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+                    XDG_CACHE_HOME=str(cache), **extra,
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                built = json.loads((self.root / "eb.json").read_text())
+                self.assertTrue(
+                    Path(built["paths"]["EASYBUILD_BUILDPATH"]).is_relative_to(
+                        cache / "eb-local" / "work"
+                    )
+                )
+
+    def test_sticky_world_writable_tmpdir_is_accepted(self):
+        tmpdir = self.root / "sticky-tmp"
+        tmpdir.mkdir()
+        tmpdir.chmod(0o1777)
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+            XDG_CACHE_HOME=str(self.root / "cache"),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        self.assertTrue(
+            Path(built["paths"]["EASYBUILD_BUILDPATH"]).is_relative_to(
+                tmpdir / f"eb-local-{os.getuid()}" / "work"
+            )
+        )
+
+    def test_tmpdir_world_writable_workspace_parent_is_refused(self):
+        tmpdir = self.root / "tmp"
+        parent = tmpdir / f"eb-local-{os.getuid()}"
+        parent.mkdir(parents=True)
+        parent.chmod(0o777)
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(SLURM_JOB_ID="", TMPDIR=str(tmpdir))
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("must not be writable by group or others", run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+
+    def test_tmpdir_symlinked_workspace_parent_is_refused(self):
+        tmpdir = self.root / "tmp"
+        target = self.root / "target"
+        tmpdir.mkdir()
+        target.mkdir()
+        (tmpdir / f"eb-local-{os.getuid()}").symlink_to(
+            target, target_is_directory=True,
+        )
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(SLURM_JOB_ID="", TMPDIR=str(tmpdir))
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("symbolic link", run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+
+    def test_xdg_world_writable_workspace_parent_is_refused(self):
+        cache = self.root / "cache"
+        parent = cache / "eb-local"
+        parent.mkdir(parents=True)
+        parent.chmod(0o777)
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR="", XDG_CACHE_HOME=str(cache),
+        )
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("must not be writable by group or others", run.stderr)
+        self.assertFalse((self.root / "eb.json").exists())
+
+    def test_workstation_ignores_tmpdir_on_tmpfs(self):
+        cache = self.root / "cache"
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", XDG_CACHE_HOME=str(cache),
+            CONTROL_FSTYPE="tmpfs",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        built = json.loads((self.root / "eb.json").read_text())
+        self.assertTrue(
+            Path(built["paths"]["EASYBUILD_BUILDPATH"]).is_relative_to(
+                cache / "eb-local" / "work"
+            )
+        )
+
+    def test_explain_without_node_local_root_has_no_empty_mount_path(self):
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            ["--explain", "recipe.eb"], SLURM_JOB_ID="", TMPDIR="",
+            XDG_CACHE_HOME=str(self.root / "cache"),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("mount under ,", run.stdout)
+        self.assertIn("workstation's local disk", run.stdout)
+
+    def test_clean_workspaces_removes_a_failed_workstation_build(self):
+        tmpdir = self.root / "first-tmp"
+        tmpdir.mkdir()
+        self.config.write_text("# workstation\n")
+        failed = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+            XDG_CACHE_HOME=str(self.root / "cache"),
+            CONTROL_EB_STATUS="37",
+        )
+        self.assertEqual(failed.returncode, 37, failed.stdout + failed.stderr)
+        work_root = tmpdir / f"eb-local-{os.getuid()}" / "work"
+        self.assertEqual(len(list(work_root.glob("eb-local.*"))), 1)
+        cleaned = self.run_wrapper(
+            ["clean", "--delete", "--workspaces", "--no-logs"],
+            SLURM_JOB_ID="", TMPDIR="",
+            XDG_CACHE_HOME=str(self.root / "different-cache"),
+        )
+        self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+        self.assertEqual(list(work_root.iterdir()), [])
+        registry = self.prefix / ".eb-local" / f"workspace-roots-{os.getuid()}"
+        self.assertEqual(list(registry.iterdir()), [])
+
+    def test_clean_workspaces_forgets_a_missing_recorded_root(self):
+        tmpdir = self.root / "vanishing-tmp"
+        tmpdir.mkdir()
+        self.config.write_text("# workstation\n")
+        failed = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+            XDG_CACHE_HOME=str(self.root / "cache"),
+            CONTROL_EB_STATUS="37",
+        )
+        self.assertEqual(failed.returncode, 37, failed.stdout + failed.stderr)
+        registry = self.prefix / ".eb-local" / f"workspace-roots-{os.getuid()}"
+        self.assertEqual(len(list(registry.iterdir())), 1)
+        shutil.rmtree(tmpdir)
+        dry_run = self.run_wrapper(
+            ["clean", "--dry-run", "--workspaces", "--no-logs"],
+            SLURM_JOB_ID="", TMPDIR="",
+            XDG_CACHE_HOME=str(self.root / "different-cache"),
+        )
+        self.assertEqual(
+            dry_run.returncode, 0, dry_run.stdout + dry_run.stderr,
+        )
+        self.assertEqual(len(list(registry.iterdir())), 1)
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                cleaned = self.run_wrapper(
+                    ["clean", "--delete", "--workspaces", "--no-logs"],
+                    SLURM_JOB_ID="", TMPDIR="",
+                    XDG_CACHE_HOME=str(self.root / "different-cache"),
+                )
+                self.assertEqual(
+                    cleaned.returncode, 0, cleaned.stdout + cleaned.stderr,
+                )
+                self.assertEqual(list(registry.iterdir()), [])
+
+    def test_clean_workspaces_refuses_an_unreadable_recorded_root(self):
+        tmpdir = self.root / "sealed-tmp"
+        tmpdir.mkdir()
+        self.config.write_text("# workstation\n")
+        failed = self.run_wrapper(
+            SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+            XDG_CACHE_HOME=str(self.root / "cache"),
+            CONTROL_EB_STATUS="37",
+        )
+        self.assertEqual(failed.returncode, 37, failed.stdout + failed.stderr)
+        work_root = tmpdir / f"eb-local-{os.getuid()}" / "work"
+        work_root.chmod(0)
+        self.addCleanup(lambda: work_root.chmod(0o700))
+        cleaned = self.run_wrapper(
+            ["clean", "--delete", "--workspaces", "--no-logs"],
+            SLURM_JOB_ID="", TMPDIR="",
+            XDG_CACHE_HOME=str(self.root / "different-cache"),
+        )
+        self.assertEqual(cleaned.returncode, 2, cleaned.stdout + cleaned.stderr)
+        self.assertIn(f"cannot read {work_root}", cleaned.stderr)
+
+    def test_doctor_reports_insecure_workspace_parents_and_continues(self):
+        self.config.write_text("# workstation\n")
+        cases = {}
+        foreign_tmp = self.root / "doctor-foreign"
+        fake_uid = os.getuid() + 1
+        (foreign_tmp / f"eb-local-{fake_uid}").mkdir(parents=True)
+        cases["directory you own"] = (
+            foreign_tmp,
+            {
+                "EB_LOCAL_TEST_UID": str(fake_uid),
+                "EB_LOCAL_TEST_TMPDIR_UID": str(fake_uid),
+            },
+        )
+        writable_tmp = self.root / "doctor-writable"
+        writable_parent = writable_tmp / f"eb-local-{os.getuid()}"
+        writable_parent.mkdir(parents=True)
+        writable_parent.chmod(0o777)
+        cases["must not be writable by group or others"] = (writable_tmp, {})
+        symlink_tmp = self.root / "doctor-symlink"
+        symlink_tmp.mkdir()
+        symlink_target = self.root / "doctor-target"
+        symlink_target.mkdir()
+        (symlink_tmp / f"eb-local-{os.getuid()}").symlink_to(
+            symlink_target, target_is_directory=True,
+        )
+        cases["symbolic link"] = (symlink_tmp, {})
+        for reason, (tmpdir, extra) in cases.items():
+            with self.subTest(reason=reason):
+                run = self.run_wrapper(
+                    ["doctor"], SLURM_JOB_ID="", TMPDIR=str(tmpdir),
+                    XDG_CACHE_HOME=str(self.root / "cache"), **extra,
+                )
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                self.assertEqual(run.stderr, "")
+                self.assertIn(f"FAIL workstation workspace parent", run.stdout)
+                self.assertIn(reason, run.stdout)
+                self.assertIn("EESSI is not loaded in this shell", run.stdout)
+                self.assertTrue(
+                    run.stdout.rstrip().endswith(
+                        "Something above says FAIL; builds stop there."
+                    )
+                )
+
+    def test_cluster_refusal_hint_preserves_global_configuration_options(self):
+        options = self.root / "hint options.toml"
+        options.write_text(
+            '[profile.hint]\nprefix = "/unused/profile-prefix"\n'
+        )
+        options.chmod(0o600)
+        project = self.root / "project install"
+        run = self.run_wrapper(
+            [
+                "--config", str(options), "--profile", "hint",
+                "--project", str(project), "recipe with spaces.eb", "--robot",
+            ],
+            SLURM_JOB_ID="", **self.with_sbatch(),
+        )
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn(
+            "  opt in to this machine's local disk with: "
+            f"eb-local --config '{options}' --profile hint "
+            f"--project '{project}' --workstation "
+            "'recipe with spaces.eb' --robot\n",
+            run.stderr,
+        )
+
+    def test_sbatch_without_an_allocation_preserves_the_cluster_refusal(self):
+        run = self.run_wrapper(SLURM_JOB_ID="", **self.with_sbatch())
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("inside an allocation", run.stderr)
+        self.assertFalse(self.prefix.exists())
+
+    def test_nonempty_slurm_context_prevents_automatic_workstation_mode(self):
+        self.config.write_text("# no site storage\n")
+        run = self.run_wrapper(
+            SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+            TMPDIR="", XDG_CACHE_HOME=str(self.root / "cache"),
+        )
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("storage.node_local_root", run.stderr)
+        self.assertIn("--workstation", run.stderr)
+
+    def test_workstation_option_forces_local_mode_with_sbatch(self):
+        self.config.write_text("# no site storage\n")
+        for args in (
+            ["--workstation", "recipe.eb"],
+            ["recipe.eb", "--workstation"],
+        ):
+            with self.subTest(args=args):
+                run = self.run_wrapper(
+                    args, SLURM_JOB_ID="", TMPDIR="",
+                    XDG_CACHE_HOME=str(self.root / "cache"),
+                    **self.with_sbatch(),
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_doctor_reports_workstation_capacity(self):
+        self.config.write_text("# workstation\n")
+        run = self.run_wrapper(
+            ["doctor"], SLURM_JOB_ID="", TMPDIR="",
+            XDG_CACHE_HOME=str(self.root / "cache"),
+            EB_LOCAL_TEST_WORKSPACE_CAPACITY="8192:17",
+        )
+        self.assertIn("8192 free bytes, 17 free inodes", run.stdout)
 
     def test_invalid_allocation_identity_creates_no_prefix(self):
         self.refused(SLURM_JOB_ID="not-a-job")
@@ -276,9 +648,17 @@ class StorageControls(StorageFixture):
         self.config.unlink()
         self.refused()
 
-    def test_configuration_without_node_local_root_is_refused(self):
+    def test_configuration_without_node_local_root_selects_local_mode(self):
         self.config.write_text("node_local_fstype = xfs\n")
-        self.refused()
+        run = self.run_wrapper(SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertTrue((self.root / "eb.json").exists())
+        built = json.loads((self.root / "eb.json").read_text())
+        self.assertTrue(
+            Path(built["paths"]["EASYBUILD_BUILDPATH"]).is_relative_to(
+                self.job / f"eb-local-{os.getuid()}" / "work"
+            )
+        )
 
     def test_group_writable_configuration_is_refused(self):
         self.config.chmod(0o620)
@@ -348,7 +728,7 @@ class StorageControls(StorageFixture):
                 self.assertEqual(list(self.job.iterdir()), [])
 
     def test_allocation_hint_comes_from_the_configuration(self):
-        run = self.run_wrapper(SLURM_JOB_ID="")
+        run = self.run_wrapper(SLURM_JOB_ID="", **self.with_sbatch())
         self.assertEqual(run.returncode, 2)
         self.assertIn("salloc -n 16 -t 02:00:00", run.stderr)
 
@@ -417,7 +797,7 @@ class RefusalWording(StorageFixture):
                                      f"to the directory itself, {real}."), fix)
 
     def test_no_job_a_job_id_that_is_not_one_and_no_node_local_root(self):
-        self.assertEqual(self.refusal(SLURM_JOB_ID="")[0],
+        self.assertEqual(self.refusal(SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster")[0],
                          "eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.")
         first, fix = self.refusal(SLURM_JOB_ID="not-a-job")
         self.assertEqual(first, "eb-local: SLURM_JOB_ID=not-a-job is not a Slurm job id; nothing was built.")
@@ -427,6 +807,7 @@ class RefusalWording(StorageFixture):
         self.assertEqual(first, "eb-local: no site file sets storage.node_local_root, the directory that holds each "
                                 "job's node-local mount; nothing was built.")
         self.assertIn("--config FILE or EB_LOCAL_CONFIG=FILE", fix)
+        self.assertIn("--workstation", fix)
 
     def test_a_prefix_on_shared_scratch_or_in_job_storage_names_where_each_was_set(self):
         for prefix, tree, what in (
@@ -486,10 +867,6 @@ class RefusalWording(StorageFixture):
         self.assertIn("where /proc is mounted", fix)
 
     def test_clean_workspaces_says_nothing_was_removed(self):
-        first, fix = self.refusal(["clean", "--workspaces"], SLURM_JOB_ID="")
-        self.assertEqual(first, "eb-local: clean --workspaces works only inside the Slurm job that made the workspaces, "
-                                "and SLURM_JOB_ID is unset or empty; nothing was removed.")
-        self.assertIn("srun --jobid=JOBID --overlap", fix)
         first, fix = self.refusal(["clean", "--workspaces"], CONTROL_FSTYPE="tmpfs")
         self.assertEqual(first, f"eb-local: the node-local mount {self.job} is on tmpfs, not xfs; nothing was removed.")
 
