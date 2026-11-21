@@ -231,6 +231,88 @@ class PlanBeforeChange(unittest.TestCase):
             "clean --workspaces (rtrash)", trashing, ["clean", "--workspaces"], listed=3, nothing="removed"
         )
 
+    def test_uninstall_lists_before_it_removes_anything(self):
+        def deleting(test):
+            scene = test.scene()
+            scene.demo_install()
+            return scene
+
+        def trashing(test):
+            scene = deleting(test)
+            scene.rtrash_recorder()
+            return scene
+
+        def install_gone(scene):
+            return not any((scene.prefix / "versions").rglob("Demo"))
+
+        self.check_unchanged(
+            "uninstall --delete", deleting, ["uninstall", "--delete", "Demo/1.0"], changed=install_gone, nothing="removed"
+        )
+        self.check_unchanged(
+            "uninstall (rtrash)", trashing, ["uninstall", "Demo/1.0"], changed=lambda s: s.marker.exists(), nothing="removed"
+        )
+
+    def test_uninstall_checks_its_list_again_once_it_has_the_lock(self):
+        def installed(test):
+            scene = test.scene()
+            scene.demo_install()
+            return scene
+
+        def module_file(scene):
+            return next((scene.prefix / "versions").rglob("1.0.lua"))
+
+        self.check_changed_under_the_lock(
+            "uninstall --delete",
+            installed,
+            ["uninstall", "--delete", "Demo/1.0"],
+            listed=2,
+            change=lambda scene: module_file(scene).unlink(),
+            kept=lambda scene: any((scene.prefix / "versions").rglob("Demo")),
+            code=1,
+            message="changed while it waited for the prefix lock; nothing was removed",
+        )
+
+    def test_uninstall_refuses_what_was_added_while_it_waited_for_the_lock(self):
+        def installed(test):
+            scene = test.scene()
+            scene.demo_install()
+            return scene
+
+        def class_link(scene):
+            return next((scene.prefix / "versions").rglob("modules")) / "tools" / "Demo" / "1.0.lua"
+
+        def link_the_module(scene):
+            link = class_link(scene)
+            link.parent.mkdir(parents=True)
+            link.symlink_to(next((scene.prefix / "versions").rglob("1.0.lua")))
+
+        self.check_changed_under_the_lock(
+            "uninstall --delete",
+            installed,
+            ["uninstall", "--delete", "Demo/1.0"],
+            listed=2,
+            change=link_the_module,
+            kept=lambda scene: any((scene.prefix / "versions").rglob("Demo")) and class_link(scene).is_symlink(),
+            code=1,
+            message="changed while it waited for the prefix lock; nothing was removed",
+        )
+
+    def test_uninstall_reports_after_it_has_changed_everything(self):
+        def deleting(test):
+            scene = test.scene()
+            scene.demo_install()
+            return scene
+
+        def trashing(test):
+            scene = deleting(test)
+            scene.rtrash_recorder()
+            return scene
+
+        self.check_every_write(
+            "uninstall --delete", deleting, ["uninstall", "--delete", "Demo/1.0"], listed=2, nothing="removed"
+        )
+        self.check_every_write("uninstall (rtrash)", trashing, ["uninstall", "Demo/1.0"], listed=2, nothing="removed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5708,16 +5708,10 @@ fn makeReadOnly(c: Ctx, path: []const u8, depth: usize) void {
     _ = linux.fchmodat(linux.AT.FDCWD, zp.ptr, @intCast(st.mode & 0o7555));
 }
 
-fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
+/// What `uninstall` would remove, or null after it has said why it removes
+/// nothing, which is exit status 2.
+fn uninstallPlan(c: Ctx, p: Place, versions: []const u8, modules: []const []const u8, o: UninstallOpts) ?Found {
     const a = c.a;
-    if (modules.len == 0) die("uninstall needs NAME/VERSION, as module avail shows it", .{});
-    const p = place(c, s);
-    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
-        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
-    } else |_| die("nothing is installed in {s}", .{p.prefix});
-    var prefix_lock: ?sys.fd_t = if (o.dry_run) null else acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
     if (o.target) |raw_target| {
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -5757,18 +5751,44 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (dependents.items.len > 0) {
         warn("these installed modules load what you named; uninstall them in the same command, or keep it:", .{});
         for (dependents.items) |f| warn("  {s}", .{f});
-        return 2;
+        return null;
     }
     // The usage log is eb-keep-logs' to read. Exit 2 from
     // `used --require-none` means the prefix is named there, or the log
     // could not be read; either way nothing is removed. Without the
     // option this is not consulted.
-    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return 2;
+    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return null;
+    return found;
+}
+
+/// Whether `now` names exactly what `self` names. A module file or link added
+/// since is not listed, so removing the installation would leave it dangling.
+fn foundUnchanged(self: Found, now: Found) bool {
+    for ([_][2][]const []const u8{
+        .{ self.installs.items, now.installs.items },
+        .{ self.modules.items, now.modules.items },
+    }) |pair| {
+        for (pair[0]) |x| if (!listed(pair[1], x)) return false;
+        for (pair[1]) |y| if (!listed(pair[0], y)) return false;
+    }
+    return true;
+}
+
+fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("uninstall needs NAME/VERSION, as module avail shows it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
+    } else |_| die("nothing is installed in {s}", .{p.prefix});
+    const found = uninstallPlan(c, p, versions, modules, o) orelse return 2;
     for (found.installs.items) |d| {
         if (!storage.under(d, versions)) die("{s} is outside {s}", .{ d, versions });
         say("  {s}/", .{d});
     }
     for (found.modules.items) |f| say("  {s}", .{f});
+    if (stdout.failed) return unlisted("removed");
     if (o.dry_run) {
         say("eb-local: dry run, nothing removed", .{});
         return 0;
@@ -5782,6 +5802,16 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     }
     if (trash != .rtrash and !o.delete) {
         notTrashed(s);
+        return 1;
+    }
+    // The list is out. Only now does uninstall take the prefix lock, which
+    // makes `.eb-local/.lock`, and check under it that what it listed is
+    // still installed and still safe to remove.
+    var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
+    const again = uninstallPlan(c, p, versions, modules, o) orelse return 2;
+    if (!foundUnchanged(found, again)) {
+        warn("what uninstall listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
         return 1;
     }
     for (found.installs.items) |d| makeWritable(c, d, 0);
@@ -5802,17 +5832,21 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
                 },
             }
         }
-        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
     } else {
         for (found.installs.items) |d| fsx.deleteTree(a, fsx.cwd, d) catch |e| die("cannot remove {s} ({s})", .{ d, storage.describeError(e) });
         for (found.modules.items) |f| sys.unlinkat(fsx.cwd, f, 0) catch |e| die("cannot remove {s} ({s})", .{ f, storage.describeError(e) });
-        say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
     }
     // The NAME directories they leave empty.
     for ([_][]const []const u8{ found.installs.items, found.modules.items }) |list| for (list) |x| {
         const parent = std.fs.path.dirname(x) orelse continue;
         sys.unlinkat(fsx.cwd, parent, linux.AT.REMOVEDIR) catch {};
     };
+    // Nothing is left to change, so this report cannot stop a later step.
+    if (trash == .rtrash) {
+        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
+    } else {
+        say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
+    }
     return 0;
 }
 
