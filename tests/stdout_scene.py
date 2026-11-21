@@ -146,6 +146,42 @@ class Scene:
         record.chmod(0o600)
         return record
 
+    def building(self, *, secret=None):
+        """A job that can run `build recipe.eb` through to the end.
+
+        The test build sources a prelude into the build script, which gives it
+        `module`; the `eb` double writes a log. With a SECRET the site file
+        names it, and the double writes it to the log for `build` to redact.
+        """
+        job = self.in_a_job()
+        prelude = self.root / "prelude.sh"
+        prelude.write_text(
+            "module() {\n"
+            '    [ "$1" = load ] || return 0\n'
+            '    case "$2" in EESSI-extend/*)\n'
+            "        export EESSI_SOFTWARE_SUBDIR=x86_64/amd/zen4 EESSI_ACCELERATOR_TARGET= EESSI_VERSION=2026.06\n"
+            '        export EASYBUILD_INSTALLPATH="$EESSI_USER_INSTALL/versions/2026.06/software/linux/x86_64/amd/zen4";;\n'
+            "    esac\n"
+            "}\n"
+            "export -f module\n",
+            encoding="utf-8",
+        )
+        self.write_double(
+            "eb",
+            "printf 'building with %s\\n' \"${BUILD_SECRET-nothing}\" > \"$EASYBUILD_TMP_LOGDIR/easybuild-test.log\"\n"
+            # A log made in the second the build started can carry the kernel's coarse time
+            # of the second before, and build then takes it for an older log and keeps the secret.
+            "touch -d '+1 hour' \"$EASYBUILD_TMP_LOGDIR/easybuild-test.log\"\n"
+            f"printf 'eb\\n' >> '{self.marker}'\n",
+        )
+        self.env["EB_LOCAL_TEST_PRELUDE"] = str(prelude)
+        (self.root / "recipe.eb").write_text("name = 'Demo'\n", encoding="utf-8")
+        if secret:
+            with open(self.root / "site.toml", "a", encoding="utf-8") as site:
+                site.write('[secrets]\nBUILD_SECRET = "env:BUILD_SECRET"\n')
+            self.env["BUILD_SECRET"] = secret
+        return job
+
     def old_log(self):
         logs = self.prefix / ".eb-local" / "logs"
         logs.mkdir(parents=True, exist_ok=True)

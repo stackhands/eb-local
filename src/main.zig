@@ -4061,6 +4061,22 @@ fn prefixCapacity(c: Ctx, path: []const u8) ?storage.Capacity {
     return prefixCapacityOverride(c) orelse (storage.capacity(path) catch null);
 }
 
+/// The durable directories of a build, refused when a link leads them, or
+/// the trees below the prefix, onto storage that does not outlive the job.
+/// It makes nothing, so it runs before the prefix exists as well as after.
+fn buildTrees(c: Ctx, refused: []const RefusedTree, prefix: []const u8) Durable {
+    const d = durableDirs(c, prefix, "nothing was built");
+    // The trees a build writes below the prefix must not lead onto refused
+    // storage either, through a symbolic link made later.
+    for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
+        const path = std.fs.path.join(c.a, &.{ prefix, sub }) catch oom();
+        const resolved = storage.canonical(c.a, path, c.cwd) catch oom();
+        for (refused) |t| if (storage.under(resolved, t.path))
+            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
+    }
+    return d;
+}
+
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     if (args.len == 0) {
@@ -4100,6 +4116,18 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const refused = refusedTrees(c, s, true);
     for (refused) |t| if (storage.under(p.prefix, t.path))
         die("the install prefix {s} [{s}] is under {s}, {s}; nothing was built.\n  " ++ outlive ++ "; " ++ prefix_fix ++ ".", .{ p.prefix, prefixFrom(s, p), t.path, t.what });
+    {
+        // Said before the prefix exists, so a standard output that cannot take
+        // it leaves nothing behind; the canonical form is what realpath gives
+        // once the prefix is made.
+        const shown_prefix = storage.canonical(a, p.prefix, c.cwd) catch oom();
+        _ = buildTrees(c, refused, shown_prefix);
+        var shown: std.ArrayList(u8) = .empty;
+        shown.appendSlice(a, replay(a, "--explain", s, g, shown_prefix, &.{})) catch oom();
+        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
+        say("eb-local: what this runs: eb-local {s}", .{shown.items});
+        if (stdout.failed) return unlisted("built");
+    }
     common.atomic.makedirs(p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
     {
         var zb: [sys.path_max:0]u8 = undefined;
@@ -4114,23 +4142,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         if (cap.exhausted())
             die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
-    const d = durableDirs(c, p.prefix, "nothing was built");
-    // The trees a build writes below the prefix must not lead onto refused
-    // storage either, through a symbolic link made later.
-    for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
-        const path = std.fs.path.join(a, &.{ p.prefix, sub }) catch oom();
-        const resolved = storage.canonical(a, path, c.cwd) catch oom();
-        for (refused) |t| if (storage.under(resolved, t.path))
-            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
-    }
-
-    {
-        var shown: std.ArrayList(u8) = .empty;
-        shown.appendSlice(a, replay(a, "--explain", s, g, p.prefix, &.{})) catch oom();
-        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
-        say("eb-local: what this runs: eb-local {s}", .{shown.items});
-        if (stdout.failed) return 1;
-    }
+    const d = buildTrees(c, refused, p.prefix);
 
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
@@ -4289,7 +4301,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
-    if (rc == 0 and !keep) {
+    // The workspace goes only once what was said about the logs has reached
+    // standard output; until then it stays, as after a failed build.
+    if (rc == 0 and !keep and !stdout.failed) {
         storage.releaseLock(&ws_lock);
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e| {
             if (localStorage(s, c, g))

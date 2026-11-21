@@ -427,6 +427,52 @@ class PlanBeforeChange(unittest.TestCase):
                 self.assertEqual(scene.calls(), [f"stdout-bytes {len(out.read_bytes())}"])
                 scene.old_log()
 
+    def test_build_says_what_it_runs_before_it_makes_the_prefix(self):
+        def in_a_job(test):
+            scene = test.scene(make_prefix=False)
+            scene.building()
+            return scene
+
+        def built(scene):
+            return scene.prefix.exists() or bool(scene.calls())
+
+        self.check_unchanged("build", in_a_job, ["recipe.eb"], changed=built, nothing="built")
+
+    def test_build_keeps_its_workspace_until_what_it_said_about_the_logs_is_out(self):
+        secret = "s3cret-value-xyz-123"
+        for front_end in self.front_ends:
+            argv = [*self.front_ends[front_end], "recipe.eb"]
+            for budget in range(6):
+                with self.subTest(front_end=front_end, writes_that_succeed=budget):
+                    scene = self.scene(make_prefix=False)
+                    job = scene.building(secret=secret)
+                    before = snapshot(scene.root)
+                    env = dict(scene.env, EB_LOCAL_TEST_STDOUT_WRITES=str(budget))
+                    run = subprocess.run(
+                        argv, env=env, cwd=scene.root, stdin=subprocess.DEVNULL, capture_output=True, timeout=60
+                    )
+                    out, err = run.stdout.decode(), run.stderr.decode()
+                    # The banner, the redaction report, a blank line, "done" and the eval line;
+                    # the build script writes its own two lines to the descriptor it inherited.
+                    ours = [x for x in out.splitlines() if not x.startswith(("eb-local: installing", "eb-local: target"))]
+                    self.assertEqual(len(ours), min(budget, 5))
+                    self.assertNotIn(secret, out + err)
+                    workspaces = list(job.glob("eb-local.*"))
+                    if budget == 0:
+                        self.assertEqual(snapshot(scene.root), before)
+                        self.assertIn("nothing was built", err)
+                    else:
+                        log = scene.prefix / ".eb-local" / "logs" / "easybuild-test.log"
+                        self.assertEqual(scene.calls(), ["eb"])
+                        self.assertNotIn(secret, log.read_text(encoding="utf-8"))
+                        self.assertNotIn("nothing was built", err)
+                    if budget == 1:
+                        self.assertEqual(len(workspaces), 1, "the report did not get out, so the workspace stays")
+                        self.assertIn("build workspace kept at", err)
+                    elif budget > 1:
+                        self.assertEqual(workspaces, [])
+                    self.assertEqual(run.returncode, 1 if budget < 5 else 0, err)
+
 
 if __name__ == "__main__":
     unittest.main()
