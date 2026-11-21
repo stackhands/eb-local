@@ -221,8 +221,37 @@ fn warn(comptime fmt: []const u8, args: anytype) void {
     cli.err(tool ++ ": " ++ fmt ++ "\n", args);
 }
 
+var stdout: cli.Stdout = .{ .tool = tool };
+
+/// `fmt` and a newline in `buf`, or on `a` when `buf` is too small. Running
+/// out of memory is an error to the caller, not a failed write.
+fn formatLine(a: Allocator, buf: []u8, comptime fmt: []const u8, args: anytype) error{OutOfMemory}![]const u8 {
+    if (std.fmt.bufPrint(buf, fmt ++ "\n", args)) |s| return s else |_| {}
+    return std.fmt.allocPrint(a, fmt ++ "\n", args);
+}
+
 fn say(comptime fmt: []const u8, args: anytype) void {
-    cli.out(fmt ++ "\n", args);
+    if (stdout.failed) return;
+    var buf: [4096]u8 = undefined;
+    const s = formatLine(std.heap.page_allocator, &buf, fmt, args) catch oom();
+    defer if (@intFromPtr(s.ptr) != @intFromPtr(&buf)) std.heap.page_allocator.free(s);
+    _ = stdout.write(s);
+}
+
+test "formatLine reports running out of memory instead of a failed write" {
+    var small: [4]u8 = undefined;
+    var big: [64]u8 = undefined;
+
+    var never = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqualStrings("fits\n", try formatLine(never.allocator(), &big, "{s}", .{"fits"}));
+    try std.testing.expect(!never.has_induced_failure);
+    try std.testing.expectError(error.OutOfMemory, formatLine(never.allocator(), &small, "{s}", .{"too long for it"}));
+    try std.testing.expect(never.has_induced_failure);
+
+    var plenty = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const heap = try formatLine(plenty.allocator(), &small, "{s}", .{"too long for it"});
+    defer std.testing.allocator.free(heap);
+    try std.testing.expectEqualStrings("too long for it\n", heap);
 }
 
 const Ctx = struct {
@@ -879,7 +908,7 @@ fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const lines = environmentLines(c, s, p, envStrict(c, g), false);
     if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    cli.put(1, lines);
+    _ = stdout.write(lines);
     return 0;
 }
 
@@ -1083,7 +1112,7 @@ fn cmdLeave(c: Ctx) u8 {
     }
     out.appendSlice(c.a, "unset EB_LOCAL_DEV_SAVED\n") catch oom();
     evalHint("leave");
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return 0;
 }
 
@@ -1251,7 +1280,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     evalHint("dev --locked");
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return 0;
 }
 
@@ -1332,7 +1361,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
@@ -1591,7 +1620,7 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
         warn("no build environment module for the {s} compilers is available;", .{family});
         cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
     }
-    cli.put(1, str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }));
+    _ = stdout.write(str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }));
     return 0;
 }
 
@@ -2287,7 +2316,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
     for (s.eessi.items) |e| line(a, &out, e.name, e.value);
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return 0;
 }
 
@@ -2483,7 +2512,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
     checkSiteConfig(a, label, text);
     if (show) {
-        cli.put(1, text);
+        _ = stdout.write(text);
         return 0;
     }
     if (fsx.statAt(fsx.cwd, target, false)) |st| {
@@ -3912,7 +3941,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{build_script}) catch oom();
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return 0;
 }
 
@@ -4370,7 +4399,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
                 out.append(a, '\n') catch oom();
             }
         }
-        cli.put(1, out.items);
+        _ = stdout.write(out.items);
         return 0;
     }
 
@@ -4418,7 +4447,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     }.f;
     if (trees.items.len == 0 or rows.items.len == 0) {
         add(a, &out, str(a, "Nothing{s} is installed in {s}.\n", .{ if (filters.len > 0) " that matches" else "", p.prefix }));
-        cli.put(1, out.items);
+        _ = stdout.write(out.items);
         return 0;
     }
 
@@ -4457,7 +4486,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     } else {
         add(a, &out, "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.\n");
     }
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return 0;
 }
 
@@ -5154,7 +5183,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     out.appendSlice(a, "\n") catch oom();
     out.appendSlice(a, summary) catch oom();
     out.appendSlice(a, "\n") catch oom();
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return if (any_failed) 1 else 0;
 }
 
@@ -5326,7 +5355,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         argv.append(a, path) catch oom();
         if (o.print) {
             say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
-            cli.put(1, script);
+            _ = stdout.write(script);
             continue;
         }
         var why: common.atomic.Why = .{};
@@ -5878,11 +5907,11 @@ pub fn main(init: std.process.Init) u8 {
     if (args.len > 0) {
         const first: []const u8 = args[0];
         if (std.mem.eql(u8, first, "help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
-            cli.put(1, usage_text);
+            _ = stdout.write(usage_text);
             return 0;
         }
         if (std.mem.eql(u8, first, "--version")) {
-            cli.put(1, comptime cli.versionLine(tool, version, build_options.commit));
+            _ = stdout.write(comptime cli.versionLine(tool, version, build_options.commit));
             return 0;
         }
         if (std.meta.stringToEnum(Command, first)) |cmd| {
@@ -5958,7 +5987,7 @@ pub fn main(init: std.process.Init) u8 {
             continue;
         }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
-            cli.put(1, usage_text);
+            _ = stdout.write(usage_text);
             return 0;
         } else if (std.mem.eql(u8, x, "--project")) {
             g.project = value(args, &i, "--project");
@@ -6505,7 +6534,7 @@ fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
-    cli.put(1, out.items);
+    _ = stdout.write(out.items);
     return 0;
 }
 
