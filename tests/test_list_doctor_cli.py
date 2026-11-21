@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import subprocess
 import unittest
 
@@ -666,7 +667,11 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertNotIn("FAIL", run.stdout)
         self.assertIn(f"ok   `eb-local eb` sources {init}", run.stdout)
-        self.assertIn("ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi", run.stdout)
+        self.assertIn(
+            f"ok   `eb-local eb` exports EESSI_USER_INSTALL={shlex.quote(str(self.prefix))}, "
+            "the prefix selected by configuration",
+            run.stdout,
+        )
         self.assertTrue(run.stdout.rstrip().endswith(
             "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file."), run.stdout)
 

@@ -45,7 +45,7 @@ module() {
         # The install path EESSI-extend sets, or CONTROL_INSTALLPATH; and
         # CONTROL_LOAD_SETS, NAME=VALUE, as a site load hook would set it.
         case "$2" in
-            EESSI-extend/*)
+            EESSI-extend|EESSI-extend/*)
                 export EASYBUILD_INSTALLPATH="${CONTROL_INSTALLPATH:-${EESSI_USER_INSTALL:-${EESSI_PROJECT_INSTALL:-$HOME/eessi}}/versions/2026.06/software/linux/x86_64/amd/zen4}"
                 [ -z "${CONTROL_LOAD_SETS:-}" ] || export "$CONTROL_LOAD_SETS";;
         esac
@@ -64,6 +64,8 @@ names=os.environ["CONTROL_PATH_NAMES"].split()
 result={"paths":{name:os.environ.get(name) for name in names},"argv":sys.argv[2:],
         "user":os.environ.get("EESSI_USER_INSTALL"),
         "project":os.environ.get("EESSI_PROJECT_INSTALL"),
+        "eessi_custom":os.environ.get("EESSI_CUSTOM_SITE_OPT"),
+        "site_toolchains":os.environ.get("EESSI_SITE_TOP_LEVEL_TOOLCHAINS_2026_06"),
         "hooks":os.environ.get("EASYBUILD_HOOKS"),
         "ld_library_path":os.environ.get("LD_LIBRARY_PATH"),
         "ld_preload":os.environ.get("LD_PRELOAD"),
