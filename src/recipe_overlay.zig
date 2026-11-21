@@ -5,8 +5,9 @@ const common = @import("zig_common");
 const toml = @import("toml.zig");
 const Allocator = std.mem.Allocator;
 
-/// One parameter assignment to replace in the upstream easyconfig.
+/// One parameter assignment to add to or replace in the upstream easyconfig.
 pub const Parameter = struct {
+    action: []const u8 = "replace",
     name: []const u8,
     value: []const u8,
 };
@@ -64,10 +65,91 @@ fn tableString(a: Allocator, t: *const toml.Table, key: []const u8, d: *Diagnost
     return try expectString(a, e, d);
 }
 
-fn walkTable(a: Allocator, t: *const toml.Table, d: *Diagnostic, out: *std.ArrayList(Parameter)) Error!void {
+fn pythonKeyword(name: []const u8) bool {
+    const keywords = [_][]const u8{
+        "False",  "None",   "True",    "and",      "as",       "assert", "async",
+        "await",  "break",  "class",   "continue", "def",      "del",    "elif",
+        "else",   "except", "finally", "for",      "from",     "global", "if",
+        "import", "in",     "is",      "lambda",   "nonlocal", "not",    "or",
+        "pass",   "raise",  "return",  "try",      "while",    "with",   "yield",
+    };
+    for (keywords) |keyword| {
+        if (std.mem.eql(u8, name, keyword)) return true;
+    }
+    return false;
+}
+
+fn validateParameterName(a: Allocator, e: *const toml.Entry, d: *Diagnostic) Error!void {
+    d.line = e.line;
+    if (e.key.len == 0 or !(std.ascii.isAlphabetic(e.key[0]) or e.key[0] == '_')) {
+        return fail(a, d, "parameter name is an invalid Python identifier", .{});
+    }
+    for (e.key[1..]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) {
+            return fail(a, d, "parameter name is an invalid Python identifier", .{});
+        }
+    }
+    if (pythonKeyword(e.key)) {
+        return fail(a, d, "parameter name '{s}' is a Python keyword", .{e.key});
+    }
+}
+
+fn appendPythonString(a: Allocator, out: *std.ArrayList(u8), value: []const u8, d: *Diagnostic) Error!void {
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) {
+        return fail(a, d, "new [add] string values must not contain a newline", .{});
+    }
+    try out.append(a, '\'');
+    for (value) |ch| switch (ch) {
+        '\'' => try out.appendSlice(a, "\\'"),
+        '\\' => try out.appendSlice(a, "\\\\"),
+        '\t' => try out.appendSlice(a, "\\t"),
+        0...8, 11...31, 127 => try out.print(a, "\\x{x:0>2}", .{ch}),
+        else => try out.append(a, ch),
+    };
+    try out.append(a, '\'');
+}
+
+fn appendPythonValue(a: Allocator, out: *std.ArrayList(u8), value: toml.Value, d: *Diagnostic) Error!void {
+    switch (value) {
+        .string => |s| try appendPythonString(a, out, s, d),
+        .int => |n| try out.print(a, "{d}", .{n}),
+        .boolean => |b| try out.appendSlice(a, if (b) "True" else "False"),
+        .array => |values| {
+            try out.append(a, '[');
+            for (values, 0..) |item, index| {
+                if (index > 0) try out.appendSlice(a, ", ");
+                try appendPythonValue(a, out, item, d);
+            }
+            try out.append(a, ']');
+        },
+        .table => |table| {
+            try out.append(a, '{');
+            for (table.entries.items, 0..) |entry, index| {
+                if (index > 0) try out.appendSlice(a, ", ");
+                try appendPythonString(a, out, entry.key, d);
+                try out.appendSlice(a, ": ");
+                try appendPythonValue(a, out, entry.value, d);
+            }
+            try out.append(a, '}');
+        },
+    }
+}
+
+fn pythonValue(a: Allocator, e: *const toml.Entry, d: *Diagnostic) Error![]const u8 {
+    d.line = e.line;
+    var out: std.ArrayList(u8) = .empty;
+    try appendPythonValue(a, &out, e.value, d);
+    return out.toOwnedSlice(a);
+}
+
+fn walkParameterTable(a: Allocator, t: *const toml.Table, action: []const u8, d: *Diagnostic, out: *std.ArrayList(Parameter)) Error!void {
     for (t.entries.items) |*e| {
-        const value = try expectString(a, e, d);
-        try out.append(a, .{ .name = e.key, .value = value });
+        try validateParameterName(a, e, d);
+        const value = if (std.mem.eql(u8, action, "add"))
+            try pythonValue(a, e, d)
+        else
+            try expectString(a, e, d);
+        try out.append(a, .{ .action = action, .name = e.key, .value = value });
     }
 }
 
@@ -85,7 +167,7 @@ fn walkDependencies(a: Allocator, t: *const toml.Table, action: []const u8, d: *
     }
 }
 
-/// Read overlay TOML from `text`. Tables `[replace]`, `[patches]`,
+/// Read overlay TOML from `text`. Tables `[add]`, `[replace]`, `[patches]`,
 /// `[dependencies.add]` and `[dependencies.replace]` hold the edits.
 pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     var td: toml.Diagnostic = .{};
@@ -99,6 +181,7 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
             !std.mem.eql(u8, e.key, "base_easyconfig") and
             !std.mem.eql(u8, e.key, "base_digest") and
             !std.mem.eql(u8, e.key, "rationale") and
+            !std.mem.eql(u8, e.key, "add") and
             !std.mem.eql(u8, e.key, "replace") and
             !std.mem.eql(u8, e.key, "patches") and
             !std.mem.eql(u8, e.key, "dependencies"))
@@ -141,8 +224,15 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     var parameters: std.ArrayList(Parameter) = .empty;
     var patches: std.ArrayList(Patch) = .empty;
     var dependencies: std.ArrayList(Dependency) = .empty;
+    if (root.get("add")) |e| switch (e.value) {
+        .table => |t| try walkParameterTable(a, t, "add", d, &parameters),
+        else => {
+            d.line = e.line;
+            return fail(a, d, "[add] must be a table", .{});
+        },
+    };
     if (root.get("replace")) |e| switch (e.value) {
-        .table => |t| try walkTable(a, t, d, &parameters),
+        .table => |t| try walkParameterTable(a, t, "replace", d, &parameters),
         else => {
             d.line = e.line;
             return fail(a, d, "[replace] must be a table", .{});
@@ -301,6 +391,23 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
         if (lines.peek() != null) try out.append(a, '\n');
     }
     if (!replaced) return fail(a, d, "easyconfig has no parameter '{s}' to replace", .{param.name});
+    return out.toOwnedSlice(a);
+}
+
+fn addParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var state: PyLineState = .{};
+    while (lines.next()) |line| {
+        if (state.isTopLevel() and lineSetsParameter(line, param.name)) {
+            return fail(a, d, "easyconfig already has parameter '{s}'; use [replace]", .{param.name});
+        }
+        state.advanceLine(line);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, text);
+    if (text.len > 0 and text[text.len - 1] != '\n') try out.append(a, '\n');
+    try out.print(a, "{s} = {s}\n", .{ param.name, param.value });
     return out.toOwnedSlice(a);
 }
 
@@ -596,7 +703,10 @@ pub fn materialize(a: Allocator, base_text: []const u8, spec: Spec, d: *Diagnost
     var text = try a.dupe(u8, base_text);
     if (spec.parameters.len == 0 and spec.patches.len == 0 and spec.dependencies.len == 0) return text;
     for (spec.parameters) |p| {
-        const next = try replaceParameter(a, text, p, d);
+        const next = if (std.mem.eql(u8, p.action, "add"))
+            try addParameter(a, text, p, d)
+        else
+            try replaceParameter(a, text, p, d);
         a.free(text);
         text = next;
     }
