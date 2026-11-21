@@ -221,6 +221,13 @@ fn warn(comptime fmt: []const u8, args: anytype) void {
     cli.err(tool ++ ": " ++ fmt ++ "\n", args);
 }
 
+/// The list of what a command would change did not reach standard output, so
+/// the command changes nothing.
+fn unlisted(done: []const u8) u8 {
+    warn("standard output is not writable; nothing was {s}", .{done});
+    return 1;
+}
+
 var stdout: cli.Stdout = .{ .tool = tool };
 
 /// Set in main from EB_LOCAL_TEST_STDOUT_WRITES, only in the test artifact:
@@ -3270,6 +3277,15 @@ fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     return d;
 }
 
+/// The prefix lock file is made when a command first takes the lock. One that
+/// is there and is not a regular file would stop the command only after its
+/// list is out, so it is refused before anything is written.
+fn refuseIrregularPrefixLock(c: Ctx, prefix: []const u8) void {
+    const lock_path = std.fs.path.join(c.a, &.{ prefix, ".eb-local", ".lock" }) catch oom();
+    const st = fsx.statAt(fsx.cwd, lock_path, false) catch return;
+    if (!st.isReg()) die("cannot lock {s}: not a regular file", .{lock_path});
+}
+
 fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
     const a = c.a;
     var err_msg: []const u8 = "";
@@ -3512,6 +3528,61 @@ fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []cons
     });
 }
 
+/// What `clean` would remove: the files and directories under the prefix, and
+/// the build workspaces of this job that no build holds.
+const CleanPlan = struct {
+    targets: []const Target,
+    spaces: []const []const u8,
+    /// Recorded workspace roots whose directory no longer exists.
+    gone: []const WorkspaceRootRecord,
+
+    /// Whether everything in `self` is still in `now`.
+    fn holds(self: CleanPlan, now: CleanPlan) bool {
+        for (self.targets) |t| {
+            const found = for (now.targets) |u| {
+                if (u.dir == t.dir and std.mem.eql(u8, u.path, t.path)) break true;
+            } else false;
+            if (!found) return false;
+        }
+        for (self.spaces) |w| {
+            const found = for (now.spaces) |v| {
+                if (std.mem.eql(u8, v, w)) break true;
+            } else false;
+            if (!found) return false;
+        }
+        return true;
+    }
+};
+
+fn cleanPlan(c: Ctx, o: CleanOpts, d: Durable, roots: []const WorkspaceRootRecord, aged_before: i64) CleanPlan {
+    const a = c.a;
+    var collect: Collect = .{ .c = c };
+    if (o.logs) collect.aged(d.logs, aged_before);
+    if (o.sources) collect.files(d.sources);
+    var spaces: std.ArrayList([]const u8) = .empty;
+    var gone: std.ArrayList(WorkspaceRootRecord) = .empty;
+    for (roots) |record| {
+        const jr = record.path;
+        const fd = fsx.openDir(fsx.cwd, jr, false) catch |e| switch (e) {
+            error.NotFound => {
+                gone.append(a, record) catch oom();
+                continue;
+            },
+            else => die("cannot read {s} ({s})", .{ jr, storage.describeError(e) }),
+        };
+        defer sys.close(fd);
+        var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
+        while (it.next() catch null) |e| {
+            const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
+            if (storage.ownWorkspace(jr, full, callerUid(c))) {
+                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
+                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
+            }
+        }
+    }
+    return .{ .targets = collect.out.items, .spaces = spaces.items, .gone = gone.items };
+}
+
 fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 {
     const a = c.a;
     const p = place(c, s);
@@ -3538,72 +3609,62 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
         .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
         .none => {},
     }
-    var prefix_lock: ?sys.fd_t = null;
-    defer storage.releaseLock(&prefix_lock);
-    if (!o.dry_run and (o.logs or o.sources)) {
-        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
-        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
-            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
-        } else |_| {}
-    }
     // find -mtime +N: more than N whole days old.
     const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
-    const now: i64 = nowSecs();
-    var collect: Collect = .{ .c = c };
-    if (o.logs) collect.aged(d.logs, now - (days + 1) * 86400 + 1);
-    if (o.sources) collect.files(d.sources);
-    var spaces: std.ArrayList([]const u8) = .empty;
-    for (roots.items) |record| {
-        const jr = record.path;
-        const fd = fsx.openDir(fsx.cwd, jr, false) catch |e| switch (e) {
-            error.NotFound => {
-                if (!o.dry_run) if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
-                continue;
-            },
-            else => die("cannot read {s} ({s})", .{ jr, storage.describeError(e) }),
-        };
-        defer sys.close(fd);
-        var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
-        while (it.next() catch null) |e| {
-            const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
-            if (storage.ownWorkspace(jr, full, callerUid(c))) {
-                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
-                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
-            }
+    const aged_before: i64 = nowSecs() - (days + 1) * 86400 + 1;
+    if (!o.dry_run and (o.logs or o.sources)) refuseIrregularPrefixLock(c, p.prefix);
+    const plan = cleanPlan(c, o, d, roots.items, aged_before);
+    const targets = plan.targets;
+    const spaces = plan.spaces;
+    if (targets.len == 0 and spaces.len == 0) {
+        if (json) {
+            emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces, 0, 0);
+        } else {
+            say("eb-local: nothing to clean in {s}", .{p.prefix});
+            if (stdout.failed) return unlisted("removed");
         }
-    }
-    const targets = collect.out.items;
-    if (targets.len == 0 and spaces.items.len == 0) {
         if (!o.dry_run) for (roots.items) |record| if (record.dir_fd) |dir| {
             if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
         };
-        if (json) {
-            emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces.items, 0, 0);
-        } else {
-            say("eb-local: nothing to clean in {s}", .{p.prefix});
-        }
         return 0;
     }
     if (!json) {
         for (targets) |t| say("  {s}{s}", .{ t.path, if (t.dir) "/" else "" });
-        for (spaces.items) |w| say("  {s}/ (build workspace)", .{w});
+        for (spaces) |w| say("  {s}/ (build workspace)", .{w});
+        if (stdout.failed) return unlisted("removed");
     }
+    if (!o.dry_run) for (plan.gone) |record| if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
     if (o.dry_run) {
         if (json) {
-            emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces.items, 0, 0);
+            emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces, 0, 0);
         } else {
-            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
+            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.len });
         }
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
         notTrashed(s);
-        if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces.items, 0, 0);
+        if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces, 0, 0);
+        return 1;
+    }
+    // The list is out. Only now does clean hold the prefix lock, which makes
+    // `.eb-local/.lock`, and check that the lock did not wait through a change
+    // to what it listed.
+    var prefix_lock: ?sys.fd_t = null;
+    defer storage.releaseLock(&prefix_lock);
+    if (o.logs or o.sources) {
+        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
+            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
+        } else |_| {}
+    }
+    if (!plan.holds(cleanPlan(c, o, d, roots.items, aged_before))) {
+        warn("what clean listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
         return 1;
     }
     // Build workspaces are disposable scratch; they are deleted, not trashed.
     var removed_ws: usize = 0;
-    for (spaces.items) |w| {
+    for (spaces) |w| {
         if (storage.removeTree(a, w)) |_| {
             removed_ws += 1;
         } else |e| warn("cannot remove {s} ({s})", .{ w, storage.describeError(e) });
@@ -3611,7 +3672,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
     for (roots.items) |record| if (record.dir_fd) |dir| {
         if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
     };
-    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
     var removed_items: usize = 0;
     var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
@@ -3631,7 +3691,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
             }
             removed_items = targets.len;
             action = "trashed";
-            if (!json) say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
         } else {
             for (targets) |t| {
                 if (t.dir) {
@@ -3645,15 +3704,23 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
                 }
             }
             action = "deleted";
-            if (!json) say("eb-local: deleted {d} item(s)", .{removed_items});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
             removeEmptyDirs(c, dir, st.dev, 0);
         }
     }
-    if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces.items, removed_items, removed_ws);
-    if (removed_ws < spaces.items.len or removed_items < targets.len) return 1;
+    // Nothing is left to change, so no report below can stop a later step.
+    if (!json) {
+        if (spaces.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
+        if (targets.len > 0 and trash == .rtrash) {
+            say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
+        } else if (targets.len > 0) {
+            say("eb-local: deleted {d} item(s)", .{removed_items});
+        }
+    }
+    if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces, removed_items, removed_ws);
+    if (removed_ws < spaces.len or removed_items < targets.len) return 1;
     return 0;
 }
 

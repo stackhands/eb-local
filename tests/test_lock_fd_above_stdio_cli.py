@@ -44,7 +44,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
         env.update(extra)
         return env
 
-    def test_clean_json_closed_stdout_reports_bad_fd_and_keeps_lock_empty(self):
+    def test_clean_json_closed_stdout_reports_bad_fd_and_makes_no_lock(self):
         logs = self.prefix / ".eb-local" / "logs"
         logs.mkdir(parents=True)
         (logs / "easybuild-old.log").write_text("log\n", encoding="utf-8")
@@ -55,7 +55,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
             cwd=self.root,
         )
         lock_file = self.prefix / ".eb-local" / ".lock"
-        self.assertEqual(lock_file.read_bytes(), b"")
+        self.assertFalse(lock_file.exists())
         self.assertEqual(got.returncode, 1, got.stderr)
         self.assertIn("cannot write JSON output", got.stderr)
         self.assertIn("Bad file descriptor", got.stderr)

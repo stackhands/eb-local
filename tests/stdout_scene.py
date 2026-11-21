@@ -8,6 +8,7 @@ it had written its plan shows up as a file in the snapshot.
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -60,13 +61,21 @@ def run_with_stdout(argv, sink, *, env, cwd):
     return subprocess.run(argv, stdout=subprocess.PIPE, **common)
 
 
+EPOCH = re.compile(rb"(?<!\d)1\d{9}(?!\d)")
+
+
 def snapshot(root):
-    """Every path below root with its type, mode and content, links unfollowed."""
+    """Every path below root with its type, mode and content, links unfollowed.
+
+    A job script is named for the second it was made in, and a double that
+    records the call names it too, so that second is written as <epoch> and two
+    runs a second apart compare equal.
+    """
     state = {}
     for dirpath, dirnames, filenames in os.walk(root):
         for name in dirnames + filenames:
             path = Path(dirpath) / name
-            rel = str(path.relative_to(root))
+            rel = EPOCH.sub(b"<epoch>", str(path.relative_to(root)).encode()).decode()
             info = path.lstat()
             mode = stat.S_IMODE(info.st_mode)
             if stat.S_ISLNK(info.st_mode):
@@ -74,7 +83,8 @@ def snapshot(root):
             elif stat.S_ISDIR(info.st_mode):
                 state[rel] = ("dir", mode)
             else:
-                state[rel] = ("file", mode, hashlib.sha256(path.read_bytes()).hexdigest())
+                text = EPOCH.sub(b"<epoch>", path.read_bytes().replace(str(root).encode(), b"<root>"))
+                state[rel] = ("file", mode, hashlib.sha256(text).hexdigest())
     return state
 
 
@@ -107,6 +117,34 @@ class Scene:
             "LC_ALL": "C.UTF-8",
             "PYTHONUTF8": "1",
         }
+
+    def in_a_job(self):
+        """Run as Slurm job 42 with a node-local mount of its own, as `clean --workspaces` needs."""
+        local = self.root / "local"
+        (local / "42").mkdir(parents=True)
+        mountinfo = self.root / "mountinfo"
+        mountinfo.write_text(
+            "1 0 0:1 / / rw - ext4 /dev/root rw\n"
+            f"2 1 0:2 / {local / '42'} rw,relatime - xfs /dev/node rw\n",
+            encoding="utf-8",
+        )
+        site = self.root / "site.toml"
+        site.write_text(
+            f'[storage]\nnode_local_root = "{local}"\nnode_local_mount = "%j"\n',
+            encoding="utf-8",
+        )
+        self.env.update({"SLURM_JOB_ID": "42", "EB_LOCAL_TEST_MOUNTINFO": str(mountinfo)})
+        return local / "42"
+
+    def stale_workspace_root(self):
+        """A workstation workspace root the prefix recorded and that is gone; returns its record."""
+        registry = self.prefix / ".eb-local" / f"workspace-roots-{os.getuid()}"
+        registry.mkdir(parents=True)
+        registry.chmod(0o700)
+        record = registry / "stale"
+        record.write_text(str(self.root / "gone-root"), encoding="utf-8")
+        record.chmod(0o600)
+        return record
 
     def old_log(self):
         logs = self.prefix / ".eb-local" / "logs"
@@ -160,4 +198,5 @@ class Scene:
         self.recorder("rtrash")
 
     def calls(self):
-        return self.marker.read_text(encoding="utf-8").splitlines() if self.marker.exists() else []
+        text = self.marker.read_text(encoding="utf-8") if self.marker.exists() else ""
+        return EPOCH.sub(b"<epoch>", text.encode()).decode().splitlines()
