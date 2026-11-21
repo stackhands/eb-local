@@ -361,6 +361,74 @@ gcc main.c -L"{lib}" "{versioned}" -o prog-duplicate
         self.assertIn(f"Library rpath: [{lib}]", duplicate)
         self.assertEqual(duplicate.count(str(lib)), 1)
 
+    def test_cmake_install_keeps_the_wrapper_rpath(self):
+        lib = self.root / "dep" / "lib"
+        search = self.root / "search" / "lib"
+        source = self.root / "project"
+        install = self.root / "install"
+        lib.mkdir(parents=True)
+        search.mkdir(parents=True)
+        source.mkdir()
+        shared = lib / "libfoo.so.3"
+        (self.root / "foo.c").write_text("int foo(void) { return 42; }\n")
+        (source / "main.c").write_text(
+            "int foo(void);\nint main(void) { return foo() == 42 ? 0 : 1; }\n"
+        )
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-Wl,-soname,libfoo.so.3", "-o", shared, self.root / "foo.c"],
+            check=True,
+        )
+        (source / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(wrapper_rpath C)\n"
+            "add_library(foo SHARED IMPORTED)\n"
+            f'set_target_properties(foo PROPERTIES IMPORTED_LOCATION "{shared}")\n'
+            "add_executable(app main.c)\n"
+            "target_link_libraries(app PRIVATE foo)\n"
+            "install(TARGETS app)\n"
+        )
+        after = (
+            "set -e\n"
+            f'cmake $CMAKE_ARGS -S "{source}" -B build -DCMAKE_INSTALL_PREFIX="{install}"\n'
+            "cmake --build build\n"
+            "cmake --install build\n"
+            f'env -u LD_LIBRARY_PATH "{install}/bin/app"\n'
+            f'readelf -d "{install}/bin/app" > "$CONTROL_ROOT/installed.dynamic"\n'
+            'printf %s "$EB_LOCAL_MESON_INSTALL_RPATH" > "$CONTROL_ROOT/meson-rpath"\n'
+        )
+        _, replay = self.dev(
+            "NVHPC/26.7",
+            after=after,
+            PATH=os.environ["PATH"],
+            LIBRARY_PATH=str(search),
+            LD_LIBRARY_PATH="",
+        )
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        dynamic = (self.root / "installed.dynamic").read_text()
+        self.assertIn("Library rpath:", dynamic)
+        self.assertIn(str(lib), dynamic)
+        self.assertNotIn("RUNPATH", dynamic)
+        self.assertEqual((self.root / "meson-rpath").read_text(), str(search))
+
+    def test_meson_install_rpath_filters_library_path(self):
+        keep = self.root / "keep" / "lib"
+        other = self.root / "other" / "lib64"
+        compat = self.root / "compat"
+        after = 'printf %s "$EB_LOCAL_MESON_INSTALL_RPATH" > "$CONTROL_ROOT/meson-rpath"\n'
+        self.dev(
+            "NVHPC/26.7",
+            after=after,
+            LIBRARY_PATH=(
+                f":relative:{keep}//:{keep}/:{compat}/lib:/lib:/lib64/sub:"
+                f"/usr/lib:{other}:/opt/lib,comma"
+            ),
+            EESSI_EPREFIX=f"{compat}//",
+        )
+        self.assertEqual(
+            (self.root / "meson-rpath").read_text(),
+            f"{keep}:{other}",
+        )
+
 
     def test_config_env_keeps_the_choice_by_family(self):
         run = self.run_wrapper(["config", "--env"])

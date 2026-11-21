@@ -87,6 +87,8 @@ The lines =eb-local dev= prints do the same, load the modules and a build enviro
 | =EB_LOCAL_DEV_SAVED=      | The state from before the first =dev --replace= and the module list from the latest replacement                 |
 | =PATH=                    | The RPATH wrappers' directory first, when eb-local writes wrappers                                             |
 | =EB_LOCAL_RPATH_WRAPPERS= | The RPATH wrappers' directory, when eb-local writes wrappers                                                   |
+| =CMAKE_ARGS=              | =-DCMAKE_SKIP_RPATH=ON= before existing arguments, unless a skip-rpath value is already present                 |
+| =EB_LOCAL_MESON_INSTALL_RPATH= | The =LIBRARY_PATH= directories for a Meson target's =install_rpath=                                    |
 | =SSL_CERT_FILE=, =CARGO_HTTP_CAINFO= | The host's CA bundle, when the host has none at =/etc/ssl/certs/ca-certificates.crt= and the variable is not set |
 
 EESSI's =cargo= and =curl= look for the CA bundle at =/etc/ssl/certs/ca-certificates.crt=. A host that keeps it at =/etc/pki/tls/certs/ca-bundle.crt=, =/etc/ssl/ca-bundle.pem= or =/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem= would leave them without one, so =dev= names the first of those that is readable.

@@ -71,20 +71,30 @@ contains_module() {
 }
 
 prior_path=$PATH
+prior_cmake=$CMAKE_ARGS
+prior_meson=$EB_LOCAL_MESON_INSTALL_RPATH
 eval "$(eb_local dev --replace --buildenv buildenv/test GCC/1)"
 contains_module Base/1
 contains_module GCC/1
 test -n "$EB_LOCAL_DEV_SAVED"
+test "$CMAKE_ARGS" = "-DCMAKE_SKIP_RPATH=ON $prior_cmake"
+test "$EB_LOCAL_MESON_INSTALL_RPATH" = "$CONTROL_ROOT/meson/lib"
+active_cmake=$CMAKE_ARGS
+active_meson=$EB_LOCAL_MESON_INSTALL_RPATH
 
 eval "$(eb_local dev --replace --buildenv buildenv/test llvm-compilers/2)"
 contains_module Base/1
 contains_module llvm-compilers/2
 if contains_module GCC/1; then exit 20; fi
+test "$CMAKE_ARGS" = "$active_cmake"
+test "$EB_LOCAL_MESON_INSTALL_RPATH" = "$active_meson"
 
 eval "$(eb_local dev --replace --buildenv buildenv/test GCC/3)"
 contains_module Base/1
 contains_module GCC/3
 if contains_module llvm-compilers/2; then exit 21; fi
+test "$CMAKE_ARGS" = "$active_cmake"
+test "$EB_LOCAL_MESON_INSTALL_RPATH" = "$active_meson"
 
 eval "$(eb_local leave)"
 test "$LOADEDMODULES" = Base/1
@@ -92,10 +102,29 @@ test "$PATH" = "$prior_path"
 test "$LD_LIBRARY_PATH" = "$CONTROL_ROOT/prior/lib"
 test "$EB_LOCAL_DEV_PREFIX" = "$CONTROL_ROOT/prior/dev"
 test "$EB_LOCAL_RPATH_WRAPPERS" = "$CONTROL_ROOT/prior wrappers"
+test "$CMAKE_ARGS" = "$prior_cmake"
+test "$EB_LOCAL_MESON_INSTALL_RPATH" = "$prior_meson"
 test "${LD_PRELOAD+x}" = x
 test -z "$LD_PRELOAD"
 test "${LD_AUDIT+x}" != x
 test "${EB_LOCAL_DEV_SAVED+x}" != x
+
+EB_LOCAL_DEV_SAVED=$LEGACY_STATE
+export EB_LOCAL_DEV_SAVED
+eval "$(eb_local leave)"
+test "$PATH" = "$CONTROL_ROOT/legacy/bin"
+test "$EB_LOCAL_DEV_PREFIX" = "$CONTROL_ROOT/legacy/dev"
+test "${CMAKE_ARGS+x}" != x
+test "${EB_LOCAL_MESON_INSTALL_RPATH+x}" != x
+
+CMAKE_ARGS='-DUSER_FLAG=OFF -DCMAKE_SKIP_RPATH=OFF'
+EB_LOCAL_MESON_INSTALL_RPATH=before-off
+export CMAKE_ARGS EB_LOCAL_MESON_INSTALL_RPATH
+eval "$(eb_local dev --replace --buildenv buildenv/test GCC/4)"
+test "$CMAKE_ARGS" = '-DUSER_FLAG=OFF -DCMAKE_SKIP_RPATH=OFF'
+eval "$(eb_local leave)"
+test "$CMAKE_ARGS" = '-DUSER_FLAG=OFF -DCMAKE_SKIP_RPATH=OFF'
+test "$EB_LOCAL_MESON_INSTALL_RPATH" = before-off
 """
 
 
@@ -119,12 +148,32 @@ class DevLifecycle(unittest.TestCase):
             "LD_PRELOAD": "",
             "EB_LOCAL_DEV_PREFIX": str(self.root / "prior" / "dev"),
             "EB_LOCAL_RPATH_WRAPPERS": str(self.root / "prior wrappers"),
+            "CMAKE_ARGS": "-DUSER_FLAG=ON",
+            "EB_LOCAL_MESON_INSTALL_RPATH": "prior-meson",
+            "LIBRARY_PATH": (
+                f"{self.root}/meson/lib:/usr/lib:{self.root}/compat/lib"
+            ),
+            "EESSI_EPREFIX": str(self.root / "compat"),
             "EESSI_VERSION": "2026.06",
             "EESSI_SOFTWARE_SUBDIR": "x86_64/test",
             "CONTROL_ROOT": str(self.root),
             "MODULE_STUB": str(self.stub),
             "PYTHON": shutil.which("python3"),
         }
+        values = {
+            "PATH": str(self.root / "legacy" / "bin"),
+            "EB_LOCAL_DEV_PREFIX": str(self.root / "legacy" / "dev"),
+            "EB_LOCAL_RPATH_WRAPPERS": None,
+            "LD_LIBRARY_PATH": str(self.root / "legacy" / "lib"),
+            "LD_PRELOAD": None,
+            "LD_AUDIT": None,
+        }
+        lines = ["eb-local-dev-v1", "prior:Base/1"]
+        for name, value in values.items():
+            encoded = "u" if value is None else "s" + value.encode().hex()
+            lines.append(f"{name}:{encoded}")
+        lines.append("active:Base/1")
+        self.env["LEGACY_STATE"] = "\n".join(lines)
 
     def command(self):
         return f'"{binary.BIN}" "$@"'

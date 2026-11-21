@@ -32,6 +32,14 @@ The `LLVM` module, which other modules also load, ships `clang` but is not `llvm
 So `dev` puts RPATH wrappers of its own first for each of those compilers on `PATH` that no wrapper covers, and does the same for every compiler and linker when Lmod has no build environment for the compilers loaded, neither the family's nor one at the compiler's own toolchain level.
 Like EasyBuild's wrappers, they add a run path for each library directory a link names with `-L` or finds through `LIBRARY_PATH`, and leave out the system's and the compatibility layer's directories.
 
+## Installed CMake and meson targets
+
+`dev` adds `-DCMAKE_SKIP_RPATH=ON` to `CMAKE_ARGS`.
+Pass `$CMAKE_ARGS` on the CMake configure command so installation does not replace the run paths added by the compiler wrapper.
+
+Meson has no generic `b_rpath` option.
+`dev` exports the library search path as `EB_LOCAL_MESON_INSTALL_RPATH`; pass it as each installed target's `install_rpath` so Meson retains those directories.
+
 ## Linkers the wrappers never see
 
 The wrappers cover `gcc`, `ld` and the compilers `dev` wraps because they find their own linker.
