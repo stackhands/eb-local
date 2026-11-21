@@ -158,14 +158,14 @@ exec eb-local nested
             self.assertEqual(run_given.returncode, 0, run_given.stdout + run_given.stderr)
             self.assertEqual(run_given.stdout, f"{given}\n")
 
-    @unittest.skipUnless(binary.BIN, "checkout delegation end-to-end uses the Zig binary")
+    @unittest.skipUnless(binary.ZIG, "checkout delegation end-to-end uses the Zig binary")
     def test_shim_delegates_to_zig_without_exporting_eb_local_config(self):
         config = self.root / "eb-local.conf"
         config.write_text("node_local_root = /local/via-zig\n", encoding="utf-8")
         config.chmod(0o600)
         zig = self.root / "zig-out" / "bin" / "eb-local"
         zig.parent.mkdir(parents=True)
-        shutil.copy2(binary.BIN, zig)
+        shutil.copy2(binary.ZIG, zig)
         zig.chmod(0o755)
 
         guard_bin = self.root / "guard-bin"

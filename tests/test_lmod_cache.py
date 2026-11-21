@@ -43,14 +43,14 @@ fi
 
 def run(args, env=None):
     return subprocess.run(
-        [binary.BIN, "lmod-cache", *args],
+        [binary.ZIG, "lmod-cache", *args],
         capture_output=True,
         text=True,
         env=env,
     )
 
 
-@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+@unittest.skipUnless(binary.ZIG, "needs the Zig build")
 class LmodCache(unittest.TestCase):
     def single_target(self, root, spider_body=SPIDER):
         spider = root / "spider"
@@ -388,7 +388,7 @@ class LmodCache(unittest.TestCase):
             (cpu / "accel/nvidia/cc90/modules/all").mkdir(parents=True)
             env = {**os.environ, "EB_LOCAL_UPDATE_LOG": str(log)}
             got = subprocess.run(
-                [binary.BIN, "lmod-cache", "--prefix", str(root), "--update-cmd", str(updater)],
+                [binary.ZIG, "lmod-cache", "--prefix", str(root), "--update-cmd", str(updater)],
                 capture_output=True,
                 text=True,
                 env=env,

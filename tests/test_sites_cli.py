@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Site file templates, configuration carried in EB_LOCAL_* variables, and
-how nimvault is run, through the command line of the Zig build
-(EB_LOCAL_BIN).
+how nimvault is run, through the command line of the Zig build, which
+is the one EB_LOCAL_BIN names, or the one the shell shim runs.
 """
 import os
 from pathlib import Path
@@ -50,7 +50,7 @@ def exported(text):
     return carried
 
 
-@unittest.skipUnless(binary.BIN, "site templates and EB_LOCAL_SECRET_* are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "site templates and EB_LOCAL_SECRET_* are features of the Zig build")
 class SitesCli(StorageFixture):
     def setUp(self):
         super().setUp()

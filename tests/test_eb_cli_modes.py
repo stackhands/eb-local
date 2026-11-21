@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "eb and EB_LOCAL_EESSI_EXTEND are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "eb and EB_LOCAL_EESSI_EXTEND are features of the Zig build")
 class EbCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-eb-modes-")
@@ -31,7 +31,7 @@ class EbCliModes(unittest.TestCase):
             env.pop(name, None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

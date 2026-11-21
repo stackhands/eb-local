@@ -10,7 +10,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "site is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "site is a feature of the Zig build")
 class SiteCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-site-modes-")
@@ -24,7 +24,7 @@ class SiteCliModes(unittest.TestCase):
             "EB_LOCAL_CONFIG": "",
         }
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

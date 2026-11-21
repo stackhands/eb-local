@@ -10,7 +10,7 @@ import binary
 import hostile_fs
 
 
-@unittest.skipUnless(binary.BIN, "rpath-wrappers is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "rpath-wrappers is a feature of the Zig build")
 class RpathWrappersCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-rpath-")
@@ -46,7 +46,7 @@ class RpathWrappersCli(unittest.TestCase):
         }
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, "rpath-wrappers", *args],
+            [binary.ZIG, "rpath-wrappers", *args],
             env=env,
             cwd=self.root,
             capture_output=True,

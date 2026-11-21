@@ -10,7 +10,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "overlay is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "overlay is a feature of the Zig build")
 class OverlayEbStackCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-overlay-cli-")
@@ -19,7 +19,7 @@ class OverlayEbStackCli(unittest.TestCase):
 
     def run_overlay(self, args, path="/usr/bin:/bin"):
         return subprocess.run(
-            [binary.BIN, "overlay", *args],
+            [binary.ZIG, "overlay", *args],
             env={"PATH": path, "HOME": str(self.root)},
             cwd=self.root,
             capture_output=True,

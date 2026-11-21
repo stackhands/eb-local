@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "profiles is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "profiles is a feature of the Zig build")
 class ProfilesCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-profiles-")
@@ -30,7 +30,7 @@ class ProfilesCli(unittest.TestCase):
             "EB_LOCAL_CONFIG": "" if site_path is None else str(site_path),
         }
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

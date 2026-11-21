@@ -10,7 +10,7 @@ from test_storage import StorageFixture
 
 
 @unittest.skipUnless(
-    binary.BIN and os.geteuid() != 0,
+    binary.ZIG and os.geteuid() != 0,
     "errno stderr parity tests run unprivileged against the Zig binary",
 )
 class ErrnoStderrParity(StorageFixture):

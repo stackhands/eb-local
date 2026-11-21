@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "env is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "env is a feature of the Zig build")
 class EnvCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-env-modes-")
@@ -37,7 +37,7 @@ class EnvCliModes(unittest.TestCase):
         }
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

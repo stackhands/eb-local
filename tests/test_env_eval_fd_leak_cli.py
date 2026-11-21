@@ -25,7 +25,7 @@ os.replace(tmp, out_file)
 '''
 
 
-@unittest.skipUnless(binary.BIN, "env/dev JSON and lock evaluation belong to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "env/dev JSON and lock evaluation belong to the Zig binary")
 class EnvEvalFdLeakCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-env-fd-")
@@ -117,7 +117,7 @@ class EnvEvalFdLeakCli(unittest.TestCase):
                 for f in self.records.glob("*.json"):
                     f.unlink()
                 run = subprocess.run(
-                    [binary.BIN, *args],
+                    [binary.ZIG, *args],
                     env=self.base_env(),
                     cwd=self.root,
                     capture_output=True,
@@ -140,7 +140,7 @@ class EnvEvalFdLeakCli(unittest.TestCase):
                     bg_pid_file.unlink()
                 try:
                     run = subprocess.run(
-                        [binary.BIN, *args],
+                        [binary.ZIG, *args],
                         env=self.base_env(FAIL_WITH_BG="1", BG_PID_FILE=str(bg_pid_file)),
                         cwd=self.root,
                         capture_output=True,

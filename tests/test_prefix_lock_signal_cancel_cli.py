@@ -41,7 +41,7 @@ def wait_signal_not_pending(pid, sig, timeout=5.0):
     raise AssertionError(f"signal {sig} remained pending on pid {pid}")
 
 
-@unittest.skipUnless(binary.BIN, "prefix lock cancellation targets the Zig build")
+@unittest.skipUnless(binary.ZIG, "prefix lock cancellation targets the Zig build")
 class PrefixLockSignalCancel(StorageFixture):
     def setUp(self):
         super().setUp()

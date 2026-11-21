@@ -50,7 +50,7 @@ sys.exit(15 if got else 0)
 '''
 
 
-@unittest.skipUnless(binary.BIN, "eb and --explain eb are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "eb and --explain eb are features of the Zig build")
 class ExtendCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-extend-")

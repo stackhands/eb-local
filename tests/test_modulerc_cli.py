@@ -14,13 +14,13 @@ import hostile_fs
 
 def run(args, *, text=True):
     return subprocess.run(
-        [binary.BIN, "modulerc", *args],
+        [binary.ZIG, "modulerc", *args],
         capture_output=True,
         text=text,
     )
 
 
-@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+@unittest.skipUnless(binary.ZIG, "needs the Zig build")
 class Modulerc(unittest.TestCase):
     def test_default_output_and_status_are_unchanged_raw_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:

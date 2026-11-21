@@ -23,7 +23,7 @@ def run_closed_stdout(argv, *, env, cwd):
     )
 
 
-@unittest.skipUnless(binary.BIN, "lock descriptor placement belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "lock descriptor placement belongs to the Zig binary")
 class LockFdAboveStdioCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lock-fd-")
@@ -50,7 +50,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
         (logs / "easybuild-old.log").write_text("log\n", encoding="utf-8")
 
         got = run_closed_stdout(
-            [binary.BIN, "clean", "--delete", "--json"],
+            [binary.ZIG, "clean", "--delete", "--json"],
             env=self.base_env(),
             cwd=self.root,
         )
@@ -70,7 +70,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
         mod.write_text("-- lua\n", encoding="utf-8")
 
         run_closed_stdout(
-            [binary.BIN, "uninstall", "--delete", "Demo/1.0"],
+            [binary.ZIG, "uninstall", "--delete", "Demo/1.0"],
             env=self.base_env(),
             cwd=self.root,
         )
@@ -102,7 +102,7 @@ class LockFdAboveStdioCli(unittest.TestCase):
         rtrash.chmod(0o755)
 
         run_closed_stdout(
-            [binary.BIN, "restore", "Demo/1.0"],
+            [binary.ZIG, "restore", "Demo/1.0"],
             env=self.base_env(),
             cwd=self.root,
         )

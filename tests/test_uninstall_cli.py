@@ -101,7 +101,7 @@ sys.exit(rc)
 '''
 
 
-@unittest.skipUnless(binary.BIN, "uninstall is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "uninstall is a feature of the Zig build")
 class Uninstall(StorageFixture):
     def setUp(self):
         super().setUp()

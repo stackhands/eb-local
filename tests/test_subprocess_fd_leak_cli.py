@@ -27,7 +27,7 @@ with open(out, "w", encoding="utf-8") as fh:
 '''
 
 
-@unittest.skipUnless(binary.BIN, "subprocess descriptor isolation belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "subprocess descriptor isolation belongs to the Zig binary")
 class SubprocessNullFdLeakCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-subproc-fd-")
@@ -90,7 +90,7 @@ class SubprocessNullFdLeakCli(unittest.TestCase):
         os.set_blocking(wfd, True)
 
         proc = subprocess.Popen(
-            [binary.BIN, "doctor", "--workspace", str(ws)],
+            [binary.ZIG, "doctor", "--workspace", str(ws)],
             env=self.base_env(),
             cwd=self.root,
             stdin=subprocess.DEVNULL,
@@ -158,7 +158,7 @@ class SubprocessNullFdLeakCli(unittest.TestCase):
 
         run = subprocess.run(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--verify",
                 "--modulepath",
@@ -194,7 +194,7 @@ class SubprocessNullFdLeakCli(unittest.TestCase):
 
         run = subprocess.run(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--prefix",
                 str(prefix),

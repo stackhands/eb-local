@@ -9,7 +9,7 @@ import binary
 from test_storage import StorageFixture
 
 
-@unittest.skipUnless(binary.BIN, "diagnostic path and errno checks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "diagnostic path and errno checks target the Zig build")
 class ErrorPathAndErrno(StorageFixture):
     def setUp(self):
         super().setUp()

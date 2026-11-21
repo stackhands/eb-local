@@ -40,7 +40,7 @@ esac
 '''
 
 
-@unittest.skipUnless(binary.BIN, "list and doctor are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "list and doctor are features of the Zig build")
 class ListAndDoctor(StorageFixture):
     def setUp(self):
         super().setUp()
