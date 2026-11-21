@@ -2,6 +2,7 @@
 """Held lock descriptors never occupy closed stdio slots (`1>&-`)."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -47,7 +48,9 @@ class LockFdAboveStdioCli(unittest.TestCase):
     def test_clean_json_closed_stdout_reports_bad_fd_and_makes_no_lock(self):
         logs = self.prefix / ".eb-local" / "logs"
         logs.mkdir(parents=True)
-        (logs / "easybuild-old.log").write_text("log\n", encoding="utf-8")
+        old = logs / "easybuild-old.log"
+        old.write_text("log\n", encoding="utf-8")
+        os.utime(old, (1_000_000_000, 1_000_000_000))
 
         got = run_closed_stdout(
             [binary.ZIG, "clean", "--delete", "--json"],
@@ -56,8 +59,9 @@ class LockFdAboveStdioCli(unittest.TestCase):
         )
         lock_file = self.prefix / ".eb-local" / ".lock"
         self.assertFalse(lock_file.exists())
+        self.assertTrue(old.exists())
         self.assertEqual(got.returncode, 1, got.stderr)
-        self.assertIn("cannot write JSON output", got.stderr)
+        self.assertIn("cannot write output", got.stderr)
         self.assertIn("Bad file descriptor", got.stderr)
 
     def test_uninstall_closed_stdout_makes_no_lock(self):

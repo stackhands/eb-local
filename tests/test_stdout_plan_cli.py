@@ -9,6 +9,7 @@ delegate to it agree on the status, the message and the files left behind.
 """
 
 import fcntl
+import json
 import os
 import subprocess
 import tempfile
@@ -93,7 +94,7 @@ class PlanBeforeChange(unittest.TestCase):
             finished_calls = [call.replace(str(control.root), "<root>") for call in control.calls()]
             self.assertNotEqual(finished, before, "the control run must do the work")
             writes = len(done.stdout.decode().splitlines())
-            self.assertGreater(writes, listed)
+            self.assertGreaterEqual(writes, listed)
             for n in range(writes + 1):
                 with self.subTest(command=name, front_end=front_end, writes_that_succeed=n):
                     scene = make(self)
@@ -340,6 +341,91 @@ class PlanBeforeChange(unittest.TestCase):
             return scene
 
         self.check_every_write("restore", trashed, ["restore", "Restored/1.0"], listed=2, nothing="restored")
+
+    def test_clean_json_lists_before_it_removes_anything(self):
+        def deleting(test):
+            scene = test.scene()
+            scene.old_log()
+            return scene
+
+        self.check_unchanged(
+            "clean --json --delete",
+            deleting,
+            ["clean", "--json", "--delete"],
+            changed=lambda s: not (s.prefix / ".eb-local" / "logs" / "easybuild-old.log").exists(),
+            nothing="removed",
+        )
+
+    def test_clean_json_forgets_a_stale_workspace_root_only_once_its_document_is_out(self):
+        def nothing_to_clean(test):
+            scene = test.scene()
+            scene.stale_record = scene.stale_workspace_root()
+            return scene
+
+        def refused(test):
+            scene = nothing_to_clean(test)
+            scene.old_log()
+            return scene
+
+        record_gone = lambda scene: not scene.stale_record.exists()
+        self.check_unchanged(
+            "clean --json --workspaces (nothing)",
+            nothing_to_clean,
+            ["clean", "--json", "--workspaces"],
+            changed=record_gone,
+            nothing="removed",
+        )
+        self.check_unchanged(
+            "clean --json --workspaces (refused)",
+            refused,
+            ["clean", "--json", "--workspaces"],
+            changed=record_gone,
+            nothing="removed",
+            control_code=1,
+        )
+
+    def test_clean_json_is_one_write_that_comes_before_every_removal(self):
+        def logs_and_a_workspace(test):
+            scene = test.scene()
+            job = scene.in_a_job()
+            scene.old_log()
+            (job / "eb-local.AbCdEf12").mkdir()
+            return scene
+
+        self.check_every_write(
+            "clean --json --workspaces --delete",
+            logs_and_a_workspace,
+            ["clean", "--json", "--workspaces", "--delete"],
+            listed=1,
+            nothing="removed",
+        )
+
+    def test_clean_json_has_reached_standard_output_when_rtrash_runs(self):
+        scene = self.scene()
+        scene.old_log()
+        scene.write_double(
+            "rtrash",
+            f"printf 'stdout-bytes %s\\n' \"$(wc -c < /proc/$$/fd/1)\" >> '{scene.marker}'\n",
+        )
+        out = scene.root / "stdout.json"
+        for front_end in self.front_ends:
+            with self.subTest(front_end=front_end):
+                scene.marker.unlink(missing_ok=True)
+                with open(out, "wb") as sink:
+                    done = subprocess.run(
+                        [*self.front_ends[front_end], "clean", "--json"],
+                        env=scene.env,
+                        cwd=scene.root,
+                        stdin=subprocess.DEVNULL,
+                        stdout=sink,
+                        stderr=subprocess.PIPE,
+                        timeout=60,
+                    )
+                self.assertEqual(done.returncode, 0, done.stderr)
+                document = json.loads(out.read_text(encoding="utf-8"))
+                self.assertEqual((document["action"], document["removed_items"]), ("trashed", 1))
+                self.assertEqual(scene.calls(), [f"stdout-bytes {len(out.read_bytes())}"])
+                scene.old_log()
 
 
 if __name__ == "__main__":

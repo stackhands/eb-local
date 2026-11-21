@@ -3514,10 +3514,11 @@ fn forgetWorkspaceRootIfEmpty(c: Ctx, prefix: []const u8, root: []const u8) void
     sys.unlinkat(dir, workspaceRegistryName(c.a, root), 0) catch {};
 }
 
-fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) void {
+/// Write the one JSON document `clean --json` prints, and say whether it got out.
+fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) bool {
     var items: std.ArrayList(CleanItemJson) = .empty;
     for (targets) |t| items.append(a, .{ .path = t.path, .kind = if (t.dir) "dir" else "file" }) catch oom();
-    jsonout.emit(a, CleanReport{
+    const line = jsonout.renderLine(a, CleanReport{
         .prefix = prefix,
         .dry_run = dry_run,
         .action = action,
@@ -3525,7 +3526,8 @@ fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []cons
         .workspaces = spaces,
         .removed_items = removed_items,
         .removed_workspaces = removed_workspaces,
-    });
+    }) catch oom();
+    return emit(line);
 }
 
 /// What `clean` would remove: the files and directories under the prefix, and
@@ -3553,6 +3555,11 @@ const CleanPlan = struct {
         return true;
     }
 };
+
+/// Recorded workspace roots that are gone are forgotten once the list is out.
+fn forgetGoneRoots(plan: CleanPlan) void {
+    for (plan.gone) |record| if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
+}
 
 fn cleanPlan(c: Ctx, o: CleanOpts, d: Durable, roots: []const WorkspaceRootRecord, aged_before: i64) CleanPlan {
     const a = c.a;
@@ -3618,7 +3625,7 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
     const spaces = plan.spaces;
     if (targets.len == 0 and spaces.len == 0) {
         if (json) {
-            emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces, 0, 0);
+            if (!emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces, 0, 0)) return unlisted("removed");
         } else {
             say("eb-local: nothing to clean in {s}", .{p.prefix});
             if (stdout.failed) return unlisted("removed");
@@ -3633,10 +3640,9 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
         for (spaces) |w| say("  {s}/ (build workspace)", .{w});
         if (stdout.failed) return unlisted("removed");
     }
-    if (!o.dry_run) for (plan.gone) |record| if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
     if (o.dry_run) {
         if (json) {
-            emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces, 0, 0);
+            _ = emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces, 0, 0);
         } else {
             say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.len });
         }
@@ -3644,9 +3650,18 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
         notTrashed(s);
-        if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces, 0, 0);
+        if (json and !emitCleanJson(a, p.prefix, false, "refused", targets, spaces, 0, 0)) return unlisted("removed");
+        forgetGoneRoots(plan);
         return 1;
     }
+    // With `--json` the document is the list. It says what clean is about to
+    // remove, so it is written, and has reached standard output, before the
+    // first removal; a removal that then fails is a warning and exit status 1.
+    if (json) {
+        const planned = if (targets.len == 0) "workspaces-only" else if (trash == .rtrash) "trashed" else "deleted";
+        if (!emitCleanJson(a, p.prefix, false, planned, targets, spaces, targets.len, spaces.len)) return unlisted("removed");
+    }
+    forgetGoneRoots(plan);
     // The list is out. Only now does clean hold the prefix lock, which makes
     // `.eb-local/.lock`, and check that the lock did not wait through a change
     // to what it listed.
@@ -3673,7 +3688,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
         if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
     };
     var removed_items: usize = 0;
-    var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
         if (trash == .rtrash) {
             var argv: std.ArrayList([]const u8) = .empty;
@@ -3690,7 +3704,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
                 .signal => return stop(run),
             }
             removed_items = targets.len;
-            action = "trashed";
         } else {
             for (targets) |t| {
                 if (t.dir) {
@@ -3703,7 +3716,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
                     } else |e| warn("cannot remove {s} ({s})", .{ t.path, storage.describeError(e) });
                 }
             }
-            action = "deleted";
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
@@ -3719,7 +3731,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
             say("eb-local: deleted {d} item(s)", .{removed_items});
         }
     }
-    if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces, removed_items, removed_ws);
     if (removed_ws < spaces.len or removed_items < targets.len) return 1;
     return 0;
 }

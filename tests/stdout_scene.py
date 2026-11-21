@@ -195,6 +195,10 @@ class Scene:
             "exit 0\n",
         )
 
+    def write_double(self, name, body):
+        """A program of that name that runs BODY, a few lines of sh."""
+        write_executable(self.bins / name, "#!/bin/sh\n" + body + "exit 0\n")
+
     def recorder(self, name):
         """A program of that name that records its call in the marker and does nothing."""
         write_executable(
