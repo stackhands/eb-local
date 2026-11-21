@@ -288,6 +288,79 @@ class DevBuildenv(StorageFixture):
         self.assertIn(f"Library rpath: [{lib}]", dyn2)
         self.assertNotIn(str(compat), dyn2)
 
+    def test_a_full_path_shared_library_records_its_directory(self):
+        lib = self.root / "dep" / "lib"
+        lib.mkdir(parents=True)
+        versioned = lib / "libfoo.so.3"
+        unversioned = lib / "libbar.so"
+        static = lib / "libfoo.so.a"
+        (self.root / "foo.c").write_text("int foo(void) { return 42; }\n")
+        (self.root / "main.c").write_text(
+            "int foo(void);\nint main(void) { return foo() == 42 ? 0 : 1; }\n"
+        )
+        env = dict(os.environ, XDG_CACHE_HOME=str(self.root / "cache"))
+        env.pop("LD_LIBRARY_PATH", None)
+        env.pop("LIBRARY_PATH", None)
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-Wl,-soname,libfoo.so.3", "-o", versioned, self.root / "foo.c"],
+            check=True,
+            cwd=self.root,
+        )
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-Wl,-soname,libbar.so", "-o", unversioned, self.root / "foo.c"],
+            check=True,
+            cwd=self.root,
+        )
+        subprocess.run(["gcc", "-c", "-o", self.root / "foo.o", self.root / "foo.c"], check=True, cwd=self.root)
+        subprocess.run(["ar", "rcs", static, self.root / "foo.o"], check=True, cwd=self.root)
+        argv, env = binary.command(self.script, ["rpath-wrappers"], env)
+        setup = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        relative = unversioned.relative_to(self.root)
+        build = subprocess.run(
+            [
+                "bash",
+                "-c",
+                setup.stdout
+                + f'''
+set -e
+gcc main.c "{versioned}" -o prog-versioned
+env -u LD_LIBRARY_PATH ./prog-versioned
+gcc main.c "{unversioned}" -o prog-unversioned
+gcc main.c "{static}" -o prog-static
+gcc main.c "{relative}" -o prog-relative
+gcc main.c -L"{lib}" "{versioned}" -o prog-duplicate
+''',
+            ],
+            env=env,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+
+        def dynamic(name):
+            return subprocess.run(
+                ["readelf", "-d", self.root / name],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        for name in ("prog-versioned", "prog-unversioned"):
+            with self.subTest(name=name):
+                dyn = dynamic(name)
+                self.assertIn(f"Library rpath: [{lib}]", dyn)
+                self.assertNotIn("RUNPATH", dyn)
+        for name in ("prog-static", "prog-relative"):
+            with self.subTest(name=name):
+                dyn = dynamic(name)
+                self.assertNotIn("RPATH", dyn)
+                self.assertNotIn("RUNPATH", dyn)
+        duplicate = dynamic("prog-duplicate")
+        self.assertIn(f"Library rpath: [{lib}]", duplicate)
+        self.assertEqual(duplicate.count(str(lib)), 1)
+
 
     def test_config_env_keeps_the_choice_by_family(self):
         run = self.run_wrapper(["config", "--env"])

@@ -33,10 +33,12 @@ pub const marker = ".eb-local-rpath";
 /// PATH. An empty entry is the current directory, including the one a
 /// trailing colon names, as execvp searches. When that command links, it
 /// adds a run path for each absolute
-/// library directory named with -L, and for a compiler driver for each
-/// LIBRARY_PATH entry, which EESSI's modules set and the driver passes to
-/// the linker; system and compatibility-layer directories are left out, as
-/// the loader finds those itself. --disable-new-dtags writes RPATH rather
+/// library directory named with -L or by an absolute `lib*.so` path, and for
+/// a compiler driver for each LIBRARY_PATH entry, which EESSI's modules set
+/// and the driver passes to the linker; system and compatibility-layer
+/// directories are left out, as the loader finds those itself. Other `.so`
+/// names are commonly runtime-loaded plugins, not link inputs that create a
+/// DT_NEEDED entry, so they are not inferred here. --disable-new-dtags writes RPATH rather
 /// than RUNPATH, so LD_LIBRARY_PATH cannot override it, as in EasyBuild.
 pub const script =
     \\#!/bin/bash
@@ -81,6 +83,7 @@ pub const script =
     \\        -L | --library-path) want_dir=1 ;;
     \\        -L*) dirs+=("${arg#-L}") ;;
     \\        --library-path=*) dirs+=("${arg#--library-path=}") ;;
+    \\        /?*/lib*.so | /?*/lib*.so.[0-9]*) dirs+=("${arg%/*}") ;;
     \\    esac
     \\    case $arg in
     \\        -v | -V | --version | -qversion | --help | --help=* | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
