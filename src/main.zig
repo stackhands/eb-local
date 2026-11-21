@@ -53,11 +53,11 @@ const usage_text =
     \\  eb-local --explain <easyconfig> [eb options]
     \\                                       the commands that build runs, as shell lines,
     \\                                       its checks as comments; creates and runs nothing
-    \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
+    \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
     \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
-    \\                                       present empty value counts as set; with none set, the
-    \\                                       module uses $HOME/eessi and nothing is exported.
+    \\                                       present empty value counts as set; with none set,
+    \\                                       configuration selects a user or project install.
     \\                                       eb runs only if the module's install path is in the
     \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
@@ -176,8 +176,9 @@ const usage_text =
     \\                                       run eb-stack package bump or plan by subprocess only
     \\  eb-local help | --version
     \\
-    \\Every command but eb takes --profile NAME, --project DIR (a shared project
-    \\directory instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
+    \\Every configured command, including eb, takes --profile NAME, --project DIR
+    \\(a shared project directory instead of $HOME/eessi) and --config FILE.
+    \\Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -257,12 +258,36 @@ const Place = struct {
     project: bool,
 };
 
+/// The configured user or project install selected by `place`. Env, builds,
+/// eb and doctor all use this value, so they cannot disagree about the
+/// variable that names the configured prefix.
+const ConfiguredInstall = struct {
+    prefix: []const u8,
+    mode: extend.Mode,
+
+    fn variable(self: ConfiguredInstall) []const u8 {
+        return extend.variable(self.mode);
+    }
+
+    fn exportLine(self: ConfiguredInstall, a: Allocator) []const u8 {
+        return str(a, "export {s}={s}\n", .{ self.variable(), q(a, self.prefix) });
+    }
+
+    fn setting(self: ConfiguredInstall) []const u8 {
+        return if (self.mode == .project) "project" else "prefix";
+    }
+};
+
+fn configuredInstall(p: Place) ConfiguredInstall {
+    return .{ .prefix = p.prefix, .mode = if (p.project) .project else .user };
+}
+
 /// What `eb-local env` set, if NAME=VALUE is that: its install variable,
 /// naming P's prefix, or, when the extension env loads for a prefix that
 /// exists is loaded, the install path it chose in the prefix's versions
 /// tree, or the EasyBuild prefix it sets beside that path.
 fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: []const u8) ?[]const u8 {
-    const mine = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
+    const mine = configuredInstall(p).variable();
     if (std.mem.eql(u8, name, mine)) {
         return if (std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix)) "names your prefix, as eb-local env sets it" else null;
     }
@@ -312,6 +337,7 @@ const pure_prelude =
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bool) []const u8 {
     const a = c.a;
+    const install = configuredInstall(p);
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
@@ -329,7 +355,7 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
         \\unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
         \\
     );
-    add(a, &out, str(a, "export {s}={s}\n", .{ if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", q(a, p.prefix) }));
+    add(a, &out, install.exportLine(a));
     // [eessi] settings before the stack loads: the EESSI module and its
     // hooks read them then.
     for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
@@ -3427,7 +3453,7 @@ fn buildVariables(a: Allocator, work: []const u8, d: Durable) [11][2][]const u8 
 }
 
 fn buildUmask(p: Place) u32 {
-    return if (p.project) 0o002 else 0o077;
+    return if (configuredInstall(p).mode == .project) 0o002 else 0o077;
 }
 
 /// The command a build runs: `build_script` in a clean bash, with the stack,
@@ -3435,10 +3461,11 @@ fn buildUmask(p: Place) u32 {
 /// five arguments, and eb's after them.
 fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []const []const u8) []const []const u8 {
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
+    const install = configuredInstall(p);
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(a, &.{
-        bash,                 "--noprofile",         "--norc",                                                         "-c",     build_script,                         "eb-local",
-        s.stack_module.value, s.extend_module.value, if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix, if (p.project) "project" else "user",
+        bash,                 "--noprofile",         "--norc",           "-c",           build_script,           "eb-local",
+        s.stack_module.value, s.extend_module.value, install.variable(), install.prefix, @tagName(install.mode),
     }) catch oom();
     argv.appendSlice(a, args) catch oom();
     return argv.items;
@@ -3452,11 +3479,12 @@ fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []cons
 fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     const p = place(c, s);
+    const install = configuredInstall(p);
     const d = durableDirs(c, p.prefix, "a build would stop here");
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain: the script a build runs, with its environment and arguments. Nothing was created or run.\n") catch oom();
     out.print(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
-        if (p.project) "project" else "user", p.prefix, if (p.project) s.project.from else s.prefix.from,
+        @tagName(install.mode), install.prefix, if (install.mode == .project) s.project.from else s.prefix.from,
     }) catch oom();
     if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         out.print(a, "# Checks first: Slurm job {s}, its own node-local {s} mount under {s},\n", .{ job, s.node_local_fstype.value, s.node_local_root.value }) catch oom();
@@ -4556,7 +4584,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
                 note(a, &out, lines_ptr, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
                 if (!site) failed = true;
             } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
-        } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
+        } else {
+            const install = configuredInstall(p);
+            note(a, &out, lines_ptr, "ok  ", "`eb-local eb` exports {s}={s}, the {s} selected by configuration", .{
+                install.variable(),
+                q(a, install.prefix),
+                install.setting(),
+            });
+        }
     } else |_| {
         note(a, &out, lines_ptr, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
         if (!site) failed = true;
@@ -5392,7 +5427,7 @@ pub fn main(init: std.process.Init) u8 {
         const raw = argv_all[1..];
         const forwarded = a.alloc([]const u8, raw.len) catch oom();
         for (raw, 0..) |arg, n| forwarded[n] = arg;
-        return cmdExtend(c, forwarded);
+        return cmdExtend(c, loadSettings(c, .{}), forwarded);
     }
 
     var args: []const [:0]const u8 = argv_all[1..];
@@ -5861,11 +5896,11 @@ pub fn main(init: std.process.Init) u8 {
         if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet, g.json_out, check_recursive);
         return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet, g.json_out, check_recursive);
     }
-    // The install mode is the four EESSI variables, not the site file.
+    // Explicit install variables select the mode; without one, configuration
+    // selects the same user prefix or project as env.
     if (command == .eb) {
-        if (g.profile != null or g.project != null or g.config_file != null)
-            die("eb reads the install mode from the environment, not from --profile, --project or --config", .{});
-        return if (g.explain) explainExtend(c, rest.items) else cmdExtend(c, rest.items);
+        const s = loadSettings(c, g);
+        return if (g.explain) explainExtend(c, s, rest.items) else cmdExtend(c, s, rest.items);
     }
     if (command == .leave) return cmdLeave(c);
     const s = loadSettings(c, g);
@@ -5929,31 +5964,82 @@ test "a build script selects no MPI transport" {
     try std.testing.expect(std.mem.indexOf(u8, build_script, "FI_PROVIDER") == null);
 }
 
-fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
+const extend_source_var = "EBLOCAL_EB_SOURCEPATH";
+const extend_toolchains_var = "EBLOCAL_EB_SITE_TOOLCHAINS";
+
+const ExtendEnv = struct {
+    env: std.process.Environ.Map,
+    exports: []const [2][]const u8,
+
+    fn deinit(self: *ExtendEnv) void {
+        self.env.deinit();
+    }
+};
+
+/// Add the configuration that `env` would select to an `eb` launch, without
+/// replacing choices the caller already exported.
+fn extendEnvironment(c: Ctx, s: config.Settings) ExtendEnv {
+    var env = c.env.clone(c.a) catch oom();
+    var exports: std.ArrayList([2][]const u8) = .empty;
+    const selected = extend.select(&env) catch return .{ .env = env, .exports = &.{} };
+    const selected_name = extend.variable(selected.mode);
+    if (env.get(selected_name) == null) {
+        const install = configuredInstall(place(c, s));
+        env.put(install.variable(), install.prefix) catch oom();
+        exports.append(c.a, .{ install.variable(), install.prefix }) catch oom();
+    }
+    for (s.eessi.items) |v| if (env.get(v.name) == null) {
+        env.put(v.name, v.value) catch oom();
+        exports.append(c.a, .{ v.name, v.value }) catch oom();
+    };
+    if (s.site_toolchains.value.len > 0) {
+        const json = config.toolchainsJson(c.a, s.site_toolchains.value) catch oom();
+        env.put(extend_toolchains_var, json) catch oom();
+        exports.append(c.a, .{ extend_toolchains_var, json }) catch oom();
+    }
+
+    if (env.get("EASYBUILD_SOURCEPATH") == null) {
+        const install_root = env.get("EESSI_USER_INSTALL") orelse env.get("EESSI_PROJECT_INSTALL");
+        if (install_root) |root| {
+            if (root.len > 0) {
+                const prefix = storage.canonical(c.a, root, c.cwd) catch oom();
+                const sources = std.fs.path.join(c.a, &.{ prefix, ".eb-local", "sources" }) catch oom();
+                env.put(extend_source_var, sources) catch oom();
+                exports.append(c.a, .{ extend_source_var, sources }) catch oom();
+            }
+        }
+    }
+    return .{ .env = env, .exports = exports.items };
+}
+
+fn cmdExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    const sel = extend.select(c.env) catch |err| switch (err) {
+    var ext = extendEnvironment(c, s);
+    defer ext.deinit();
+    const sel = extend.select(&ext.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}", .{extend.tooMany(c.a, c.env) catch oom()});
+            cli.err("{s}", .{extend.tooMany(c.a, &ext.env) catch oom()});
             return 3;
         },
     };
-    var env = c.env.clone(c.a) catch oom();
-    defer env.deinit();
-    extend.apply(&env);
-    for (shell_startup) |name| _ = env.swapRemove(name);
+    extend.apply(&ext.env);
+    for (shell_startup) |name| _ = ext.env.swapRemove(name);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
-    return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
+    return stop(runAttached(c.a, argv, envpOf(c.a, &ext.env)));
 }
 
-/// What eb-local eb would run: the launcher's own script after a `set --`
-/// line with the arguments it would get, so the text runs as the launcher
-/// does. Nothing runs and nothing is created.
-fn explainExtend(c: Ctx, args: []const []const u8) u8 {
+/// What eb-local eb would run: the configured environment exports and the
+/// launcher's own script after a `set --` line with the arguments it would
+/// get, so the text runs as the launcher does. Nothing runs and nothing is
+/// created.
+fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const a = c.a;
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    const sel = extend.select(c.env) catch |err| switch (err) {
+    var ext = extendEnvironment(c, s);
+    defer ext.deinit();
+    const sel = extend.select(&ext.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}", .{extend.tooMany(a, c.env) catch oom()});
+            cli.err("{s}", .{extend.tooMany(a, &ext.env) catch oom()});
             return 3;
         },
     };
@@ -5961,10 +6047,11 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain eb: the script eb-local eb runs, with its arguments. Nothing was run.\n") catch oom();
     const name = extend.variable(sel.mode);
-    if (c.env.get(name)) |v| {
-        out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, q(a, v), @tagName(sel.mode), sel.umask }) catch oom();
-    } else {
-        out.print(a, "# No install variable is set: a user install into the module's default, $HOME/eessi; the process umask is {s}.\n", .{sel.umask}) catch oom();
+    const val = ext.env.get(name).?;
+    out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, qSingleLine(a, val), @tagName(sel.mode), sel.umask }) catch oom();
+    if (ext.exports.len > 0) {
+        out.appendSlice(a, "# The script gets these environment variables:\n") catch oom();
+        for (ext.exports) |kv| out.print(a, "export {s}={s}\n", .{ kv[0], q(a, kv[1]) }) catch oom();
     }
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
@@ -5977,11 +6064,79 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     return 0;
 }
 
+test "extendEnvironment always populates the selected install variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // No install variable in caller env -> configured user prefix is added.
+    {
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
+        var s: config.Settings = .{};
+        s.prefix = .{ .value = "/srv/user-prefix", .from = "test" };
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
+        try std.testing.expectEqual(extend.Mode.user, sel.mode);
+        try std.testing.expectEqualStrings("/srv/user-prefix", ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 2), ext.exports.len);
+        try std.testing.expectEqualStrings("EESSI_USER_INSTALL", ext.exports[0][0]);
+        try std.testing.expectEqualStrings("/srv/user-prefix", ext.exports[0][1]);
+        try std.testing.expectEqualStrings(extend_source_var, ext.exports[1][0]);
+        try std.testing.expectEqualStrings("/srv/user-prefix/.eb-local/sources", ext.exports[1][1]);
+    }
+
+    // Configured project -> EESSI_PROJECT_INSTALL is added.
+    {
+        var cwd_buf: [sys.path_max]u8 = undefined;
+        const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+        const proj = try std.fmt.allocPrint(a, "{s}/.zig-cache/extend-env-project-{d}", .{ cwd, linux.getpid() });
+        try common.atomic.makedirs(proj);
+        defer storage.removeTree(a, proj) catch {};
+        var zb: [sys.path_max:0]u8 = undefined;
+        const zp = try sys.z(&zb, proj);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.fchmodat(linux.AT.FDCWD, zp.ptr, 0o2770)));
+
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = cwd };
+        var s: config.Settings = .{};
+        s.project = .{ .value = proj, .from = "test" };
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
+        try std.testing.expectEqual(extend.Mode.project, sel.mode);
+        try std.testing.expectEqualStrings(proj, ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 2), ext.exports.len);
+        try std.testing.expectEqualStrings("EESSI_PROJECT_INSTALL", ext.exports[0][0]);
+        try std.testing.expectEqualStrings(proj, ext.exports[0][1]);
+        try std.testing.expectEqualStrings(extend_source_var, ext.exports[1][0]);
+    }
+
+    // Explicit install variable (even empty) -> preserved as the selected variable without re-exporting.
+    {
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        try map.put("EESSI_SITE_INSTALL", "");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
+        const s: config.Settings = .{};
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
+        try std.testing.expectEqual(extend.Mode.site, sel.mode);
+        try std.testing.expectEqualStrings("", ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 0), ext.exports.len);
+    }
+}
+
 test "a build has the process umask eb-local eb has for the same install" {
     for ([_]Place{ .{ .prefix = "/x", .project = false }, .{ .prefix = "/x", .project = true } }) |p| {
         var env = std.process.Environ.Map.init(std.testing.allocator);
         defer env.deinit();
-        try env.put(if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix);
+        const install = configuredInstall(p);
+        try env.put(install.variable(), install.prefix);
         const sel = try extend.select(&env);
         try std.testing.expectEqual(try std.fmt.parseInt(u32, sel.umask, 8), buildUmask(p));
     }
