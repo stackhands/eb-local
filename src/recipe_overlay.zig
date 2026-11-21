@@ -835,16 +835,14 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     {
         var probe: []const u8 = out_dir;
         while (probe.len > 0 and !std.mem.eql(u8, probe, ".") and !std.mem.eql(u8, probe, "/")) {
-            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
-                if (st.isDir()) break;
-                break;
-            } else |_| {}
+            if (common.fsx.statAt(common.fsx.cwd, probe, false)) |_| break else |_| {}
             first_missing = probe;
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
     common.atomic.makedirs(out_dir) catch |err| {
         failMsg("cannot create {s}: {s}", .{ out_dir, @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     var why: common.atomic.Why = .{};
