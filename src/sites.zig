@@ -14,6 +14,7 @@ pub const Template = struct { name: []const u8, text: []const u8 };
 /// The built-in templates, for no particular site; a site keeps its own in a file.
 pub const all = [_]Template{
     .{ .name = "slurm", .text = @embedFile("sites/slurm.toml") },
+    .{ .name = "workstation", .text = @embedFile("sites/workstation.toml") },
 };
 
 /// The built-in template called `name`, or null when there is none.
@@ -238,6 +239,6 @@ test "every rendered template loads as a site file" {
             std.debug.print("template {s}: {s}\n", .{ t.name, cd.message });
             return e;
         };
-        try testing.expect(s.node_local_root.value.len > 0);
+        try testing.expect(s.node_local_root.value.len > 0 or s.storage_mode.value == .local);
     }
 }

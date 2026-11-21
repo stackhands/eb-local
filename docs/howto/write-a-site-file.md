@@ -23,6 +23,7 @@ These steps write the site file from a template, install it beside the program, 
 
     ```text
     slurm        placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition
+    workstation  placeholders: prefix
     ```
 
     `slurm` is for any Slurm cluster whose jobs get a node-local disk.
