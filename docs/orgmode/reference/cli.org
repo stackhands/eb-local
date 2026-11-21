@@ -274,6 +274,7 @@ With =W= set to a workspace a build made, which holds =build=, =cache=, =cargo=,
 Load EESSI and EESSI-extend in a bash with no profile and no rc file, and run =eb= with the arguments, with no Slurm job.
 With no install variable set, it exports =EESSI_USER_INSTALL= for the configured =prefix=, or =EESSI_PROJECT_INSTALL= for the configured =project=, exactly as =env= does.
 An install variable already in the environment remains authoritative.
+=doctor= warns when that explicit variable selects a different mode or path from the configured destination; it does not warn when no install variable is exported because =eb= supplies the configuration itself.
 EESSI-extend takes the install mode from the install variables, of which at most one of =EESSI_USER_INSTALL=, =EESSI_PROJECT_INSTALL=, =EESSI_SITE_INSTALL= and =EESSI_CVMFS_INSTALL= may be set; a present, empty one counts.
 With more than one set, =eb= runs nothing and the command exits 3.
 
@@ -450,7 +451,7 @@ The shape is in [[file:json/list.schema.json][list.schema.json]].
 ** doctor
 
 Print one line for each check of what would stop a build, =eb-local eb= or a module load, each starting =ok=, =info=, =warn= or =FAIL=, then a line that says whether anything stops a build.
-It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and =LD_LIBRARY_PATH= left in the shell, the EESSI init =eb-local eb= sources, the allocation's node-local mount, whether EESSI is loaded and your modules are on =MODULEPATH=, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
+It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and =LD_LIBRARY_PATH= left in the shell, the EESSI init =eb-local eb= sources, whether an explicitly exported install variable disagrees with the configured destination, the allocation's node-local mount, whether EESSI is loaded and your modules are on =MODULEPATH=, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
 With =--workspace PATH=, it also creates, writes, renames, executes and removes a small probe in that existing directory.
 It reports the file-system type, whether the storage is node-local or shared, free bytes and inodes, a =noexec= mount, and whether the effective =XDG_CACHE_HOME= (or =$HOME/.cache= when unset) is inside the workspace.
 The check does not create a build workspace and never starts a build.
