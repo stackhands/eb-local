@@ -232,8 +232,7 @@ Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 eb-local 3.3.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
 
-No CLI flag was added, removed or renamed between `v3.2.0` and `v3.3.0`.
-After `v3.3.0`, the command line adds `--replace` on `dev` and the `leave` command.
+Between `v3.3.0` and `v3.4.0` the command line adds `--replace` on `dev` and the `leave` command; no flag was removed or renamed.
 
 ## Commands
 
