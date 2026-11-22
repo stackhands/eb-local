@@ -5,7 +5,7 @@
 Install the `eb-local` program for your account, from a release or from source.
 On a cluster whose site installs eb-local, load the site's module, or use the `eb-local` already on `PATH`, and skip this page.
 
-These pages describe release 3.3.0.
+These pages describe release 3.4.0.
 Release 3.3.0 is older: its `dev` has no `--replace` and it has no `leave` command, its RPATH wrappers record no run path for a library a link names by its full path or inside a response file, its build refuses a prefix or workspace on a file system that does not count inodes, such as btrfs, and it fails under a distribution Lmod that has no `EESSI` module. The [changelog](https://github.com/stackhands/eb-local/blob/main/CHANGELOG.md) lists what each earlier release lacks.
 A build from the main branch prints the version of the last release, with its own commit.
 [Find what is wrong before a build](find-what-is-wrong.md) copies `eb-local-readiness` from a pinned `main` commit when you use the release binary.
