@@ -117,6 +117,21 @@ class Check(unittest.TestCase):
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("libdemo.so => not found", run.stdout)
 
+    def test_prefix_names_an_installed_binary_and_its_unresolved_needed_library(self):
+        lib = self.tree("x86_64/amd/zen4")
+        prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
+        prefix = self.root / "install"
+        binary_path = prefix / "bin" / "consumer"
+        binary_path.parent.mkdir(parents=True)
+        shutil.copy2(prog, binary_path)
+        (lib / "libdemo.so").unlink()
+        run = self.check("--prefix", prefix, "--quiet")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn(
+            f"NEEDED library libdemo.so cannot be resolved for {binary_path}",
+            run.stdout,
+        )
+
     def test_the_host_loader_and_libc_are_problems_under_eessi(self):
         lib = self.tree("x86_64/amd/zen4")
         prog = self.program(lib, f"-Wl,-rpath,{lib}", "-Wl,--disable-new-dtags")
@@ -364,7 +379,7 @@ class Check(unittest.TestCase):
         self.assertEqual(rec.returncode, 1, rec.stdout + rec.stderr)
         self.assertIn(str(libdemo), rec.stdout)
         self.assertIn("RUNPATH", rec.stdout)
-        self.assertIn("libsub.so is not found", rec.stdout)
+        self.assertIn(f"NEEDED library libsub.so cannot be resolved for {libdemo}", rec.stdout)
 
         quiet = self.check("--recursive", "--quiet", prog, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
         self.assertEqual(quiet.returncode, 1, quiet.stdout + quiet.stderr)

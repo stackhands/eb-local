@@ -887,6 +887,17 @@ const dev_saved_names = [_][]const u8{
     "PATH",
     "EB_LOCAL_DEV_PREFIX",
     "EB_LOCAL_RPATH_WRAPPERS",
+    "CMAKE_ARGS",
+    "EB_LOCAL_MESON_INSTALL_RPATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+};
+
+const dev_saved_names_v1 = [_][]const u8{
+    "PATH",
+    "EB_LOCAL_DEV_PREFIX",
+    "EB_LOCAL_RPATH_WRAPPERS",
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "LD_AUDIT",
@@ -968,26 +979,35 @@ fn savedValue(c: Ctx, line: []const u8, name: []const u8) SavedVar {
 }
 
 fn parseDevSaved(c: Ctx, text: []const u8) DevSaved {
-    var lines: [9][]const u8 = undefined;
+    var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
-    for (&lines) |*line| {
-        line.* = it.next() orelse
-            die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    }
-    if (it.next() != null)
+    while (it.next()) |line| lines.append(c.a, line) catch oom();
+    if (lines.items.len == 0)
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    if (!std.mem.eql(u8, lines[0], "eb-local-dev-v1"))
+    const names: []const []const u8 = if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v2"))
+        &dev_saved_names
+    else if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v1"))
+        &dev_saved_names_v1
+    else
         die("EB_LOCAL_DEV_SAVED has an unsupported version", .{});
-    if (!std.mem.startsWith(u8, lines[1], "prior:"))
+    if (lines.items.len != names.len + 3)
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    const prior = lines[1]["prior:".len..];
+    if (!std.mem.startsWith(u8, lines.items[1], "prior:"))
+        die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    const prior = lines.items[1]["prior:".len..];
     if (!validModuleList(prior))
         die("EB_LOCAL_DEV_SAVED contains an invalid prior module list", .{});
-    var values: [dev_saved_names.len]SavedVar = undefined;
-    for (dev_saved_names, 0..) |name, i| values[i] = savedValue(c, lines[i + 2], name);
-    if (!std.mem.startsWith(u8, lines[8], "active:"))
+    var values: [dev_saved_names.len]SavedVar = @splat(.{ .present = false });
+    for (names, 0..) |name, i| {
+        const value = savedValue(c, lines.items[i + 2], name);
+        for (dev_saved_names, 0..) |current, j| {
+            if (std.mem.eql(u8, name, current)) values[j] = value;
+        }
+    }
+    const active_line = lines.items[names.len + 2];
+    if (!std.mem.startsWith(u8, active_line, "active:"))
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    const active = lines[8]["active:".len..];
+    const active = active_line["active:".len..];
     if (!validModuleList(active))
         die("EB_LOCAL_DEV_SAVED contains an invalid active module list", .{});
     const marker = std.mem.lastIndexOf(u8, text, "\nactive:") orelse unreachable;
@@ -1000,7 +1020,7 @@ fn newDevSaved(c: Ctx) DevSaved {
         die("LOADEDMODULES contains a module name that cannot be recorded", .{});
     var values: [dev_saved_names.len]SavedVar = undefined;
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(c.a, "eb-local-dev-v1\nprior:") catch oom();
+    out.appendSlice(c.a, "eb-local-dev-v2\nprior:") catch oom();
     out.appendSlice(c.a, prior) catch oom();
     for (dev_saved_names, 0..) |name, i| {
         out.append(c.a, '\n') catch oom();
@@ -1225,6 +1245,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, "else\nmodule load") catch oom();
     for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
     out.append(a, '\n') catch oom();
+    out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
@@ -1301,6 +1322,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // stays hidden behind the wrappers.
     out.appendSlice(a, drop_rpath_wrappers) catch oom();
     out.appendSlice(a, buildenvLines(c, s)) catch oom();
+    out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     // A program linked here belongs to this shell's CPU (and GPU) target, so
     // its install directory names them; the shell fills them in once EESSI
@@ -1431,6 +1453,40 @@ const host_ca_bundle =
     \\    done
     \\    unset _eb_local_ca
     \\fi
+    \\
+;
+
+/// Build-system settings that preserve run paths supplied by compiler
+/// wrappers when a project is installed.
+const installed_rpath_settings =
+    \\case " ${CMAKE_ARGS-} " in
+    \\    *" -DCMAKE_SKIP_RPATH="* | *" -DCMAKE_SKIP_RPATH:"*) ;;
+    \\    *) CMAKE_ARGS="-DCMAKE_SKIP_RPATH=ON${CMAKE_ARGS:+ $CMAKE_ARGS}" ;;
+    \\esac
+    \\export CMAKE_ARGS
+    \\EB_LOCAL_MESON_INSTALL_RPATH=
+    \\_eb_local_seen=:
+    \\_eb_local_eprefix=${EESSI_EPREFIX-}
+    \\while [[ $_eb_local_eprefix == *//* ]]; do _eb_local_eprefix=${_eb_local_eprefix//\/\//\/}; done
+    \\while [ "${_eb_local_eprefix%/}" != "$_eb_local_eprefix" ] && [ "$_eb_local_eprefix" != / ]; do _eb_local_eprefix=${_eb_local_eprefix%/}; done
+    \\_eb_local_rest=${LIBRARY_PATH-}:
+    \\while [ -n "$_eb_local_rest" ]; do
+    \\    _eb_local_dir=${_eb_local_rest%%:*}
+    \\    _eb_local_rest=${_eb_local_rest#*:}
+    \\    while [[ $_eb_local_dir == *//* ]]; do _eb_local_dir=${_eb_local_dir//\/\//\/}; done
+    \\    while [ "${_eb_local_dir%/}" != "$_eb_local_dir" ] && [ "$_eb_local_dir" != / ]; do _eb_local_dir=${_eb_local_dir%/}; done
+    \\    case $_eb_local_dir in /?*) ;; *) continue ;; esac
+    \\    case $_eb_local_dir in *,* | *:*) continue ;; esac
+    \\    case $_eb_local_dir in /lib | /lib/* | /lib64 | /lib64/* | /usr | /usr/*) continue ;; esac
+    \\    if [ -n "$_eb_local_eprefix" ]; then
+    \\        case $_eb_local_dir in "$_eb_local_eprefix" | "$_eb_local_eprefix"/*) continue ;; esac
+    \\    fi
+    \\    case $_eb_local_seen in *":$_eb_local_dir:"*) continue ;; esac
+    \\    _eb_local_seen=$_eb_local_seen$_eb_local_dir:
+    \\    EB_LOCAL_MESON_INSTALL_RPATH=${EB_LOCAL_MESON_INSTALL_RPATH:+$EB_LOCAL_MESON_INSTALL_RPATH:}$_eb_local_dir
+    \\done
+    \\export EB_LOCAL_MESON_INSTALL_RPATH
+    \\unset _eb_local_seen _eb_local_eprefix _eb_local_rest _eb_local_dir
     \\
 ;
 
@@ -1864,7 +1920,7 @@ fn reportElf(
             }
             if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{needed_path});
+                k.problem(a, "NEEDED library {s} cannot be resolved for {s}", .{ n, path });
             } else k.enqueue(a, needed_path, effective_loader_root, child_rpath_list.items);
             continue;
         }
@@ -1879,7 +1935,7 @@ fn reportElf(
                 k.problem(a, "{s} is found only through LD_LIBRARY_PATH", .{n});
             } else {
                 if (!quiet) say("  needs    {s} => not found", .{n});
-                k.problem(a, "{s} is not found", .{n});
+                k.problem(a, "NEEDED library {s} cannot be resolved for {s}", .{ n, path });
             }
             continue;
         };

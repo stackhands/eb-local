@@ -378,7 +378,9 @@ With `LD_LIBRARY_PATH` set in the shell, `dev` warns on stderr.
 
 Print shell lines that restore the state recorded by the first `dev --replace` in `EB_LOCAL_DEV_SAVED`.
 Run them with `eval "$(eb-local leave)"`.
-The lines unload modules absent from the recorded prior list, reload that list in order, restore `PATH`, the dev marker variables and `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`, then unset `EB_LOCAL_DEV_SAVED`.
+The current `eb-local-dev-v2` state stores `CMAKE_ARGS` and `EB_LOCAL_MESON_INSTALL_RPATH` as well as `PATH`, the dev marker variables and loader variables.
+The lines unload modules absent from the recorded prior list, reload that list in order, restore those variables, then unset `EB_LOCAL_DEV_SAVED`.
+An `eb-local-dev-v1` state remains accepted and restores its older variable set.
 A missing, malformed or unsupported record is refused.
 
 ### rpath-wrappers
@@ -409,8 +411,7 @@ A problem is a line of its own, after `problem:`, below the line it concerns:
 | `the loader is the host's, not the compatibility layer's under DIR` | EESSI is loaded, and the file names a loader outside its compatibility layer. |
 | `RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH` | The file records `RUNPATH` rather than `RPATH`. |
 | `run paths into the TARGET software tree; this shell is TARGET: build it again on this node type` | A run path, or a directory in `LD_LIBRARY_PATH`, leads into the tree of a CPU target other than `$EESSI_SOFTWARE_SUBDIR`. |
-| `LIBRARY does not exist` | The file names a library by its path, and there is none. |
-| `LIBRARY is not found` | No run path, no directory in `LD_LIBRARY_PATH` and none of the loader's directories holds the library. |
+| `NEEDED library LIBRARY cannot be resolved for FILE` | A path-named library does not exist, or no run path and none of the loader's directories holds a name. |
 | `LIBRARY is found only through LD_LIBRARY_PATH` | The same, but a directory in `LD_LIBRARY_PATH` holds it. |
 | `LIBRARY comes from the host, not from EESSI` | EESSI is loaded, and the library resolves outside it. |
 
