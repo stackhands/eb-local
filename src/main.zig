@@ -221,7 +221,34 @@ fn warn(comptime fmt: []const u8, args: anytype) void {
     cli.err(tool ++ ": " ++ fmt ++ "\n", args);
 }
 
+/// The list of what a command would change did not reach standard output, so
+/// the command changes nothing.
+fn unlisted(done: []const u8) u8 {
+    warn("standard output is not writable; nothing was {s}", .{done});
+    return 1;
+}
+
 var stdout: cli.Stdout = .{ .tool = tool };
+
+/// Set in main from EB_LOCAL_TEST_STDOUT_WRITES, only in the test artifact:
+/// that many writes to standard output succeed, and the next one and every
+/// one after it fail as a full disk would, so a test can fail the write that
+/// follows any given one.
+var test_stdout_writes: ?usize = null;
+
+fn emit(bytes: []const u8) bool {
+    if (comptime build_options.test_ops) {
+        if (test_stdout_writes) |left| {
+            if (left == 0) {
+                stdout.fd = sys.openat(linux.AT.FDCWD, "/dev/full", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0) catch stdout.fd;
+                test_stdout_writes = null;
+            } else {
+                test_stdout_writes = left - 1;
+            }
+        }
+    }
+    return stdout.write(bytes);
+}
 
 /// `fmt` and a newline in `buf`, or on `a` when `buf` is too small. Running
 /// out of memory is an error to the caller, not a failed write.
@@ -235,7 +262,7 @@ fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const s = formatLine(std.heap.page_allocator, &buf, fmt, args) catch oom();
     defer if (@intFromPtr(s.ptr) != @intFromPtr(&buf)) std.heap.page_allocator.free(s);
-    _ = stdout.write(s);
+    _ = emit(s);
 }
 
 test "formatLine reports running out of memory instead of a failed write" {
@@ -941,8 +968,7 @@ fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const lines = environmentLines(c, s, p, envStrict(c, g), false);
     if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    _ = stdout.write(lines);
-    return 0;
+    return if (emit(lines)) 0 else 1;
 }
 
 const dev_saved_names = [_][]const u8{
@@ -1145,8 +1171,7 @@ fn cmdLeave(c: Ctx) u8 {
     }
     out.appendSlice(c.a, "unset EB_LOCAL_DEV_SAVED\n") catch oom();
     evalHint("leave");
-    _ = stdout.write(out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// The first and last line of the lines `dev --envrc` owns in `.envrc`.
@@ -1313,8 +1338,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
     evalHint("dev --locked");
-    _ = stdout.write(out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
@@ -1394,7 +1418,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     if (g.lock) return writeLock(c, s, out.items);
     if (g.json_out) return emitEnvChange(c, "dev", out.items);
-    _ = stdout.write(out.items);
+    if (!emit(out.items)) return 1;
     if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
@@ -1653,8 +1677,7 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
         warn("no build environment module for the {s} compilers is available;", .{family});
         cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
     }
-    _ = stdout.write(str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }));
-    return 0;
+    return if (emit(str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }))) 0 else 1;
 }
 
 // ---- check ----------------------------------------------------------------
@@ -2349,8 +2372,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
     for (s.eessi.items) |e| line(a, &out, e.name, e.value);
-    _ = stdout.write(out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// Print the resolved value(s) of one configuration key for scripts and
@@ -2545,8 +2567,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
     checkSiteConfig(a, label, text);
     if (show) {
-        _ = stdout.write(text);
-        return 0;
+        return if (emit(text)) 0 else 1;
     }
     if (fsx.statAt(fsx.cwd, target, false)) |st| {
         if (st.isDir()) {
@@ -3289,6 +3310,15 @@ fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     return d;
 }
 
+/// The prefix lock file is made when a command first takes the lock. One that
+/// is there and is not a regular file would stop the command only after its
+/// list is out, so it is refused before anything is written.
+fn refuseIrregularPrefixLock(c: Ctx, prefix: []const u8) void {
+    const lock_path = std.fs.path.join(c.a, &.{ prefix, ".eb-local", ".lock" }) catch oom();
+    const st = fsx.statAt(fsx.cwd, lock_path, false) catch return;
+    if (!st.isReg()) die("cannot lock {s}: not a regular file", .{lock_path});
+}
+
 fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
     const a = c.a;
     var err_msg: []const u8 = "";
@@ -3517,10 +3547,11 @@ fn forgetWorkspaceRootIfEmpty(c: Ctx, prefix: []const u8, root: []const u8) void
     sys.unlinkat(dir, workspaceRegistryName(c.a, root), 0) catch {};
 }
 
-fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) void {
+/// Write the one JSON document `clean --json` prints, and say whether it got out.
+fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) bool {
     var items: std.ArrayList(CleanItemJson) = .empty;
     for (targets) |t| items.append(a, .{ .path = t.path, .kind = if (t.dir) "dir" else "file" }) catch oom();
-    jsonout.emit(a, CleanReport{
+    const line = jsonout.renderLine(a, CleanReport{
         .prefix = prefix,
         .dry_run = dry_run,
         .action = action,
@@ -3528,7 +3559,68 @@ fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []cons
         .workspaces = spaces,
         .removed_items = removed_items,
         .removed_workspaces = removed_workspaces,
-    });
+    }) catch oom();
+    return emit(line);
+}
+
+/// What `clean` would remove: the files and directories under the prefix, and
+/// the build workspaces of this job that no build holds.
+const CleanPlan = struct {
+    targets: []const Target,
+    spaces: []const []const u8,
+    /// Recorded workspace roots whose directory no longer exists.
+    gone: []const WorkspaceRootRecord,
+
+    /// Whether everything in `self` is still in `now`.
+    fn holds(self: CleanPlan, now: CleanPlan) bool {
+        for (self.targets) |t| {
+            const found = for (now.targets) |u| {
+                if (u.dir == t.dir and std.mem.eql(u8, u.path, t.path)) break true;
+            } else false;
+            if (!found) return false;
+        }
+        for (self.spaces) |w| {
+            const found = for (now.spaces) |v| {
+                if (std.mem.eql(u8, v, w)) break true;
+            } else false;
+            if (!found) return false;
+        }
+        return true;
+    }
+};
+
+/// Recorded workspace roots that are gone are forgotten once the list is out.
+fn forgetGoneRoots(plan: CleanPlan) void {
+    for (plan.gone) |record| if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
+}
+
+fn cleanPlan(c: Ctx, o: CleanOpts, d: Durable, roots: []const WorkspaceRootRecord, aged_before: i64) CleanPlan {
+    const a = c.a;
+    var collect: Collect = .{ .c = c };
+    if (o.logs) collect.aged(d.logs, aged_before);
+    if (o.sources) collect.files(d.sources);
+    var spaces: std.ArrayList([]const u8) = .empty;
+    var gone: std.ArrayList(WorkspaceRootRecord) = .empty;
+    for (roots) |record| {
+        const jr = record.path;
+        const fd = fsx.openDir(fsx.cwd, jr, false) catch |e| switch (e) {
+            error.NotFound => {
+                gone.append(a, record) catch oom();
+                continue;
+            },
+            else => die("cannot read {s} ({s})", .{ jr, storage.describeError(e) }),
+        };
+        defer sys.close(fd);
+        var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
+        while (it.next() catch null) |e| {
+            const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
+            if (storage.ownWorkspace(jr, full, callerUid(c))) {
+                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
+                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
+            }
+        }
+    }
+    return .{ .targets = collect.out.items, .spaces = spaces.items, .gone = gone.items };
 }
 
 fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 {
@@ -3557,72 +3649,70 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
         .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
         .none => {},
     }
-    var prefix_lock: ?sys.fd_t = null;
-    defer storage.releaseLock(&prefix_lock);
-    if (!o.dry_run and (o.logs or o.sources)) {
-        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
-        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
-            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
-        } else |_| {}
-    }
     // find -mtime +N: more than N whole days old.
     const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
-    const now: i64 = nowSecs();
-    var collect: Collect = .{ .c = c };
-    if (o.logs) collect.aged(d.logs, now - (days + 1) * 86400 + 1);
-    if (o.sources) collect.files(d.sources);
-    var spaces: std.ArrayList([]const u8) = .empty;
-    for (roots.items) |record| {
-        const jr = record.path;
-        const fd = fsx.openDir(fsx.cwd, jr, false) catch |e| switch (e) {
-            error.NotFound => {
-                if (!o.dry_run) if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
-                continue;
-            },
-            else => die("cannot read {s} ({s})", .{ jr, storage.describeError(e) }),
-        };
-        defer sys.close(fd);
-        var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
-        while (it.next() catch null) |e| {
-            const full = std.fs.path.join(a, &.{ jr, e.name }) catch oom();
-            if (storage.ownWorkspace(jr, full, callerUid(c))) {
-                const ws_lock = std.fs.path.join(a, &.{ full, ".eb-local.lock" }) catch oom();
-                if (storage.tryLockFree(ws_lock)) spaces.append(a, full) catch oom();
-            }
+    const aged_before: i64 = nowSecs() - (days + 1) * 86400 + 1;
+    if (!o.dry_run and (o.logs or o.sources)) refuseIrregularPrefixLock(c, p.prefix);
+    const plan = cleanPlan(c, o, d, roots.items, aged_before);
+    const targets = plan.targets;
+    const spaces = plan.spaces;
+    if (targets.len == 0 and spaces.len == 0) {
+        if (json) {
+            if (!emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces, 0, 0)) return unlisted("removed");
+        } else {
+            say("eb-local: nothing to clean in {s}", .{p.prefix});
+            if (stdout.failed) return unlisted("removed");
         }
-    }
-    const targets = collect.out.items;
-    if (targets.len == 0 and spaces.items.len == 0) {
         if (!o.dry_run) for (roots.items) |record| if (record.dir_fd) |dir| {
             if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
         };
-        if (json) {
-            emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces.items, 0, 0);
-        } else {
-            say("eb-local: nothing to clean in {s}", .{p.prefix});
-        }
         return 0;
     }
     if (!json) {
         for (targets) |t| say("  {s}{s}", .{ t.path, if (t.dir) "/" else "" });
-        for (spaces.items) |w| say("  {s}/ (build workspace)", .{w});
+        for (spaces) |w| say("  {s}/ (build workspace)", .{w});
+        if (stdout.failed) return unlisted("removed");
     }
     if (o.dry_run) {
         if (json) {
-            emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces.items, 0, 0);
+            _ = emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces, 0, 0);
         } else {
-            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
+            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.len });
         }
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
         notTrashed(s);
-        if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces.items, 0, 0);
+        if (json and !emitCleanJson(a, p.prefix, false, "refused", targets, spaces, 0, 0)) return unlisted("removed");
+        forgetGoneRoots(plan);
+        return 1;
+    }
+    // With `--json` the document is the list. It says what clean is about to
+    // remove, so it is written, and has reached standard output, before the
+    // first removal; a removal that then fails is a warning and exit status 1.
+    if (json) {
+        const planned = if (targets.len == 0) "workspaces-only" else if (trash == .rtrash) "trashed" else "deleted";
+        if (!emitCleanJson(a, p.prefix, false, planned, targets, spaces, targets.len, spaces.len)) return unlisted("removed");
+    }
+    forgetGoneRoots(plan);
+    // The list is out. Only now does clean hold the prefix lock, which makes
+    // `.eb-local/.lock`, and check that the lock did not wait through a change
+    // to what it listed.
+    var prefix_lock: ?sys.fd_t = null;
+    defer storage.releaseLock(&prefix_lock);
+    if (o.logs or o.sources) {
+        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
+            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
+        } else |_| {}
+    }
+    if (!plan.holds(cleanPlan(c, o, d, roots.items, aged_before))) {
+        warn("what clean listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
         return 1;
     }
     // Build workspaces are disposable scratch; they are deleted, not trashed.
     var removed_ws: usize = 0;
-    for (spaces.items) |w| {
+    for (spaces) |w| {
         if (storage.removeTree(a, w)) |_| {
             removed_ws += 1;
         } else |e| warn("cannot remove {s} ({s})", .{ w, storage.describeError(e) });
@@ -3630,9 +3720,7 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
     for (roots.items) |record| if (record.dir_fd) |dir| {
         if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
     };
-    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
     var removed_items: usize = 0;
-    var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
         if (trash == .rtrash) {
             var argv: std.ArrayList([]const u8) = .empty;
@@ -3649,8 +3737,6 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
                 .signal => return stop(run),
             }
             removed_items = targets.len;
-            action = "trashed";
-            if (!json) say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
         } else {
             for (targets) |t| {
                 if (t.dir) {
@@ -3663,16 +3749,22 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
                     } else |e| warn("cannot remove {s} ({s})", .{ t.path, storage.describeError(e) });
                 }
             }
-            action = "deleted";
-            if (!json) say("eb-local: deleted {d} item(s)", .{removed_items});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
             removeEmptyDirs(c, dir, st.dev, 0);
         }
     }
-    if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces.items, removed_items, removed_ws);
-    if (removed_ws < spaces.items.len or removed_items < targets.len) return 1;
+    // Nothing is left to change, so no report below can stop a later step.
+    if (!json) {
+        if (spaces.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
+        if (targets.len > 0 and trash == .rtrash) {
+            say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
+        } else if (targets.len > 0) {
+            say("eb-local: deleted {d} item(s)", .{removed_items});
+        }
+    }
+    if (removed_ws < spaces.len or removed_items < targets.len) return 1;
     return 0;
 }
 
@@ -3981,8 +4073,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{build_script}) catch oom();
-    _ = stdout.write(out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// A test capacity, `BYTES:INODES`, or `BYTES:INODES:uncounted` for a file
@@ -4008,6 +4099,22 @@ fn prefixCapacityOverride(c: Ctx) ?storage.Capacity {
 
 fn prefixCapacity(c: Ctx, path: []const u8) ?storage.Capacity {
     return prefixCapacityOverride(c) orelse (storage.capacity(path) catch null);
+}
+
+/// The durable directories of a build, refused when a link leads them, or
+/// the trees below the prefix, onto storage that does not outlive the job.
+/// It makes nothing, so it runs before the prefix exists as well as after.
+fn buildTrees(c: Ctx, refused: []const RefusedTree, prefix: []const u8) Durable {
+    const d = durableDirs(c, prefix, "nothing was built");
+    // The trees a build writes below the prefix must not lead onto refused
+    // storage either, through a symbolic link made later.
+    for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
+        const path = std.fs.path.join(c.a, &.{ prefix, sub }) catch oom();
+        const resolved = storage.canonical(c.a, path, c.cwd) catch oom();
+        for (refused) |t| if (storage.under(resolved, t.path))
+            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
+    }
+    return d;
 }
 
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
@@ -4049,6 +4156,18 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const refused = refusedTrees(c, s, true);
     for (refused) |t| if (storage.under(p.prefix, t.path))
         die("the install prefix {s} [{s}] is under {s}, {s}; nothing was built.\n  " ++ outlive ++ "; " ++ prefix_fix ++ ".", .{ p.prefix, prefixFrom(s, p), t.path, t.what });
+    {
+        // Said before the prefix exists, so a standard output that cannot take
+        // it leaves nothing behind; the canonical form is what realpath gives
+        // once the prefix is made.
+        const shown_prefix = storage.canonical(a, p.prefix, c.cwd) catch oom();
+        _ = buildTrees(c, refused, shown_prefix);
+        var shown: std.ArrayList(u8) = .empty;
+        shown.appendSlice(a, replay(a, "--explain", s, g, shown_prefix, &.{})) catch oom();
+        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
+        say("eb-local: what this runs: eb-local {s}", .{shown.items});
+        if (stdout.failed) return unlisted("built");
+    }
     common.atomic.makedirs(p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
     {
         var zb: [sys.path_max:0]u8 = undefined;
@@ -4063,22 +4182,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         if (cap.exhausted())
             die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
-    const d = durableDirs(c, p.prefix, "nothing was built");
-    // The trees a build writes below the prefix must not lead onto refused
-    // storage either, through a symbolic link made later.
-    for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
-        const path = std.fs.path.join(a, &.{ p.prefix, sub }) catch oom();
-        const resolved = storage.canonical(a, path, c.cwd) catch oom();
-        for (refused) |t| if (storage.under(resolved, t.path))
-            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
-    }
-
-    {
-        var shown: std.ArrayList(u8) = .empty;
-        shown.appendSlice(a, replay(a, "--explain", s, g, p.prefix, &.{})) catch oom();
-        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
-        say("eb-local: what this runs: eb-local {s}", .{shown.items});
-    }
+    const d = buildTrees(c, refused, p.prefix);
 
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
@@ -4237,7 +4341,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
-    if (rc == 0 and !keep) {
+    // The workspace goes only once what was said about the logs has reached
+    // standard output; until then it stays, as after a failed build.
+    if (rc == 0 and !keep and !stdout.failed) {
         storage.releaseLock(&ws_lock);
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e| {
             if (localStorage(s, c, g))
@@ -4439,8 +4545,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
                 out.append(a, '\n') catch oom();
             }
         }
-        _ = stdout.write(out.items);
-        return 0;
+        return if (emit(out.items)) 0 else 1;
     }
 
     if (json) {
@@ -4487,8 +4592,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     }.f;
     if (trees.items.len == 0 or rows.items.len == 0) {
         add(a, &out, str(a, "Nothing{s} is installed in {s}.\n", .{ if (filters.len > 0) " that matches" else "", p.prefix }));
-        _ = stdout.write(out.items);
-        return 0;
+        return if (emit(out.items)) 0 else 1;
     }
 
     var width: usize = "MODULE".len;
@@ -4526,8 +4630,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     } else {
         add(a, &out, "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.\n");
     }
-    _ = stdout.write(out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 // ---- doctor ---------------------------------------------------------------
@@ -5223,7 +5326,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     out.appendSlice(a, "\n") catch oom();
     out.appendSlice(a, summary) catch oom();
     out.appendSlice(a, "\n") catch oom();
-    _ = stdout.write(out.items);
+    if (!emit(out.items)) return 1;
     return if (any_failed) 1 else 0;
 }
 
@@ -5363,20 +5466,11 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const root = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
     const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
     const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
-    if (!o.print) {
-        common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
-        common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
-    }
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     const stamp = nowSecs();
-    var failed = false;
-    const guard: ?Guard = if (o.print) null else Guard.hold();
-    defer if (guard) |*g_ref| g_ref.release();
+    const Job = struct { name: []const u8, script: []const u8, path: []const u8, argv: []const []const u8 };
+    var plan: std.ArrayList(Job) = .empty;
     for (chosen.items) |t| {
-        if (guard) |*g_ref| if (g_ref.received()) |sig| {
-            g_ref.release();
-            return stop(.{ .signal = sig });
-        };
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
         const chdir_val = sbatchValue(a, c.cwd);
         const script = str(a,
@@ -5393,48 +5487,69 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
         while (words.next()) |w| argv.append(a, w) catch oom();
         argv.append(a, path) catch oom();
-        if (o.print) {
-            say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
-            _ = stdout.write(script);
-            continue;
+        plan.append(a, .{ .name = t.name, .script = script, .path = path, .argv = argv.items }) catch oom();
+    }
+    if (o.print) {
+        for (plan.items) |job| {
+            say("# {s}: {s}", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() });
+            if (!emit(job.script)) return 1;
         }
-        var why: common.atomic.Why = .{};
-        defer why.deinit(a);
-        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
-            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
-        if (guard.?.received()) |sig| {
-            sys.unlinkat(fsx.cwd, path, 0) catch {};
-            guard.?.release();
+        return 0;
+    }
+    // Every job is named before the first directory or script exists and
+    // before the first sbatch runs, so a stdout that cannot take the list
+    // changes nothing, and no later line of ours interleaves with sbatch's.
+    {
+        var plan_text: std.ArrayList(u8) = .empty;
+        for (plan.items) |job| plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() }) catch oom();
+        if (!emit(plan_text.items)) return unlisted("submitted");
+    }
+    common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
+    common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
+    var failed = false;
+    const guard = Guard.hold();
+    defer guard.release();
+    for (plan.items) |job| {
+        if (guard.received()) |sig| {
+            guard.release();
             return stop(.{ .signal = sig });
         }
-        say("eb-local: {s}:", .{t.name});
-        const ran = guard.?.run(a, argv.items, c.envp);
+        const path = job.path;
+        var why: common.atomic.Why = .{};
+        defer why.deinit(a);
+        common.atomic.atomicWrite(a, path, job.script, .{ .mode = 0o700 }, &why) catch |e|
+            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
+        if (guard.received()) |sig| {
+            sys.unlinkat(fsx.cwd, path, 0) catch {};
+            guard.release();
+            return stop(.{ .signal = sig });
+        }
+        const ran = guard.run(a, job.argv, c.envp);
         switch (ran) {
             .exit => |code| {
                 if (code != 0) {
-                    if (guard.?.received()) |sig| {
+                    if (guard.received()) |sig| {
                         sys.unlinkat(fsx.cwd, path, 0) catch {};
-                        guard.?.release();
+                        guard.release();
                         return stop(.{ .signal = sig });
                     }
-                    warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
+                    warn("sbatch refused the {s} job (exit {d})", .{ job.name, code });
                     failed = true;
                 }
-                if (guard.?.received()) |sig| {
-                    guard.?.release();
+                if (guard.received()) |sig| {
+                    guard.release();
                     return stop(.{ .signal = sig });
                 }
             },
             .signal => |sig| {
                 sys.unlinkat(fsx.cwd, path, 0) catch {};
-                guard.?.release();
-                return stop(.{ .signal = guard.?.received() orelse sig });
+                guard.release();
+                return stop(.{ .signal = guard.received() orelse sig });
             },
         }
     }
-    if (o.print) return 0;
-    if (guard.?.received()) |sig| {
-        guard.?.release();
+    if (guard.received()) |sig| {
+        guard.release();
         return stop(.{ .signal = sig });
     }
     say("", .{});
@@ -5666,16 +5781,10 @@ fn makeReadOnly(c: Ctx, path: []const u8, depth: usize) void {
     _ = linux.fchmodat(linux.AT.FDCWD, zp.ptr, @intCast(st.mode & 0o7555));
 }
 
-fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
+/// What `uninstall` would remove, or null after it has said why it removes
+/// nothing, which is exit status 2.
+fn uninstallPlan(c: Ctx, p: Place, versions: []const u8, modules: []const []const u8, o: UninstallOpts) ?Found {
     const a = c.a;
-    if (modules.len == 0) die("uninstall needs NAME/VERSION, as module avail shows it", .{});
-    const p = place(c, s);
-    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
-        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
-    } else |_| die("nothing is installed in {s}", .{p.prefix});
-    var prefix_lock: ?sys.fd_t = if (o.dry_run) null else acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
     if (o.target) |raw_target| {
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -5715,18 +5824,44 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (dependents.items.len > 0) {
         warn("these installed modules load what you named; uninstall them in the same command, or keep it:", .{});
         for (dependents.items) |f| warn("  {s}", .{f});
-        return 2;
+        return null;
     }
     // The usage log is eb-keep-logs' to read. Exit 2 from
     // `used --require-none` means the prefix is named there, or the log
     // could not be read; either way nothing is removed. Without the
     // option this is not consulted.
-    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return 2;
+    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return null;
+    return found;
+}
+
+/// Whether `now` names exactly what `self` names. A module file or link added
+/// since is not listed, so removing the installation would leave it dangling.
+fn foundUnchanged(self: Found, now: Found) bool {
+    for ([_][2][]const []const u8{
+        .{ self.installs.items, now.installs.items },
+        .{ self.modules.items, now.modules.items },
+    }) |pair| {
+        for (pair[0]) |x| if (!listed(pair[1], x)) return false;
+        for (pair[1]) |y| if (!listed(pair[0], y)) return false;
+    }
+    return true;
+}
+
+fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("uninstall needs NAME/VERSION, as module avail shows it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
+    } else |_| die("nothing is installed in {s}", .{p.prefix});
+    const found = uninstallPlan(c, p, versions, modules, o) orelse return 2;
     for (found.installs.items) |d| {
         if (!storage.under(d, versions)) die("{s} is outside {s}", .{ d, versions });
         say("  {s}/", .{d});
     }
     for (found.modules.items) |f| say("  {s}", .{f});
+    if (stdout.failed) return unlisted("removed");
     if (o.dry_run) {
         say("eb-local: dry run, nothing removed", .{});
         return 0;
@@ -5740,6 +5875,16 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     }
     if (trash != .rtrash and !o.delete) {
         notTrashed(s);
+        return 1;
+    }
+    // The list is out. Only now does uninstall take the prefix lock, which
+    // makes `.eb-local/.lock`, and check under it that what it listed is
+    // still installed and still safe to remove.
+    var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
+    const again = uninstallPlan(c, p, versions, modules, o) orelse return 2;
+    if (!foundUnchanged(found, again)) {
+        warn("what uninstall listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
         return 1;
     }
     for (found.installs.items) |d| makeWritable(c, d, 0);
@@ -5760,17 +5905,21 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
                 },
             }
         }
-        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
     } else {
         for (found.installs.items) |d| fsx.deleteTree(a, fsx.cwd, d) catch |e| die("cannot remove {s} ({s})", .{ d, storage.describeError(e) });
         for (found.modules.items) |f| sys.unlinkat(fsx.cwd, f, 0) catch |e| die("cannot remove {s} ({s})", .{ f, storage.describeError(e) });
-        say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
     }
     // The NAME directories they leave empty.
     for ([_][]const []const u8{ found.installs.items, found.modules.items }) |list| for (list) |x| {
         const parent = std.fs.path.dirname(x) orelse continue;
         sys.unlinkat(fsx.cwd, parent, linux.AT.REMOVEDIR) catch {};
     };
+    // Nothing is left to change, so this report cannot stop a later step.
+    if (trash == .rtrash) {
+        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
+    } else {
+        say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
+    }
     return 0;
 }
 
@@ -5830,25 +5979,13 @@ fn targetRoot(c: Ctx, path: []const u8) bool {
     return isDirAt(fd, "software") and isDirAt(fd, "modules");
 }
 
-/// Brings back from the trash what uninstall moved there, for every CPU
-/// target, and makes each installation read-only again: rtrash restore
-/// alone brings one back with the writable directories rtrash needs.
-fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+/// What `restore` would bring back, in the order it comes back: installations,
+/// module files in `modules/all`, and EasyBuild's links to them.
+const Restoring = [3]std.ArrayList(Trashed);
+
+fn restorePlan(c: Ctx, p: Place, versions: []const u8, rtrash: []const u8, modules: []const []const u8) Restoring {
     const a = c.a;
-    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
-    const p = place(c, s);
-    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
-        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
-    } else |_| die("nothing was installed in {s}", .{p.prefix});
-    var prefix_lock: ?sys.fd_t = if (dry_run) null else acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
-    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
-        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
-    // Installations, the module files in modules/all, and EasyBuild's links
-    // to them from modules/<class>/, in the order they come back: nothing
-    // is back before what it needs.
     var found = [_]std.ArrayList(Trashed){ .empty, .empty, .empty };
     for (modules, 0..) |m, idx| {
         if (listed(modules[0..idx], m)) continue;
@@ -5882,10 +6019,48 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
             die("{s} exists; restore replaces nothing, so nothing was restored", .{e.original});
         } else |_| {}
     };
+    return found;
+}
+
+/// Whether everything `self` names is still in `now`.
+fn restoringHolds(self: Restoring, now: Restoring) bool {
+    for (self, 0..) |list, kind| for (list.items) |e| {
+        const there = for (now[kind].items) |f| {
+            if (std.mem.eql(u8, e.original, f.original) and std.mem.eql(u8, e.trash_dir, f.trash_dir)) break true;
+        } else false;
+        if (!there) return false;
+    };
+    return true;
+}
+
+/// Brings back from the trash what uninstall moved there, for every CPU
+/// target, and makes each installation read-only again: rtrash restore
+/// alone brings one back with the writable directories rtrash needs.
+fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
+    } else |_| die("nothing was installed in {s}", .{p.prefix});
+    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
+        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
+    const found = restorePlan(c, p, versions, rtrash, modules);
     for (found, 0..) |list, kind| for (list.items) |e| say("  {s}{s}", .{ e.original, if (kind == 0) "/" else "" });
+    if (stdout.failed) return unlisted("restored");
     if (dry_run) {
         say("eb-local: dry run, nothing restored", .{});
         return 0;
+    }
+    // The list is out. Only now does restore take the prefix lock, which makes
+    // `.eb-local/.lock`, and check under it that the trash still holds what it
+    // listed and that nothing is in the way.
+    var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLock(&prefix_lock);
+    if (!restoringHolds(found, restorePlan(c, p, versions, rtrash, modules))) {
+        warn("what restore listed changed while it waited for the prefix lock; nothing was restored. Run it again.", .{});
+        return 1;
     }
     // rtrash restore takes no --; every path is absolute.
     for (found, 0..) |list, kind| for (list.items) |e| {
@@ -5917,12 +6092,17 @@ fn subcommand(word: []const u8) ?Command {
 /// `EB_LOCAL_EESSI_EXTEND` set, not empty and not `0`, every argument is
 /// eb's, as for `eb-local eb --`.
 pub fn main(init: std.process.Init) u8 {
+    return stdout.finish(runMain(init));
+}
+
+fn runMain(init: std.process.Init) u8 {
     const a = init.arena.allocator();
     const argv_all = init.minimal.args.toSlice(a) catch die("cannot read the arguments", .{});
     var cwd_buf: [sys.path_max]u8 = undefined;
     const cwd = a.dupe(u8, fsx.realpath(fsx.cwd, ".", &cwd_buf) catch "/") catch oom();
     const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_STDOUT_WRITES"))) |v| test_stdout_writes = std.fmt.parseInt(usize, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FLOCK_ERRNO"))) |v| {
             if (std.mem.eql(u8, v, "ENOLCK")) {
@@ -5947,12 +6127,10 @@ pub fn main(init: std.process.Init) u8 {
     if (args.len > 0) {
         const first: []const u8 = args[0];
         if (std.mem.eql(u8, first, "help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
-            _ = stdout.write(usage_text);
-            return 0;
+            return if (emit(usage_text)) 0 else 1;
         }
         if (std.mem.eql(u8, first, "--version")) {
-            _ = stdout.write(comptime cli.versionLine(tool, version, build_options.commit));
-            return 0;
+            return if (emit(comptime cli.versionLine(tool, version, build_options.commit))) 0 else 1;
         }
         if (std.meta.stringToEnum(Command, first)) |cmd| {
             if (cmd != .build) {
@@ -6027,8 +6205,7 @@ pub fn main(init: std.process.Init) u8 {
             continue;
         }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
-            _ = stdout.write(usage_text);
-            return 0;
+            return if (emit(usage_text)) 0 else 1;
         } else if (std.mem.eql(u8, x, "--project")) {
             g.project = value(args, &i, "--project");
         } else if (joined(x, "--project")) |v| {
@@ -6577,8 +6754,7 @@ fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
-    _ = stdout.write(out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 test "extendEnvironment always populates the selected install variable" {
