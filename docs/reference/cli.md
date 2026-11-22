@@ -229,7 +229,7 @@ The version line names the program, its version, the target and optimize mode of
 Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 
 ```text
-eb-local 3.3.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
+eb-local 3.4.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
 
 Between `v3.3.0` and `v3.4.0` the command line adds `--replace` on `dev` and the `leave` command; no flag was removed or renamed.

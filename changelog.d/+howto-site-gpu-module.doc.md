@@ -1,1 +1,0 @@
-A how-to guide, *Build CUDA software against a site's GPU modules*, covers building on the GPU node a site module is visible on, giving programs a run path into a Python package's library directory that its module leaves off `LIBRARY_PATH`, checking the installation with `eb-local check`, and libraries an install step copies with the build's run path.

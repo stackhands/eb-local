@@ -1,1 +1,0 @@
-Preserve the loading executable's compatibility-layer loader root and inherited `DT_RPATH` across transitive shared-library checks in `eb-local check --recursive`, preventing false host-`libc` reports on EESSI binaries. The inherited run paths are searched before `LD_LIBRARY_PATH`, as the loader does.
