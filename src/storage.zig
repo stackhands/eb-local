@@ -777,8 +777,8 @@ pub fn acquireBoundedLockCancel(
         return .failed;
     }
     if (comptime build_options.test_ops) {
-        if (test_flock_errno) |te| {
-            if (notify) common.cli.err("eb-local: warning: cannot lock {s} ({s}); continuing unlocked\n", .{ lock_path, sys.describeErrno(te) });
+        if (test_flock_errno) |flock_errno| {
+            if (notify) common.cli.err("eb-local: warning: cannot lock {s} ({s}); continuing unlocked\n", .{ lock_path, sys.describeErrno(flock_errno) });
             sys.close(fd);
             return .unlocked;
         }
