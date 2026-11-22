@@ -2,6 +2,73 @@
 
 <!-- towncrier release notes start -->
 
+## 3.4.0 (2026-11-22)
+
+### Features
+
+- Add opt-in development environment replacement and leaving to the Zig front end.
+- The repository's `eb-local` POSIX shell shim delegates every command
+  to the Zig program, avoids delegating to shim copies and preserves an
+  adjacent `eb-local.conf`. For Bash users, the default prefix moves from
+  `~/.local/eessi` to `~/eessi` while retaining an existing legacy
+  install. User installs change from umask 022 to 077, so other users can
+  no longer read them. An untrusted adjacent config is rejected instead
+  of skipped, and child signals are re-raised rather than translated to
+  status 128 plus the signal number.
+
+### Fixes
+
+- A build, `eb-local eb` and `eb-local doctor` no longer refuse an installation prefix or a workspace on btrfs with `no space left on device (... 0 free inodes)`. btrfs has no inode table and reports zero total and zero free inodes; such a file system is full only when it has no free bytes. `doctor --workspace` says that the file system does not count inodes.
+- Add the `init/modules` directory of `EESSI` for builds, `eb-local env` and `eb-local dev` when a distribution's Lmod has no `EESSI` module on MODULEPATH, and say so in `eb-local doctor` instead of failing.
+- Avoid leaking open pipe descriptor `fd 3` into child processes or stalling on background children when `env --json`, `dev --json`, `dev --lock`, or `dev --locked --json` evaluates shell setup lines.
+- Build the Zig CLI before the shell test suite exercises the delegation shim.
+- Cancel contended `.eb-local/.lock` waits on `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` via `common.state.lockExclusiveCancel`, removing unused build workspaces before re-raising.
+- Discover `config.toml` and `eb-local.conf` in `<checkout>` directly from the Zig binary when running out of `<checkout>/zig-out/bin/eb-local`, without relying on `EB_LOCAL_CONFIG` from the shell shim.
+- Doctor fails when a readable Lmod initializer does not define the module command a build requires.
+- Doctor refuses an install prefix that lies under a symbolic link naming shared scratch or the node-local root.
+- Doctor treats a workspace under a shared scratch root as shared when that root is a symbolic link.
+- Format filesystem diagnostics with `[Errno N] ...` via `storage.describeError` across `build`, `check`, `dev`, `clean`, and `doctor` to match `COMPAT` notes and `docs/reference/refusals.md`.
+- Forward `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` to `lmod-cache` child process groups and remove temporary verification and uncommitted cache directories before re-raising.
+- Forward `SIGINT`, `SIGTERM`, and `SIGHUP` from `Guard.run` to the child process group across `build`, `eb`, `submit`, and `clean`, isolating non-TTY children in a dedicated process group while preserving single-signal terminal `Ctrl-C` delivery.
+- Hold the signal guard across `submit` targets and unlink unsubmitted batch scripts when interrupted by `SIGINT`, `SIGTERM`, `SIGHUP`, or `SIGQUIT`.
+- Initialize Lmod for the shell that evaluates eb-local env or eb-local dev, including clean zsh sessions.
+- Keep the delegation shim valid POSIX shell when it skips shim copies on PATH.
+- Preserve the loading executable's compatibility-layer loader root and inherited `DT_RPATH` across transitive shared-library checks in `eb-local check --recursive`, preventing false host-`libc` reports on EESSI binaries. The inherited run paths are searched before `LD_LIBRARY_PATH`, as the loader does.
+- Publish Lmod cache `timestamp` files atomically with pre-backdated `mtime` so concurrent readers never observe `timestamp.mtime >= spiderT.lua.mtime`.
+- Refuse non-regular FIFO inputs and outputs without blocking in `overlay materialize`, and validate output targets with exit code 2 in `--dry-run`.
+- Reject dev locks whose CPU target contains empty, `.` or `..` path components.
+- Reject malformed module names passed as `list` filters.
+- Remove `EB_LOCAL_CONFIG` injection from the repository `eb-local` shell shim so it strictly locates and `exec`s the Zig binary without mutating the environment.
+- Report OS errno diagnostics and exit `1` whenever `eb-local lmod-cache` (`--dry-run`, `--prefix`, or `--modulepath`) fails to write standard output to `/dev/full` or a closed descriptor.
+- Report OS errno diagnostics and exit `1` whenever `eb-local modulerc` (`--check`, `--dry-run`, or write mode) fails to write standard output to `/dev/full` or a closed descriptor.
+- Serialize concurrent `lmod-cache` writers across cache and timestamp directories via `common.state.lockExclusiveCancel`, canceling contended waits cleanly on termination signals.
+- Stage and lock `.eb-local.lock` before publishing `eb-local.XXXXXXXX` build workspaces so `clean --workspaces` cannot delete a build workspace waiting on `.eb-local/.lock`.
+- Submit refuses an install prefix or working directory containing a newline that would split an #SBATCH directive.
+- Terminate `build_script` and `extend.script` immediately on `SIGINT` during module and target setup instead of letting GNU Bash wait-and-cooperative-exit drop `SIGINT` when a foreground setup helper catches `SIGINT` and exits normally.
+- The RPATH wrappers that `dev` and `rpath-wrappers` put first read the arguments in a response file, `@FILE`, and add a run path for the directory of a shared library named by its full path. Meson and CMake put a long link line in a response file, and CMake and pkg-config often name a library by its path, so such a link recorded no run path for those libraries outside `LIBRARY_PATH`; a compile in a response file, which the wrapper took for a link, no longer gets run path options.
+- Try later Lmod initializers when an earlier readable initializer defines no `module` command.
+- Use `common.proc.run` instead of `std.process.run` in `storage.probeWorkspace` so `doctor --workspace` never opens and retains an un-`CLOEXEC` `/dev/null` descriptor via `std.Io.Threaded`.
+- Wait on reparented child-group `SIGCHLD` events via `PR_SET_CHILD_SUBREAPER` and `signalfd` with a 500 ms deadline before escalating to `SIGKILL` in `Guard.run`, ensuring descendants flush logs and exit before secret redaction and lock release.
+- `eb-local dev --locked` now skips the modules in `eb-local.lock` when that file records an EESSI version and the shell's `EESSI_VERSION` is different.
+- `eb-local dev` uses nounset-safe expansions for an EESSI software target, so shells using `set -u` do not abort when a module omits either target variable.
+
+### Documentation
+
+- A how-to guide, *Build CUDA software against a site's GPU modules*, covers building on the GPU node a site module is visible on, giving programs a run path into a Python package's library directory that its module leaves off `LIBRARY_PATH`, checking the installation with `eb-local check`, and libraries an install step copies with the build's run path.
+- A new guide, `docs/howto/install-your-own-recipe.md`, covers what a build of a recipe file of your own needs beyond a recipe EasyBuild ships: naming the file and the directory of its dependencies with `--robot=DIR`, giving sources with `--sourcepath`, a recipe for software published only as prebuilt libraries (`Tarball`, the system toolchain and when `check_readelf_rpath = False` is right), what `is already installed (module found), skipping` means when the module is not in your prefix, the lock that makes two builds into one prefix run one after the other and `EB_LOCAL_LOCK_TIMEOUT_MS` for the one that waits, and `--ignore-locks` after a build that was killed.
+- Document the opt-in development environment replacement and restoration model.
+
+### Miscellaneous
+
+- Tests pin that `eb-local doctor` reports no finding for a path-list variable such as `PYTHONPATH` or `R_LIBS_USER` whose whole value is empty, which the tools that read it treat as unset, while an empty entry inside a non-empty list, as in `:`, `:DIR` or `DIR:`, is still named.
+- The execve-block builders over a std process environment map build through
+  zig-common `env.Builder`, whose set order and block shape they now use,
+  instead of hand-rolled line assembly.
+- Update the pinned `zig-common` dependency from `v0.10.0` to `v0.12.0`. The
+  ELF scan warning for a path it cannot open now names `IsDir` or
+  `NotRegularFile` instead of `InvalidArgument` for a directory or a FIFO.
+
+
 ## 3.3.0 (2026-11-19)
 
 ### Features
