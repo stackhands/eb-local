@@ -6,7 +6,7 @@ import binary
 from test_storage import StorageFixture
 
 
-@unittest.skipUnless(binary.BIN, "TOML configuration is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "TOML configuration is a feature of the Zig build")
 class TomlInteger(StorageFixture):
     def setUp(self):
         super().setUp()

@@ -128,7 +128,7 @@ test "$EB_LOCAL_MESON_INSTALL_RPATH" = before-off
 """
 
 
-@unittest.skipUnless(binary.BIN, "requires EB_LOCAL_BIN for Zig lifecycle checks")
+@unittest.skipUnless(binary.ZIG, "Zig lifecycle checks need the Zig build")
 class DevLifecycle(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-dev-lifecycle-")
@@ -176,7 +176,7 @@ class DevLifecycle(unittest.TestCase):
         self.env["LEGACY_STATE"] = "\n".join(lines)
 
     def command(self):
-        return f'"{binary.BIN}" "$@"'
+        return f'"{binary.ZIG}" "$@"'
 
     def test_replace_switches_compilers_and_leave_restores_the_caller(self):
         script = self.root / "lifecycle.sh"
@@ -203,7 +203,7 @@ class DevLifecycle(unittest.TestCase):
                 self.assertFalse(any("Base/1" in names for names in unloads), unloads)
 
     def test_leave_refuses_missing_and_malformed_state(self):
-        argv = [binary.BIN, "leave"]
+        argv = [binary.ZIG, "leave"]
         for state in (None, "not a state"):
             env = dict(self.env)
             if state is not None:

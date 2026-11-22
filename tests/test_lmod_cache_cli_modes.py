@@ -9,7 +9,7 @@ import binary
 import hostile_fs
 
 
-@unittest.skipUnless(binary.BIN, "lmod-cache is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "lmod-cache is a feature of the Zig build")
 class LmodCacheCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lmod-cache-modes-")
@@ -18,7 +18,7 @@ class LmodCacheCliModes(unittest.TestCase):
 
     def run_cache(self, args):
         return subprocess.run(
-            [binary.BIN, "lmod-cache", *args],
+            [binary.ZIG, "lmod-cache", *args],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
             cwd=self.root,
             capture_output=True,

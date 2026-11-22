@@ -10,7 +10,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "overlay materialize is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "overlay materialize is a feature of the Zig build")
 class OverlayMaterializeParity(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-overlay-parity-")
@@ -28,7 +28,7 @@ class OverlayMaterializeParity(unittest.TestCase):
 
     def run_overlay(self, args, *, timeout=2.0):
         return subprocess.run(
-            [binary.BIN, "overlay", "materialize", *args],
+            [binary.ZIG, "overlay", "materialize", *args],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
             cwd=self.root,
             capture_output=True,

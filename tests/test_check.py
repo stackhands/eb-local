@@ -18,7 +18,7 @@ from test_json_cli import load_schema, validate
 GCC = shutil.which("gcc")
 
 
-@unittest.skipUnless(binary.BIN and GCC, "needs the Zig build and gcc")
+@unittest.skipUnless(binary.ZIG and GCC, "needs the Zig build and gcc")
 class Check(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -45,7 +45,7 @@ class Check(unittest.TestCase):
     def check(self, *files, **env):
         e = dict(self.env)
         e.update(env)
-        return subprocess.run([binary.BIN, "check", *map(str, files)], env=e, text=True, capture_output=True)
+        return subprocess.run([binary.ZIG, "check", *map(str, files)], env=e, text=True, capture_output=True)
 
     def test_a_program_with_its_rpath_in_this_target_passes(self):
         lib = self.tree("x86_64/amd/zen4")
@@ -351,7 +351,7 @@ class Check(unittest.TestCase):
         prog, _, _ = self._build_transitive_chain(lib_flags=("-Wl,--enable-new-dtags",), drop_sub=True)
 
         raw = subprocess.run(
-            [binary.BIN, "check", str(prog)],
+            [binary.ZIG, "check", str(prog)],
             env=dict(self.env, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4"),
             capture_output=True,
             text=False,
@@ -362,7 +362,7 @@ class Check(unittest.TestCase):
         self.assertNotIn(b"libsub.so", raw.stdout)
 
         quiet = subprocess.run(
-            [binary.BIN, "check", "--quiet", str(prog)],
+            [binary.ZIG, "check", "--quiet", str(prog)],
             env=dict(self.env, EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4"),
             capture_output=True,
             text=False,

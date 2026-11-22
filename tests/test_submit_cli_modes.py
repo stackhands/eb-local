@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "submit is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "submit is a feature of the Zig build")
 class SubmitCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-submit-modes-")
@@ -28,7 +28,7 @@ class SubmitCliModes(unittest.TestCase):
 
     def run_submit(self, args, site_path=None, path="/usr/bin:/bin"):
         return subprocess.run(
-            [binary.BIN, "submit", *args],
+            [binary.ZIG, "submit", *args],
             env={
                 "PATH": path,
                 "HOME": str(self.root),
@@ -93,7 +93,7 @@ class SubmitCliModes(unittest.TestCase):
         for extra_args in (["--print"], []):
             with self.subTest(case="prefix", extra_args=extra_args):
                 got = subprocess.run(
-                    [binary.BIN, "submit", "--on=cpu", *extra_args, "recipe.eb"],
+                    [binary.ZIG, "submit", "--on=cpu", *extra_args, "recipe.eb"],
                     env={
                         "PATH": "/usr/bin:/bin",
                         "HOME": str(self.root),
@@ -115,7 +115,7 @@ class SubmitCliModes(unittest.TestCase):
         for extra_args in (["--print"], []):
             with self.subTest(case="cwd", extra_args=extra_args):
                 got = subprocess.run(
-                    [binary.BIN, "submit", "--on=cpu", *extra_args, "recipe.eb"],
+                    [binary.ZIG, "submit", "--on=cpu", *extra_args, "recipe.eb"],
                     env={
                         "PATH": "/usr/bin:/bin",
                         "HOME": str(self.root),

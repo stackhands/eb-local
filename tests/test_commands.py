@@ -80,7 +80,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(len(self.workspaces()), 1)
 
-    @unittest.skipUnless(binary.BIN, "re-raising the child's signal is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "re-raising the child's signal is a feature of the Zig build")
     def test_a_killed_build_is_that_signal_after_the_workspace_is_reported(self):
         killer = self.root / "doubles-kill.sh"
         killer.write_text((self.root / "doubles.sh").read_text() + "\neb() { kill -TERM $$; }\n")
@@ -109,7 +109,7 @@ class Commands(StorageFixture):
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
 
-    @unittest.skipUnless(binary.BIN, "the install prefix is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the install prefix is a feature of the Zig build")
     def test_dev_names_an_install_prefix_for_the_target(self):
         self.prefix.mkdir(parents=True)
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
@@ -160,7 +160,7 @@ class Commands(StorageFixture):
                     ),
                 )
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_explain_prints_the_build_and_creates_nothing(self):
         run = self.run_wrapper(
             ["--explain", "recipe with space.eb", "--robot"],
@@ -179,7 +179,7 @@ class Commands(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
         self.assertFalse((self.root / "eb.json").exists())
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_the_printed_script_runs_as_a_build_runs_it(self):
         explained = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"])
         self.assertEqual(explained.returncode, 0, explained.stderr)
@@ -196,7 +196,7 @@ class Commands(StorageFixture):
         self.assertEqual(json.loads((self.root / "eb.json").read_text()), real)
         self.assertEqual(real["argv"], ["recipe with space.eb", "--robot"])
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_a_build_starts_with_the_command_that_prints_its_script(self):
         run = self.run_wrapper(["recipe with space.eb", "--robot"])
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -210,7 +210,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.stdout.splitlines()[0],
                          f"eb-local: what this runs: eb-local --project {shlex.quote(str(self.prefix))} --explain recipe.eb")
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_explain_a_project_build_keeps_the_project_umask(self):
         self.prefix.mkdir(parents=True)
         self.prefix.chmod(0o2770)
@@ -222,7 +222,7 @@ class Commands(StorageFixture):
                       f" {shlex.quote(str(self.prefix))} project recipe.eb\n", run.stdout)
         self.assertEqual(list(self.job.iterdir()), [])
 
-    @unittest.skipUnless(binary.BIN, "the shared default prefix is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the shared default prefix is a feature of the Zig build")
     def test_the_default_prefix_is_eessi_extends_and_an_older_install_stays_in_use(self):
         home = self.root / "home"
         home.mkdir()
@@ -389,7 +389,7 @@ class Commands(StorageFixture):
             )
         )
 
-    @unittest.skipUnless(binary.BIN, "the lfoss warning is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the lfoss warning is a feature of the Zig build")
     def test_dev_warns_when_an_lfoss_module_meets_the_foss_build_environment(self):
         # With the default, dev picks the build environment for the compilers
         # (test_dev_buildenv); a chosen GCC one is loaded as it is, with a warning.
@@ -465,7 +465,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(old.exists())
 
-    @unittest.skipUnless(binary.BIN, "clean.trash is a setting of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "clean.trash is a setting of the Zig build")
     def test_clean_says_clean_trash_none_keeps_the_logs_with_rtrash_there(self):
         self.with_rtrash()
         old, = self.logs(40)

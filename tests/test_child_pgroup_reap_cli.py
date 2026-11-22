@@ -185,7 +185,7 @@ def wait_file(path: Path, timeout: float = 10.0) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@unittest.skipUnless(binary.BIN, "straggler reaping belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "straggler reaping belongs to the Zig binary")
 class ChildPgroupReapCli(StorageFixture):
     def setUp(self):
         super().setUp()

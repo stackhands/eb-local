@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "uninstall is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "uninstall is a feature of the Zig build")
 class UninstallCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-uninstall-modes-")
@@ -37,7 +37,7 @@ class UninstallCliModes(unittest.TestCase):
         }
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

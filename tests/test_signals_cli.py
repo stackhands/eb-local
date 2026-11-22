@@ -46,7 +46,7 @@ sys.exit(15 if got[0] == "SIGTERM" else 1)
 KEY = "licence-key-6f1c2e9a"
 
 
-@unittest.skipUnless(binary.BIN, "passing signals on is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "passing signals on is a feature of the Zig build")
 class Signals(StorageFixture):
     def setUp(self):
         super().setUp()

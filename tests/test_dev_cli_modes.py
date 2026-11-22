@@ -10,7 +10,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "dev is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "dev is a feature of the Zig build")
 class DevCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-dev-modes-")
@@ -31,7 +31,7 @@ class DevCliModes(unittest.TestCase):
         env.pop("LD_LIBRARY_PATH", None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, "dev", *args],
+            [binary.ZIG, "dev", *args],
             env=env,
             cwd=self.root,
             capture_output=True,
@@ -92,7 +92,7 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(lines[-1], "# <<< eb-local dev <<<")
         self.assertEqual(len(lines), 3)
         # the program is named by its own path, and the line replays this dev
-        self.assertTrue(lines[1].startswith('eval "$(' + binary.BIN + " "), lines[1])
+        self.assertTrue(lines[1].startswith('eval "$(' + binary.ZIG + " "), lines[1])
         self.assertTrue(lines[1].endswith(' dev FFTW/3.3.10-GCC-15.2.0)"'), lines[1])
 
         # the user's own lines around the block survive a rewrite with other modules

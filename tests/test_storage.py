@@ -543,7 +543,7 @@ class StorageControls(StorageFixture):
         self.nodes.symlink_to(real, target_is_directory=True)
         self.refused(TMPDIR=str(self.job))
 
-    @unittest.skipUnless(binary.BIN, "dropping BASH_ENV and loader paths is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "dropping BASH_ENV and loader paths is a feature of the Zig build")
     def test_build_drops_bash_env_and_loader_paths(self):
         marker = self.root / "bash-env-ran"
         evil = self.root / "evil-bash-env.sh"
@@ -740,7 +740,7 @@ class StorageControls(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
 
 
-@unittest.skipUnless(binary.BIN, "the wording of these refusals is the Zig build's")
+@unittest.skipUnless(binary.ZIG, "the wording of these refusals is the Zig build's")
 class RefusalWording(StorageFixture):
     """A refusal says what it refused and why, and what was not done; its next
     line says what to change: a setting, with its value and where it was set,
@@ -871,7 +871,7 @@ class RefusalWording(StorageFixture):
         self.assertEqual(first, f"eb-local: the node-local mount {self.job} is on tmpfs, not xfs; nothing was removed.")
 
 
-@unittest.skipUnless(binary.BIN, "checking where EESSI-extend installs is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "checking where EESSI-extend installs is a feature of the Zig build")
 class InstallPathChecks(StorageFixture):
     """The install path EESSI-extend chose, and install variables left in the shell or set as it loads."""
 
@@ -917,7 +917,7 @@ class InstallPathChecks(StorageFixture):
         self.assertNotIn("is set in this shell", run.stderr)
 
 
-@unittest.skipUnless(binary.BIN, "clean removal edge cases target the Zig build")
+@unittest.skipUnless(binary.ZIG, "clean removal edge cases target the Zig build")
 class CleanFilesystemEdgeCases(StorageFixture):
     def test_clean_removes_readonly_reprod_and_workspace_trees_with_spaces(self):
         logs = self.prefix / ".eb-local" / "logs"

@@ -24,11 +24,11 @@ class EnvStrictSource(unittest.TestCase):
         self.assertIn("EB_LOCAL_ENV_STRICT=1", page)
 
 
-@unittest.skipUnless(binary.BIN, "env --strict needs the Zig build")
+@unittest.skipUnless(binary.ZIG, "env --strict needs the Zig build")
 class EnvStrictCli(unittest.TestCase):
     def test_strict_exits_when_init_is_missing(self):
         run = subprocess.run(
-            [binary.BIN, "env", "--strict"],
+            [binary.ZIG, "env", "--strict"],
             capture_output=True,
             text=True,
             env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
@@ -51,19 +51,19 @@ class EnvStrictCli(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             env = {"PATH": os.environ["PATH"], "HOME": tmp, "EB_LOCAL_PREFIX": f"{tmp}/eessi"}
-            default_dev = subprocess.run([binary.BIN, "dev"], capture_output=True, text=False, env=env)
+            default_dev = subprocess.run([binary.ZIG, "dev"], capture_output=True, text=False, env=env)
             self.assertEqual((default_dev.returncode, default_dev.stderr), (0, b""))
             self.assertTrue(default_dev.stdout.startswith(b"if ! type module >/dev/null 2>&1; then\n"))
             self.assertNotIn(b"init=${repo}/versions/${ver}/init/lmod/bash", default_dev.stdout)
 
-            strict_dev = subprocess.run([binary.BIN, "dev", "--strict"], capture_output=True, text=False, env=env)
+            strict_dev = subprocess.run([binary.ZIG, "dev", "--strict"], capture_output=True, text=False, env=env)
             self.assertEqual((strict_dev.returncode, strict_dev.stderr), (0, b""))
             self.assertTrue(strict_dev.stdout.endswith(default_dev.stdout))
             prelude = strict_dev.stdout[: len(strict_dev.stdout) - len(default_dev.stdout)]
             self.assertIn(b"init=${repo}/versions/${ver}/init/lmod/bash", prelude)
 
             custom_be = subprocess.run(
-                [binary.BIN, "dev", "--buildenv", "buildenv/site-gcc", "FFTW/3.3.10"],
+                [binary.ZIG, "dev", "--buildenv", "buildenv/site-gcc", "FFTW/3.3.10"],
                 capture_output=True,
                 text=False,
                 env=env,
@@ -75,7 +75,7 @@ class EnvStrictCli(unittest.TestCase):
 
     def test_dev_strict_exits_2_when_init_is_absent(self):
         run = subprocess.run(
-            [binary.BIN, "dev", "--strict", "--buildenv", "buildenv/site-gcc", "FFTW/3.3.10"],
+            [binary.ZIG, "dev", "--strict", "--buildenv", "buildenv/site-gcc", "FFTW/3.3.10"],
             capture_output=True,
             text=True,
             env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},

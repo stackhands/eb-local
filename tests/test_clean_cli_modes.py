@@ -11,7 +11,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "clean is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "clean is a feature of the Zig build")
 class CleanCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-clean-modes-")
@@ -29,7 +29,7 @@ class CleanCliModes(unittest.TestCase):
         env.pop("SLURM_JOB_ID", None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

@@ -18,14 +18,14 @@ def digest_of(data: bytes) -> str:
 
 def run(args, *, cwd=None, text=True):
     return subprocess.run(
-        [binary.BIN, "overlay", *args],
+        [binary.ZIG, "overlay", *args],
         capture_output=True,
         cwd=cwd,
         text=text,
     )
 
 
-@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+@unittest.skipUnless(binary.ZIG, "needs the Zig build")
 class OverlayMaterialize(unittest.TestCase):
     def test_default_output_and_status_are_unchanged_raw_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -851,7 +851,7 @@ class OverlayMaterialize(unittest.TestCase):
                     self.assertFalse(out_dir.exists())
 
 
-@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+@unittest.skipUnless(binary.ZIG, "needs the Zig build")
 class OverlayDefaultOutput(unittest.TestCase):
     """Without overlay, build-related stdout stays unchanged."""
 
@@ -863,7 +863,7 @@ class OverlayDefaultOutput(unittest.TestCase):
         return f"{arch}-linux-musl"
 
     def test_version_line_is_unchanged(self):
-        run = subprocess.run([binary.BIN, "--version"], capture_output=True, text=True)
+        run = subprocess.run([binary.ZIG, "--version"], capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertRegex(
             run.stdout,
@@ -871,7 +871,7 @@ class OverlayDefaultOutput(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(binary.BIN, "EB_LOCAL_BIN names the Zig build")
+@unittest.skipUnless(binary.ZIG, "needs the Zig build")
 class OverlayCheckUnreadableOutputs(unittest.TestCase):
     def test_unreadable_existing_outputs_exit_two(self):
         base_bytes = b"name = 'demo'\n"
@@ -997,7 +997,7 @@ class OverlayCheckUnreadableOutputs(unittest.TestCase):
                 with dev_full.open("wb") as full_out:
                     got = subprocess.run(
                         [
-                            binary.BIN,
+                            binary.ZIG,
                             "overlay",
                             "materialize",
                             "--overlay",

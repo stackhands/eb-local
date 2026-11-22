@@ -42,7 +42,7 @@ printf '%s\n' "$*" >> "$CONTROL_ROOT/cc-calls"
 '''
 
 
-@unittest.skipUnless(binary.BIN, "compiler-family selection is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "compiler-family selection is a feature of the Zig build")
 class DevBuildenv(StorageFixture):
     def setUp(self):
         super().setUp()

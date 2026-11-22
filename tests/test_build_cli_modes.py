@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "build and --explain modes are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "build and --explain modes are features of the Zig build")
 class BuildCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-build-modes-")
@@ -36,7 +36,7 @@ class BuildCliModes(unittest.TestCase):
         env.pop("SLURM_JOB_ID", None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

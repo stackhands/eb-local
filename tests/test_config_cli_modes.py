@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "config is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "config is a feature of the Zig build")
 class ConfigCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-config-modes-")
@@ -34,7 +34,7 @@ class ConfigCliModes(unittest.TestCase):
         env.pop("ABSENT_TOK", None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

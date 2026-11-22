@@ -63,7 +63,7 @@ export -f eb
 '''
 
 
-@unittest.skipUnless(binary.BIN, "features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "features of the Zig build")
 class Hardening(StorageFixture):
     def run_tool(self, args, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))
@@ -85,7 +85,7 @@ class Hardening(StorageFixture):
         # program too: only the site file sets the storage settings.
         program = self.root / "opt" / "eb-local"
         program.parent.mkdir()
-        shutil.copy2(binary.BIN, program)
+        shutil.copy2(binary.ZIG, program)
         site = program.parent / "config.toml"
         site.write_text(f'[storage]\nnode_local_root = "{self.nodes}"\n')
         site.chmod(0o644)
