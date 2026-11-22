@@ -18,6 +18,7 @@ install-software
 install-your-own-recipe
 eb-without-a-site-file
 build-for-every-node-type
+build-against-a-site-gpu-module
 install-what-eessi-lacks
 find-what-is-wrong
 refresh-the-module-cache
