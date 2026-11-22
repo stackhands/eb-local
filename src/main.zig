@@ -1450,7 +1450,25 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     var exe_buf: [sys.path_max]u8 = undefined;
     const exe = q(a, selfExe(&exe_buf) orelse tool);
     const unwrapped = str(a, "eval \"$({s} rpath-wrappers --unwrapped)\"\n", .{exe});
-    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}", .{ gcc, unwrapped });
+    const pin_python =
+        \\if [ "${EB_LOCAL_PIN_BUILDENV_PYTHON-}" = 1 ] && [ -x "${EPREFIX-}/usr/bin/python3" ]; then
+        \\    _eb_local_python_root=${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}
+        \\    _eb_local_python_dir=$_eb_local_python_root/eb-local/python-pin
+        \\    if mkdir -p "$_eb_local_python_dir" && chmod 700 "$_eb_local_python_dir"; then
+        \\        if ln -sfn "$EPREFIX/usr/bin/python3" "$_eb_local_python_dir/python3"; then
+        \\            case $PATH in "$_eb_local_python_dir"|"$_eb_local_python_dir":*) ;; *) PATH="$_eb_local_python_dir:$PATH" ;; esac
+        \\            export PATH
+        \\        else
+        \\            echo "eb-local: cannot pin build environment Python" >&2
+        \\        fi
+        \\    else
+        \\        echo "eb-local: cannot create a private Python wrapper directory" >&2
+        \\    fi
+        \\    unset _eb_local_python_root _eb_local_python_dir
+        \\fi
+        \\
+    ;
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}{s}", .{ gcc, pin_python, unwrapped });
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
@@ -1487,6 +1505,7 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
         \\unset eb_local_family eb_local_buildenv eb_local_level
         \\
     , .{ gcc, gcc, exe }));
+    add(a, &out, pin_python);
     add(a, &out, unwrapped);
     return out.items;
 }

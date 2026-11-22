@@ -43,6 +43,7 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 |---|---|
 | `EB_LOCAL_PROFILE` | Names the profile when `--profile` does not; empty, it selects none. |
 | `EB_LOCAL_CONFIG` | Names a configuration file to read when `--config` does not. |
+| `EB_LOCAL_PIN_BUILDENV_PYTHON` | `1` prepends the stable private compatibility-layer `python3` directory after `dev` loads a build environment. |
 | `EB_LOCAL_KEEP_WORK` | `1` keeps the workspace of a build that succeeds. |
 | `EB_LOCAL_LOCK_TIMEOUT_MS` | Positive integer milliseconds to wait for a busy `flock` lock before exiting non-zero; default `300000`. |
 | `EB_LOCAL_EESSI_EXTEND` | Set, not empty and not `0`, it sends every argument to `eb`, as after `eb-local eb --`. An eb-stack EESSI target runs eb-local this way. |
