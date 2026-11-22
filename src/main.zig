@@ -250,6 +250,45 @@ const install_vars = [_][]const u8{
     "EASYBUILD_INSTALLPATH_SOFTWARE",    "EASYBUILD_INSTALLPATH_MODULES", "EASYBUILD_PREFIX",
 };
 
+/// How many names each `unset` line `env` and a build print takes, in the
+/// order of `install_vars`: four names, one name, three names, four names.
+const install_unset_groups = [_]usize{ 4, 1, 3, 4 };
+
+comptime {
+    var n: usize = 0;
+    for (install_unset_groups) |size| n += size;
+    std.debug.assert(n == install_vars.len);
+}
+
+/// The names `env` and a build unset: `install_vars`. The test artifact
+/// takes another list of as many names from EB_LOCAL_TEST_INSTALL_VARS, so a
+/// test sees both read one list.
+fn installNames(a: Allocator, c: Ctx) []const []const u8 {
+    if (build_options.test_ops) if (nonEmpty(c.env.get("EB_LOCAL_TEST_INSTALL_VARS"))) |value| {
+        var names: std.ArrayList([]const u8) = .empty;
+        var words = std.mem.tokenizeScalar(u8, value, ' ');
+        while (words.next()) |word| {
+            for (word) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '_') return &install_vars;
+            names.append(a, word) catch oom();
+        }
+        if (names.items.len == install_vars.len) return names.items;
+    };
+    return &install_vars;
+}
+
+/// The `unset` lines for `names`, grouped as `install_unset_groups` says.
+fn installUnsetLines(a: Allocator, names: []const []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var next: usize = 0;
+    for (install_unset_groups) |size| {
+        out.appendSlice(a, "unset") catch oom();
+        for (names[next .. next + size]) |name| out.print(a, " {s}", .{name}) catch oom();
+        out.append(a, '\n') catch oom();
+        next += size;
+    }
+    return out.items;
+}
+
 /// What, left in a shell, sends a later load of EESSI-extend, or eb after
 /// it, somewhere else: EESSI-extend sets the other install variables itself.
 const leftover_vars = [_][]const u8{
@@ -358,13 +397,7 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
     add(a, &out, lmod_init);
     if (pure) add(a, &out, pure_prelude);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
-    add(a, &out,
-        \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
-        \\unset EESSI_SITE_SOFTWARE_PREFIX
-        \\unset EESSI_SOFTWARE_SUBDIR_OVERRIDE EESSI_ACCELERATOR_TARGET_OVERRIDE EESSI_OVERRIDE_GPU_CHECK
-        \\unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
-        \\
-    );
+    add(a, &out, installUnsetLines(a, installNames(a, c)));
     add(a, &out, install.exportLine(a));
     // [eessi] settings before the stack loads: the EESSI module and its
     // hooks read them then.
@@ -3691,7 +3724,7 @@ fn initDefinesModule(c: Ctx, envp: proc.Envp, file: []const u8) bool {
     return r.term.code() == 0;
 }
 
-const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
+const build_script_head = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
     \\trap 'trap - INT; kill -s INT "$$"' INT
     \\stack=$1 extend=$2 install_var=$3 prefix=$4 mode=$5
     \\shift 5
@@ -3719,10 +3752,10 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
 ++ eessi_modules ++
     \\# EESSI-extend reads the variables when it loads, so it is loaded fresh.
     \\module unload "$extend" >/dev/null 2>&1 || true
-    \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
-    \\unset EESSI_SITE_SOFTWARE_PREFIX
-    \\unset EESSI_SOFTWARE_SUBDIR_OVERRIDE EESSI_ACCELERATOR_TARGET_OVERRIDE EESSI_OVERRIDE_GPU_CHECK
-    \\unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
+    \\
+;
+
+const build_script_tail =
     \\restore
     \\export "$install_var=$prefix"
     \\# Lmod finds every module of a load before it loads any; the extension
@@ -3788,6 +3821,11 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\exec eb "$@"
 ;
 
+/// `build_script_head`, the `unset` lines for `names`, then `build_script_tail`.
+fn buildScript(a: Allocator, names: []const []const u8) []const u8 {
+    return std.mem.concat(a, u8, &.{ build_script_head, installUnsetLines(a, names), build_script_tail }) catch oom();
+}
+
 /// What bash would run before the script could unset it: bash runs BASH_ENV
 /// first, and SHELLOPTS=xtrace prints the commands into the job log.
 const shell_startup = [_][]const u8{ "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS" };
@@ -3832,12 +3870,13 @@ fn buildUmask(p: Place) u32 {
     return if (configuredInstall(p).mode == .project) 0o002 else 0o077;
 }
 
-/// The command a build runs: `build_script` in a clean bash, with the stack,
+/// The command a build runs: `buildScript` in a clean bash, with the stack,
 /// the extension, the install variable, the prefix and the mode as its first
 /// five arguments, and eb's after them.
 fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []const []const u8) []const []const u8 {
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
     const install = configuredInstall(p);
+    const build_script = buildScript(a, installNames(a, c));
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(a, &.{
         bash,                 "--noprofile",         "--norc",           "-c",           build_script,           "eb-local",
@@ -3856,6 +3895,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     const a = c.a;
     const p = place(c, s);
     const install = configuredInstall(p);
+    const build_script = buildScript(a, installNames(a, c));
     const d = durableDirs(c, p.prefix, "a build would stop here");
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain: the script a build runs, with its environment and arguments. Nothing was created or run.\n") catch oom();
@@ -6405,8 +6445,11 @@ test {
 }
 
 test "a build script selects no MPI transport" {
-    try std.testing.expect(std.mem.indexOf(u8, build_script, "OMPI_MCA") == null);
-    try std.testing.expect(std.mem.indexOf(u8, build_script, "FI_PROVIDER") == null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const script = buildScript(arena.allocator(), &install_vars);
+    try std.testing.expect(std.mem.indexOf(u8, script, "OMPI_MCA") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "FI_PROVIDER") == null);
 }
 
 const extend_source_var = "EBLOCAL_EB_SOURCEPATH";

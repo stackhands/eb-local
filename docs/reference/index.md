@@ -13,6 +13,7 @@ configuration
 recipe-overlay
 readiness
 environment
+env-scrub
 refusals
 api
 ```
