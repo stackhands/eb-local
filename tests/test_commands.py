@@ -229,6 +229,32 @@ class Commands(StorageFixture):
                                  (0, "module-visible"), replay.stderr)
 
     @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
+    def test_replace_failure_keeps_saved_state_complete(self):
+        self.prefix.mkdir(parents=True)
+        script = self.root / "replace-failure.sh"
+        script.write_text(
+            "set -eu\n"
+            "module() { [ \"${1-}\" = is-avail ] && return 1; return 0; }\n"
+            f"eb_local={shlex.quote(binary.ZIG)}\n"
+            'eval "$($eb_local dev --replace)"\n'
+            'saved=$EB_LOCAL_DEV_SAVED\n'
+            "export EBROOTNVHPC=1 XDG_CACHE_HOME=/dev/null\n"
+            'if eval "$($eb_local dev --replace)"; then exit 1; fi\n'
+            'test "$EB_LOCAL_DEV_SAVED" = "$saved"\n'
+            "unset EBROOTNVHPC XDG_CACHE_HOME\n"
+            'eval "$($eb_local leave)"\n'
+            'test "${EB_LOCAL_DEV_SAVED+x}" != x\n'
+            'eval "$($eb_local dev --replace)"\n'
+            'test -n "$EB_LOCAL_DEV_SAVED"\n',
+            encoding="utf-8",
+        )
+        env = dict(self.env, SLURM_JOB_ID="", EESSI_VERSION="2026.06",
+                   EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        run = subprocess.run(["bash", str(script)], env=env, cwd=self.root,
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
     @unittest.skipIf(os.geteuid() == 0, "root can read mode-000 files")
     def test_a_mode_000_lmod_initializer_is_not_sourced(self):
         if Path("/etc/profile.d/lmod.sh").exists():
