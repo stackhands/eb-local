@@ -318,6 +318,7 @@ With more than one install variable set, it prints nothing on stdout and exits 3
 Print the shell lines that load EESSI and then EESSI-extend for the prefix, or the project directory, which puts the modules installed there on `MODULEPATH`.
 Run them with `eval "$(eb-local env)"`.
 When stdout is a terminal, it also says on stderr that the lines change nothing until the shell runs them.
+When the shell that runs the lines has no `module` command, they return 1 before they unset or export anything, and that shell stays up unless it has errexit. `--strict` still exits the shell, and it checks the init file first.
 
 | Option | Meaning |
 |---|---|
@@ -341,6 +342,7 @@ Only variables are in the change. Shell functions and aliases, such as Lmod's `m
 ### dev
 
 Print the lines `env` prints, then the lines that load the modules `dev.modules` names and those named on the line, then a build environment, and that set `EB_LOCAL_DEV_PREFIX` to `<prefix>/dev/<EESSI version>/<CPU target>`, with the GPU target appended when EESSI found one.
+When `rpath-wrappers` fails, the lines return its status before setting `EB_LOCAL_DEV_PREFIX`. Evaluating them in an interactive shell does not close that shell.
 
 | Option | Meaning |
 |---|---|

@@ -66,6 +66,8 @@ class StdoutWriteErrorsCli(unittest.TestCase):
             encoding="utf-8",
         )
         self.site.chmod(0o600)
+        self.module_sh = self.root / "module.sh"
+        self.module_sh.write_text("module() { return 0; }\n", encoding="utf-8")
 
         # Compiler stub for rpath-wrappers, sbatch/eb sentinels for submit/build,
         # and rtrash stub for restore.
@@ -97,6 +99,7 @@ class StdoutWriteErrorsCli(unittest.TestCase):
             "EB_LOCAL_CONFIG": str(self.site),
             "EB_LOCAL_PREFIX": str(self.prefix),
             "SLURM_JOB_ID": "",
+            "BASH_ENV": str(self.module_sh),
         }
         env.update(extra)
         return env
