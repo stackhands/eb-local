@@ -9,6 +9,16 @@ import unittest
 
 import binary
 
+GUARD_FAILURE = """#!/bin/sh
+printf '%s\n' 'export EESSI_SOFTWARE_SUBDIR=wrong/from-failed-guard'
+printf '%s\n' 'export EB_LOCAL_GUARD_TEST=applied'
+exit 78
+"""
+
+GUARD_SUCCESS = """#!/bin/sh
+printf '%s\n' 'export EB_LOCAL_GUARD_TEST=applied'
+"""
+
 MODULE_STUB = r"""#!/usr/bin/env python3
 import os
 from pathlib import Path
@@ -178,6 +188,41 @@ class DevLifecycle(unittest.TestCase):
     def command(self):
         return f'"{binary.ZIG}" "$@"'
 
+    def dev_output(self, env):
+        return self.command_output(["dev"], env)
+
+    def command_output(self, args, env):
+        emitted = subprocess.run(
+            [binary.ZIG, *args],
+            cwd=self.root,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(emitted.returncode, 0, emitted.stdout + emitted.stderr)
+        return emitted.stdout
+
+    def caller_script(self, emitted, reached, state=None):
+        save_state = ""
+        if state is not None:
+            save_state = (
+                '\nif [ -n "${ZSH_VERSION-}" ]; then\n'
+                '  TRAPZERR() { printf "%s" "${EB_LOCAL_GUARD_TEST-unset}" > '
+                f"{str(state)!r}; }}\n"
+                "else\n"
+                '  trap \'printf "%s" "${EB_LOCAL_GUARD_TEST-unset}" > '
+                f"{str(state)!r}' EXIT\n"
+                "fi\n"
+            )
+        return (
+            "set -e\n"
+            'module() { eval "$("$PYTHON" "$MODULE_STUB" "$@")"; }\n'
+            + save_state
+            + emitted
+            + f"\nprintf '%s\\n' reached > {str(reached)!r}\n"
+        )
+
     def test_replace_switches_compilers_and_leave_restores_the_caller(self):
         script = self.root / "lifecycle.sh"
         script.write_text(textwrap.dedent(LIFECYCLE).replace("__EB_LOCAL_COMMAND__", self.command()))
@@ -212,6 +257,255 @@ class DevLifecycle(unittest.TestCase):
             self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
             self.assertEqual(got.stdout, "")
             self.assertIn("EB_LOCAL_DEV_SAVED" if state else "no recorded dev", got.stderr)
+
+    def test_failed_arch_guard_stops_errexit_callers_without_evaluating_output(self):
+        bin_dir = self.root / "guard-bin"
+        bin_dir.mkdir()
+        guard = bin_dir / "eessi-arch-guard"
+        guard.write_text(GUARD_FAILURE)
+        guard.chmod(0o755)
+        env = dict(self.env, PATH=f"{bin_dir}:/usr/bin:/bin")
+        emitted = self.dev_output(env)
+
+        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
+            with self.subTest(shell=Path(shell).name):
+                reached = self.root / f"reached-{Path(shell).name}"
+                state = self.root / f"state-{Path(shell).name}"
+                replay = subprocess.run(
+                    [shell, "-c", self.caller_script(emitted, reached, state)],
+                    cwd=self.root,
+                    env=env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(replay.returncode, 78, replay.stdout + replay.stderr)
+                self.assertFalse(reached.exists())
+                self.assertEqual(state.read_text(), "unset")
+
+    def test_failed_arch_guard_returns_from_non_errexit_eval_contexts(self):
+        bin_dir = self.root / "guard-bin"
+        bin_dir.mkdir()
+        guard = bin_dir / "eessi-arch-guard"
+        guard.write_text(GUARD_FAILURE)
+        guard.chmod(0o755)
+        env = dict(self.env, PATH=f"{bin_dir}:/usr/bin:/bin")
+        emitted = self.dev_output(env)
+        emitted_path = self.root / "dev-output.sh"
+        emitted_path.write_text(emitted)
+        modes = {
+            "errexit-off": f'eval "$(cat {str(emitted_path)!r})"\nresult_status=$?\n',
+            "or": (
+                f'eval "$(cat {str(emitted_path)!r})" || '
+                '{ result_status=$?; printf fallback > "$FALLBACK"; }\n'
+            ),
+            "if": (
+                f'if eval "$(cat {str(emitted_path)!r})"; then result_status=0; '
+                "else result_status=$?; fi\n"
+            ),
+        }
+
+        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
+            for mode, invoke in modes.items():
+                with self.subTest(shell=Path(shell).name, mode=mode):
+                    (self.root / "module-calls").unlink(missing_ok=True)
+                    result = self.root / f"result-{Path(shell).name}-{mode}"
+                    fallback = self.root / f"fallback-{Path(shell).name}-{mode}"
+                    script = (
+                        'module() { eval "$("$PYTHON" "$MODULE_STUB" "$@")"; }\n'
+                        + invoke
+                        + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                        "then exit 31; fi\n"
+                        + 'printf "%s:%s:%s" "$result_status" "${EESSI_SOFTWARE_SUBDIR-unset}" '
+                        f'"${{EB_LOCAL_GUARD_TEST-unset}}" > {str(result)!r}\n'
+                        + 'exit "$result_status"\n'
+                    )
+                    replay = subprocess.run(
+                        [shell, "-c", script],
+                        cwd=self.root,
+                        env=dict(env, FALLBACK=str(fallback)),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(replay.returncode, 78, replay.stdout + replay.stderr)
+                    self.assertEqual(result.read_text(), "78:x86_64/test:unset")
+                    self.assertEqual(fallback.exists(), mode == "or")
+                    loads = [
+                        line for line in (self.root / "module-calls").read_text().splitlines()
+                        if line.startswith("load ")
+                    ]
+                    self.assertFalse(any("EESSI-extend" in line for line in loads), loads)
+
+    def test_passing_arch_guard_applies_its_output(self):
+        bin_dir = self.root / "guard-bin"
+        bin_dir.mkdir()
+        guard = bin_dir / "eessi-arch-guard"
+        guard.write_text(GUARD_SUCCESS)
+        guard.chmod(0o755)
+        env = dict(self.env, PATH=f"{bin_dir}:/usr/bin:/bin")
+        emitted = self.dev_output(env)
+
+        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
+            with self.subTest(shell=Path(shell).name):
+                reached = self.root / f"reached-{Path(shell).name}"
+                script = self.caller_script(
+                    emitted
+                    + '\ntest "$EB_LOCAL_GUARD_TEST" = applied\n'
+                    + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                    "then exit 31; fi\n",
+                    reached,
+                )
+                replay = subprocess.run(
+                    [shell, "-c", script],
+                    cwd=self.root,
+                    env=env,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+                self.assertTrue(reached.exists())
+
+    def test_failed_replace_keeps_state_for_leave_and_retry(self):
+        bin_dir = self.root / "guard-bin"
+        bin_dir.mkdir()
+        mode = self.root / "guard-mode"
+        mode.write_text("fail")
+        guard = bin_dir / "eessi-arch-guard"
+        guard.write_text(
+            "#!/bin/sh\n"
+            'if [ "$(cat "$GUARD_MODE")" = fail ]; then\n'
+            "  printf '%s\\n' 'export EESSI_SOFTWARE_SUBDIR=wrong'\n"
+            "  exit 78\n"
+            "fi\n"
+            "printf '%s\\n' 'export EESSI_SOFTWARE_SUBDIR=x86_64/test'\n"
+        )
+        guard.chmod(0o755)
+        env = dict(
+            self.env,
+            PATH=f"{bin_dir}:/usr/bin:/bin",
+            GUARD_MODE=str(mode),
+            EB_LOCAL_DEV_SAVED=self.env["LEGACY_STATE"],
+        )
+        failed = self.command_output(["dev", "--replace"], env)
+        failed_path = self.root / "failed-replace.sh"
+        failed_path.write_text(failed)
+        modes = {
+            "off": f'eval "$(cat {str(failed_path)!r})"; rc=$?\n',
+            "or": f'eval "$(cat {str(failed_path)!r})" || rc=$?\n',
+            "if": f'if eval "$(cat {str(failed_path)!r})"; then rc=0; else rc=$?; fi\n',
+        }
+        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
+            for name, invoke in modes.items():
+                with self.subTest(shell=Path(shell).name, mode=name):
+                    script = (
+                        'module() { eval "$("$PYTHON" "$MODULE_STUB" "$@")"; }\n'
+                        + f'eb_local() {{ {self.command()} ; }}\n'
+                        + f'printf fail > {str(mode)!r}\n'
+                        + invoke
+                        + '[ "$rc" = 78 ] || exit 20\n'
+                        + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                        "then exit 31; fi\n"
+                        + 'eval "$(eb_local leave)" || exit 21\n'
+                        + '[ "$LOADEDMODULES" = Base/1 ] || exit 22\n'
+                        + f'[ "$PATH" = {str(self.root / "legacy" / "bin")!r} ] || exit 24\n'
+                        + f'printf pass > {str(mode)!r}\n'
+                        + 'eval "$(eb_local dev --replace)" || exit 23\n'
+                        + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                        "then exit 32; fi\n"
+                        + 'test -n "$EB_LOCAL_DEV_SAVED" || exit 25\n'
+                        + 'eval "$(eb_local leave)" || exit 26\n'
+                    )
+                    run = subprocess.run(
+                        [shell, "-c", script],
+                        cwd=self.root,
+                        env=env,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_failed_replace_from_new_and_active_shell_restores_and_retries(self):
+        bin_dir = self.root / "guard-bin"
+        bin_dir.mkdir()
+        mode = self.root / "guard-mode"
+        guard = bin_dir / "eessi-arch-guard"
+        guard.write_text(
+            "#!/bin/sh\n"
+            'if [ "$(cat "$GUARD_MODE")" = fail ]; then\n'
+            "  printf '%s\\n' 'export EESSI_SOFTWARE_SUBDIR=wrong'\n"
+            "  exit 78\n"
+            "fi\n"
+            "printf '%s\\n' 'export EESSI_SOFTWARE_SUBDIR=x86_64/test'\n"
+        )
+        guard.chmod(0o755)
+        env = dict(
+            self.env,
+            PATH=f"{bin_dir}:/usr/bin:/bin",
+            GUARD_MODE=str(mode),
+        )
+        modes = {
+            "off": 'eval "$(eb_local dev --replace)"; rc=$?\n',
+            "or": 'eval "$(eb_local dev --replace)" || rc=$?\n',
+            "if": (
+                'if eval "$(eb_local dev --replace)"; then rc=0; '
+                "else rc=$?; fi\n"
+            ),
+        }
+        starts = {
+            "new": "",
+            "active": (
+                f'printf pass > {str(mode)!r}\n'
+                'eval "$(eb_local dev --replace GCC/1)" || exit 10\n'
+                "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                "then exit 30; fi\n"
+            ),
+        }
+        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
+            for start, prepare in starts.items():
+                for shape, invoke in modes.items():
+                    with self.subTest(
+                        shell=Path(shell).name,
+                        start=start,
+                        shape=shape,
+                    ):
+                        script = (
+                            'module() { eval "$("$PYTHON" "$MODULE_STUB" "$@")"; }\n'
+                            + f'eb_local() {{ {self.command()} ; }}\n'
+                            + "prior_path=$PATH\n"
+                            + prepare
+                            + f'printf fail > {str(mode)!r}\n'
+                            + invoke
+                            + '[ "$rc" = 78 ] || exit 20\n'
+                            + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                            "then exit 31; fi\n"
+                            + 'eval "$(eb_local leave)" || exit 21\n'
+                            + '[ "$LOADEDMODULES" = Base/1 ] || exit 22\n'
+                            + '[ "$PATH" = "$prior_path" ] || exit 23\n'
+                            + f'printf pass > {str(mode)!r}\n'
+                            + 'eval "$(eb_local dev --replace GCC/2)" || exit 24\n'
+                            + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+                            "then exit 32; fi\n"
+                            + 'test -n "$EB_LOCAL_DEV_SAVED" || exit 25\n'
+                            + 'eval "$(eb_local leave)" || exit 26\n'
+                            + '[ "$LOADEDMODULES" = Base/1 ] || exit 27\n'
+                            + '[ "$PATH" = "$prior_path" ] || exit 28\n'
+                        )
+                        run = subprocess.run(
+                            [shell, "-c", script],
+                            cwd=self.root,
+                            env=env,
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(
+                            run.returncode,
+                            0,
+                            run.stdout + run.stderr,
+                        )
 
 
 if __name__ == "__main__":

@@ -156,6 +156,34 @@ class EnvEvalFdLeakCli(unittest.TestCase):
                 self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
                 self.assertEqual(list(self.tmp_scratch.iterdir()), [])
 
+    def test_arch_guard_failure_stops_json_and_lock_evaluation(self):
+        guard = self.bins / "eessi-arch-guard"
+        guard.write_text(
+            "#!/bin/sh\n"
+            "printf 'export EESSI_SOFTWARE_SUBDIR=wrong/from-failed-guard\\n'\n"
+            "exit 78\n",
+            encoding="utf-8",
+        )
+        for label, args in (
+            ("env-json", ["env", "--json"]),
+            ("dev-json", ["dev", "--json", "zlib/1.3"]),
+            ("dev-lock", ["dev", "--lock", "zlib/1.3"]),
+        ):
+            with self.subTest(mode=label):
+                run = subprocess.run(
+                    [binary.ZIG, *args],
+                    env=self.base_env(),
+                    cwd=self.root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(run.returncode, 78, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertFalse((self.root / "eb-local.lock").exists())
+                self.assertEqual(list(self.tmp_scratch.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()
