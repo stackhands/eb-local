@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Black-box CLI behavior tests for `eb-local config` modes, `--get`, `--env`, and `--check`."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
 import binary
+import hostile_fs
 
 
 @unittest.skipUnless(binary.ZIG, "config is a feature of the Zig build")
@@ -106,6 +108,101 @@ class ConfigCliModes(unittest.TestCase):
                 self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
                 self.assertEqual(got.stdout, "")
                 self.assertIn(f"eessi.{var}: [eessi] sets EESSI_* variables other than", got.stderr)
+
+    def test_config_refuses_hostile_input_files(self):
+        def make_inputs(base: Path):
+            entries = []
+            d = base / "dir.toml"
+            d.mkdir()
+            entries.append(("dir", d, str(d).encode()))
+
+            pipe = base / "pipe.toml"
+            os.mkfifo(pipe, 0o600)
+            entries.append(("fifo", pipe, str(pipe).encode()))
+
+            link, _ = hostile_fs.dangling_symlink(base / "dangling.toml", base / "absent.toml")
+            entries.append(("dangling", link, b"symbolic link"))
+
+            nonutf = base / "nonutf.toml"
+            nonutf.write_bytes(b'prefix = "\xff\xfe"\n')
+            nonutf.chmod(0o600)
+            entries.append(("nonutf", nonutf, b"the file is not UTF-8"))
+
+            bom = base / "bom.toml"
+            bom.write_bytes(b'\xef\xbb\xbfprefix = "/tmp/x"\n')
+            bom.chmod(0o600)
+            entries.append(("bom", bom, b""))
+
+            big = hostile_fs.oversized_file(base / "big.toml", 2 * 1024 * 1024)
+            entries.append(("oversized", big, b"StreamTooLong"))
+            return entries
+
+        explicit_dir = self.root / "explicit"
+        explicit_dir.mkdir()
+        for kind, path, needle in make_inputs(explicit_dir):
+            with self.subTest(mode="explicit", kind=kind):
+                env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": ""}
+                got = subprocess.run(
+                    [binary.ZIG, "--config", str(path), "config", "--check"],
+                    env=env,
+                    cwd=self.root,
+                    capture_output=True,
+                    text=False,
+                    timeout=2,
+                    check=False,
+                )
+                self.assertEqual(got.returncode, 2, got.stderr)
+                self.assertEqual(got.stdout, b"")
+                self.assertTrue(len(got.stderr.strip()) > 0)
+                self.assertIn(str(path).encode(), got.stderr)
+                if needle:
+                    self.assertIn(needle, got.stderr)
+
+        user_cases = (
+            ("dir", b""),
+            ("fifo", b""),
+            ("dangling", b"symbolic link"),
+            ("nonutf", b"the file is not UTF-8"),
+            ("bom", b""),
+            ("oversized", b"StreamTooLong"),
+        )
+        for kind, needle in user_cases:
+            with self.subTest(mode="user", kind=kind):
+                user_home = self.root / f"home-{kind}"
+                cfg_dir = user_home / ".config" / "eb-local"
+                cfg_dir.mkdir(parents=True)
+                target = cfg_dir / "config.toml"
+                if kind == "dir":
+                    target.mkdir()
+                elif kind == "fifo":
+                    os.mkfifo(target, 0o600)
+                elif kind == "dangling":
+                    hostile_fs.dangling_symlink(target, user_home / "absent.toml")
+                elif kind == "nonutf":
+                    target.write_bytes(b'prefix = "\xff\xfe"\n')
+                    target.chmod(0o600)
+                elif kind == "bom":
+                    target.write_bytes(b'\xef\xbb\xbfprefix = "/tmp/x"\n')
+                    target.chmod(0o600)
+                elif kind == "oversized":
+                    hostile_fs.oversized_file(target, 2 * 1024 * 1024)
+
+                env = {"PATH": "/usr/bin:/bin", "HOME": str(user_home), "EB_LOCAL_CONFIG": ""}
+                got = subprocess.run(
+                    [binary.ZIG, "config", "--check"],
+                    env=env,
+                    cwd=self.root,
+                    capture_output=True,
+                    text=False,
+                    timeout=2,
+                    check=False,
+                )
+                self.assertEqual(got.returncode, 2, got.stderr)
+                self.assertEqual(got.stdout, b"")
+                self.assertTrue(len(got.stderr.strip()) > 0)
+                self.assertIn(str(target).encode(), got.stderr)
+                if needle:
+                    self.assertIn(needle, got.stderr)
 
 
 if __name__ == "__main__":
