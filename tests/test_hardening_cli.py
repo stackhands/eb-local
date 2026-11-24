@@ -20,6 +20,7 @@ import subprocess
 import unittest
 
 import binary
+import hostile_fs
 from test_storage import StorageFixture
 
 EB_ECHO = r'''
@@ -255,6 +256,91 @@ export -f eb
         sibling = (self.prefix / ".eb-local" / "logs" / "sibling.log").read_text()
         self.assertNotIn("tok-3141-secret", sibling)
         self.assertIn("<secret SOURCE_TOKEN removed by eb-local>", sibling)
+
+    def test_secrets_refuse_hostile_input_files(self):
+        for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
+            self.env.pop(name, None)
+
+        hostile_dir = self.root / "hostile-sec"
+        hostile_dir.mkdir()
+        d = hostile_dir / "dir"
+        d.mkdir()
+        pipe = hostile_dir / "pipe.sec"
+        os.mkfifo(pipe, 0o600)
+        link, _ = hostile_fs.dangling_symlink(hostile_dir / "dangling.sec", hostile_dir / "absent.sec")
+        oversized = hostile_fs.oversized_file(hostile_dir / "big.sec", 65537, fill=b"a", mode=0o600)
+        nul_sparse = hostile_fs.oversized_file(hostile_dir / "nul.sec", 8192, mode=0o600)
+
+        cases = (
+            ("dir", d, ""),
+            ("fifo", pipe, ""),
+            ("dangling", link, "Too many levels of symbolic links"),
+            ("oversized", oversized, "larger than 65536 bytes"),
+            ("nul", nul_sparse, "holds a NUL byte"),
+        )
+        for kind, path, needle in cases:
+            with self.subTest(kind=kind):
+                site = self.root / f"site-{kind}.toml"
+                site.write_text(
+                    f'[storage]\nnode_local_root = "{self.nodes}"\n'
+                    f'[secrets]\nSOURCE_TOKEN = "file:{path}"\n',
+                    encoding="utf-8",
+                )
+                site.chmod(0o600)
+                argv, env = binary.command(
+                    self.script,
+                    ["--config", str(site), "config", "--check", "--json"],
+                    dict(self.env),
+                )
+                got = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True, timeout=2, check=False)
+                self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+                doc = json.loads(got.stdout)
+                self.assertTrue(doc["check_failed"])
+                self.assertEqual(doc["secrets"][0]["status"], "failed")
+                self.assertIn(str(path), doc["secrets"][0]["detail"])
+                if needle:
+                    self.assertIn(needle, doc["secrets"][0]["detail"])
+
+                build_argv, build_env = binary.command(
+                    self.script,
+                    ["--config", str(site), "recipe.eb"],
+                    dict(self.env),
+                )
+                build_got = subprocess.run(build_argv, env=build_env, cwd=self.root, capture_output=True, text=True, timeout=2, check=False)
+                self.assertEqual(build_got.returncode, 2, build_got.stdout + build_got.stderr)
+                self.assertIn(str(path), build_got.stderr)
+                if needle:
+                    self.assertIn(needle, build_got.stderr)
+
+        token = self.root / "good-token"
+        token.write_text("tok-3141-secret\n", encoding="utf-8")
+        token.chmod(0o600)
+        site_ok = self.root / "site-log-hostile.toml"
+        site_ok.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\n'
+            f'[secrets]\nSOURCE_TOKEN = "file:{token}"\n',
+            encoding="utf-8",
+        )
+        site_ok.chmod(0o600)
+
+        logs = self.prefix / ".eb-local" / "logs"
+        logs.mkdir(parents=True)
+        os.mkfifo(logs / "pipe.log", 0o600)
+        hostile_fs.dangling_symlink(logs / "dangling.log", self.root / "absent-log")
+        outside = self.root / "outside.log"
+        outside.write_text("outside tok-3141-secret\n", encoding="utf-8")
+        (logs / "live.log").symlink_to(outside)
+        nonutf_log = logs / "nonutf.log"
+        nonutf_log.write_bytes(b"leak \xff\xfe tok-3141-secret\n")
+        bom_log = logs / "bom.log"
+        bom_log.write_bytes(b"\xef\xbb\xbfleak tok-3141-secret\n")
+
+        argv, env = binary.command(self.script, ["--config", str(site_ok), "recipe.eb"], dict(self.env))
+        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False, timeout=5, check=False)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside tok-3141-secret\n")
+        self.assertEqual(nonutf_log.read_bytes(), b"leak \xff\xfe <secret SOURCE_TOKEN removed by eb-local>\n")
+        self.assertEqual(bom_log.read_bytes(), b"\xef\xbb\xbfleak <secret SOURCE_TOKEN removed by eb-local>\n")
 
 
 if __name__ == "__main__":

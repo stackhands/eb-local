@@ -1,0 +1,1 @@
+`tests/test_hardening_cli.py` verifies that `file:` secret resolution rejects directory and FIFO paths under a bounded timeout as well as dangling symlinks and oversized inputs, and that log redaction leaves special files untouched while scrubbing byte-order mark and non-UTF-8 logs.
