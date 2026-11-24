@@ -258,7 +258,7 @@ class DevCliModes(unittest.TestCase):
         got = self.run_dev(["--locked"])
         self.assertEqual(got.returncode, 0, got.stderr)
         run = subprocess.run(
-            ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+            ["bash", "-c", 'module() { return 0; }\n' + got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
                  "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"},
             capture_output=True, text=True,
@@ -275,7 +275,7 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(empty.returncode, 0, empty.stderr)
         self.assertNotIn('elif [ "${EESSI_VERSION-}"', empty.stdout)
         loaded = subprocess.run(
-            ["bash", "-c", empty.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+            ["bash", "-c", 'module() { return 0; }\n' + empty.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
                  "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"},
             capture_output=True, text=True,
