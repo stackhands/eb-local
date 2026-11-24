@@ -318,6 +318,7 @@ With more than one install variable set, it prints nothing on stdout and exits 3
 Print the shell lines that load EESSI and then EESSI-extend for the prefix, or the project directory, which puts the modules installed there on `MODULEPATH`.
 Run them with `eval "$(eb-local env)"`.
 When stdout is a terminal, it also says on stderr that the lines change nothing until the shell runs them.
+When the shell that runs the lines has no `module` command, they return 1 before they unset or export anything, and that shell stays up unless it has errexit. `--strict` still exits the shell, and it checks the init file first.
 
 | Option | Meaning |
 |---|---|

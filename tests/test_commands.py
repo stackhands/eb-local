@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -127,6 +128,133 @@ class Commands(StorageFixture):
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
         self.assertFalse(self.prefix.exists())
+
+    @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
+    def test_dev_and_env_leave_the_shell_unchanged_without_a_module_command(self):
+        # Every initializer is unusable. The evaluating shell has no module
+        # function of its own, so the lines have nothing to load with.
+        if Path("/etc/profile.d/lmod.sh").exists():
+            self.skipTest("/etc/profile.d/lmod.sh is this host's Lmod init")
+        host = self.root / "lmod" / "init" / "bash"
+        host.mkdir(parents=True)
+        eessi = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        eessi.mkdir(parents=True)
+        shells = ["bash"]
+        if shutil.which("zsh"):
+            shells.append("zsh")
+        saved = (
+            "eb-local-dev-v1\n"
+            "prior:Base/1\n"
+            "PATH:u\n"
+            "EB_LOCAL_DEV_PREFIX:u\n"
+            "EB_LOCAL_RPATH_WRAPPERS:u\n"
+            "LD_LIBRARY_PATH:u\n"
+            "LD_PRELOAD:u\n"
+            "LD_AUDIT:u\n"
+            "active:Old/1"
+        )
+        clean = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(self.root),
+            "LMOD_PKG": str(self.root / "lmod"),
+            "EESSI_CVMFS_REPO": str(self.root / "repo"),
+            "EESSI_VERSION": "2026.06",
+            "LOADEDMODULES": "Base/1:Old/1",
+            "EB_LOCAL_DEV_SAVED": saved,
+            "EXPECTED_DEV_SAVED": saved,
+        }
+        for command, argv in (("dev", ["dev"]), ("dev --replace", ["dev", "--replace"]), ("env", ["env"])):
+            run = self.run_wrapper(argv, SLURM_JOB_ID="", **{
+                name: clean[name] for name in (
+                    "LMOD_PKG", "EESSI_CVMFS_REPO", "EESSI_VERSION",
+                    "LOADEDMODULES", "EB_LOCAL_DEV_SAVED",
+                )
+            })
+            self.assertEqual(run.returncode, 0, run.stderr)
+            for shell in shells:
+                with self.subTest(command=command, shell=shell):
+                    flags = ["-f"] if shell == "zsh" else ["--noprofile", "--norc"]
+                    script = (run.stdout
+                              + 'eb_local_eval_status=$?\n'
+                              + '[ "${EB_LOCAL_DEV_SAVED-unset}" = "$EXPECTED_DEV_SAVED" ] && saved=unchanged || saved=changed\n'
+                              + 'printf "%s|%s|%s" "${EESSI_USER_INSTALL-unset}" "${EB_LOCAL_DEV_PREFIX-unset}" "$saved"\n'
+                              + 'exit "$eb_local_eval_status"\n')
+                    replay = subprocess.run([shell, *flags, "-c", script], env=clean,
+                                            capture_output=True, text=True)
+                    self.assertEqual((replay.returncode, replay.stdout),
+                                     (1, "unset|unset|unchanged"), replay.stderr)
+                    self.assertIn("no module command found", replay.stderr)
+                    stopped = subprocess.run(
+                        [shell, *flags, "-c", "set -e\n" + run.stdout + "echo survived\n"],
+                        env=clean, capture_output=True, text=True,
+                    )
+                    self.assertEqual(stopped.returncode, 1, stopped.stderr)
+                    self.assertNotIn("survived", stopped.stdout)
+            # A shell that already has a module command still receives the install variable.
+            ready = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-c",
+                 'module() { return 0; }\n' + run.stdout
+                 + 'eb_local_eval_status=$?\nprintf "%s" "${EESSI_USER_INSTALL-unset}"\nexit "$eb_local_eval_status"\n'],
+                env=clean, capture_output=True, text=True,
+            )
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+            self.assertEqual(ready.stdout, str(self.prefix))
+
+        for init_kind in ("lmod", "eessi"):
+            with self.subTest(init=init_kind):
+                init_root = self.root / init_kind
+                lmod = init_root / "lmod"
+                repo = init_root / "repo"
+                if init_kind == "lmod":
+                    init = lmod / "init" / "bash"
+                else:
+                    init = repo / "versions" / "2026.06" / "init" / "lmod" / "bash"
+                init.parent.mkdir(parents=True)
+                init.write_text("module() { return 0; }\n")
+                init_env = {
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.root),
+                    "LMOD_PKG": str(lmod),
+                    "EESSI_CVMFS_REPO": str(repo),
+                    "EESSI_VERSION": "2026.06",
+                }
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="", **init_env)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                replay = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c",
+                     run.stdout + "type module >/dev/null 2>&1 && printf module-visible\n"],
+                    env=init_env, capture_output=True, text=True,
+                )
+                self.assertEqual((replay.returncode, replay.stdout),
+                                 (0, "module-visible"), replay.stderr)
+
+    @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
+    @unittest.skipIf(os.geteuid() == 0, "root can read mode-000 files")
+    def test_a_mode_000_lmod_initializer_is_not_sourced(self):
+        if Path("/etc/profile.d/lmod.sh").exists():
+            self.skipTest("/etc/profile.d/lmod.sh is this host's Lmod init")
+        host = self.root / "lmod" / "init" / "bash"
+        host.parent.mkdir(parents=True)
+        host.write_text("echo sourced-unreadable\n")
+        host.chmod(0)
+        self.addCleanup(host.chmod, 0o644)
+        eessi = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        eessi.mkdir(parents=True)
+        clean = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(self.root),
+            "LMOD_PKG": str(self.root / "lmod"),
+            "EESSI_CVMFS_REPO": str(self.root / "repo"),
+            "EESSI_VERSION": "2026.06",
+        }
+        run = self.run_wrapper(["env"], SLURM_JOB_ID="", **clean)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        replay = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", run.stdout],
+            env=clean, capture_output=True, text=True,
+        )
+        self.assertEqual(replay.returncode, 1, replay.stderr)
+        self.assertNotIn("sourced-unreadable", replay.stdout + replay.stderr)
 
     def test_dev_loads_a_module_once_and_the_build_environment_only_last(self):
         # With the default, dev picks the build environment for the compilers
