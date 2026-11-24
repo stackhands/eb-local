@@ -480,7 +480,24 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []c
     // Tasks run with the CPU target eessi-arch-guard selects, which can be
     // below the one EESSI detects; where the guard is installed, it moves the
     // stack there before EESSI-extend reads its install path.
-    add(a, &out, "if command -v eessi-arch-guard >/dev/null 2>&1; then eval \"$(eessi-arch-guard --shell)\"; fi\n");
+    add(a, &out,
+        \\if command -v eessi-arch-guard >/dev/null 2>&1; then
+        \\    if _eb_local_arch_delta=$(eessi-arch-guard --shell); then
+        \\        eval "$_eb_local_arch_delta"
+        \\        unset _eb_local_arch_delta
+        \\    else
+        \\        local _eb_local_arch_status=$?
+        \\        unset _eb_local_arch_delta
+        \\        if [ -n "${eb_local_dev_saved_base+x}" ]; then
+        \\            EB_LOCAL_DEV_SAVED=$(printf '%s\nactive:%s' "$eb_local_dev_saved_base" "${LOADEDMODULES-}")
+        \\            export EB_LOCAL_DEV_SAVED
+        \\            unset eb_local_dev_saved_base
+        \\        fi
+        \\        return "$_eb_local_arch_status"
+        \\    fi
+        \\fi
+        \\
+    );
     const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
     if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
     // build.site_toolchains under the version the stack set, as a build
@@ -848,13 +865,12 @@ fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
     return std.mem.lessThan(u8, x.name, y.name);
 }
 
-/// Run `lines` in a bash child and print, as one JSON document, how its
-/// environment then differs from this process's. The child's own output goes
-/// to stderr, so stdout carries the document alone.
 /// Run `lines` in a bash child and return its environment afterwards, as
 /// `env -0` prints it. What the lines print goes to stderr. Null, with a
-/// message, when the child cannot run or the lines fail.
-fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
+/// message, when the child cannot run or the lines fail. `status` is the child
+/// status on failure and zero when the environment is captured.
+fn runLines(c: Ctx, kind: []const u8, lines: []const u8, status: *u8) ?[]const u8 {
+    status.* = 1;
     const a = c.a;
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
     const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
@@ -880,6 +896,7 @@ fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
     defer r.deinit(a);
     if (r.stderr.len > 0) cli.put(2, r.stderr);
     if (r.term.code() != 0) {
+        status.* = @intCast(r.term.code());
         warn("the {s} lines failed in bash (status {d}); nothing is written", .{ kind, r.term.code() });
         return null;
     }
@@ -888,10 +905,12 @@ fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
         return null;
     };
     defer sys.close(opened.fd);
-    return fsx.readAll(a, opened.fd, 8 << 20) catch |e| {
+    const env0 = fsx.readAll(a, opened.fd, 8 << 20) catch |e| {
         warn("could not read captured {s} environment: {s}", .{ kind, @errorName(e) });
         return null;
     };
+    status.* = 0;
+    return env0;
 }
 
 /// The value of `name` in the output of `env -0`, or "" when it is not set.
@@ -956,19 +975,25 @@ test "runLines cleans temporary directory and descriptors on failure and success
         defer sys.close(null_fd);
         _ = linux.dup2(null_fd, 2);
         defer _ = linux.dup2(saved_err, 2);
-        break :blk runLines(ctx, "env", "exit 7");
+        var status: u8 = 0;
+        const result = runLines(ctx, "env", "exit 7", &status);
+        try std.testing.expectEqual(@as(u8, 7), status);
+        break :blk result;
     };
     try std.testing.expect(failed_res == null);
     try std.testing.expectEqual(before, try testSelfFdCount());
 
-    const ok = runLines(ctx, "env", "export DEMO_KEY=ok") orelse return error.TestUnexpectedResult;
+    var status: u8 = 1;
+    const ok = runLines(ctx, "env", "export DEMO_KEY=ok", &status) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0), status);
     try std.testing.expectEqualStrings("ok", env0Value(ok, "DEMO_KEY"));
     try std.testing.expectEqual(before, try testSelfFdCount());
 }
 
 fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
     const a = c.a;
-    const env0 = runLines(c, kind, lines) orelse return 1;
+    var status: u8 = 1;
+    const env0 = runLines(c, kind, lines, &status) orelse return status;
     var set: std.ArrayList(EnvVar) = .empty;
     var after: std.StringHashMapUnmanaged(void) = .empty;
     var it = std.mem.splitScalar(u8, env0, 0);
@@ -1286,7 +1311,8 @@ fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
 /// `dev --lock`: run the dev lines in a bash child and record what loaded.
 fn writeLock(c: Ctx, s: config.Settings, lines: []const u8) u8 {
     const a = c.a;
-    const env0 = runLines(c, "dev", lines) orelse return 1;
+    var status: u8 = 1;
+    const env0 = runLines(c, "dev", lines, &status) orelse return status;
     var modules: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, env0Value(env0, "LOADEDMODULES"), ':');
     while (it.next()) |m| {
@@ -1380,7 +1406,7 @@ fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
     if (!validModuleList(current))
         die("LOADEDMODULES contains a module name that cannot be replaced", .{});
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(c.a, str(c.a, "eb_local_dev_saved_base={s}\n", .{q(c.a, saved.base)})) catch oom();
+    out.appendSlice(c.a, str(c.a, "local eb_local_dev_saved_base={s}\n", .{q(c.a, saved.base)})) catch oom();
     var wrote_unload = false;
     var it = std.mem.splitScalar(u8, saved.active, ':');
     while (it.next()) |module| {

@@ -427,10 +427,17 @@ class Commands(StorageFixture):
         self.prefix.mkdir(parents=True)
         self.config.write_text(self.config.read_text() + "dev_buildenv = buildenv/mine\nstack_module = stack/mine\n")
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
-        self.assertIn("module load stack/mine\n"
-                      'if command -v eessi-arch-guard >/dev/null 2>&1; then eval "$(eessi-arch-guard --shell)"; fi\n'
-                      "module load EESSI-extend/2026.06-easybuild\n", run.stdout)
+        self.assertEqual(run.stdout.count("if ! type module >/dev/null 2>&1; then\n"), 1)
+        self.assertIn("eb_local_apply() {\n", run.stdout)
+        self.assertIn("module load stack/mine\n", run.stdout)
+        self.assertIn("if command -v eessi-arch-guard >/dev/null 2>&1; then\n", run.stdout)
+        self.assertIn("module load EESSI-extend/2026.06-easybuild\n", run.stdout)
         self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
+        replace = self.run_wrapper(["dev", "--replace"], SLURM_JOB_ID="")
+        self.assertEqual(
+            replace.stdout.count("if ! type module >/dev/null 2>&1; then\n"),
+            1,
+        )
 
     def test_legacy_config_checks_all_lines_before_value_validation(self):
         cases = (
