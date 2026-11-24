@@ -1,0 +1,1 @@
+`tests/test_config_cli_modes.py` verifies that `eb-local` configuration loading rejects directory and FIFO inputs under a bounded timeout as well as dangling symlinks and malformed byte or oversized files.
