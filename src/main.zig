@@ -1013,6 +1013,23 @@ const dev_saved_names = [_][]const u8{
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "LD_AUDIT",
+    "JULIA_DEPOT_PATH",
+    "R_LIBS_USER",
+    "PYTHONUSERBASE",
+    "GOPATH",
+    "GOMODCACHE",
+    "EB_LOCAL_DEV_GO_PREFIX",
+};
+
+const dev_saved_names_v2 = [_][]const u8{
+    "PATH",
+    "EB_LOCAL_DEV_PREFIX",
+    "EB_LOCAL_RPATH_WRAPPERS",
+    "CMAKE_ARGS",
+    "EB_LOCAL_MESON_INSTALL_RPATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_AUDIT",
 };
 
 const dev_saved_names_v1 = [_][]const u8{
@@ -1105,8 +1122,10 @@ fn parseDevSaved(c: Ctx, text: []const u8) DevSaved {
     while (it.next()) |line| lines.append(c.a, line) catch oom();
     if (lines.items.len == 0)
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    const names: []const []const u8 = if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v2"))
+    const names: []const []const u8 = if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v3"))
         &dev_saved_names
+    else if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v2"))
+        &dev_saved_names_v2
     else if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v1"))
         &dev_saved_names_v1
     else
@@ -1141,7 +1160,7 @@ fn newDevSaved(c: Ctx) DevSaved {
         die("LOADEDMODULES contains a module name that cannot be recorded", .{});
     var values: [dev_saved_names.len]SavedVar = undefined;
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(c.a, "eb-local-dev-v2\nprior:") catch oom();
+    out.appendSlice(c.a, "eb-local-dev-v3\nprior:") catch oom();
     out.appendSlice(c.a, prior) catch oom();
     for (dev_saved_names, 0..) |name, i| {
         out.append(c.a, '\n') catch oom();
@@ -1368,7 +1387,9 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
-    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, dev_lang_dirs) catch oom();
+    out.appendSlice(a, "fi\n") catch oom();
     const lines = emittedLines(a, envStrict(c, g), out.items);
     if (g.json_out) return emitEnvChange(c, "dev", lines);
     evalHint("dev --locked");
@@ -1449,6 +1470,7 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, dev_lang_dirs) catch oom();
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     const lines = emittedLines(a, envStrict(c, g), out.items);
     if (g.lock) return writeLock(c, s, lines);
@@ -3826,6 +3848,7 @@ const test_prelude =
 
 /// What a shell without a module command sources for one.
 const lmod_init = @embedFile("lmod-init.sh");
+const dev_lang_dirs = @embedFile("dev-lang-dirs.sh");
 
 /// A shell whose `module` is a host Lmod, such as a distribution's package
 /// sets up in every login shell, sourced no init that puts EESSI's modules

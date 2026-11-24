@@ -73,6 +73,11 @@ contains_module() {
 prior_path=$PATH
 prior_cmake=$CMAKE_ARGS
 prior_meson=$EB_LOCAL_MESON_INSTALL_RPATH
+prior_julia=$JULIA_DEPOT_PATH
+prior_r=$R_LIBS_USER
+prior_python=$PYTHONUSERBASE
+prior_gopath=$GOPATH
+prior_gomodcache=$GOMODCACHE
 eval "$(eb_local dev --replace --buildenv buildenv/test GCC/1)"
 contains_module Base/1
 contains_module GCC/1
@@ -104,11 +109,18 @@ test "$EB_LOCAL_DEV_PREFIX" = "$CONTROL_ROOT/prior/dev"
 test "$EB_LOCAL_RPATH_WRAPPERS" = "$CONTROL_ROOT/prior wrappers"
 test "$CMAKE_ARGS" = "$prior_cmake"
 test "$EB_LOCAL_MESON_INSTALL_RPATH" = "$prior_meson"
+test "$JULIA_DEPOT_PATH" = "$prior_julia"
+test "$R_LIBS_USER" = "$prior_r"
+test "$PYTHONUSERBASE" = "$prior_python"
+test "$GOPATH" = "$prior_gopath"
+test "$GOMODCACHE" = "$prior_gomodcache"
+test "$EB_LOCAL_DEV_GO_PREFIX" = "$CONTROL_ROOT/prior/go-prefix"
 test "${LD_PRELOAD+x}" = x
 test -z "$LD_PRELOAD"
 test "${LD_AUDIT+x}" != x
 test "${EB_LOCAL_DEV_SAVED+x}" != x
 
+export JULIA_DEPOT_PATH=/v1/julia R_LIBS_USER=/v1/r PYTHONUSERBASE=/v1/python GOPATH=/v1/go GOMODCACHE=/v1/cache EB_LOCAL_DEV_GO_PREFIX=/v1/prefix
 EB_LOCAL_DEV_SAVED=$LEGACY_STATE
 export EB_LOCAL_DEV_SAVED
 eval "$(eb_local leave)"
@@ -116,6 +128,25 @@ test "$PATH" = "$CONTROL_ROOT/legacy/bin"
 test "$EB_LOCAL_DEV_PREFIX" = "$CONTROL_ROOT/legacy/dev"
 test "${CMAKE_ARGS+x}" != x
 test "${EB_LOCAL_MESON_INSTALL_RPATH+x}" != x
+test "${JULIA_DEPOT_PATH+x}" != x
+test "${R_LIBS_USER+x}" != x
+test "${PYTHONUSERBASE+x}" != x
+test "${GOPATH+x}" != x
+test "${GOMODCACHE+x}" != x
+test "${EB_LOCAL_DEV_GO_PREFIX+x}" != x
+
+export JULIA_DEPOT_PATH=/v2/julia R_LIBS_USER=/v2/r PYTHONUSERBASE=/v2/python GOPATH=/v2/go GOMODCACHE=/v2/cache EB_LOCAL_DEV_GO_PREFIX=/v2/prefix
+EB_LOCAL_DEV_SAVED=$V2_STATE
+export EB_LOCAL_DEV_SAVED
+eval "$(eb_local leave)"
+test "$PATH" = "$CONTROL_ROOT/v2/bin"
+test "$EB_LOCAL_DEV_PREFIX" = "$CONTROL_ROOT/v2/dev"
+test "${JULIA_DEPOT_PATH+x}" != x
+test "${R_LIBS_USER+x}" != x
+test "${PYTHONUSERBASE+x}" != x
+test "${GOPATH+x}" != x
+test "${GOMODCACHE+x}" != x
+test "${EB_LOCAL_DEV_GO_PREFIX+x}" != x
 
 CMAKE_ARGS='-DUSER_FLAG=OFF -DCMAKE_SKIP_RPATH=OFF'
 EB_LOCAL_MESON_INSTALL_RPATH=before-off
@@ -125,6 +156,22 @@ test "$CMAKE_ARGS" = '-DUSER_FLAG=OFF -DCMAKE_SKIP_RPATH=OFF'
 eval "$(eb_local leave)"
 test "$CMAKE_ARGS" = '-DUSER_FLAG=OFF -DCMAKE_SKIP_RPATH=OFF'
 test "$EB_LOCAL_MESON_INSTALL_RPATH" = before-off
+
+unset JULIA_DEPOT_PATH R_LIBS_USER PYTHONUSERBASE GOPATH GOMODCACHE EB_LOCAL_DEV_GO_PREFIX
+eval "$(eb_local dev --replace --buildenv buildenv/test GCC/5)"
+test -n "$JULIA_DEPOT_PATH"
+test -n "$R_LIBS_USER"
+test -n "$PYTHONUSERBASE"
+test -n "$GOPATH"
+test -n "$GOMODCACHE"
+test -n "$EB_LOCAL_DEV_GO_PREFIX"
+eval "$(eb_local leave)"
+test "${JULIA_DEPOT_PATH+x}" != x
+test "${R_LIBS_USER+x}" != x
+test "${PYTHONUSERBASE+x}" != x
+test "${GOPATH+x}" != x
+test "${GOMODCACHE+x}" != x
+test "${EB_LOCAL_DEV_GO_PREFIX+x}" != x
 """
 
 
@@ -150,6 +197,12 @@ class DevLifecycle(unittest.TestCase):
             "EB_LOCAL_RPATH_WRAPPERS": str(self.root / "prior wrappers"),
             "CMAKE_ARGS": "-DUSER_FLAG=ON",
             "EB_LOCAL_MESON_INSTALL_RPATH": "prior-meson",
+            "JULIA_DEPOT_PATH": str(self.root / "prior" / "julia"),
+            "R_LIBS_USER": str(self.root / "prior" / "r"),
+            "PYTHONUSERBASE": str(self.root / "prior" / "python"),
+            "GOPATH": str(self.root / "prior" / "go"),
+            "GOMODCACHE": str(self.root / "prior" / "go" / "pkg" / "mod"),
+            "EB_LOCAL_DEV_GO_PREFIX": str(self.root / "prior" / "go-prefix"),
             "LIBRARY_PATH": (
                 f"{self.root}/meson/lib:/usr/lib:{self.root}/compat/lib"
             ),
@@ -174,6 +227,22 @@ class DevLifecycle(unittest.TestCase):
             lines.append(f"{name}:{encoded}")
         lines.append("active:Base/1")
         self.env["LEGACY_STATE"] = "\n".join(lines)
+        v2_values = {
+            "PATH": str(self.root / "v2" / "bin"),
+            "EB_LOCAL_DEV_PREFIX": str(self.root / "v2" / "dev"),
+            "EB_LOCAL_RPATH_WRAPPERS": None,
+            "CMAKE_ARGS": None,
+            "EB_LOCAL_MESON_INSTALL_RPATH": None,
+            "LD_LIBRARY_PATH": None,
+            "LD_PRELOAD": None,
+            "LD_AUDIT": None,
+        }
+        lines = ["eb-local-dev-v2", "prior:Base/1"]
+        for name, value in v2_values.items():
+            encoded = "u" if value is None else "s" + value.encode().hex()
+            lines.append(f"{name}:{encoded}")
+        lines.append("active:Base/1")
+        self.env["V2_STATE"] = "\n".join(lines)
 
     def command(self):
         return f'"{binary.ZIG}" "$@"'

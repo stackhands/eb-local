@@ -90,6 +90,11 @@ The lines `eb-local dev` prints do the same, load the modules and a build enviro
 | `EB_LOCAL_DEV_SAVED` | The state from before the first `dev --replace` and the module list from the latest replacement |
 | `PATH` | The RPATH wrappers' directory first, when eb-local writes wrappers |
 | `EB_LOCAL_RPATH_WRAPPERS` | The RPATH wrappers' directory, when eb-local writes wrappers |
+| `JULIA_DEPOT_PATH` | `<EB_LOCAL_DEV_PREFIX>/julia:`, unless already set |
+| `R_LIBS_USER` | `<EB_LOCAL_DEV_PREFIX>/R/%p-library/%v`, unless already set |
+| `PYTHONUSERBASE` | `<EB_LOCAL_DEV_PREFIX>/python`, unless already set |
+| `GOPATH` and `GOMODCACHE` | A matching Go workspace and module cache under `<EB_LOCAL_DEV_PREFIX>/go`, unless supplied by the caller |
+| `EB_LOCAL_DEV_GO_PREFIX` | Internal marker for Go paths that `dev` generated, restored by `leave` |
 | `CMAKE_ARGS` | `-DCMAKE_SKIP_RPATH=ON` before existing arguments, unless a skip-rpath value is already present |
 | `EB_LOCAL_MESON_INSTALL_RPATH` | The `LIBRARY_PATH` directories for a Meson target's `install_rpath` |
 | `SSL_CERT_FILE`, `CARGO_HTTP_CAINFO` | The host's CA bundle, when the host has none at `/etc/ssl/certs/ca-certificates.crt` and the variable is not set |
