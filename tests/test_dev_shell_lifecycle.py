@@ -36,6 +36,8 @@ class DevShellLifecycle(StorageFixture):
         stale.mkdir()
         clean = self.root / "clean-bin"
         clean.mkdir()
+        other = self.root / "other-bin"
+        other.mkdir()
         for name, executable in available_shells():
             with self.subTest(shell=name):
                 path_file = self.root / f"path-{name}"
@@ -43,7 +45,7 @@ class DevShellLifecycle(StorageFixture):
                 script = (
                     MODULE_WITH_TARGET
                     + f"\nexport EB_LOCAL_RPATH_WRAPPERS={str(stale)!r}\n"
-                    + f"export PATH={str(stale)!r}:{str(clean)!r}\n"
+                    + f"export PATH={str(stale)!r}:{str(clean)!r}:{str(other)!r}\n"
                     + emitted.stdout
                     + f"\nprintf '%s' \"$PATH\" > {str(path_file)!r}\n"
                     + f"printf '%s' \"${{EB_LOCAL_RPATH_WRAPPERS-unset}}\" > {str(wrapper_file)!r}\n"
@@ -56,7 +58,10 @@ class DevShellLifecycle(StorageFixture):
                     cwd=self.root,
                 )
                 self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
-                self.assertNotIn(str(stale), path_file.read_text().split(":"))
+                self.assertEqual(
+                    path_file.read_text().split(":"),
+                    [str(clean), str(other)],
+                )
                 self.assertEqual(wrapper_file.read_text(), "unset")
 
 
