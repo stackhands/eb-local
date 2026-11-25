@@ -20,7 +20,7 @@ These steps run them and read what they say.
     ```
 
     ```text
-    ok   eb-local 3.4.0
+    ok   eb-local 3.5.0
     ok   site file /usr/local/bin/config.toml
     ok   builds use the allocation's own xfs mount /local/%u.%j
     ok   installs go to /home/alice/eessi: a user install, prefix from default

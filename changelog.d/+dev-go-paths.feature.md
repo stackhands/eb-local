@@ -1,1 +1,0 @@
-`eb-local dev` sets matching Go paths under `EB_LOCAL_DEV_PREFIX` only when the caller has not set them, preserves empty and custom values, and records language directory state in the backward-compatible dev-v3 lifecycle record.
