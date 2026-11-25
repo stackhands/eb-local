@@ -1,0 +1,1 @@
+A unit test pins that `eb-local lmod-cache`, updating `--timestamp` in place with standard input, output and error closed, keeps the duplicate it restores the timestamp through off descriptors 0, 1 and 2.

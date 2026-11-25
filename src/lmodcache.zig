@@ -1523,6 +1523,57 @@ test "a failed close of an in-place timestamp restores the inode it changed" {
     try std.testing.expectEqualStrings("other\n", try fsx.readAll(a, swapped, 64));
 }
 
+var stdio_open_before_restore = [3]bool{ false, false, false };
+
+fn recordStdioBeforeRestore() void {
+    for (&stdio_open_before_restore, 0..) |*open, fd| open.* = isOpen(@intCast(fd));
+}
+
+test "the restore duplicate of an in-place timestamp takes no closed standard stream" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-inplace-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const dir = try fsx.openDir(fsx.cwd, root, true);
+    defer sys.close(dir);
+
+    const made = try sys.openat(dir, "stamp", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o644);
+    try sys.writeAll(made, "kept\n");
+    sys.close(made);
+    const held = try sys.openat(dir, "stamp", .{}, 0);
+    defer sys.close(held);
+    const st = try fsx.statAt(dir, "stamp", false);
+
+    var saved = [3]sys.fd_t{ -1, -1, -1 };
+    defer for (saved) |s| if (s >= 0) sys.close(s);
+    for (&saved, 0..) |*s, fd| s.* = @intCast(try sys.call(linux.fcntl, .{ @as(sys.fd_t, @intCast(fd)), linux.F.DUPFD_CLOEXEC, @as(usize, 3) }));
+
+    storage.test_close_errno = .IO;
+    storage.test_close_count = 1;
+    test_after_inplace_close = recordStdioBeforeRestore;
+    test_quiet = true;
+    defer {
+        storage.test_close_errno = null;
+        storage.test_close_count = null;
+        test_after_inplace_close = null;
+        test_quiet = false;
+    }
+    // With 0, 1 and 2 closed the stamp opens on 0, and a duplicate taken
+    // at the lowest free number would land on 1.
+    errdefer for (saved, 0..) |s, fd| {
+        _ = linux.dup3(s, @intCast(fd), 0);
+    };
+    for (0..3) |fd| sys.close(@intCast(fd));
+    const times = [2]linux.timespec{ .{ .sec = 1_800_000_000, .nsec = 0 }, .{ .sec = 1_800_000_000, .nsec = 0 } };
+    const updated = updateTimestampInPlace(a, dir, "stamp", "stamp", st, &times);
+    for (saved, 0..) |s, fd| _ = try sys.call(linux.dup3, .{ s, @as(sys.fd_t, @intCast(fd)), @as(u32, 0) });
+
+    try std.testing.expect(!updated);
+    try std.testing.expectEqual([3]bool{ false, false, false }, stdio_open_before_restore);
+    try std.testing.expectEqualStrings("kept\n", try fsx.readAll(a, held, 64));
+}
+
 test "an in-place timestamp that grew after its stat is left alone" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
