@@ -3254,14 +3254,6 @@ fn openPrivateChild(c: Ctx, parent: sys.fd_t, name: []const u8, path: []const u8
     return .{ .fd = fd };
 }
 
-fn privateChildOrDie(c: Ctx, parent: sys.fd_t, name: []const u8, path: []const u8, create: bool, undone: []const u8) ?sys.fd_t {
-    return switch (openPrivateChild(c, parent, name, path, create)) {
-        .fd => |fd| fd,
-        .missing => null,
-        .refused => |why| die("{s}; {s}.", .{ why, undone }),
-    };
-}
-
 const LocalRoot = struct {
     path: []const u8,
     capacity_path: []const u8,
@@ -3594,35 +3586,87 @@ fn workspaceRegistryName(a: Allocator, root: []const u8) []const u8 {
     return std.fmt.allocPrint(a, "{x}", .{std.hash.Wyhash.hash(0, root)}) catch oom();
 }
 
-fn workspaceRegistryDir(c: Ctx, prefix: []const u8, create: bool) ?sys.fd_t {
+fn openWorkspaceRegistryDir(c: Ctx, prefix: []const u8, create: bool) PrivateChild {
     const state = std.fs.path.join(c.a, &.{ prefix, ".eb-local" }) catch oom();
     const state_fd = sys.openat(fsx.cwd, state, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch |e| switch (e) {
-        error.NotFound => return null,
-        else => die("cannot open durable state directory {s} ({s})", .{ state, storage.describeError(e) }),
+        error.NotFound => return .missing,
+        else => return .{ .refused = str(c.a, "cannot open durable state directory {s} ({s})", .{ state, storage.describeError(e) }) },
     };
     defer sys.close(state_fd);
     const name = std.fmt.allocPrint(c.a, "workspace-roots-{d}", .{callerUid(c)}) catch oom();
     const path = std.fs.path.join(c.a, &.{ state, name }) catch oom();
-    return privateChildOrDie(c, state_fd, name, path, create, "the workspace-root registry was not opened");
+    return switch (openPrivateChild(c, state_fd, name, path, create)) {
+        .refused => |why| .{ .refused = str(c.a, "{s}; the workspace-root registry was not opened.", .{why}) },
+        else => |got| got,
+    };
 }
 
-fn recordWorkspaceRoot(c: Ctx, prefix: []const u8, root: []const u8) void {
-    const dir = workspaceRegistryDir(c, prefix, true) orelse die("cannot create the workspace-root registry", .{});
+fn workspaceRegistryDir(c: Ctx, prefix: []const u8, create: bool) ?sys.fd_t {
+    return switch (openWorkspaceRegistryDir(c, prefix, create)) {
+        .fd => |fd| fd,
+        .missing => null,
+        .refused => |why| die("{s}", .{why}),
+    };
+}
+
+/// Set in main from EB_LOCAL_TEST_RECORD_OPEN_ERRNO, only in the test
+/// artifact, so the temporary file of a workspace-root record is not
+/// created and the open fails with that errno.
+var test_record_open_errno: ?linux.E = null;
+
+/// Write the registry entry for `root` and return null, or return why it
+/// was not written, so the caller removes the workspace before it reports
+/// that. Every failure, the registry and an entry that cannot be used
+/// included, is returned. The entry is written to a temporary file in the
+/// registry and renamed over the entry once the write, fsync and close
+/// succeed. A failure before the rename removes only the temporary file,
+/// so an entry that older workspaces under `root` were recorded in is
+/// kept. A failed sync of the registry after the rename leaves the new
+/// entry, which names the same root as any it replaced.
+fn recordWorkspaceRoot(c: Ctx, prefix: []const u8, root: []const u8) ?[]const u8 {
+    const dir = switch (openWorkspaceRegistryDir(c, prefix, true)) {
+        .fd => |fd| fd,
+        .missing => return str(c.a, "cannot create the workspace-root registry", .{}),
+        .refused => |why| return why,
+    };
     defer sys.close(dir);
     const name = workspaceRegistryName(c.a, root);
-    const fd = sys.openat(dir, name, .{
+    if (fsx.statAt(dir, name, false)) |st| {
+        if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0)
+            return str(c.a, "workstation workspace-root registry entry {s} must be a private regular file you own", .{name});
+    } else |e| if (e != error.NotFound) return str(c.a, "cannot inspect workstation workspace-root registry ({s})", .{storage.describeError(e)});
+    writeWorkspaceRecord(c.a, dir, name, root) catch |e|
+        return str(c.a, "cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
+    return null;
+}
+
+fn writeWorkspaceRecord(a: Allocator, dir: sys.fd_t, name: []const u8, root: []const u8) sys.Error!void {
+    var rnd: [6]u8 = undefined;
+    _ = try sys.call(linux.getrandom, .{ &rnd, rnd.len, @as(u32, 0) });
+    const tmp = std.fmt.allocPrint(a, ".{s}.{x}.tmp", .{ name, std.mem.readInt(u48, &rnd, .little) }) catch oom();
+    if (comptime build_options.test_ops) if (test_record_open_errno) |e| {
+        _ = try sys.result(@bitCast(-@as(isize, @backingInt(e))));
+    };
+    const fd = try sys.openat(dir, tmp, .{
         .ACCMODE = .WRONLY,
         .CREAT = true,
-        .TRUNC = true,
+        .EXCL = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
-    }, 0o600) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
-    const st = fsx.fstat(fd) catch |e| die("cannot inspect workstation workspace-root registry ({s})", .{storage.describeError(e)});
-    if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0)
-        die("workstation workspace-root registry entry {s} must be a private regular file you own", .{name});
-    sys.writeAll(fd, root) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
-    storage.fsyncWritten(fd) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
-    storage.closeWritten(fd) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
+    }, 0o600);
+    errdefer {
+        const kept = sys.last_errno;
+        sys.unlinkat(dir, tmp, 0) catch {};
+        sys.last_errno = kept;
+    }
+    {
+        errdefer sys.close(fd);
+        try sys.writeAll(fd, root);
+        try storage.fsyncWritten(fd);
+    }
+    try storage.closeWritten(fd);
+    try sys.renameat(dir, tmp, dir, name);
+    try storage.fsyncWritten(dir);
 }
 
 fn recordedWorkspaceRoots(c: Ctx, prefix: []const u8) []const WorkspaceRootRecord {
@@ -3633,6 +3677,8 @@ fn recordedWorkspaceRoots(c: Ctx, prefix: []const u8) []const WorkspaceRootRecor
         return &.{};
     };
     while (it.next() catch null) |entry| {
+        // `recordWorkspaceRoot` names its temporary files with a leading dot.
+        if (std.mem.startsWith(u8, entry.name, ".")) continue;
         const fd = sys.openat(dir, entry.name, .{ .NOFOLLOW = true, .CLOEXEC = true }, 0) catch continue;
         const st = fsx.fstat(fd) catch {
             sys.close(fd);
@@ -4413,7 +4459,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         };
     };
     defer storage.releaseLockAfterError(&prefix_lock);
-    if (localStorage(s, c, g)) recordWorkspaceRoot(c, p.prefix, job_root);
+    if (localStorage(s, c, g)) if (recordWorkspaceRoot(c, p.prefix, job_root)) |why| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("{s}", .{why});
+    };
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -6256,12 +6305,13 @@ fn runMain(init: std.process.Init) u8 {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_RELEASE_ERRNO"))) |v| {
             if (std.mem.startsWith(u8, v, "E")) storage.test_release_errno = std.meta.stringToEnum(linux.E, v[1..]);
         }
-        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_ERRNO"))) |v| {
-            if (std.mem.startsWith(u8, v, "E")) storage.test_close_errno = std.meta.stringToEnum(linux.E, v[1..]);
-        }
-        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_ERRNO"))) |v| {
-            if (std.mem.startsWith(u8, v, "E")) storage.test_fsync_errno = std.meta.stringToEnum(linux.E, v[1..]);
-        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_ERRNO"))) |v| storage.test_close_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_AFTER"))) |v| storage.test_close_after = std.fmt.parseInt(u32, v, 10) catch 0;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_COUNT"))) |v| storage.test_close_count = std.fmt.parseInt(u32, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_ERRNO"))) |v| storage.test_fsync_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_AFTER"))) |v| storage.test_fsync_after = std.fmt.parseInt(u32, v, 10) catch 0;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_COUNT"))) |v| storage.test_fsync_count = std.fmt.parseInt(u32, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_RECORD_OPEN_ERRNO"))) |v| test_record_open_errno = storage.testErrno(v);
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {

@@ -5,6 +5,7 @@
 //! after `spider` succeeds, and the timestamp is then set one second
 //! older than the cache file.
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const build_options = @import("build_options");
 const common = @import("zig_common");
@@ -164,7 +165,123 @@ fn olderTimespec(cache_mtime: linux.timespec) linux.timespec {
     return .{ .sec = cache_mtime.sec - 1, .nsec = cache_mtime.nsec };
 }
 
-fn writeTimestamp(stamp_path: []const u8, cache_mtime: linux.timespec) bool {
+fn writeAt(fd: sys.fd_t, bytes: []const u8) sys.Error!void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = try sys.call(linux.pwrite, .{ fd, bytes[off..].ptr, bytes.len - off, @as(linux.off_t, @intCast(off)) });
+        if (n == 0) return error.NoSpace;
+        off += n;
+    }
+}
+
+/// Write the previous bytes and times of a timestamp updated in place
+/// back through `fd`, sync it and close it. `fd` is closed once whatever
+/// fails, and the first failure is returned.
+fn restoreInPlace(fd: sys.fd_t, prior: []const u8, times: *const [2]linux.timespec) sys.Error!void {
+    {
+        errdefer sys.close(fd);
+        _ = try sys.call(linux.ftruncate, .{ fd, @as(linux.off_t, 0) });
+        try writeAt(fd, prior);
+        _ = try sys.call(linux.utimensat, .{ fd, @as(?[*:0]const u8, null), times, @as(u32, 0) });
+        try storage.fsyncWritten(fd);
+    }
+    try storage.closeWritten(fd);
+}
+
+fn undoInPlace(keep: sys.fd_t, prior: []const u8, times: *const [2]linux.timespec, stamp_path: []const u8) void {
+    restoreInPlace(keep, prior, times) catch |err| fail("cannot restore {s}: {s}", .{ stamp_path, sys.describe(err) });
+}
+
+/// Run by the unit tests between the failed close of an in-place update
+/// and its restore.
+var test_after_inplace_close: ?*const fn () void = null;
+
+fn updateTimestampInPlace(
+    a: std.mem.Allocator,
+    parent_fd: sys.fd_t,
+    base: []const u8,
+    stamp_path: []const u8,
+    st: fsx.Stat,
+    times: *const [2]linux.timespec,
+) bool {
+    const fd = sys.openat(parent_fd, base, .{ .ACCMODE = .RDWR, .NOFOLLOW = true }, 0) catch |err| {
+        const detail = if (err == error.SymLink) "symlink is not followed" else @errorName(err);
+        fail("cannot write {s}: {s}", .{ stamp_path, detail });
+        return false;
+    };
+    // `st` came from an earlier stat of the name, so a file put in its
+    // place before the open is refused rather than changed.
+    const opened = fsx.fstat(fd) catch |err| {
+        sys.close(fd);
+        fail("cannot write {s}: {s}", .{ stamp_path, storage.describeError(err) });
+        return false;
+    };
+    if (opened.dev != st.dev or opened.ino != st.ino or !opened.isReg()) {
+        sys.close(fd);
+        fail("cannot write {s}: it was replaced after it was checked", .{stamp_path});
+        return false;
+    }
+    // Read with the size of the first stat as the limit, so a file that
+    // grew since then fails here, before anything is changed.
+    const limit = std.math.cast(usize, st.size) orelse {
+        sys.close(fd);
+        fail("cannot write {s}: FileTooBig", .{stamp_path});
+        return false;
+    };
+    const prior = fsx.readAll(a, fd, limit) catch |err| {
+        sys.close(fd);
+        fail("cannot write {s}: {s}", .{ stamp_path, storage.describeError(err) });
+        return false;
+    };
+    defer a.free(prior);
+    const old_times = [2]linux.timespec{ st.atime, st.mtime };
+    // The restore goes through a duplicate taken before the first change,
+    // so it reaches the inode that was changed even when `base` has been
+    // renamed or replaced by then.
+    // At 3 or above, as `sys.keepAboveStdio` keeps descriptors, so a closed
+    // standard stream is not reused for it.
+    const keep: sys.fd_t = @intCast(sys.call(linux.fcntl, .{ fd, linux.F.DUPFD_CLOEXEC, @as(usize, 3) }) catch |err| {
+        const detail = sys.describe(err);
+        sys.close(fd);
+        fail("cannot write {s}: {s}", .{ stamp_path, detail });
+        return false;
+    });
+    if (st.size > 0) {
+        _ = sys.call(linux.ftruncate, .{ fd, @as(linux.off_t, 0) }) catch |err| {
+            const detail = sys.describe(err);
+            sys.close(fd);
+            sys.close(keep);
+            fail("cannot write {s}: {s}", .{ stamp_path, detail });
+            return false;
+        };
+    }
+    _ = sys.call(linux.utimensat, .{ fd, @as(?[*:0]const u8, null), times, @as(u32, 0) }) catch |err| {
+        const detail = @errorName(err);
+        sys.close(fd);
+        fail("cannot set the time of {s}: {s}", .{ stamp_path, detail });
+        undoInPlace(keep, prior, &old_times, stamp_path);
+        return false;
+    };
+    storage.fsyncWritten(fd) catch |err| {
+        const detail = sys.describe(err);
+        sys.close(fd);
+        fail("cannot write {s}: {s}", .{ stamp_path, detail });
+        undoInPlace(keep, prior, &old_times, stamp_path);
+        return false;
+    };
+    storage.closeWritten(fd) catch |err| {
+        fail("cannot write {s}: {s}", .{ stamp_path, sys.describe(err) });
+        if (comptime builtin.is_test) if (test_after_inplace_close) |hook| hook();
+        undoInPlace(keep, prior, &old_times, stamp_path);
+        return false;
+    };
+    // Linux flushes a file on every close, and `fd` was synced and its
+    // close checked, so this last close has nothing left to report.
+    sys.close(keep);
+    return true;
+}
+
+fn writeTimestamp(a: std.mem.Allocator, stamp_path: []const u8, cache_mtime: linux.timespec) bool {
     const existing: ?fsx.Stat = fsx.statAt(fsx.cwd, stamp_path, false) catch |err| switch (err) {
         error.NotFound => null,
         error.SymLink => {
@@ -232,7 +349,12 @@ fn writeTimestamp(stamp_path: []const u8, cache_mtime: linux.timespec) bool {
             fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
             return false;
         };
-        sys.close(tmp_fd);
+        storage.closeWritten(tmp_fd) catch |err| {
+            const why = sys.describe(err);
+            sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+            fail("cannot write {s}: {s}", .{ stamp_path, why });
+            return false;
+        };
         if (fsx.statAt(parent_fd, base, false)) |cur| {
             if (cur.isLink()) {
                 sys.unlinkat(parent_fd, tmp_name, 0) catch {};
@@ -261,25 +383,18 @@ fn writeTimestamp(stamp_path: []const u8, cache_mtime: linux.timespec) bool {
         return true;
     } else |open_err| {
         if (existing != null and open_err == error.AccessDenied) {
-            const fd = sys.openat(parent_fd, base, .{ .ACCMODE = .RDWR, .NOFOLLOW = true }, 0) catch |err| {
-                const detail = if (err == error.SymLink) "symlink is not followed" else @errorName(err);
-                fail("cannot write {s}: {s}", .{ stamp_path, detail });
-                return false;
-            };
-            defer sys.close(fd);
-            if (existing.?.size > 0) _ = linux.ftruncate(fd, 0);
-            _ = sys.call(linux.utimensat, .{ fd, @as(?[*:0]const u8, null), &times, @as(u32, 0) }) catch |err| {
-                fail("cannot set the time of {s}: {s}", .{ stamp_path, @errorName(err) });
-                return false;
-            };
-            return true;
+            return updateTimestampInPlace(a, parent_fd, base, stamp_path, existing.?, &times);
         }
         fail("cannot write {s}: {s}", .{ stamp_path, @errorName(open_err) });
         return false;
     }
 }
 
+/// Set by a unit test whose expected errors would otherwise reach stderr.
+var test_quiet = false;
+
 fn fail(comptime fmt: []const u8, args: anytype) void {
+    if (comptime builtin.is_test) if (test_quiet) return;
     std.debug.print(tool ++ ": " ++ fmt ++ "\n", args);
 }
 
@@ -976,6 +1091,68 @@ fn luaQuote(a: std.mem.Allocator, value: []const u8) ![]const u8 {
     return out.toOwnedSlice(a);
 }
 
+/// Create `path` and write `data` to it. A failed open, write or close is
+/// reported, and the caller's verify directory removes what was made.
+fn writeNew(path: []const u8, data: []const u8) bool {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o644) catch |err| {
+        fail("cannot write {s}: {s}", .{ path, sys.describe(err) });
+        return false;
+    };
+    sys.writeAll(fd, data) catch |err| {
+        const why = sys.describe(err);
+        sys.close(fd);
+        fail("cannot write {s}: {s}", .{ path, why });
+        return false;
+    };
+    storage.closeWritten(fd) catch |err| {
+        fail("cannot write {s}: {s}", .{ path, sys.describe(err) });
+        return false;
+    };
+    return true;
+}
+
+/// Put `data` back at `path` through a new file in the same directory,
+/// renamed over `path` once it is written, synced and closed, and then
+/// sync the directory. A failure before the rename removes the new file;
+/// the first failure is returned. The file gets mode 0644, as the cache
+/// is written with, and the caller as its owner; unlike `atomicWrite` it
+/// copies no ACL or other owner from the file it replaces.
+fn putBack(path: []const u8, data: []const u8) !void {
+    const parent_fd = try fsx.openDir(fsx.cwd, std.fs.path.dirname(path) orelse "/", true);
+    defer sys.close(parent_fd);
+    var rnd: [6]u8 = undefined;
+    _ = try sys.call(linux.getrandom, .{ &rnd, rnd.len, @as(u32, 0) });
+    var tmp_buf: [sys.path_max]u8 = undefined;
+    const tmp_name = try std.fmt.bufPrint(&tmp_buf, ".{s}.{x}.tmp", .{ std.fs.path.basename(path), std.mem.readInt(u48, &rnd, .little) });
+    const fd = try sys.openat(parent_fd, tmp_name, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o644);
+    errdefer {
+        const kept = sys.last_errno;
+        sys.unlinkat(parent_fd, tmp_name, 0) catch {};
+        sys.last_errno = kept;
+    }
+    {
+        errdefer sys.close(fd);
+        try sys.fchmod(fd, 0o644);
+        try sys.writeAll(fd, data);
+        try storage.fsyncWritten(fd);
+    }
+    try storage.closeWritten(fd);
+    try sys.renameat(parent_fd, tmp_name, parent_fd, std.fs.path.basename(path));
+    try storage.fsyncWritten(parent_fd);
+}
+
 fn makeVerifyDir(a: std.mem.Allocator, cache_dir: []const u8) ![]u8 {
     return fsx.mkdtemp(a, cache_dir, ".eb-local-verify-");
 }
@@ -999,13 +1176,9 @@ fn installVerified(
     const candidate_path = std.fs.path.join(a, &.{ tmp_dir, "spiderT.lua" }) catch return 1;
     const candidate_stamp = std.fs.path.join(a, &.{ tmp_dir, "timestamp" }) catch return 1;
     const rc_path = std.fs.path.join(a, &.{ tmp_dir, "lmodrc.lua" }) catch return 1;
-    const cwd = std.Io.Dir.cwd();
-    cwd.writeFile(io, .{ .sub_path = candidate_path, .data = candidate }) catch |err| {
-        fail("cannot write {s}: {s}", .{ candidate_path, @errorName(err) });
-        return 1;
-    };
+    if (!writeNew(candidate_path, candidate)) return 1;
     const stat = fsx.statAt(fsx.cwd, candidate_path, false) catch return 1;
-    if (!writeTimestamp(candidate_stamp, stat.mtime)) return 1;
+    if (!writeTimestamp(a, candidate_stamp, stat.mtime)) return 1;
     const quoted_dir = luaQuote(a, tmp_dir) catch {
         fail("cannot write a temporary LMOD_RC; the cache was not changed", .{});
         return 1;
@@ -1017,10 +1190,7 @@ fn installVerified(
         \\}}
         \\
     , .{ quoted_dir, quoted_stamp }) catch return 1;
-    cwd.writeFile(io, .{ .sub_path = rc_path, .data = rc }) catch |err| {
-        fail("cannot write {s}: {s}", .{ rc_path, @errorName(err) });
-        return 1;
-    };
+    if (!writeNew(rc_path, rc)) return 1;
     const cached = readInventory(io, a, env, rc_path, opts.modulepath, false) catch |err| switch (err) {
         error.Canceled => return 130,
         error.ModuleNotFound => {
@@ -1155,7 +1325,16 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     }
     const cwd = std.Io.Dir.cwd();
     const cache_path = std.fs.path.join(a, &.{ opts.cache_dir, "spiderT.lua" }) catch return 1;
-    const prev_cache: ?[]const u8 = cwd.readFileAlloc(io, cache_path, a, .limited(64 * 1024 * 1024)) catch null;
+    // A rollback puts these bytes back, so only a cache that does not
+    // exist counts as none: one that cannot be read is not replaced.
+    const prev_cache: ?[]const u8 = cwd.readFileAlloc(io, cache_path, a, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            const why = if (err == error.StreamTooLong) "larger than 64 MiB" else @errorName(err);
+            fail("cannot read {s}: {s}; the cache was not changed", .{ cache_path, why });
+            return 1;
+        },
+    };
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = opts.cache_dir;
@@ -1189,14 +1368,12 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         fn rollback(alloc: std.mem.Allocator, missing: ?[]const u8, path: []const u8, prev: ?[]const u8, wrote: bool) void {
             if (wrote) {
                 if (prev) |data| {
-                    var why: common.atomic.Why = .{};
-                    defer why.deinit(alloc);
-                    common.atomic.atomicWrite(alloc, path, data, .{ .mode = 0o644 }, &why) catch {};
+                    putBack(path, data) catch |err| fail("cannot restore {s}: {s}", .{ path, storage.describeError(err) });
                 } else {
-                    sys.unlinkat(fsx.cwd, path, 0) catch {};
+                    sys.unlinkat(fsx.cwd, path, 0) catch |err| fail("cannot remove {s}: {s}", .{ path, sys.describe(err) });
                 }
             }
-            if (missing) |dir| fsx.deleteTree(alloc, fsx.cwd, dir) catch {};
+            if (missing) |dir| fsx.deleteTree(alloc, fsx.cwd, dir) catch |err| fail("cannot remove {s}: {s}", .{ dir, storage.describeError(err) });
         }
     }.rollback;
     var cache_written = false;
@@ -1226,7 +1403,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     };
-    if (!writeTimestamp(opts.timestamp, stat.mtime)) {
+    if (!writeTimestamp(a, opts.timestamp, stat.mtime)) {
         cleanup(a, first_missing, cache_path, prev_cache, cache_written);
         return 1;
     }
@@ -1296,6 +1473,109 @@ test "a failed directory release closes every descriptor and keeps the first err
     storage.test_release_errno = null;
     try std.testing.expectEqual(linux.E.SUCCESS, sys.last_errno);
     try std.testing.expect(!isOpen(signaled_fd));
+}
+
+var inplace_test_dir: sys.fd_t = -1;
+
+fn replaceInPlaceStamp() void {
+    const fd = sys.openat(inplace_test_dir, "swap", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o644) catch unreachable;
+    sys.writeAll(fd, "other\n") catch unreachable;
+    sys.close(fd);
+    sys.renameat(inplace_test_dir, "swap", inplace_test_dir, "stamp") catch unreachable;
+}
+
+test "a failed close of an in-place timestamp restores the inode it changed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-inplace-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const dir = try fsx.openDir(fsx.cwd, root, true);
+    defer sys.close(dir);
+    inplace_test_dir = dir;
+
+    const made = try sys.openat(dir, "stamp", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o644);
+    try sys.writeAll(made, "kept\n");
+    const before = [2]linux.timespec{ .{ .sec = 1_700_000_000, .nsec = 0 }, .{ .sec = 1_700_000_000, .nsec = 0 } };
+    _ = try sys.call(linux.utimensat, .{ made, @as(?[*:0]const u8, null), &before, @as(u32, 0) });
+    sys.close(made);
+    const held = try sys.openat(dir, "stamp", .{}, 0);
+    defer sys.close(held);
+    const st = try fsx.statAt(dir, "stamp", false);
+
+    storage.test_close_errno = .IO;
+    storage.test_close_count = 1;
+    test_after_inplace_close = replaceInPlaceStamp;
+    test_quiet = true;
+    defer {
+        storage.test_close_errno = null;
+        storage.test_close_count = null;
+        test_after_inplace_close = null;
+        test_quiet = false;
+    }
+    const times = [2]linux.timespec{ .{ .sec = 1_800_000_000, .nsec = 0 }, .{ .sec = 1_800_000_000, .nsec = 0 } };
+    try std.testing.expect(!updateTimestampInPlace(a, dir, "stamp", "stamp", st, &times));
+
+    try std.testing.expectEqualStrings("kept\n", try fsx.readAll(a, held, 64));
+    try std.testing.expectEqual(@as(isize, 1_700_000_000), (try fsx.fstat(held)).mtime.sec);
+    const swapped = try sys.openat(dir, "stamp", .{}, 0);
+    defer sys.close(swapped);
+    try std.testing.expectEqualStrings("other\n", try fsx.readAll(a, swapped, 64));
+}
+
+test "an in-place timestamp that grew after its stat is left alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-inplace-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const dir = try fsx.openDir(fsx.cwd, root, true);
+    defer sys.close(dir);
+
+    const made = try sys.openat(dir, "stamp", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o644);
+    const st = try fsx.statAt(dir, "stamp", false);
+    try sys.writeAll(made, "late\n");
+    sys.close(made);
+
+    test_quiet = true;
+    defer test_quiet = false;
+    const times = [2]linux.timespec{ .{ .sec = 1_800_000_000, .nsec = 0 }, .{ .sec = 1_800_000_000, .nsec = 0 } };
+    try std.testing.expect(!updateTimestampInPlace(a, dir, "stamp", "stamp", st, &times));
+    const fd = try sys.openat(dir, "stamp", .{}, 0);
+    defer sys.close(fd);
+    try std.testing.expectEqualStrings("late\n", try fsx.readAll(a, fd, 64));
+    try std.testing.expect((try fsx.fstat(fd)).mtime.sec != 1_800_000_000);
+}
+
+test "an in-place timestamp replaced after its stat is left alone" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-inplace-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const dir = try fsx.openDir(fsx.cwd, root, true);
+    defer sys.close(dir);
+
+    const made = try sys.openat(dir, "stamp", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, 0o644);
+    // The same size as the file put in its place, so only the inode
+    // tells them apart.
+    try sys.writeAll(made, "first\n");
+    sys.close(made);
+    const st = try fsx.statAt(dir, "stamp", false);
+    const held = try sys.openat(dir, "stamp", .{}, 0);
+    defer sys.close(held);
+    inplace_test_dir = dir;
+    replaceInPlaceStamp();
+
+    test_quiet = true;
+    defer test_quiet = false;
+    const times = [2]linux.timespec{ .{ .sec = 1_800_000_000, .nsec = 0 }, .{ .sec = 1_800_000_000, .nsec = 0 } };
+    try std.testing.expect(!updateTimestampInPlace(a, dir, "stamp", "stamp", st, &times));
+    const fd = try sys.openat(dir, "stamp", .{}, 0);
+    defer sys.close(fd);
+    try std.testing.expectEqualStrings("other\n", try fsx.readAll(a, fd, 64));
+    try std.testing.expect((try fsx.fstat(fd)).mtime.sec != 1_800_000_000);
+    try std.testing.expectEqualStrings("first\n", try fsx.readAll(a, held, 64));
 }
 
 test "a colon-separated module path drops empty segments" {
