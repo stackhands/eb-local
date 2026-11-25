@@ -1290,8 +1290,8 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
     } else {
         const fd = sys.openat(fsx.cwd, ".envrc", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
             die("cannot create .envrc ({s})", .{storage.describeError(e)});
-        defer sys.close(fd);
         sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{storage.describeError(e)});
+        storage.closeWritten(fd) catch |e| die("cannot write .envrc ({s})", .{storage.describeError(e)});
     }
     cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
     return 0;
@@ -1323,8 +1323,8 @@ fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
     } else |_| {
         const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
             die("cannot create {s} ({s})", .{ name, storage.describeError(e) });
-        defer sys.close(fd);
         sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+        storage.closeWritten(fd) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
     }
 }
 
@@ -3617,12 +3617,12 @@ fn recordWorkspaceRoot(c: Ctx, prefix: []const u8, root: []const u8) void {
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0o600) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
-    defer sys.close(fd);
     const st = fsx.fstat(fd) catch |e| die("cannot inspect workstation workspace-root registry ({s})", .{storage.describeError(e)});
     if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0)
         die("workstation workspace-root registry entry {s} must be a private regular file you own", .{name});
     sys.writeAll(fd, root) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
-    sys.fsync(fd) catch {};
+    storage.fsyncWritten(fd) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
+    storage.closeWritten(fd) catch |e| die("cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
 }
 
 fn recordedWorkspaceRoots(c: Ctx, prefix: []const u8) []const WorkspaceRootRecord {
@@ -6255,6 +6255,12 @@ fn runMain(init: std.process.Init) u8 {
         }
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_RELEASE_ERRNO"))) |v| {
             if (std.mem.startsWith(u8, v, "E")) storage.test_release_errno = std.meta.stringToEnum(linux.E, v[1..]);
+        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_ERRNO"))) |v| {
+            if (std.mem.startsWith(u8, v, "E")) storage.test_close_errno = std.meta.stringToEnum(linux.E, v[1..]);
+        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_ERRNO"))) |v| {
+            if (std.mem.startsWith(u8, v, "E")) storage.test_fsync_errno = std.meta.stringToEnum(linux.E, v[1..]);
         }
     }
     // A single program name, then eb's own arguments: an eb-stack target.
