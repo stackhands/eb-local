@@ -1031,6 +1031,49 @@ test "lock descriptors stay above closed stdio slots" {
     try testing.expectEqual(@as(u8, 0), linux.W.EXITSTATUS(status));
 }
 
+fn isOpen(fd: sys.fd_t) bool {
+    return linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)) != .BADF;
+}
+
+test "a failed release closes the descriptor and returns its errno" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-lock-release-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const lock_path = try std.fs.path.join(a, &.{ root, ".lock" });
+    defer test_release_errno = null;
+
+    var lock = acquireOptionalLock(lock_path);
+    const fd = lock.?;
+    test_release_errno = .IO;
+    sys.last_errno = .SUCCESS;
+    try testing.expectError(error.Unexpected, releaseLock(&lock));
+    test_release_errno = null;
+    try testing.expectEqual(linux.E.IO, sys.last_errno);
+    try testing.expectEqualStrings("[Errno 5] Input/output error", sys.describe(error.Unexpected));
+    try testing.expect(lock == null);
+    try testing.expect(!isOpen(fd));
+    try testing.expect(tryLockFree(lock_path));
+
+    lock = acquireOptionalLock(lock_path);
+    const fd2 = lock.?;
+    test_release_errno = .IO;
+    sys.last_errno = .ACCES;
+    releaseLockAfterError(&lock);
+    test_release_errno = null;
+    try testing.expectEqual(linux.E.ACCES, sys.last_errno);
+    try testing.expectEqualStrings("[Errno 13] Permission denied", sys.describe(error.AccessDenied));
+    try testing.expect(lock == null);
+    try testing.expect(!isOpen(fd2));
+    try testing.expect(tryLockFree(lock_path));
+
+    test_release_errno = .IO;
+    try testing.expect(!tryLockFree(lock_path));
+    test_release_errno = null;
+    try testing.expect(tryLockFree(lock_path));
+}
+
 test "the mount a path lies on" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -1236,6 +1236,65 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     return code;
 }
 
+fn isOpen(fd: sys.fd_t) bool {
+    return linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)) != .BADF;
+}
+
+test "a failed directory release closes every descriptor and keeps the first errno" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-dirhold-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const first = try std.fs.path.join(a, &.{ root, "first" });
+    const second = try std.fs.path.join(a, &.{ root, "second" });
+    try common.atomic.makedirs(first);
+    try common.atomic.makedirs(second);
+    defer storage.test_release_errno = null;
+
+    var hold: DirHold = .{};
+    try hold.lockExistingDir(first, 1000);
+    try hold.lockExistingDir(second, 1000);
+    const fds = [_]sys.fd_t{ hold.fds[0], hold.fds[1] };
+    storage.test_release_errno = .IO;
+    sys.last_errno = .SUCCESS;
+    try std.testing.expectError(error.Unexpected, hold.release());
+    storage.test_release_errno = null;
+    try std.testing.expectEqual(linux.E.IO, sys.last_errno);
+    try std.testing.expectEqualStrings(second, hold.failed);
+    try std.testing.expectEqual(@as(usize, 0), hold.len);
+    for (fds) |fd| try std.testing.expect(!isOpen(fd));
+
+    var after: DirHold = .{};
+    try after.lockExistingDir(first, 1000);
+    const fd = after.fds[0];
+    storage.test_release_errno = .IO;
+    sys.last_errno = .ACCES;
+    try std.testing.expectEqual(@as(u8, 3), after.end(3));
+    storage.test_release_errno = null;
+    try std.testing.expectEqual(linux.E.ACCES, sys.last_errno);
+    try std.testing.expect(!isOpen(fd));
+
+    var clean: DirHold = .{};
+    try clean.lockExistingDir(first, 1000);
+    try std.testing.expectEqual(@as(u8, 0), clean.end(0));
+    try std.testing.expectEqual(@as(usize, 0), clean.len);
+
+    // A signal recorded before the end of a successful run drops the failed
+    // release, as `run` raises the signal again.
+    var signaled: DirHold = .{};
+    try signaled.lockExistingDir(first, 1000);
+    const signaled_fd = signaled.fds[0];
+    first_signal.store(@backingInt(linux.SIG.TERM), .seq_cst);
+    defer first_signal.store(0, .seq_cst);
+    storage.test_release_errno = .IO;
+    sys.last_errno = .SUCCESS;
+    try std.testing.expectEqual(@as(u8, 1), signaled.end(0));
+    storage.test_release_errno = null;
+    try std.testing.expectEqual(linux.E.SUCCESS, sys.last_errno);
+    try std.testing.expect(!isOpen(signaled_fd));
+}
+
 test "a colon-separated module path drops empty segments" {
     const dirs = try moduleDirs(std.testing.allocator, ":/mod/a::/mod/b:/mod/a:");
     defer std.testing.allocator.free(dirs);
