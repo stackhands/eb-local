@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 import binary
+import support
 
 
 @unittest.skipUnless(binary.ZIG, "dev is a feature of the Zig build")
@@ -26,14 +27,15 @@ class DevCliModes(unittest.TestCase):
         self.module_sh.write_text("module() { return 0; }\n")
 
     def run_dev(self, args, **env_overrides):
-        env = {
-            "PATH": "/usr/bin:/bin",
-            "HOME": str(self.root),
-            "EB_LOCAL_CONFIG": str(self.site),
-            "EB_LOCAL_PREFIX": str(self.prefix),
-        }
-        env.pop("LD_LIBRARY_PATH", None)
-        env.update(env_overrides)
+        env = support.isolated_env(
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_CONFIG": str(self.site),
+                "EB_LOCAL_PREFIX": str(self.prefix),
+            },
+            **env_overrides,
+        )
         env.setdefault("BASH_ENV", str(self.module_sh))
         return subprocess.run(
             [binary.ZIG, "dev", *args],
@@ -134,8 +136,12 @@ class DevCliModes(unittest.TestCase):
         run = subprocess.run(
             ["bash", "-c", 'module() { return 0; }\nsource ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
             cwd=self.root,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": str(self.site),
-                 "EB_LOCAL_PREFIX": str(self.prefix)},
+            env=support.isolated_env({
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_CONFIG": str(self.site),
+                "EB_LOCAL_PREFIX": str(self.prefix),
+            }),
             capture_output=True, text=True,
         )
         self.assertTrue(run.stdout.startswith(str(self.prefix) + "/dev/"), run.stdout + run.stderr)
@@ -207,8 +213,12 @@ class DevCliModes(unittest.TestCase):
         def run_lines(subdir):
             return subprocess.run(
                 ["bash", "-c", 'module() { return 0; }\n' + got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
-                env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EESSI_SOFTWARE_SUBDIR": subdir,
-                     "EESSI_VERSION": "2026.06"},
+                env=support.isolated_env({
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.root),
+                    "EESSI_SOFTWARE_SUBDIR": subdir,
+                    "EESSI_VERSION": "2026.06",
+                }),
                 capture_output=True, text=True,
             )
 
