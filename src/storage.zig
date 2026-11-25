@@ -608,11 +608,12 @@ pub fn probeWorkspace(
     result.created = true;
     var current = first;
     defer sys.unlinkat(dir, current, 0) catch {};
-    {
-        defer sys.close(fd);
-        try sys.writeAll(fd, "#!/bin/sh\nexit 0\n");
-        result.written = true;
-    }
+    sys.writeAll(fd, "#!/bin/sh\nexit 0\n") catch |err| {
+        sys.close(fd);
+        return err;
+    };
+    try closeWritten(fd);
+    result.written = true;
     try sys.renameat(dir, first, dir, renamed);
     current = renamed;
     result.renamed = true;
@@ -903,6 +904,46 @@ pub fn releaseLockAfterError(lock: *?sys.fd_t) void {
     const kept = sys.last_errno;
     releaseLock(lock) catch {};
     sys.last_errno = kept;
+}
+
+/// Set in `main` from `EB_LOCAL_TEST_CLOSE_ERRNO`, only in the test
+/// artifact, so every `closeWritten` closes its descriptor and then
+/// fails with that errno.
+pub var test_close_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_FSYNC_ERRNO`, only in the test
+/// artifact, so every `fsyncWritten` fails with that errno without
+/// syncing.
+pub var test_fsync_errno: ?linux.E = null;
+
+fn closeFd(fd: sys.fd_t) usize {
+    const rc = linux.close(fd);
+    if (comptime build_options.test_ops) {
+        if (test_close_errno) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    }
+    return rc;
+}
+
+fn fsyncFd(fd: sys.fd_t) usize {
+    if (comptime build_options.test_ops) {
+        if (test_fsync_errno) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    }
+    return linux.fsync(fd);
+}
+
+/// Close a descriptor this process wrote a file through. A failed close
+/// is returned, with `sys.last_errno` its errno, because NFS and some
+/// quota setups report a lost write only there. Linux frees the
+/// descriptor whatever close returns, so it is not closed again, and
+/// EINTR is not an error.
+pub fn closeWritten(fd: sys.fd_t) sys.Error!void {
+    _ = try sys.result(closeFd(fd));
+}
+
+/// fsync(2) of a file this process wrote, or of the directory that names
+/// it. A failure is returned, with `sys.last_errno` its errno.
+pub fn fsyncWritten(fd: sys.fd_t) sys.Error!void {
+    _ = try sys.call(fsyncFd, .{fd});
 }
 
 /// True when `path` is absent, unlocked, or on a filesystem without `flock`.

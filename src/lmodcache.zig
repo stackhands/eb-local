@@ -254,7 +254,10 @@ fn writeTimestamp(stamp_path: []const u8, cache_mtime: linux.timespec) bool {
             fail("cannot write {s}: {s}", .{ stamp_path, @errorName(err) });
             return false;
         };
-        sys.fsync(parent_fd) catch {};
+        storage.fsyncWritten(parent_fd) catch |err| {
+            fail("cannot write {s}: {s}", .{ stamp_path, sys.describe(err) });
+            return false;
+        };
         return true;
     } else |open_err| {
         if (existing != null and open_err == error.AccessDenied) {
