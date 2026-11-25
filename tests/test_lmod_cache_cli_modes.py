@@ -124,7 +124,8 @@ class LmodCacheCliModes(unittest.TestCase):
             "--spider", str(spider),
         ])
         self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
-        self.assertIn("NoSpace", got.stderr)
+        self.assertIn("[Errno 28] No space left on device", got.stderr)
+        self.assertNotIn("NoSpace", got.stderr)
 
 
 if __name__ == "__main__":

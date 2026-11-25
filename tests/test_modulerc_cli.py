@@ -237,7 +237,8 @@ class Modulerc(unittest.TestCase):
                 ro_got = run(["--module-tree", str(ro_tree), "--default", "Example/2.0"])
                 self.assertEqual(ro_got.returncode, 1, ro_got.stdout + ro_got.stderr)
                 self.assertEqual(ro_got.stdout, "")
-                self.assertIn("AccessDenied", ro_got.stderr)
+                self.assertIn("[Errno 13] Permission denied", ro_got.stderr)
+                self.assertNotIn("AccessDenied", ro_got.stderr)
 
             dir_tree = root / "dir-tree"
             dir_tree.mkdir()
@@ -268,7 +269,8 @@ class Modulerc(unittest.TestCase):
         got = run(["--module-tree", str(mnt / "mods"), "--default", "Example/2.0"])
         self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
         self.assertEqual(got.stdout, "")
-        self.assertIn("NoSpace", got.stderr)
+        self.assertIn("[Errno 28] No space left on device", got.stderr)
+        self.assertNotIn("NoSpace", got.stderr)
 
 
 if __name__ == "__main__":
