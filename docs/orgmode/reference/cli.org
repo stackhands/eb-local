@@ -233,11 +233,10 @@ The version line names the program, its version, the target and optimize mode of
 Built with =zig build --release=safe -Dcommit=0123abc=, it prints:
 
 #+begin_example
-eb-local 3.3.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
+eb-local 3.4.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 #+end_example
 
-No CLI flag was added, removed or renamed between =v3.2.0= and =v3.3.0=.
-After =v3.3.0=, the command line adds =--replace= on =dev= and the =leave= command.
+Between =v3.3.0= and =v3.4.0= the command line adds =--replace= on =dev= and the =leave= command; no flag was removed or renamed.
 
 * Commands
 
@@ -392,6 +391,8 @@ The names it wraps are =gcc=, =g++=, =c++=, =cc=, =gfortran=, =clang=, =clang++=
 | =--unwrapped=  | Wrap only the =clang=, =clang++=, =flang=, =flang-new= and =ld.lld= on =PATH= that no other wrapper comes before, and print nothing when there are none. |
 
 Without =--unwrapped=, finding nothing to wrap is exit 1.
+
+A wrapper adds a run path, when its command links, for each directory named with =-L= or =--library-path=, for the directory of each existing =lib*.so= or =lib*.so.N= file named by its absolute path, and for each =LIBRARY_PATH= entry when it wraps a compiler driver. The arguments in a response file, =@FILE=, count as its own; one it cannot read is passed on unchanged.
 
 ** check
 
