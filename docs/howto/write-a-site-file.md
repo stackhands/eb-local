@@ -119,7 +119,7 @@ salloc -p cpu -n 1 -t 00:05:00 srun eb-local doctor
 ```
 
 ```text
-ok   eb-local 3.3.0
+ok   eb-local 3.4.0
 ok   site file /usr/local/bin/config.toml
 ok   builds use the allocation's own xfs mount /local/%u.%j
 ok   installs go to /home/alice/eessi: a user install, prefix from default
