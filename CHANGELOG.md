@@ -94,6 +94,10 @@
   root as any entry it replaced.
 - `settleGroup` keeps waiting while `wait4` reports a child in the signalled process group, so a child the `/proc` scan misses is reaped instead of being orphaned when `stop` re-raises the signal.
 
+### Documentation
+
+- The README describes builds on a workstation, laptop or CI runner without Slurm, and no longer says the shim passes an eb-local.conf.
+
 ### Miscellaneous
 
 - A unit test pins that `eb-local lmod-cache`, updating `--timestamp` in place with standard input, output and error closed, keeps the duplicate it restores the timestamp through off descriptors 0, 1 and 2.
