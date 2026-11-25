@@ -27,3 +27,14 @@ def run_shell(name, executable, script, *, env, cwd):
         text=True,
         capture_output=True,
     )
+
+
+MISSING_EESSI_REPO = "/nonexistent/eb-local-eessi"
+
+
+def isolated_env(base=None, **overrides):
+    """Return a copy of BASE with EESSI_CVMFS_REPO set to a missing path."""
+    env = dict(base) if base is not None else {}
+    env["EESSI_CVMFS_REPO"] = MISSING_EESSI_REPO
+    env.update(overrides)
+    return env

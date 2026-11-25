@@ -6,6 +6,7 @@ import subprocess
 import unittest
 
 import binary
+import support
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "src" / "main.zig"
@@ -27,11 +28,12 @@ class EnvStrictSource(unittest.TestCase):
 @unittest.skipUnless(binary.ZIG, "env --strict needs the Zig build")
 class EnvStrictCli(unittest.TestCase):
     def test_strict_exits_when_init_is_missing(self):
+        env = support.isolated_env({"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
         run = subprocess.run(
             [binary.ZIG, "env", "--strict"],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+            env=env,
         )
         script = run.stdout
         self.assertIn("init=${repo}/versions/${ver}/init/lmod/bash", script)
@@ -39,7 +41,7 @@ class EnvStrictCli(unittest.TestCase):
             ["bash", "-c", script],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+            env=env,
         )
         self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
         self.assertIn("missing", proc.stderr)
@@ -50,7 +52,7 @@ class EnvStrictCli(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            env = {"PATH": os.environ["PATH"], "HOME": tmp, "EB_LOCAL_PREFIX": f"{tmp}/eessi"}
+            env = support.isolated_env({"PATH": os.environ["PATH"], "HOME": tmp, "EB_LOCAL_PREFIX": f"{tmp}/eessi"})
             default_dev = subprocess.run([binary.ZIG, "dev"], capture_output=True, text=False, env=env)
             self.assertEqual((default_dev.returncode, default_dev.stderr), (0, b""))
             self.assertTrue(default_dev.stdout.startswith(b"eb_local_apply() {\nif ! type module >/dev/null 2>&1; then\n"))
@@ -74,11 +76,12 @@ class EnvStrictCli(unittest.TestCase):
             self.assertIn(b"module load buildenv/site-gcc\n", custom_be.stdout)
 
     def test_dev_strict_exits_2_when_init_is_absent(self):
+        env = support.isolated_env({"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
         run = subprocess.run(
             [binary.ZIG, "dev", "--strict", "--buildenv", "buildenv/site-gcc", "FFTW/3.3.10"],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+            env=env,
         )
         self.assertEqual((run.returncode, run.stderr), (0, ""))
         self.assertIn("init=${repo}/versions/${ver}/init/lmod/bash", run.stdout)
@@ -87,7 +90,7 @@ class EnvStrictCli(unittest.TestCase):
             ["bash", "-c", run.stdout],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+            env=env,
         )
         self.assertEqual(proc.returncode, 2, proc.stderr + proc.stdout)
         self.assertIn("CVMFS", proc.stderr)
