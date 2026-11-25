@@ -907,26 +907,68 @@ pub fn releaseLockAfterError(lock: *?sys.fd_t) void {
 }
 
 /// Set in `main` from `EB_LOCAL_TEST_CLOSE_ERRNO`, only in the test
-/// artifact, so every `closeWritten` closes its descriptor and then
-/// fails with that errno.
+/// artifact, so each `closeWritten` after the first
+/// `test_close_after` closes its descriptor and then fails with that
+/// errno. `testErrno` refuses EINTR, which `closeWritten` counts as a
+/// success.
 pub var test_close_errno: ?linux.E = null;
 
+/// Set in `main` from `EB_LOCAL_TEST_CLOSE_AFTER`: how many calls of
+/// `closeWritten` succeed before `test_close_errno` applies.
+pub var test_close_after: u32 = 0;
+
+/// Set in `main` from `EB_LOCAL_TEST_CLOSE_COUNT`: how many calls of
+/// `closeWritten` fail once `test_close_errno` applies; the calls after
+/// them succeed. Null fails every one.
+pub var test_close_count: ?u32 = null;
+
 /// Set in `main` from `EB_LOCAL_TEST_FSYNC_ERRNO`, only in the test
-/// artifact, so every `fsyncWritten` fails with that errno without
-/// syncing.
+/// artifact, so each `fsyncWritten` after the first `test_fsync_after`
+/// fails with that errno without syncing. `testErrno` refuses EINTR,
+/// which `fsyncWritten` would retry without end.
 pub var test_fsync_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_FSYNC_AFTER`: how many calls of
+/// `fsyncWritten` succeed before `test_fsync_errno` applies.
+pub var test_fsync_after: u32 = 0;
+
+/// Set in `main` from `EB_LOCAL_TEST_FSYNC_COUNT`: how many calls of
+/// `fsyncWritten` fail once `test_fsync_errno` applies; the calls after
+/// them succeed. Null fails every one.
+pub var test_fsync_count: ?u32 = null;
+
+/// The errno a close or fsync hook names, as `EIO` for `.IO`. Null for a
+/// name that is not an errno and for EINTR, which neither call reports.
+pub fn testErrno(name: []const u8) ?linux.E {
+    if (!std.mem.startsWith(u8, name, "E")) return null;
+    const e = std.meta.stringToEnum(linux.E, name[1..]) orelse return null;
+    return if (e == .INTR) null else e;
+}
+
+fn injected(errno: ?linux.E, after: *u32, count: *?u32) ?linux.E {
+    const e = errno orelse return null;
+    if (after.* > 0) {
+        after.* -= 1;
+        return null;
+    }
+    if (count.*) |*left| {
+        if (left.* == 0) return null;
+        left.* -= 1;
+    }
+    return e;
+}
 
 fn closeFd(fd: sys.fd_t) usize {
     const rc = linux.close(fd);
-    if (comptime build_options.test_ops) {
-        if (test_close_errno) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    if (comptime build_options.test_ops or builtin.is_test) {
+        if (injected(test_close_errno, &test_close_after, &test_close_count)) |e| return @bitCast(-@as(isize, @backingInt(e)));
     }
     return rc;
 }
 
 fn fsyncFd(fd: sys.fd_t) usize {
-    if (comptime build_options.test_ops) {
-        if (test_fsync_errno) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    if (comptime build_options.test_ops or builtin.is_test) {
+        if (injected(test_fsync_errno, &test_fsync_after, &test_fsync_count)) |e| return @bitCast(-@as(isize, @backingInt(e)));
     }
     return linux.fsync(fd);
 }
