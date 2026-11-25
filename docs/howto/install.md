@@ -5,7 +5,7 @@
 Install the `eb-local` program for your account, from a release or from source.
 On a cluster whose site installs eb-local, load the site's module, or use the `eb-local` already on `PATH`, and skip this page.
 
-These pages describe release 3.4.0.
+These pages describe release 3.5.0.
 Release 3.4.0 is older: it builds only inside a Slurm job, with no `--workstation` and no local build on a host without Slurm; its `dev` sets no `PYTHONUSERBASE`, `JULIA_DEPOT_PATH`, `R_LIBS_USER` or Go paths under `EB_LOCAL_DEV_PREFIX`; and its recipe overlays take no top-level easyconfig assignments. The [changelog](https://github.com/stackhands/eb-local/blob/main/CHANGELOG.md) lists what each earlier release lacks.
 A build from the main branch prints the version of the last release, with its own commit.
 [Find what is wrong before a build](find-what-is-wrong.md) copies `eb-local-readiness` from a pinned `main` commit when you use the release binary.
