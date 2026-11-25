@@ -10,6 +10,7 @@ for it, clean the log, and then die of the signal.
 import os
 from pathlib import Path
 import pty
+import shutil
 import signal
 import subprocess
 import time
@@ -41,6 +42,13 @@ with open(log, "a") as f:
     f.write("stopping with " + os.environ["LICENCE_KEY"] + "\n")
 open(os.path.join(root, "eb.signals"), "w").write(" ".join(got))
 sys.exit(15 if got[0] == "SIGTERM" else 1)
+'''
+
+LATE_EB = r'''
+import gzip, os
+log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-late.log.gz")
+with gzip.open(log, "wt") as f:
+    f.write("built with " + os.environ["LICENCE_KEY"] + "\n")
 '''
 
 KEY = "licence-key-6f1c2e9a"
@@ -138,6 +146,22 @@ class Signals(StorageFixture):
         # on only what was sent to it alone.
         self.assertEqual((self.root / "eb.signals").read_text(), "SIGINT")
         self.assert_stopped_and_clean(eb)
+
+    def test_a_sigterm_while_the_logs_are_cleaned_drops_a_failed_lock_release(self):
+        # EasyBuild has exited; the gzip that cleaning its log runs sends the
+        # signal, before the workspace and its lock go.
+        late = self.root / "late-bin"
+        late.mkdir()
+        (self.root / "late-eb.py").write_text(LATE_EB)
+        (late / "eb").write_text('#!/bin/bash\nexec python3 "$CONTROL_ROOT/late-eb.py" "$@"\n')
+        (late / "gzip").write_text(f'#!/bin/bash\nkill -TERM "$PPID"\nexec {shutil.which("gzip")} "$@"\n')
+        for program in late.iterdir():
+            program.chmod(0o755)
+        env = dict(self.build_env, PATH=f"{late}:{self.build_env['PATH']}", EB_LOCAL_TEST_RELEASE_ERRNO="EIO")
+        run = subprocess.run(self.argv, env=env, cwd=self.root, start_new_session=True,
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, -signal.SIGTERM, run.stdout + run.stderr)
+        self.assertNotIn("cannot release", run.stderr)
 
     def test_unsignalled_build_with_secrets_keeps_default_raw_bytes(self):
         self.build_env["SLOW_EB_WAIT"] = "0"

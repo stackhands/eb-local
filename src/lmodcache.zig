@@ -383,18 +383,64 @@ const DirHold = struct {
     fds: [3]sys.fd_t = .{ -1, -1, -1 },
     devs: [3]u64 = .{ 0, 0, 0 },
     inos: [3]u64 = .{ 0, 0, 0 },
+    paths: [3][]const u8 = .{ "", "", "" },
     len: usize = 0,
+    /// The directory whose release `release` returned an error for.
+    failed: []const u8 = "",
 
-    fn release(self: *DirHold) void {
+    /// Release and close every held directory. Each is closed whatever its
+    /// release returns; the first failure is returned after the last close,
+    /// with `sys.last_errno` its errno.
+    fn release(self: *DirHold) sys.Error!void {
+        var first: ?sys.Error = null;
+        var first_errno: linux.E = .SUCCESS;
         while (self.len > 0) {
             self.len -= 1;
             const fd = self.fds[self.len];
             if (fd >= 0) {
-                _ = linux.flock(fd, std.posix.LOCK.UN);
-                sys.close(fd);
                 self.fds[self.len] = -1;
+                var held: ?sys.fd_t = fd;
+                storage.releaseLock(&held) catch |err| if (first == null) {
+                    first = err;
+                    first_errno = sys.last_errno;
+                    self.failed = self.paths[self.len];
+                };
             }
         }
+        if (first) |err| {
+            sys.last_errno = first_errno;
+            return err;
+        }
+    }
+
+    /// `release` in cleanup after another failure: a failed release is
+    /// dropped and `sys.last_errno` is put back.
+    fn releaseAfterError(self: *DirHold) void {
+        const kept = sys.last_errno;
+        self.release() catch {};
+        sys.last_errno = kept;
+    }
+
+    /// Release at the end of a run that exits `code`. After a success a
+    /// failed release is reported and the run exits 1; after a failure, or
+    /// a signal the caller raises again, it is dropped, so the failure
+    /// already reported is the one that stands.
+    fn end(self: *DirHold, code: u8) u8 {
+        // Blocked, a signal is either seen here or comes after the release.
+        var block = linux.sigemptyset();
+        for (cache_signals) |sig| linux.sigaddset(&block, sig);
+        var prev: linux.sigset_t = undefined;
+        _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &prev);
+        defer _ = linux.sigprocmask(linux.SIG.SETMASK, &prev, null);
+        if (code != 0 or receivedSignal() != null) {
+            self.releaseAfterError();
+            return if (code != 0) code else 1;
+        }
+        self.release() catch |err| {
+            fail("cannot release the lock on {s}: {s}", .{ self.failed, sys.describe(err) });
+            return 1;
+        };
+        return 0;
     }
 
     fn contains(self: *const DirHold, dev: u64, ino: u64) bool {
@@ -446,26 +492,25 @@ const DirHold = struct {
                     return error.LockFailed;
                 },
             };
+            var held: ?sys.fd_t = fd;
             const verify = fsx.statAt(fsx.cwd, dir_path, true) catch |err| switch (err) {
                 error.NotFound => {
-                    _ = linux.flock(fd, std.posix.LOCK.UN);
-                    sys.close(fd);
+                    storage.releaseLockAfterError(&held);
                     continue;
                 },
                 else => {
-                    _ = linux.flock(fd, std.posix.LOCK.UN);
-                    sys.close(fd);
+                    storage.releaseLockAfterError(&held);
                     return error.LockFailed;
                 },
             };
             if (verify.dev != st.dev or verify.ino != st.ino) {
-                _ = linux.flock(fd, std.posix.LOCK.UN);
-                sys.close(fd);
+                storage.releaseLockAfterError(&held);
                 continue;
             }
             self.fds[self.len] = fd;
             self.devs[self.len] = st.dev;
             self.inos[self.len] = st.ino;
+            self.paths[self.len] = dir_path;
             self.len += 1;
             return;
         }
@@ -779,7 +824,7 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     const update_cmd = resolved[0];
     for (targets) |t| {
         var target_hold: DirHold = .{};
-        defer target_hold.release();
+        defer target_hold.releaseAfterError();
         var cancel_guard = WriterCancelGuard.hold();
         target_hold.lockExistingDir(t.cache_dir, storage.default_lock_timeout_ms) catch |err| switch (err) {
             error.Canceled => return reRaiseWriterSignal(&cancel_guard, cancel_guard.received() orelse .TERM),
@@ -789,7 +834,7 @@ fn runPrefix(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
             },
         };
         cancel_guard.release();
-        const code = runUpdate(io, a, update_cmd, t);
+        const code = target_hold.end(runUpdate(io, a, update_cmd, t));
         if (code != 0) return code;
     }
     return 0;
@@ -1061,14 +1106,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         return 2;
     };
     var dir_hold: DirHold = .{};
-    defer dir_hold.release();
+    defer dir_hold.releaseAfterError();
     {
         var cancel_guard = WriterCancelGuard.hold();
         defer cancel_guard.release();
         const stamp_parent = std.fs.path.dirname(opts.timestamp) orelse "/";
         dir_hold.lockPairOrdered(opts.cache_dir, stamp_parent, timeout_ms) catch |err| switch (err) {
             error.Canceled => {
-                dir_hold.release();
+                dir_hold.releaseAfterError();
                 return reRaiseWriterSignal(&cancel_guard, cancel_guard.received() orelse .TERM);
             },
             error.TimedOut, error.LockFailed => return 1,
@@ -1128,7 +1173,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
         dir_hold.lockExistingDir(opts.cache_dir, timeout_ms) catch |err| switch (err) {
             error.Canceled => {
                 if (first_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
-                dir_hold.release();
+                dir_hold.releaseAfterError();
                 return reRaiseWriterSignal(&cancel_guard, cancel_guard.received() orelse .TERM);
             },
             error.TimedOut, error.LockFailed => {
@@ -1186,7 +1231,68 @@ pub fn run(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map
     defer line.deinit(a);
     line.print(a, "wrote {s}; {s} is older than it\n", .{ cache_path, opts.timestamp }) catch return 1;
     if (!writeStdout(line.items)) return 1;
-    return 0;
+    const code = dir_hold.end(0);
+    if (guard.received()) |sig| return stopSignal(&guard, sig);
+    return code;
+}
+
+fn isOpen(fd: sys.fd_t) bool {
+    return linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)) != .BADF;
+}
+
+test "a failed directory release closes every descriptor and keeps the first errno" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-dirhold-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const first = try std.fs.path.join(a, &.{ root, "first" });
+    const second = try std.fs.path.join(a, &.{ root, "second" });
+    try common.atomic.makedirs(first);
+    try common.atomic.makedirs(second);
+    defer storage.test_release_errno = null;
+
+    var hold: DirHold = .{};
+    try hold.lockExistingDir(first, 1000);
+    try hold.lockExistingDir(second, 1000);
+    const fds = [_]sys.fd_t{ hold.fds[0], hold.fds[1] };
+    storage.test_release_errno = .IO;
+    sys.last_errno = .SUCCESS;
+    try std.testing.expectError(error.Unexpected, hold.release());
+    storage.test_release_errno = null;
+    try std.testing.expectEqual(linux.E.IO, sys.last_errno);
+    try std.testing.expectEqualStrings(second, hold.failed);
+    try std.testing.expectEqual(@as(usize, 0), hold.len);
+    for (fds) |fd| try std.testing.expect(!isOpen(fd));
+
+    var after: DirHold = .{};
+    try after.lockExistingDir(first, 1000);
+    const fd = after.fds[0];
+    storage.test_release_errno = .IO;
+    sys.last_errno = .ACCES;
+    try std.testing.expectEqual(@as(u8, 3), after.end(3));
+    storage.test_release_errno = null;
+    try std.testing.expectEqual(linux.E.ACCES, sys.last_errno);
+    try std.testing.expect(!isOpen(fd));
+
+    var clean: DirHold = .{};
+    try clean.lockExistingDir(first, 1000);
+    try std.testing.expectEqual(@as(u8, 0), clean.end(0));
+    try std.testing.expectEqual(@as(usize, 0), clean.len);
+
+    // A signal recorded before the end of a successful run drops the failed
+    // release, as `run` raises the signal again.
+    var signaled: DirHold = .{};
+    try signaled.lockExistingDir(first, 1000);
+    const signaled_fd = signaled.fds[0];
+    first_signal.store(@backingInt(linux.SIG.TERM), .seq_cst);
+    defer first_signal.store(0, .seq_cst);
+    storage.test_release_errno = .IO;
+    sys.last_errno = .SUCCESS;
+    try std.testing.expectEqual(@as(u8, 1), signaled.end(0));
+    storage.test_release_errno = null;
+    try std.testing.expectEqual(linux.E.SUCCESS, sys.last_errno);
+    try std.testing.expect(!isOpen(signaled_fd));
 }
 
 test "a colon-separated module path drops empty segments" {
