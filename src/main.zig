@@ -2919,6 +2919,20 @@ fn passOn(sig: linux.SIG, info: *const linux.siginfo_t, _: ?*anyopaque) callconv
     }
 }
 
+/// Block `passed_on` while a guard is held, so that a signal is either seen
+/// by the check that follows or comes after the step the check decides.
+fn blockPassedOn() linux.sigset_t {
+    var block = linux.sigemptyset();
+    for (passed_on) |sig| linux.sigaddset(&block, sig);
+    var prev: linux.sigset_t = undefined;
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &prev);
+    return prev;
+}
+
+fn restoreMask(prev: *const linux.sigset_t) void {
+    _ = linux.sigprocmask(linux.SIG.SETMASK, prev, null);
+}
+
 /// While a guard is held, a signal of `passed_on` does not stop eb-local.
 /// One another process sent, as `kill PID` does, is passed on to the program
 /// eb-local waits for; one from the terminal is not, as it reached that
@@ -3409,13 +3423,34 @@ fn refuseIrregularPrefixLock(c: Ctx, prefix: []const u8) void {
     if (!st.isReg()) die("cannot lock {s}: not a regular file", .{lock_path});
 }
 
+fn prefixLockPath(c: Ctx, prefix: []const u8) []const u8 {
+    return std.fs.path.join(c.a, &.{ prefix, ".eb-local", ".lock" }) catch oom();
+}
+
+/// Release `lock`, the lock file at `lock_path`, at the end of a command
+/// that exits `code`. After a success a failed release is reported with
+/// its errno and the command exits 1. After a failure, a failed write to
+/// standard output among them, it is dropped and `sys.last_errno` is put
+/// back, so the failure already reported stands.
+fn endLock(code: u8, lock: *?sys.fd_t, lock_path: []const u8) u8 {
+    if (code != 0 or stdout.failed) {
+        storage.releaseLockAfterError(lock);
+        return if (code != 0) code else 1;
+    }
+    storage.releaseLock(lock) catch |e| {
+        warn("cannot release the lock on {s}: {s}", .{ lock_path, sys.describe(e) });
+        return 1;
+    };
+    return 0;
+}
+
 fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
     const a = c.a;
     var err_msg: []const u8 = "";
     const timeout_ms = storage.lockTimeoutMs(c.env, &err_msg) orelse die("{s}", .{err_msg});
     const dir = std.fs.path.join(a, &.{ prefix, ".eb-local" }) catch oom();
     common.atomic.makedirs(dir) catch |e| die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
-    const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+    const lock_path = prefixLockPath(c, prefix);
     return switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &err_msg)) {
         .held => |fd| fd,
         .unlocked => null,
@@ -3789,7 +3824,7 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
     // `.eb-local/.lock`, and check that the lock did not wait through a change
     // to what it listed.
     var prefix_lock: ?sys.fd_t = null;
-    defer storage.releaseLock(&prefix_lock);
+    defer storage.releaseLockAfterError(&prefix_lock);
     if (o.logs or o.sources) {
         const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
         if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
@@ -3854,8 +3889,8 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
             say("eb-local: deleted {d} item(s)", .{removed_items});
         }
     }
-    if (removed_ws < spaces.len or removed_items < targets.len) return 1;
-    return 0;
+    const code: u8 = if (removed_ws < spaces.len or removed_items < targets.len) 1 else 0;
+    return endLock(code, &prefix_lock, prefixLockPath(c, p.prefix));
 }
 
 // ---- build ----------------------------------------------------------------
@@ -4292,7 +4327,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const ws_held = storage.makeLockedWorkspace(a, job_root, &.{ "build", "tmp", "cache", "cargo", "source-index" }) catch |e| workspaceFailed(a, job_root, e);
     const work = ws_held.path;
     var ws_lock: ?sys.fd_t = ws_held.lock;
-    defer storage.releaseLock(&ws_lock);
+    defer storage.releaseLockAfterError(&ws_lock);
+    const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
@@ -4376,7 +4412,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             },
         };
     };
-    defer storage.releaseLock(&prefix_lock);
+    defer storage.releaseLockAfterError(&prefix_lock);
     if (localStorage(s, c, g)) recordWorkspaceRoot(c, p.prefix, job_root);
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
@@ -4433,17 +4469,11 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
     // The workspace goes only once what was said about the logs has reached
-    // standard output; until then it stays, as after a failed build.
-    if (rc == 0 and !keep and !stdout.failed) {
-        storage.releaseLock(&ws_lock);
-        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e| {
-            if (localStorage(s, c, g))
-                warn("cannot remove {s} ({s}); run eb-local clean --workspaces", .{ work, @errorName(e) })
-            else
-                warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
-        };
-        if (localStorage(s, c, g)) forgetWorkspaceRootIfEmpty(c, p.prefix, job_root);
-    } else {
+    // standard output; until then it stays, as after a failed build. Its
+    // lock is released after the last line, so a failed write is reported
+    // and a failed release after it is not.
+    const remove = rc == 0 and !keep and !stdout.failed;
+    if (!remove) {
         if (localStorage(s, c, g))
             warn("build workspace kept at {s};", .{work})
         else
@@ -4455,11 +4485,30 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         say("eb-local: done. To use the modules in a new shell or job:", .{});
         say("  eval \"$(eb-local {s})\"", .{replay(a, "env", s, g, p.prefix, &.{})});
     }
+    var released: u8 = 0;
+    if (remove) {
+        const mask = blockPassedOn();
+        released = endLock(if (guard.received() != null) 1 else 0, &ws_lock, ws_lock_path);
+        restoreMask(&mask);
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e| {
+            if (localStorage(s, c, g))
+                warn("cannot remove {s} ({s}); run eb-local clean --workspaces", .{ work, @errorName(e) })
+            else
+                warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
+        };
+        if (localStorage(s, c, g)) forgetWorkspaceRootIfEmpty(c, p.prefix, job_root);
+    }
+    const mask = blockPassedOn();
     const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
+    const code: u8 = switch (ended) {
+        .exit => |x| if (x != 0) x else released,
+        .signal => 1,
+    };
+    const final = endLock(endLock(code, &ws_lock, ws_lock_path), &prefix_lock, prefixLockPath(c, p.prefix));
+    restoreMask(&mask);
+    const late: Run = if (guard.received()) |sig| .{ .signal = sig } else ended;
     guard.release();
-    storage.releaseLock(&ws_lock);
-    storage.releaseLock(&prefix_lock);
-    return stop(ended);
+    return if (late == .signal) stop(late) else final;
 }
 
 // ---- list -----------------------------------------------------------------
@@ -5972,7 +6021,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     // makes `.eb-local/.lock`, and check under it that what it listed is
     // still installed and still safe to remove.
     var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
+    defer storage.releaseLockAfterError(&prefix_lock);
     const again = uninstallPlan(c, p, versions, modules, o) orelse return 2;
     if (!foundUnchanged(found, again)) {
         warn("what uninstall listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
@@ -5991,7 +6040,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc}),
                 .signal => {
-                    storage.releaseLock(&prefix_lock);
+                    storage.releaseLockAfterError(&prefix_lock);
                     return stop(run);
                 },
             }
@@ -6011,7 +6060,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     } else {
         say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
     }
-    return 0;
+    return endLock(0, &prefix_lock, prefixLockPath(c, p.prefix));
 }
 
 /// Relay lines `eb-keep-logs` wrote, without interpreting them.
@@ -6148,7 +6197,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
     // `.eb-local/.lock`, and check under it that the trash still holds what it
     // listed and that nothing is in the way.
     var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
+    defer storage.releaseLockAfterError(&prefix_lock);
     if (!restoringHolds(found, restorePlan(c, p, versions, rtrash, modules))) {
         warn("what restore listed changed while it waited for the prefix lock; nothing was restored. Run it again.", .{});
         return 1;
@@ -6159,14 +6208,14 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
         switch (run) {
             .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
             .signal => {
-                storage.releaseLock(&prefix_lock);
+                storage.releaseLockAfterError(&prefix_lock);
                 return stop(run);
             },
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
     say("eb-local: restored {d} installation(s), read-only again, and {d} module file(s)", .{ found[0].items.len, found[1].items.len + found[2].items.len });
-    return 0;
+    return endLock(0, &prefix_lock, prefixLockPath(c, p.prefix));
 }
 
 // ---- entry ----------------------------------------------------------------
@@ -6203,6 +6252,9 @@ fn runMain(init: std.process.Init) u8 {
             } else if (std.mem.eql(u8, v, "ENOSYS")) {
                 storage.test_flock_errno = .NOSYS;
             }
+        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_RELEASE_ERRNO"))) |v| {
+            if (std.mem.startsWith(u8, v, "E")) storage.test_release_errno = std.meta.stringToEnum(linux.E, v[1..]);
         }
     }
     // A single program name, then eb's own arguments: an eb-stack target.

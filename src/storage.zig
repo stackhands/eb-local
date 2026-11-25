@@ -2,6 +2,7 @@
 //! durable installation prefix that is neither node-local nor shared
 //! scratch. Mounts are read from /proc/self/mountinfo.
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const build_options = @import("build_options");
 const common = @import("zig_common");
@@ -466,7 +467,7 @@ pub fn makeLockedWorkspace(a: Allocator, job_root: []const u8, subdirs: []const 
         }
         var lock: ?sys.fd_t = null;
         errdefer {
-            releaseLock(&lock);
+            releaseLockAfterError(&lock);
             removeTree(a, staging) catch {};
         }
         const lock_path = try std.fmt.allocPrint(a, "{s}/.eb-local.lock", .{staging});
@@ -476,7 +477,7 @@ pub fn makeLockedWorkspace(a: Allocator, job_root: []const u8, subdirs: []const 
         }
         sys.renameat(fsx.cwd, staging, fsx.cwd, final_path) catch |err| switch (err) {
             error.Exists, error.NotEmpty => {
-                releaseLock(&lock);
+                releaseLockAfterError(&lock);
                 removeTree(a, staging) catch {};
                 continue;
             },
@@ -495,7 +496,7 @@ test "makeLockedWorkspace locks workspace before publishing" {
     defer fsx.deleteTree(a, fsx.cwd, root) catch {};
     var locked_ws = try makeLockedWorkspace(a, root, &.{ "build", "tmp" });
     defer {
-        releaseLock(&locked_ws.lock);
+        releaseLock(&locked_ws.lock) catch unreachable;
         removeTree(a, locked_ws.path) catch {};
     }
     try testing.expect(!tryLockFree(try std.fmt.allocPrint(a, "{s}/.eb-local.lock", .{locked_ws.path})));
@@ -867,15 +868,45 @@ pub fn acquireOptionalLock(path: []const u8) ?sys.fd_t {
     return fd;
 }
 
-/// Release a lock descriptor returned by `acquireBoundedLock` or `acquireOptionalLock`.
-pub fn releaseLock(lock: *?sys.fd_t) void {
+/// Set in `main` from `EB_LOCAL_TEST_RELEASE_ERRNO`, only in the test
+/// artifact, and by unit tests, so the `LOCK_UN` of every release fails
+/// with that errno.
+pub var test_release_errno: ?linux.E = null;
+
+fn releaseFlock(fd: sys.fd_t, op: i32) usize {
+    if (comptime build_options.test_ops or builtin.is_test) {
+        if (test_release_errno) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    }
+    return linux.flock(fd, op);
+}
+
+/// Release a lock descriptor returned by `acquireBoundedLock` or
+/// `acquireOptionalLock`. The descriptor is closed whatever `LOCK_UN`
+/// returns; a failed `LOCK_UN` is then returned, as Python's
+/// `fcntl.flock` raises it, with `sys.last_errno` its errno.
+pub fn releaseLock(lock: *?sys.fd_t) sys.Error!void {
     const fd = lock.* orelse return;
     lock.* = null;
-    _ = linux.flock(fd, std.posix.LOCK.UN);
+    const released = sys.call(releaseFlock, .{ fd, @as(i32, std.posix.LOCK.UN) });
+    const errno = sys.last_errno;
     sys.close(fd);
+    _ = released catch |err| {
+        sys.last_errno = errno;
+        return err;
+    };
+}
+
+/// `releaseLock` in cleanup after another failure. A failed release is
+/// dropped and `sys.last_errno` is put back, so the earlier failure's
+/// errno is the one its message describes.
+pub fn releaseLockAfterError(lock: *?sys.fd_t) void {
+    const kept = sys.last_errno;
+    releaseLock(lock) catch {};
+    sys.last_errno = kept;
 }
 
 /// True when `path` is absent, unlocked, or on a filesystem without `flock`.
+/// A probe lock whose release fails counts as held, so `clean` keeps it.
 pub fn tryLockFree(path: []const u8) bool {
     const fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .RDWR,
@@ -885,14 +916,15 @@ pub fn tryLockFree(path: []const u8) bool {
         error.NotFound => return true,
         else => return false,
     };
-    defer sys.close(fd);
+    var probe: ?sys.fd_t = fd;
+    defer if (probe) |held| sys.close(held);
     const st = fsx.fstat(fd) catch return false;
     if (!st.isReg()) return false;
     common.state.lockExclusive(fd, 0) catch |e| switch (e) {
         error.TimedOut => return false,
         else => |se| return flockUnsupported(se),
     };
-    _ = linux.flock(fd, std.posix.LOCK.UN);
+    releaseLock(&probe) catch return false;
     return true;
 }
 
@@ -916,18 +948,18 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
         .held => |fd| fd,
         else => return error.TestUnexpectedResult,
     };
-    defer releaseLock(&holder);
+    defer releaseLock(&holder) catch unreachable;
 
     var msg2: []const u8 = "";
     try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 40, false, &msg2));
     try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 40 ms") != null);
 
-    releaseLock(&holder);
+    try releaseLock(&holder);
     var again: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg2)) {
         .held => |fd| fd,
         else => return error.TestUnexpectedResult,
     };
-    releaseLock(&again);
+    try releaseLock(&again);
 
     sys.last_errno = .NOLCK;
     try testing.expect(flockUnsupported(error.Unexpected));
@@ -957,7 +989,7 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
         .held => |fd| fd,
         else => return error.TestUnexpectedResult,
     };
-    defer releaseLock(&held_for_cancel);
+    defer releaseLock(&held_for_cancel) catch unreachable;
     var cancel = std.atomic.Value(bool).init(true);
     try testing.expectEqual(CancelLockResult.canceled, acquireBoundedLockCancel(a, lock_path, 5000, false, &cancel, &msg2));
 }
@@ -985,11 +1017,11 @@ test "lock descriptors stay above closed stdio slots" {
         if (fd_b <= 2) linux.exit_group(13);
         var ws = makeLockedWorkspace(a, root, &.{"tmp"}) catch linux.exit_group(14);
         if (ws.lock == null or ws.lock.? <= 2) linux.exit_group(15);
-        releaseLock(&ws.lock);
+        releaseLock(&ws.lock) catch linux.exit_group(16);
         removeTree(a, ws.path) catch {};
         var opt: ?sys.fd_t = fd_b;
-        releaseLock(&opt);
-        releaseLock(&fd_a);
+        releaseLock(&opt) catch linux.exit_group(17);
+        releaseLock(&fd_a) catch linux.exit_group(18);
         linux.exit_group(0);
     }
     var raw: i32 = 0;
