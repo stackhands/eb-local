@@ -12,10 +12,17 @@ passes on from its caller, such as Lmod's init, is in a directory the
 test cannot write, and has no eb function for the program to run.
 """
 import os
+import shutil
 from pathlib import Path
 
 BIN = os.environ.get("EB_LOCAL_BIN")
+SH = shutil.which("sh") or "/bin/sh"
 BUILT = Path(__file__).resolve().parents[1] / "zig-out" / "bin" / "eb-local"
+# Where a copy of the shell shim finds the Zig program when a test sets its own PATH.
+SHIM_PATH = "" if BIN else str(BUILT.parent)
+# The Zig program the tests that name it run: the one EB_LOCAL_BIN names, else
+# the one the shell shim delegates to.
+ZIG = BIN or (str(BUILT) if BUILT.is_file() and os.access(BUILT, os.X_OK) else None)
 
 
 def _escape(path):
@@ -52,5 +59,5 @@ def command(script, arguments, env):
     if owner:
         # The mount belongs to the caller; the caller is made someone else.
         env["EB_LOCAL_TEST_UID"] = str(os.getuid() + 1)
-    program = [BIN] if BIN else ["sh", str(script)]
+    program = [BIN] if BIN else [SH, str(script)]
     return program + list(arguments), env

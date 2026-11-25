@@ -34,7 +34,7 @@ def run_sink(argv, sink, *, env, cwd):
         )
 
 
-@unittest.skipUnless(binary.BIN, "modulerc stdout diagnostics belong to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "modulerc stdout diagnostics belong to the Zig binary")
 class ModulercStdoutErrorsCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-modulerc-stdout-")
@@ -52,7 +52,7 @@ class ModulercStdoutErrorsCli(unittest.TestCase):
             with self.subTest(sink=sink):
                 tree = self.root / f"modules-write-{sink}"
                 got = run_sink(
-                    [binary.BIN, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0"],
+                    [binary.ZIG, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0"],
                     sink,
                     env=self.env,
                     cwd=self.root,
@@ -67,7 +67,7 @@ class ModulercStdoutErrorsCli(unittest.TestCase):
         for sink, expected in (("devfull", "No space left on device"), ("closed", "Bad file descriptor")):
             with self.subTest(sink=sink):
                 got = run_sink(
-                    [binary.BIN, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0", "--dry-run"],
+                    [binary.ZIG, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0", "--dry-run"],
                     sink,
                     env=self.env,
                     cwd=self.root,
@@ -79,7 +79,7 @@ class ModulercStdoutErrorsCli(unittest.TestCase):
     def test_check_up_to_date_exits_one_and_reports_os_errno_on_stdout_write_errors(self):
         tree = self.root / "modules-check"
         subprocess.run(
-            [binary.BIN, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0"],
+            [binary.ZIG, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0"],
             env=self.env,
             cwd=self.root,
             check=True,
@@ -89,7 +89,7 @@ class ModulercStdoutErrorsCli(unittest.TestCase):
         for sink, expected in (("devfull", "No space left on device"), ("closed", "Bad file descriptor")):
             with self.subTest(sink=sink):
                 got = run_sink(
-                    [binary.BIN, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0", "--check"],
+                    [binary.ZIG, "modulerc", "--module-tree", str(tree), "--default", "Demo/1.0", "--check"],
                     sink,
                     env=self.env,
                     cwd=self.root,

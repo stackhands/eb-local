@@ -45,7 +45,7 @@ class Sbom(unittest.TestCase):
         names = {c["name"] for c in bom["components"]}
         self.assertIn("musl", names)
         common = next(c for c in bom["components"] if c["name"] == "zig-common")
-        self.assertTrue(common["purl"].startswith("pkg:github/stackhands/zig-common@v"))
+        self.assertRegex(common["purl"], r"^pkg:github/stackhands/zig-common@(?:v\d|[0-9a-f]{40}$)")
         self.assertIn(common["properties"][0]["value"], self.zon)
         refs = {c["bom-ref"] for c in bom["components"]}
         self.assertEqual(set(bom["dependencies"][0]["dependsOn"]), refs)
@@ -98,6 +98,27 @@ class Sbom(unittest.TestCase):
         bom = json.loads(run.stdout)
         names = {c["name"] for c in bom["components"]}
         self.assertEqual(names, {"zig-common", "musl"})
+
+    def test_commit_sha_pin_sets_exact_purl_and_version(self):
+        sha = "8173ca239722581bb738adb9daa4ef09c4b6cdb0"
+        zon = (
+            '.{\n'
+            '  .name = .eb_local,\n'
+            f'  .version = "{self.version}",\n'
+            '  .dependencies = .{\n'
+            '    .zig_common = .{\n'
+            f'      .url = "git+https://github.com/stackhands/zig-common#{sha}",\n'
+            '      .hash = "zig_common-0.12.0-abc",\n'
+            '    },\n'
+            '  },\n'
+            '}\n'
+        )
+        run = self.generate(zon)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        bom = json.loads(run.stdout)
+        common = next(c for c in bom["components"] if c["name"] == "zig-common")
+        self.assertEqual(common["version"], sha)
+        self.assertEqual(common["purl"], f"pkg:github/stackhands/zig-common@{sha}")
 
 
 if __name__ == "__main__":

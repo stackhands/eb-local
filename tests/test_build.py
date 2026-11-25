@@ -27,7 +27,7 @@ class One(unittest.TestCase):
 '''
 
 
-@unittest.skipUnless(binary.BIN and shutil.which("zig"), "runs under zig build -Dtest-ops=true test")
+@unittest.skipUnless(binary.ZIG and shutil.which("zig"), "runs under zig build -Dtest-ops=true test")
 class SuiteStep(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -47,7 +47,7 @@ class SuiteStep(unittest.TestCase):
     def build(self, test):
         (self.root / "tests" / "test_one.py").write_text(test)
         env = dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(self.root / ".zig-cache"))
-        env.pop("EB_LOCAL_BIN")
+        env.pop("EB_LOCAL_BIN", None)
         run = subprocess.run(["zig", "build", "-Dtest-ops=true", "test"], cwd=self.root, env=env,
                              capture_output=True, text=True)
         return run.returncode, run.stdout + run.stderr

@@ -37,23 +37,25 @@ eb-local overlay plan [--eb-stack PATH] [--] [eb-stack package plan options...]
 eb-local help | -h | --help | --version
 #+end_example
 
-=OPTION= is one of =--profile NAME=, =--project DIR= and =--config FILE=, which the options below describe.
+=OPTION= is one of =--profile NAME=, =--project DIR=, =--config FILE= and =--workstation=, which the options below describe.
 
 =eb-local --help= prints:
 
 #+begin_example
 eb-local: install and build software on top of EESSI 2026.06, into a
 directory you own.
+  Global: --workstation forces managed recipe builds onto private local
+          storage on this machine, even when Slurm is present.
 
   eb-local <easyconfig> [eb options]   build and install with EasyBuild
   eb-local --explain <easyconfig> [eb options]
                                        the commands that build runs, as shell lines,
                                        its checks as comments; creates and runs nothing
-  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
+  eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
                                        At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
                                        EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
-                                       present empty value counts as set; with none set, the
-                                       module uses $HOME/eessi and nothing is exported.
+                                       present empty value counts as set; with none set,
+                                       configuration selects a user or project install.
                                        eb runs only if the module's install path is in the
                                        tree that variable selects
   eb-local --explain eb [--] [eb options]
@@ -172,8 +174,10 @@ directory you own.
                                        run eb-stack package bump or plan by subprocess only
   eb-local help | --version
 
-Every command but eb takes --profile NAME, --project DIR (a shared project
-directory instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
+Every configured command, including eb, takes --profile NAME, --project DIR
+(a shared project directory instead of $HOME/eessi), --config FILE and
+--workstation. The last forces managed builds onto this machine's disk.
+Use env and dev with eval:
 
   eval "$(eb-local env)"
   eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -183,8 +187,9 @@ or its checkout root, /etc/eb-local/config.toml, eb-local.conf beside this
 program or its checkout root, and /etc/eb-local.conf), then
 ~/.config/eb-local/config.toml,
 then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
-then options. Builds use the allocation's own
-node-local mount; a successful build removes its workspace unless
+then options. Without sbatch on PATH or a nonempty SLURM_* variable,
+managed builds use private workstation storage automatically. Otherwise
+they use the allocation's own node-local mount; a successful build removes its workspace unless
 EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
 written during a build are cleaned of them. A build gets every secret,
 unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
@@ -213,6 +218,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 |------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | =--profile NAME=       | Use the profile NAME, in place of =EB_LOCAL_PROFILE= and =default_profile=.                                                                                                    |
 | =--project DIR=        | Install into, and load from, the project directory DIR instead of the prefix, as the =project= setting does.                                                                    |
+| =--workstation=        | Force managed recipe builds to use private local workspace storage on this machine, even when Slurm is present.                                                                |
 | =--config FILE=        | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of =~/.config/eb-local/config.toml=, when you own it. The other file is still read. |
 | =--explain=            | Before an easyconfig, or before =eb=: print what would run, and create and run nothing.                                                                                        |
 | =-h=, =--help=, =help= | Print the usage on stdout and exit 0.                                                                                                                                          |
@@ -221,7 +227,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 
 Each option that takes a value also takes it after an equals sign, as in =--profile=gpu=.
 An empty value is refused either way, with =OPTION needs a value=.
-=eb= refuses =--profile=, =--project= and =--config=, since it reads the install mode from the environment; =site=, =check= and =rpath-wrappers= take them and do not use them.
+=eb= applies =--profile=, =--project= and =--config= through the same configuration selection as =env=; =site=, =check= and =rpath-wrappers= take them and do not use them.
 
 The version line names the program, its version, the target and optimize mode of the build, the Zig version, and the commit given to =zig build= as =-Dcommit=, or =unknown=.
 Built with =zig build --release=safe -Dcommit=0123abc=, it prints:
@@ -269,7 +275,10 @@ With =W= set to a workspace a build made, which holds =build=, =cache=, =cargo=,
 
 ** eb
 
-Load EESSI and EESSI-extend in a bash with no profile and no rc file, and run =eb= with the arguments, with no site file and no Slurm job.
+Load EESSI and EESSI-extend in a bash with no profile and no rc file, and run =eb= with the arguments, with no Slurm job.
+With no install variable set, it exports =EESSI_USER_INSTALL= for the configured =prefix=, or =EESSI_PROJECT_INSTALL= for the configured =project=, exactly as =env= does.
+An install variable already in the environment remains authoritative.
+=doctor= warns when that explicit variable selects a different mode or path from the configured destination; it does not warn when no install variable is exported because =eb= supplies the configuration itself.
 EESSI-extend takes the install mode from the install variables, of which at most one of =EESSI_USER_INSTALL=, =EESSI_PROJECT_INSTALL=, =EESSI_SITE_INSTALL= and =EESSI_CVMFS_INSTALL= may be set; a present, empty one counts.
 With more than one set, =eb= runs nothing and the command exits 3.
 
@@ -279,7 +288,7 @@ With more than one set, =eb= runs nothing and the command exits 3.
 | =EESSI_PROJECT_INSTALL= | project | not created; its owner sets the group and the setgid bit      | 002           |
 | =EESSI_SITE_INSTALL=    | site    | the init's site software path                                 | 022           |
 | =EESSI_CVMFS_INSTALL=   | cvmfs   | the EESSI software path                                       | 022           |
-| none                    | user    | =$HOME/eessi=, which need not exist before the module loads   | 077           |
+| none                    | user or project | the configured =prefix= (by default =$HOME/eessi=) or =project= | 077 or 002    |
 
 The module sets =EASYBUILD_UMASK= to the same end, with the sticky bit for a user prefix and the setgid bit for a project, and =eb= gets no =--umask=, so that value stands.
 User installs therefore change from umask 022 in the 1.x script to 077 in the Zig program, and other users can no longer read them.
@@ -287,7 +296,9 @@ An argument of =eb='s still overrides it: =--umask=022= is what a user-namespace
 The module's help text says =$HOME/EESSI=; on EESSI 2026.06 it uses =$HOME/eessi=.
 Before EESSI-extend loads, the script unsets host Rust and CMake wrappers, such as =RUSTC_WRAPPER= and =CMAKE_C_COMPILER_LAUNCHER=, and puts the compatibility layer's =usr/bin=, with its =ld=, first on =PATH=, even when =rustc= is not installed.
 EasyBuild builds under =$WORKING_DIR/easybuild=; the module sets =WORKING_DIR= to =/tmp/$USER= when it is not set, and =eb= leaves it as you set it.
-=--profile=, =--project= and =--config= are not options of =eb=, which stops with exit 2 when given one.
+Downloaded source archives stay in =<install-prefix>/.eb-local/sources=, rather than below that temporary working directory, unless the shell already exports =EASYBUILD_SOURCEPATH=.
+Configured =[eessi]= variables and =build.site_toolchains= reach the EESSI hooks; an exported variable of the same name takes precedence.
+=--profile=, =--project= and =--config= select the same settings for =eb= as for =env=.
 
 Once EESSI-extend has loaded, the script exits 2 before =eb= runs when the install path the module set is outside the tree the install variable selects, or when =EASYBUILD_INSTALLPATH_SOFTWARE= or =EASYBUILD_INSTALLPATH_MODULES= is set.
 Otherwise the command exits with =eb='s status.
@@ -296,7 +307,7 @@ With =EB_LOCAL_EESSI_EXTEND= set, not empty and not =0=, every argument of =eb-l
 
 ** =--explain eb=
 
-Print the script =eb= runs, after a =set --= line with its arguments, and run nothing.
+Print the configured environment exports and the script =eb= runs, after a =set --= line with its arguments, and run nothing.
 With more than one install variable set, it prints nothing on stdout and exits 3.
 
 ** env
@@ -304,6 +315,7 @@ With more than one install variable set, it prints nothing on stdout and exits 3
 Print the shell lines that load EESSI and then EESSI-extend for the prefix, or the project directory, which puts the modules installed there on =MODULEPATH=.
 Run them with =eval "$(eb-local env)"=.
 When stdout is a terminal, it also says on stderr that the lines change nothing until the shell runs them.
+When the shell that runs the lines has no =module= command, they return 1 before they unset or export anything, and that shell stays up unless it has errexit. =--strict= still exits the shell, and it checks the init file first.
 
 | Option     | Meaning                                                                                                              |
 |------------+----------------------------------------------------------------------------------------------------------------------|
@@ -327,6 +339,7 @@ Only variables are in the change. Shell functions and aliases, such as Lmod's =m
 ** dev
 
 Print the lines =env= prints, then the lines that load the modules =dev.modules= names and those named on the line, then a build environment, and that set =EB_LOCAL_DEV_PREFIX= to =<prefix>/dev/<EESSI version>/<CPU target>=, with the GPU target appended when EESSI found one.
+When =rpath-wrappers= fails, the lines return its status before setting =EB_LOCAL_DEV_PREFIX=. Evaluating them in an interactive shell does not close that shell.
 
 | Option              | Meaning                                                                                    |
 |---------------------+--------------------------------------------------------------------------------------------|
@@ -362,7 +375,9 @@ With =LD_LIBRARY_PATH= set in the shell, =dev= warns on stderr.
 
 Print shell lines that restore the state recorded by the first =dev --replace= in =EB_LOCAL_DEV_SAVED=.
 Run them with =eval "$(eb-local leave)"=.
-The lines unload modules absent from the recorded prior list, reload that list in order, restore =PATH=, the dev marker variables and =LD_LIBRARY_PATH=, =LD_PRELOAD= and =LD_AUDIT=, then unset =EB_LOCAL_DEV_SAVED=.
+The current =eb-local-dev-v2= state stores =CMAKE_ARGS= and =EB_LOCAL_MESON_INSTALL_RPATH= as well as =PATH=, the dev marker variables and loader variables.
+The lines unload modules absent from the recorded prior list, reload that list in order, restore those variables, then unset =EB_LOCAL_DEV_SAVED=.
+An =eb-local-dev-v1= state remains accepted and restores its older variable set.
 A missing, malformed or unsupported record is refused.
 
 ** rpath-wrappers
@@ -377,7 +392,7 @@ The names it wraps are =gcc=, =g++=, =c++=, =cc=, =gfortran=, =clang=, =clang++=
 
 Without =--unwrapped=, finding nothing to wrap is exit 1.
 
-A wrapper adds a run path, when its command links, for each directory named with =-L= or =--library-path=, for the directory of each shared library named by its absolute path, and for each =LIBRARY_PATH= entry when it wraps a compiler driver. The arguments in a response file, =@FILE=, count as its own; one it cannot read is passed on unchanged.
+A wrapper adds a run path, when its command links, for each directory named with =-L= or =--library-path=, for the directory of each existing =lib*.so= or =lib*.so.N= file named by its absolute path, and for each =LIBRARY_PATH= entry when it wraps a compiler driver. The arguments in a response file, =@FILE=, count as its own; one it cannot read is passed on unchanged.
 
 ** check
 
@@ -395,8 +410,7 @@ A problem is a line of its own, after =problem:=, below the line it concerns:
 | =the loader is the host's, not the compatibility layer's under DIR=                                              | EESSI is loaded, and the file names a loader outside its compatibility layer.               |
 | =RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH= | The file records =RUNPATH= rather than =RPATH=.                                     |
 | =run paths into the TARGET software tree; this shell is TARGET: build it again on this node type=                | A run path, or a directory in =LD_LIBRARY_PATH=, leads into the tree of a CPU target other than =$EESSI_SOFTWARE_SUBDIR=. |
-| =LIBRARY does not exist=                                                                                         | The file names a library by its path, and there is none.                                    |
-| =LIBRARY is not found=                                                                                           | No run path, no directory in =LD_LIBRARY_PATH= and none of the loader's directories holds the library. |
+| =NEEDED library LIBRARY cannot be resolved for FILE=                                                             | A path-named library does not exist, or no run path and none of the loader's directories holds a name. |
 | =LIBRARY is found only through LD_LIBRARY_PATH=                                                                  | The same, but a directory in =LD_LIBRARY_PATH= holds it.                                    |
 | =LIBRARY comes from the host, not from EESSI=                                                                    | EESSI is loaded, and the library resolves outside it.                                       |
 
@@ -446,7 +460,7 @@ The shape is in [[file:json/list.schema.json][list.schema.json]].
 ** doctor
 
 Print one line for each check of what would stop a build, =eb-local eb= or a module load, each starting =ok=, =info=, =warn= or =FAIL=, then a line that says whether anything stops a build.
-It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and =LD_LIBRARY_PATH= left in the shell, the EESSI init =eb-local eb= sources, the allocation's node-local mount, whether EESSI is loaded and your modules are on =MODULEPATH=, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
+It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and =LD_LIBRARY_PATH= left in the shell, the EESSI init =eb-local eb= sources, whether an explicitly exported install variable disagrees with the configured destination, the allocation's node-local mount, whether EESSI is loaded and your modules are on =MODULEPATH=, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
 With =--workspace PATH=, it also creates, writes, renames, executes and removes a small probe in that existing directory.
 It reports the file-system type, whether the storage is node-local or shared, free bytes and inodes, a =noexec= mount, and whether the effective =XDG_CACHE_HOME= (or =$HOME/.cache= when unset) is inside the workspace.
 The check does not create a build workspace and never starts a build.
@@ -571,7 +585,7 @@ Files go to the trash with =rtrash= as =clean.trash= says; workspaces are delete
 A directory among the logs, such as the =reprod_*= copies of a failed build's easyconfig, easyblocks and hooks, goes whole once neither it nor anything in it is newer than the cutoff: the copies keep their originals' older times, and a file added to a directory makes the directory new.
 =clean= never follows a symbolic link out of the installation directory.
 With =clean.trash= =none=, or =auto= and no rtrash on =PATH=, it removes nothing without =--delete=, and exits 1.
-If any item or build workspace cannot be removed, =clean= warns and exits 1 (including with =--json=, where =removed_items= and =removed_workspaces= report the actual counts).
+If any item or build workspace cannot be removed, =clean= warns and exits 1. With =--json= the document is written before anything is removed, so =removed_items= and =removed_workspaces= are the counts it set out to remove, and a removal that then fails changes the exit status, not the document.
 With =--json=, stdout holds one line of JSON with =schema_version= 1, =kind= =clean=, =prefix=, =dry_run=, =action= (=nothing=, =dry-run=, =trashed=, =deleted=, =workspaces-only= or =refused=), =items= (=path= and =kind=), =workspaces=, =removed_items= and =removed_workspaces=; see [[file:json/clean.schema.json][clean.schema.json]].
 Any invalid UTF-8 byte in a path is replaced with the Unicode replacement character =U+FFFD=, so non-UTF-8 paths do not round-trip.
 

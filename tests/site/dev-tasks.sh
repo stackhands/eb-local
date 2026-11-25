@@ -125,7 +125,8 @@ EOF
 #include <stdio.h>
 int main(void) { double y = gsl_sf_bessel_J0(5.0); printf("J0(5) = %.6f\n", y); return y < -0.17 && y > -0.18 ? 0 : 1; }
 EOF
-    cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$W/gsl-install"
+    read -r -a cmake_args <<< "$CMAKE_ARGS"
+    cmake "${cmake_args[@]}" -S . -B build -DCMAKE_INSTALL_PREFIX="$W/gsl-install"
     cmake --build build
     cmake --install build
     eessi_runpath "$W/gsl-install/bin/bessel" GSL
@@ -178,7 +179,9 @@ EOF
     cat > meson.build << 'EOF'
 project('gslj0', 'c')
 py = import('python').find_installation()
-py.extension_module('gslj0', 'gslj0.c', link_args: ['-lgsl', '-lgslcblas'], install: true)
+rpath = run_command('sh', '-c', 'printf %s "$EB_LOCAL_MESON_INSTALL_RPATH"', check: true).stdout()
+py.extension_module('gslj0', 'gslj0.c', link_args: ['-lgsl', '-lgslcblas'],
+                    install: true, install_rpath: rpath)
 EOF
     python -m venv "$W/venv-meson"
     "$W/venv-meson/bin/pip" install --quiet --no-cache-dir .

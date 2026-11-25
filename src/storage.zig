@@ -2,6 +2,7 @@
 //! durable installation prefix that is neither node-local nor shared
 //! scratch. Mounts are read from /proc/self/mountinfo.
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const build_options = @import("build_options");
 const common = @import("zig_common");
@@ -466,7 +467,7 @@ pub fn makeLockedWorkspace(a: Allocator, job_root: []const u8, subdirs: []const 
         }
         var lock: ?sys.fd_t = null;
         errdefer {
-            releaseLock(&lock);
+            releaseLockAfterError(&lock);
             removeTree(a, staging) catch {};
         }
         const lock_path = try std.fmt.allocPrint(a, "{s}/.eb-local.lock", .{staging});
@@ -476,7 +477,7 @@ pub fn makeLockedWorkspace(a: Allocator, job_root: []const u8, subdirs: []const 
         }
         sys.renameat(fsx.cwd, staging, fsx.cwd, final_path) catch |err| switch (err) {
             error.Exists, error.NotEmpty => {
-                releaseLock(&lock);
+                releaseLockAfterError(&lock);
                 removeTree(a, staging) catch {};
                 continue;
             },
@@ -495,7 +496,7 @@ test "makeLockedWorkspace locks workspace before publishing" {
     defer fsx.deleteTree(a, fsx.cwd, root) catch {};
     var locked_ws = try makeLockedWorkspace(a, root, &.{ "build", "tmp" });
     defer {
-        releaseLock(&locked_ws.lock);
+        releaseLock(&locked_ws.lock) catch unreachable;
         removeTree(a, locked_ws.path) catch {};
     }
     try testing.expect(!tryLockFree(try std.fmt.allocPrint(a, "{s}/.eb-local.lock", .{locked_ws.path})));
@@ -607,11 +608,12 @@ pub fn probeWorkspace(
     result.created = true;
     var current = first;
     defer sys.unlinkat(dir, current, 0) catch {};
-    {
-        defer sys.close(fd);
-        try sys.writeAll(fd, "#!/bin/sh\nexit 0\n");
-        result.written = true;
-    }
+    sys.writeAll(fd, "#!/bin/sh\nexit 0\n") catch |err| {
+        sys.close(fd);
+        return err;
+    };
+    try closeWritten(fd);
+    result.written = true;
     try sys.renameat(dir, first, dir, renamed);
     current = renamed;
     result.renamed = true;
@@ -757,12 +759,17 @@ pub fn acquireBoundedLockCancel(
     err_msg: *[]const u8,
 ) CancelLockResult {
     if (cancel) |c| if (c.load(.seq_cst)) return .canceled;
-    const fd = sys.openat(fsx.cwd, lock_path, .{
+    const raw_fd = sys.openat(fsx.cwd, lock_path, .{
         .ACCMODE = .RDWR,
         .CREAT = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0o666) catch |err| {
+        err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
+        return .failed;
+    };
+    const fd = sys.keepAboveStdio(raw_fd) catch |err| {
+        sys.close(raw_fd);
         err_msg.* = std.fmt.allocPrint(a, "cannot lock {s}: {s}", .{ lock_path, sys.describe(err) }) catch "cannot lock file";
         return .failed;
     };
@@ -837,12 +844,16 @@ pub fn acquireBoundedLockCancel(
 /// Acquire a non-blocking exclusive lock on `path` without printing errors,
 /// returning null when it cannot be opened or locked.
 pub fn acquireOptionalLock(path: []const u8) ?sys.fd_t {
-    const fd = sys.openat(fsx.cwd, path, .{
+    const raw_fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .RDWR,
         .CREAT = true,
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0o666) catch return null;
+    const fd = sys.keepAboveStdio(raw_fd) catch {
+        sys.close(raw_fd);
+        return null;
+    };
     const st = fsx.fstat(fd) catch {
         sys.close(fd);
         return null;
@@ -858,15 +869,127 @@ pub fn acquireOptionalLock(path: []const u8) ?sys.fd_t {
     return fd;
 }
 
-/// Release a lock descriptor returned by `acquireBoundedLock` or `acquireOptionalLock`.
-pub fn releaseLock(lock: *?sys.fd_t) void {
+/// Set in `main` from `EB_LOCAL_TEST_RELEASE_ERRNO`, only in the test
+/// artifact, and by unit tests, so the `LOCK_UN` of every release fails
+/// with that errno.
+pub var test_release_errno: ?linux.E = null;
+
+fn releaseFlock(fd: sys.fd_t, op: i32) usize {
+    if (comptime build_options.test_ops or builtin.is_test) {
+        if (test_release_errno) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    }
+    return linux.flock(fd, op);
+}
+
+/// Release a lock descriptor returned by `acquireBoundedLock` or
+/// `acquireOptionalLock`. The descriptor is closed whatever `LOCK_UN`
+/// returns; a failed `LOCK_UN` is then returned, as Python's
+/// `fcntl.flock` raises it, with `sys.last_errno` its errno.
+pub fn releaseLock(lock: *?sys.fd_t) sys.Error!void {
     const fd = lock.* orelse return;
     lock.* = null;
-    _ = linux.flock(fd, std.posix.LOCK.UN);
+    const released = sys.call(releaseFlock, .{ fd, @as(i32, std.posix.LOCK.UN) });
+    const errno = sys.last_errno;
     sys.close(fd);
+    _ = released catch |err| {
+        sys.last_errno = errno;
+        return err;
+    };
+}
+
+/// `releaseLock` in cleanup after another failure. A failed release is
+/// dropped and `sys.last_errno` is put back, so the earlier failure's
+/// errno is the one its message describes.
+pub fn releaseLockAfterError(lock: *?sys.fd_t) void {
+    const kept = sys.last_errno;
+    releaseLock(lock) catch {};
+    sys.last_errno = kept;
+}
+
+/// Set in `main` from `EB_LOCAL_TEST_CLOSE_ERRNO`, only in the test
+/// artifact, so each `closeWritten` after the first
+/// `test_close_after` closes its descriptor and then fails with that
+/// errno. `testErrno` refuses EINTR, which `closeWritten` counts as a
+/// success.
+pub var test_close_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_CLOSE_AFTER`: how many calls of
+/// `closeWritten` succeed before `test_close_errno` applies.
+pub var test_close_after: u32 = 0;
+
+/// Set in `main` from `EB_LOCAL_TEST_CLOSE_COUNT`: how many calls of
+/// `closeWritten` fail once `test_close_errno` applies; the calls after
+/// them succeed. Null fails every one.
+pub var test_close_count: ?u32 = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_FSYNC_ERRNO`, only in the test
+/// artifact, so each `fsyncWritten` after the first `test_fsync_after`
+/// fails with that errno without syncing. `testErrno` refuses EINTR,
+/// which `fsyncWritten` would retry without end.
+pub var test_fsync_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_FSYNC_AFTER`: how many calls of
+/// `fsyncWritten` succeed before `test_fsync_errno` applies.
+pub var test_fsync_after: u32 = 0;
+
+/// Set in `main` from `EB_LOCAL_TEST_FSYNC_COUNT`: how many calls of
+/// `fsyncWritten` fail once `test_fsync_errno` applies; the calls after
+/// them succeed. Null fails every one.
+pub var test_fsync_count: ?u32 = null;
+
+/// The errno a close or fsync hook names, as `EIO` for `.IO`. Null for a
+/// name that is not an errno and for EINTR, which neither call reports.
+pub fn testErrno(name: []const u8) ?linux.E {
+    if (!std.mem.startsWith(u8, name, "E")) return null;
+    const e = std.meta.stringToEnum(linux.E, name[1..]) orelse return null;
+    return if (e == .INTR) null else e;
+}
+
+fn injected(errno: ?linux.E, after: *u32, count: *?u32) ?linux.E {
+    const e = errno orelse return null;
+    if (after.* > 0) {
+        after.* -= 1;
+        return null;
+    }
+    if (count.*) |*left| {
+        if (left.* == 0) return null;
+        left.* -= 1;
+    }
+    return e;
+}
+
+fn closeFd(fd: sys.fd_t) usize {
+    const rc = linux.close(fd);
+    if (comptime build_options.test_ops or builtin.is_test) {
+        if (injected(test_close_errno, &test_close_after, &test_close_count)) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    }
+    return rc;
+}
+
+fn fsyncFd(fd: sys.fd_t) usize {
+    if (comptime build_options.test_ops or builtin.is_test) {
+        if (injected(test_fsync_errno, &test_fsync_after, &test_fsync_count)) |e| return @bitCast(-@as(isize, @backingInt(e)));
+    }
+    return linux.fsync(fd);
+}
+
+/// Close a descriptor this process wrote a file through. A failed close
+/// is returned, with `sys.last_errno` its errno, because NFS and some
+/// quota setups report a lost write only there. Linux frees the
+/// descriptor whatever close returns, so it is not closed again, and
+/// EINTR is not an error.
+pub fn closeWritten(fd: sys.fd_t) sys.Error!void {
+    _ = try sys.result(closeFd(fd));
+}
+
+/// fsync(2) of a file this process wrote, or of the directory that names
+/// it. A failure is returned, with `sys.last_errno` its errno.
+pub fn fsyncWritten(fd: sys.fd_t) sys.Error!void {
+    _ = try sys.call(fsyncFd, .{fd});
 }
 
 /// True when `path` is absent, unlocked, or on a filesystem without `flock`.
+/// A probe lock whose release fails counts as held, so `clean` keeps it.
 pub fn tryLockFree(path: []const u8) bool {
     const fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .RDWR,
@@ -876,14 +999,15 @@ pub fn tryLockFree(path: []const u8) bool {
         error.NotFound => return true,
         else => return false,
     };
-    defer sys.close(fd);
+    var probe: ?sys.fd_t = fd;
+    defer if (probe) |held| sys.close(held);
     const st = fsx.fstat(fd) catch return false;
     if (!st.isReg()) return false;
     common.state.lockExclusive(fd, 0) catch |e| switch (e) {
         error.TimedOut => return false,
         else => |se| return flockUnsupported(se),
     };
-    _ = linux.flock(fd, std.posix.LOCK.UN);
+    releaseLock(&probe) catch return false;
     return true;
 }
 
@@ -907,18 +1031,18 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
         .held => |fd| fd,
         else => return error.TestUnexpectedResult,
     };
-    defer releaseLock(&holder);
+    defer releaseLock(&holder) catch unreachable;
 
     var msg2: []const u8 = "";
     try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 40, false, &msg2));
     try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 40 ms") != null);
 
-    releaseLock(&holder);
+    try releaseLock(&holder);
     var again: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg2)) {
         .held => |fd| fd,
         else => return error.TestUnexpectedResult,
     };
-    releaseLock(&again);
+    try releaseLock(&again);
 
     sys.last_errno = .NOLCK;
     try testing.expect(flockUnsupported(error.Unexpected));
@@ -948,9 +1072,89 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
         .held => |fd| fd,
         else => return error.TestUnexpectedResult,
     };
-    defer releaseLock(&held_for_cancel);
+    defer releaseLock(&held_for_cancel) catch unreachable;
     var cancel = std.atomic.Value(bool).init(true);
     try testing.expectEqual(CancelLockResult.canceled, acquireBoundedLockCancel(a, lock_path, 5000, false, &cancel, &msg2));
+}
+
+test "lock descriptors stay above closed stdio slots" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-lock-stdio-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const lock_a = try std.fs.path.join(a, &.{ root, "a.lock" });
+    const lock_b = try std.fs.path.join(a, &.{ root, "b.lock" });
+
+    const pid: isize = @bitCast(linux.fork());
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = linux.close(1);
+        var msg: []const u8 = "";
+        var fd_a: ?sys.fd_t = switch (acquireBoundedLock(a, lock_a, 100, false, &msg)) {
+            .held => |fd| fd,
+            else => linux.exit_group(10),
+        };
+        if (fd_a.? <= 2) linux.exit_group(11);
+        const fd_b = acquireOptionalLock(lock_b) orelse linux.exit_group(12);
+        if (fd_b <= 2) linux.exit_group(13);
+        var ws = makeLockedWorkspace(a, root, &.{"tmp"}) catch linux.exit_group(14);
+        if (ws.lock == null or ws.lock.? <= 2) linux.exit_group(15);
+        releaseLock(&ws.lock) catch linux.exit_group(16);
+        removeTree(a, ws.path) catch {};
+        var opt: ?sys.fd_t = fd_b;
+        releaseLock(&opt) catch linux.exit_group(17);
+        releaseLock(&fd_a) catch linux.exit_group(18);
+        linux.exit_group(0);
+    }
+    var raw: i32 = 0;
+    while (linux.errno(linux.wait4(@intCast(pid), &raw, 0, null)) == .INTR) {}
+    const status: u32 = @bitCast(raw);
+    try testing.expect(linux.W.IFEXITED(status));
+    try testing.expectEqual(@as(u8, 0), linux.W.EXITSTATUS(status));
+}
+
+fn isOpen(fd: sys.fd_t) bool {
+    return linux.errno(linux.fcntl(fd, linux.F.GETFD, 0)) != .BADF;
+}
+
+test "a failed release closes the descriptor and returns its errno" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-lock-release-");
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const lock_path = try std.fs.path.join(a, &.{ root, ".lock" });
+    defer test_release_errno = null;
+
+    var lock = acquireOptionalLock(lock_path);
+    const fd = lock.?;
+    test_release_errno = .IO;
+    sys.last_errno = .SUCCESS;
+    try testing.expectError(error.Unexpected, releaseLock(&lock));
+    test_release_errno = null;
+    try testing.expectEqual(linux.E.IO, sys.last_errno);
+    try testing.expectEqualStrings("[Errno 5] Input/output error", sys.describe(error.Unexpected));
+    try testing.expect(lock == null);
+    try testing.expect(!isOpen(fd));
+    try testing.expect(tryLockFree(lock_path));
+
+    lock = acquireOptionalLock(lock_path);
+    const fd2 = lock.?;
+    test_release_errno = .IO;
+    sys.last_errno = .ACCES;
+    releaseLockAfterError(&lock);
+    test_release_errno = null;
+    try testing.expectEqual(linux.E.ACCES, sys.last_errno);
+    try testing.expectEqualStrings("[Errno 13] Permission denied", sys.describe(error.AccessDenied));
+    try testing.expect(lock == null);
+    try testing.expect(!isOpen(fd2));
+    try testing.expect(tryLockFree(lock_path));
+
+    test_release_errno = .IO;
+    try testing.expect(!tryLockFree(lock_path));
+    test_release_errno = null;
+    try testing.expect(tryLockFree(lock_path));
 }
 
 test "the mount a path lies on" {

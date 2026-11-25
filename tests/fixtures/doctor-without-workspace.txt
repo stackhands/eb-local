@@ -4,8 +4,8 @@ ok   builds use the allocation's own xfs mount {root}/node-mounts/%u.%j
 ok   installs go to {root}/durable/owned prefix: a user install, prefix from environment EB_LOCAL_PREFIX
 info {root}/durable/owned prefix does not exist yet; the first build creates it
 ok   no other EESSI or EasyBuild install variable is set in this shell
-warn /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere
-ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi
+warn {eessi_repo}/versions/2026.06/init/lmod/bash is missing, so `eb-local eb` stops; set EESSI_CVMFS_REPO or EESSI_VERSION if EESSI is elsewhere
+ok   `eb-local eb` exports EESSI_USER_INSTALL='{root}/durable/owned prefix', the prefix selected by configuration
 info no PERL5LIB, PYTHONPATH, R_LIBS*, JULIA_LOAD_PATH, JULIA_DEPOT_PATH, NODE_PATH, CMAKE_PREFIX_PATH or PKG_CONFIG_PATH entry, and no compiler-wrapper, Cargo linker or Makevars variable, points outside the approved prefixes
 info timezone target {timezone}
 info no runtime-injected host library directory was found

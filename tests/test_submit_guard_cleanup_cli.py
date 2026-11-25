@@ -84,7 +84,7 @@ def kill_quiet(pid):
         pass
 
 
-@unittest.skipUnless(binary.BIN, "submit signal cleanup targets the Zig build")
+@unittest.skipUnless(binary.ZIG, "submit signal cleanup targets the Zig build")
 class SubmitGuardCleanup(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -140,7 +140,7 @@ class SubmitGuardCleanup(StorageFixture):
                         CONTROL_ROOT=str(self.root),
                     ),
                 )
-                env["PATH"] = f"{self.programs}:/usr/bin:/bin"
+                env["PATH"] = ":".join(filter(None, [str(self.programs), binary.SHIM_PATH, "/usr/bin", "/bin"]))
                 proc = subprocess.Popen(
                     argv,
                     env=env,
@@ -178,7 +178,7 @@ class SubmitGuardCleanup(StorageFixture):
                 SBATCH_MODE="signal_on_first_success",
             ),
         )
-        env["PATH"] = f"{self.programs}:/usr/bin:/bin"
+        env["PATH"] = ":".join(filter(None, [str(self.programs), binary.SHIM_PATH, "/usr/bin", "/bin"]))
         proc = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True, timeout=10)
         self.assertEqual(proc.returncode, -signal.SIGTERM, proc.stdout + proc.stderr)
         self.assertNotIn("each job writes", proc.stdout)

@@ -12,7 +12,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "checkout site-file discovery belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "checkout site-file discovery belongs to the Zig binary")
 class CheckoutSiteConfigCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-checkout-cfg-")
@@ -20,7 +20,7 @@ class CheckoutSiteConfigCli(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve()
         self.exe = self.root / "zig-out" / "bin" / "eb-local"
         self.exe.parent.mkdir(parents=True)
-        shutil.copy2(binary.BIN, self.exe)
+        shutil.copy2(binary.ZIG, self.exe)
         self.exe.chmod(0o755)
         self.xdg = self.root / "xdg"
         self.home = self.root / "home"

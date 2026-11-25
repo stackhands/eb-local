@@ -8,9 +8,10 @@ import tempfile
 import unittest
 
 import binary
+import support
 
 
-@unittest.skipUnless(binary.BIN, "dev is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "dev is a feature of the Zig build")
 class DevCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-dev-modes-")
@@ -20,18 +21,24 @@ class DevCliModes(unittest.TestCase):
         self.site = self.root / "site.toml"
         self.site.write_text('[storage]\nnode_local_root = "/local"\n', encoding="utf-8")
         self.site.chmod(0o600)
+        # The lines refuse to change a shell with no module command. This
+        # stand-in is what BASH_ENV gives the bash child of --json and --lock.
+        self.module_sh = self.root / "module.sh"
+        self.module_sh.write_text("module() { return 0; }\n")
 
     def run_dev(self, args, **env_overrides):
-        env = {
-            "PATH": "/usr/bin:/bin",
-            "HOME": str(self.root),
-            "EB_LOCAL_CONFIG": str(self.site),
-            "EB_LOCAL_PREFIX": str(self.prefix),
-        }
-        env.pop("LD_LIBRARY_PATH", None)
-        env.update(env_overrides)
+        env = support.isolated_env(
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_CONFIG": str(self.site),
+                "EB_LOCAL_PREFIX": str(self.prefix),
+            },
+            **env_overrides,
+        )
+        env.setdefault("BASH_ENV", str(self.module_sh))
         return subprocess.run(
-            [binary.BIN, "dev", *args],
+            [binary.ZIG, "dev", *args],
             env=env,
             cwd=self.root,
             capture_output=True,
@@ -92,7 +99,7 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(lines[-1], "# <<< eb-local dev <<<")
         self.assertEqual(len(lines), 3)
         # the program is named by its own path, and the line replays this dev
-        self.assertTrue(lines[1].startswith('eval "$(' + binary.BIN + " "), lines[1])
+        self.assertTrue(lines[1].startswith('eval "$(' + binary.ZIG + " "), lines[1])
         self.assertTrue(lines[1].endswith(' dev FFTW/3.3.10-GCC-15.2.0)"'), lines[1])
 
         # the user's own lines around the block survive a rewrite with other modules
@@ -127,10 +134,14 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(self.run_dev(["--envrc"]).returncode, 0)
         # bash, as direnv runs it: the block evaluates this program's dev lines
         run = subprocess.run(
-            ["bash", "-c", 'source ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
+            ["bash", "-c", 'module() { return 0; }\nsource ./.envrc >/dev/null 2>&1; printf %s "${EB_LOCAL_DEV_PREFIX-}"'],
             cwd=self.root,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": str(self.site),
-                 "EB_LOCAL_PREFIX": str(self.prefix)},
+            env=support.isolated_env({
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_CONFIG": str(self.site),
+                "EB_LOCAL_PREFIX": str(self.prefix),
+            }),
             capture_output=True, text=True,
         )
         self.assertTrue(run.stdout.startswith(str(self.prefix) + "/dev/"), run.stdout + run.stderr)
@@ -201,9 +212,13 @@ class DevCliModes(unittest.TestCase):
 
         def run_lines(subdir):
             return subprocess.run(
-                ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
-                env={"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EESSI_SOFTWARE_SUBDIR": subdir,
-                     "EESSI_VERSION": "2026.06"},
+                ["bash", "-c", 'module() { return 0; }\n' + got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+                env=support.isolated_env({
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.root),
+                    "EESSI_SOFTWARE_SUBDIR": subdir,
+                    "EESSI_VERSION": "2026.06",
+                }),
                 capture_output=True, text=True,
             )
 
@@ -253,7 +268,7 @@ class DevCliModes(unittest.TestCase):
         got = self.run_dev(["--locked"])
         self.assertEqual(got.returncode, 0, got.stderr)
         run = subprocess.run(
-            ["bash", "-c", got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+            ["bash", "-c", 'module() { return 0; }\n' + got.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
                  "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"},
             capture_output=True, text=True,
@@ -270,7 +285,7 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(empty.returncode, 0, empty.stderr)
         self.assertNotIn('elif [ "${EESSI_VERSION-}"', empty.stdout)
         loaded = subprocess.run(
-            ["bash", "-c", empty.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
+            ["bash", "-c", 'module() { return 0; }\n' + empty.stdout + 'printf "%s" "${EB_LOCAL_DEV_PREFIX-unset}"'],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
                  "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"},
             capture_output=True, text=True,
