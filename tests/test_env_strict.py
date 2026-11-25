@@ -55,7 +55,11 @@ class EnvStrictCli(unittest.TestCase):
             env = support.isolated_env({"PATH": os.environ["PATH"], "HOME": tmp, "EB_LOCAL_PREFIX": f"{tmp}/eessi"})
             default_dev = subprocess.run([binary.ZIG, "dev"], capture_output=True, text=False, env=env)
             self.assertEqual((default_dev.returncode, default_dev.stderr), (0, b""))
-            self.assertTrue(default_dev.stdout.startswith(b"eb_local_apply() {\nif ! type module >/dev/null 2>&1; then\n"))
+            self.assertTrue(default_dev.stdout.startswith(
+                b"eb_local_apply() {\n"
+                b"    local _eb_local_wrap eb_local_family eb_local_buildenv eb_local_level\n"
+                b"if ! type module >/dev/null 2>&1; then\n"
+            ))
             self.assertNotIn(b"init=${repo}/versions/${ver}/init/lmod/bash", default_dev.stdout)
 
             strict_dev = subprocess.run([binary.ZIG, "dev", "--strict"], capture_output=True, text=False, env=env)
@@ -71,7 +75,11 @@ class EnvStrictCli(unittest.TestCase):
                 env=env,
             )
             self.assertEqual((custom_be.returncode, custom_be.stderr), (0, b""))
-            self.assertTrue(custom_be.stdout.startswith(b"eb_local_apply() {\nif ! type module >/dev/null 2>&1; then\n"))
+            self.assertTrue(custom_be.stdout.startswith(
+                b"eb_local_apply() {\n"
+                b"    local _eb_local_wrap eb_local_family eb_local_buildenv eb_local_level\n"
+                b"if ! type module >/dev/null 2>&1; then\n"
+            ))
             self.assertIn(b"module load FFTW/3.3.10\n", custom_be.stdout)
             self.assertIn(b"module load buildenv/site-gcc\n", custom_be.stdout)
 
