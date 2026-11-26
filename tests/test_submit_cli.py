@@ -26,6 +26,61 @@ echo "Submitted batch job 4242"
 '''
 
 
+def _c_isspace(ch):
+    return ch in " \t\n\v\f\r"
+
+
+def slurm_directive_value(line):
+    """Return `(flag, value)` as `sbatch` reads one `#SBATCH` option.
+
+    The scanner is `get_argument` in the scheduler's batch option parser.
+    Quotes group characters, a backslash escapes the next character, and
+    an unmatched quote is an error. The shell does not parse the line.
+    """
+    if not line.startswith("#SBATCH"):
+        raise AssertionError(line)
+    ptr = line[len("#SBATCH"):]
+    i = 0
+    while i < len(ptr) and _c_isspace(ptr[i]):
+        i += 1
+    out = []
+    quoted = False
+    q_char = ""
+    escape = False
+    while i < len(ptr) and (quoted or not _c_isspace(ptr[i])) and ptr[i] != "\n":
+        ch = ptr[i]
+        if escape:
+            escape = False
+        elif ch == "\\":
+            i += 1
+            if i < len(ptr) and ptr[i] == " ":
+                out.append(" ")
+                i += 1
+            else:
+                escape = True
+            continue
+        elif quoted and ch == q_char:
+            quoted = False
+            i += 1
+            continue
+        elif not quoted and ch in "\"'":
+            quoted = True
+            q_char = ch
+            i += 1
+            continue
+        elif not quoted and ch == "#":
+            break
+        out.append(ch)
+        i += 1
+    if quoted:
+        raise AssertionError(f"unmatched {q_char!r} in {line}")
+    text = "".join(out)
+    flag, sep, value = text.partition("=")
+    if not sep:
+        raise AssertionError(text)
+    return flag, value
+
+
 @unittest.skipUnless(binary.ZIG, "submit is a feature of the Zig build")
 class Submit(StorageFixture):
     def setUp(self):
@@ -400,6 +455,36 @@ class Submit(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn(f'#SBATCH --output="{self.prefix}/.eb-local/logs/submit-cpu-%j.out"\n', run.stdout)
         self.assertIn(f'#SBATCH --chdir="{os.path.realpath(spaced_cwd)}"\n', run.stdout)
+
+    def test_sbatch_directives_quote_paths_containing_apostrophes(self):
+        # `sbatch` reads `#SBATCH` with its own scanner: an apostrophe
+        # starts a quote, and a missing closer rejects the script. The
+        # shell never sees the line, because it is a comment.
+        work = self.root / "o'brien"
+        work.mkdir()
+        prefix = self.root / "o'prefix"
+        run = subprocess.run(
+            [binary.ZIG, "submit", "--on", "cpu", "--print", "cost$'recipe.eb", "--opt=$HOME"],
+            cwd=work,
+            env=dict(self.env, SLURM_JOB_ID="", EB_LOCAL_PREFIX=str(prefix)),
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        script = run.stdout[run.stdout.index("#!/bin/bash"):]
+        expected = {
+            "--chdir": os.path.realpath(work),
+            "--output": f"{prefix}/.eb-local/logs/submit-cpu-%j.out",
+        }
+        for line in script.splitlines():
+            if not line.startswith("#SBATCH --"):
+                continue
+            flag, value = slurm_directive_value(line)
+            if flag in expected:
+                self.assertEqual(value, expected.pop(flag), line)
+        self.assertEqual(expected, {}, script)
+        command = script.rstrip().splitlines()[-1]
+        self.assertEqual(shlex.split(command)[-2:], ["cost$'recipe.eb", "--opt=$HOME"])
 
 
 if __name__ == "__main__":
