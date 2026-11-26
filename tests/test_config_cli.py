@@ -301,6 +301,15 @@ class ConfigCli(StorageFixture):
         self.assertIn("mine", run.stdout)
         self.assertIn("licensed", run.stdout)
 
+    def test_profiles_option_overrides_environment_profile(self):
+        missing = self.run_tool(["--profile", "nope", "profiles"], EB_LOCAL_PROFILE="mine")
+        self.assertEqual(missing.returncode, 2, missing.stderr)
+        self.assertIn("no profile 'nope'", missing.stderr)
+        named = self.run_tool(["--profile", "mine", "profiles"], EB_LOCAL_PROFILE="nope")
+        self.assertEqual(named.returncode, 0, named.stderr)
+        self.assertIn("mine", named.stdout)
+        self.assertIn("licensed", named.stdout)
+
     def test_default_profile_type_checked_when_overridden(self):
         self.user.write_text('default_profile = 123\n\n[profile.mine]\nprefix = "/tmp/p"\n')
         for args, extra_env in (
