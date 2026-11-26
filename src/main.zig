@@ -2967,7 +2967,8 @@ const Guard = struct {
     }
 
     /// Run a program on this terminal and wait for it to exit.
-    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
+    /// `error.ForkFailed` is a `fork` that did not start the program.
+    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) error{ForkFailed}!Run {
         const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch oom();
         for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch oom()).ptr;
         // Blocked until this process knows the child, and the child has the
@@ -3006,7 +3007,7 @@ const Guard = struct {
             waited_pid.store(@intCast(pid), .seq_cst);
         }
         _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
-        if (pid < 0) die("cannot start {s}", .{argv[0]});
+        if (pid < 0) return error.ForkFailed;
         // Waited for without reaping, so that its pid cannot be reused
         // before the handler forgets it.
         var info: linux.siginfo_t = undefined;
@@ -3049,7 +3050,7 @@ const Guard = struct {
 fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
     const guard = Guard.hold();
     defer guard.release();
-    const ran = guard.run(a, argv, envp);
+    const ran = guard.run(a, argv, envp) catch die("cannot start {s}", .{argv[0]});
     return if (guard.received()) |sig| .{ .signal = sig } else ran;
 }
 
@@ -4496,7 +4497,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     // The guard stays until the logs are clean: a signal stops the build, but
     // eb-local first waits for EasyBuild, which writes them, to exit.
-    const ran = guard.run(a, buildCommand(a, c, s, p, args), envpOf(a, &env));
+    const build_argv = buildCommand(a, c, s, p, args);
+    const ran = guard.run(a, build_argv, envpOf(a, &env)) catch die("cannot start {s}", .{build_argv[0]});
     const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
@@ -5657,15 +5659,7 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
     const stamp = submitStamp(a, c);
-    const Job = struct {
-        name: []const u8,
-        script: []const u8,
-        preferred: []const u8,
-        options: []const u8,
-        path: []const u8,
-        argv: []const []const u8,
-    };
-    var plan: std.ArrayList(Job) = .empty;
+    var plan: std.ArrayList(SubmitJob) = .empty;
     for (chosen.items) |t| {
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
         const chdir_val = sbatchValue(a, c.cwd);
@@ -5700,75 +5694,19 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     }
     // Reserve each final path before the plan is printed. The line then
     // names the file sbatch receives, including a -2, -3, ... suffix when
-    // the preferred name is taken. The body is written after the plan. A
-    // plan that does not get out is removed again, directories included,
-    // so a failed stdout still leaves the tree as it was.
+    // the preferred name is taken. The body is written after the plan.
     const jobs_missing = firstMissingAncestor(jobs);
     const logs_missing = firstMissingAncestor(logs);
     common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
     common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
-    var created: std.ArrayList([]const u8) = .empty;
-    for (plan.items) |*job| {
-        if (plantSubmitRace(c, job.preferred)) |planted| created.append(a, planted) catch oom();
-        job.path = reserveSubmitScript(a, job.preferred);
-        created.append(a, job.path) catch oom();
-        job.argv = submitArgv(a, sbatch, job.options, job.path);
+    var fault: SubmitFault = .{ .kind = .create, .path = jobs, .err = error.Unexpected };
+    if (submitReserved(c, plan.items, sbatch, jobs, logs, jobs_missing, logs_missing, &fault)) |status| {
+        return status;
+    } else |err| switch (err) {
+        error.PlanNotPrinted => return unlisted("submitted"),
+        error.OutOfMemory => oom(),
+        error.SubmitFailed => raiseSubmitFault(fault),
     }
-    {
-        var plan_text: std.ArrayList(u8) = .empty;
-        for (plan.items) |job| plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() }) catch oom();
-        if (!emit(plan_text.items)) {
-            undoSubmitReserve(a, jobs_missing, logs_missing, created.items);
-            return unlisted("submitted");
-        }
-    }
-    var failed = false;
-    const guard = Guard.hold();
-    defer guard.release();
-    for (plan.items, 0..) |job, index| {
-        if (guard.received()) |sig| {
-            dropUnsubmitted(plan.items, index);
-            guard.release();
-            return stop(.{ .signal = sig });
-        }
-        writeReservedScript(job.path, job.script);
-        if (guard.received()) |sig| {
-            dropUnsubmitted(plan.items, index);
-            guard.release();
-            return stop(.{ .signal = sig });
-        }
-        const ran = guard.run(a, job.argv, c.envp);
-        switch (ran) {
-            .exit => |code| {
-                if (code != 0) {
-                    if (guard.received()) |sig| {
-                        dropUnsubmitted(plan.items, index);
-                        guard.release();
-                        return stop(.{ .signal = sig });
-                    }
-                    warn("sbatch refused the {s} job (exit {d})", .{ job.name, code });
-                    failed = true;
-                }
-                if (guard.received()) |sig| {
-                    dropUnsubmitted(plan.items, index + 1);
-                    guard.release();
-                    return stop(.{ .signal = sig });
-                }
-            },
-            .signal => |sig| {
-                dropUnsubmitted(plan.items, index);
-                guard.release();
-                return stop(.{ .signal = guard.received() orelse sig });
-            },
-        }
-    }
-    if (guard.received()) |sig| {
-        guard.release();
-        return stop(.{ .signal = sig });
-    }
-    say("", .{});
-    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
-    return if (failed) 1 else 0;
 }
 
 /// The stamp in a retained submit script's name. The test artifact may pin
@@ -5829,82 +5767,275 @@ fn pathCovers(parent: []const u8, child: []const u8) bool {
     return child.len > parent.len and child[parent.len] == '/' and std.mem.startsWith(u8, child, parent);
 }
 
-/// Drop reserved scripts and directories created for a plan that was not printed.
-fn undoSubmitReserve(a: Allocator, jobs_missing: ?[]const u8, logs_missing: ?[]const u8, created: []const []const u8) void {
+const SubmitJob = struct {
+    name: []const u8,
+    script: []const u8,
+    preferred: []const u8,
+    options: []const u8,
+    path: []const u8,
+    argv: []const []const u8,
+};
+
+const SubmitFault = struct {
+    kind: enum { create, mode, taken, open, write, start },
+    path: []const u8,
+    err: anyerror,
+};
+
+fn raiseSubmitFault(f: SubmitFault) noreturn {
+    switch (f.kind) {
+        .create => die("cannot create {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .mode => die("cannot set the mode of {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .taken => die("cannot write {s}: the name and its suffixes are already taken", .{f.path}),
+        .open => die("cannot open {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .write => die("cannot write {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .start => die("cannot start {s}", .{f.path}),
+    }
+}
+
+const ExclusiveOpen = union(enum) {
+    fd: sys.fd_t,
+    busy,
+    fail: SubmitFault,
+};
+
+/// Reserve, write, and submit `plan`. An error removes every script this
+/// call reserved and has not handed to sbatch. `error.PlanNotPrinted` also
+/// removes directories this call created, and only those.
+fn submitReserved(
+    c: Ctx,
+    plan: []SubmitJob,
+    sbatch: []const u8,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+    fault: *SubmitFault,
+) error{ SubmitFailed, PlanNotPrinted, OutOfMemory }!u8 {
+    const a = c.a;
+    var handed: usize = 0;
+    var rollback_dirs = false;
+    var created: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        if (rollback_dirs) {
+            undoSubmitReserve(a, jobs_dir, logs_dir, jobs_missing, logs_missing, created.items);
+        } else {
+            dropUnsubmitted(plan, handed);
+            if (handed == 0) {
+                for (created.items) |p| sys.unlinkat(fsx.cwd, p, 0) catch {};
+            }
+        }
+    }
+    for (plan) |*job| {
+        if (plantSubmitRace(c, job.preferred)) |planted| created.append(a, planted) catch return error.OutOfMemory;
+        job.path = reserveSubmitScript(a, job.preferred, fault) catch return error.SubmitFailed;
+        created.append(a, job.path) catch return error.OutOfMemory;
+        job.argv = submitArgv(a, sbatch, job.options, job.path);
+    }
+    {
+        var plan_text: std.ArrayList(u8) = .empty;
+        for (plan) |job| {
+            const line = std.mem.join(a, " ", job.argv) catch return error.OutOfMemory;
+            plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, line }) catch return error.OutOfMemory;
+        }
+        if (!emit(plan_text.items)) {
+            rollback_dirs = true;
+            return error.PlanNotPrinted;
+        }
+    }
+    var failed = false;
+    const guard = Guard.hold();
+    defer guard.release();
+    for (plan, 0..) |job, index| {
+        if (guard.received()) |sig| {
+            dropUnsubmitted(plan, index);
+            guard.release();
+            return stop(.{ .signal = sig });
+        }
+        writeReservedScript(job.path, job.script, fault) catch return error.SubmitFailed;
+        if (guard.received()) |sig| {
+            dropUnsubmitted(plan, index);
+            guard.release();
+            return stop(.{ .signal = sig });
+        }
+        const ran = guard.run(a, job.argv, c.envp) catch {
+            fault.* = .{ .kind = .start, .path = job.argv[0], .err = error.Unexpected };
+            return error.SubmitFailed;
+        };
+        switch (ran) {
+            .exit => |code| {
+                if (code != 0) {
+                    if (guard.received()) |sig| {
+                        dropUnsubmitted(plan, index);
+                        guard.release();
+                        return stop(.{ .signal = sig });
+                    }
+                    warn("sbatch refused the {s} job (exit {d})", .{ job.name, code });
+                    failed = true;
+                }
+                // sbatch ran. This script stays, including when sbatch refused it.
+                handed = index + 1;
+                if (guard.received()) |sig| {
+                    dropUnsubmitted(plan, index + 1);
+                    guard.release();
+                    return stop(.{ .signal = sig });
+                }
+            },
+            .signal => |sig| {
+                dropUnsubmitted(plan, index);
+                guard.release();
+                return stop(.{ .signal = guard.received() orelse sig });
+            },
+        }
+    }
+    if (guard.received()) |sig| {
+        guard.release();
+        return stop(.{ .signal = sig });
+    }
+    say("", .{});
+    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs_dir});
+    return if (failed) 1 else 0;
+}
+
+/// Drop reserved scripts and directories this call created for a plan that
+/// was not printed. Only this call's files are unlinked. Directories it
+/// created are removed with `rmdir`, deepest first, and a directory that
+/// another submit has filled is left in place.
+fn undoSubmitReserve(
+    a: Allocator,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+    created: []const []const u8,
+) void {
     for (created) |p| sys.unlinkat(fsx.cwd, p, 0) catch {};
-    if (jobs_missing) |dir| fsx.deleteTree(a, fsx.cwd, dir) catch {};
-    if (logs_missing) |dir| {
-        if (jobs_missing == null or !pathCovers(jobs_missing.?, dir))
-            fsx.deleteTree(a, fsx.cwd, dir) catch {};
+    removeCreatedSubmitDirs(a, jobs_dir, logs_dir, jobs_missing, logs_missing);
+}
+
+/// Directories this call created, deepest first. Each removal is `rmdir`:
+/// `ENOTEMPTY` leaves the directory and whatever another submit put in it.
+/// This never walks the directory.
+fn removeCreatedSubmitDirs(
+    a: Allocator,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+) void {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    appendCreatedChain(a, &dirs, jobs_dir, jobs_missing);
+    appendCreatedChain(a, &dirs, logs_dir, logs_missing);
+    std.mem.sort([]const u8, dirs.items, {}, deeperPath);
+    for (dirs.items) |dir| sys.unlinkat(fsx.cwd, dir, linux.AT.REMOVEDIR) catch {};
+}
+
+fn deeperPath(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return lhs.len > rhs.len;
+}
+
+fn appendCreatedChain(a: Allocator, dirs: *std.ArrayList([]const u8), target: []const u8, top: ?[]const u8) void {
+    const root = top orelse return;
+    var probe: []const u8 = target;
+    while (pathCovers(root, probe)) {
+        var seen = false;
+        for (dirs.items) |have| {
+            if (std.mem.eql(u8, have, probe)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) dirs.append(a, probe) catch oom();
+        if (std.mem.eql(u8, probe, root)) break;
+        probe = std.fs.path.dirname(probe) orelse break;
     }
 }
 
 /// Unlink reserved scripts from `from` on. Those jobs were not submitted.
 fn dropUnsubmitted(jobs: anytype, from: usize) void {
     if (from >= jobs.len) return;
-    for (jobs[from..]) |job| sys.unlinkat(fsx.cwd, job.path, 0) catch {};
+    for (jobs[from..]) |job| {
+        if (job.path.len == 0) continue;
+        sys.unlinkat(fsx.cwd, job.path, 0) catch {};
+    }
 }
 
-/// Create an empty `path` with mode 0700. Null when that final path already
+/// Create an empty `path` with mode 0700. `busy` when that final path already
 /// exists, is a directory, or is a symbolic link: the caller then tries
 /// another name. `O_EXCL` is what makes the collision visible.
-fn openExclusive(path: []const u8) ?sys.fd_t {
+fn openExclusive(path: []const u8) ExclusiveOpen {
     const fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .WRONLY,
         .CREAT = true,
         .EXCL = true,
         .NOFOLLOW = true,
     }, 0o700) catch |e| switch (e) {
-        error.Exists, error.SymLink, error.IsDir => return null,
-        else => die("cannot create {s} ({s})", .{ path, storage.describeError(e) }),
+        error.Exists, error.SymLink, error.IsDir => return .busy,
+        else => return .{ .fail = .{ .kind = .create, .path = path, .err = e } },
     };
     sys.fchmod(fd, 0o700) catch |e| {
         sys.close(fd);
         sys.unlinkat(fsx.cwd, path, 0) catch {};
-        die("cannot set the mode of {s} ({s})", .{ path, storage.describeError(e) });
+        return .{ .fail = .{ .kind = .mode, .path = path, .err = e } };
     };
-    return fd;
+    return .{ .fd = fd };
 }
 
 /// Create `path` and write `body` with mode 0700. False when that final path
 /// already exists, is a directory, or is a symbolic link.
 fn createExclusiveScript(path: []const u8, body: []const u8) bool {
-    const fd = openExclusive(path) orelse return false;
-    sys.writeAll(fd, body) catch |e| {
-        sys.close(fd);
-        sys.unlinkat(fsx.cwd, path, 0) catch {};
-        die("cannot write {s} ({s})", .{ path, storage.describeError(e) });
-    };
-    sys.close(fd);
-    return true;
+    switch (openExclusive(path)) {
+        .busy => return false,
+        .fail => |f| raiseSubmitFault(f),
+        .fd => |fd| {
+            sys.writeAll(fd, body) catch |e| {
+                sys.close(fd);
+                sys.unlinkat(fsx.cwd, path, 0) catch {};
+                die("cannot write {s} ({s})", .{ path, storage.describeError(e) });
+            };
+            sys.close(fd);
+            return true;
+        },
+    }
 }
 
 /// Reserve `preferred`, or that path with a `-2`, `-3`, ... suffix, with
 /// `O_EXCL` and mode 0700. The file is empty until `writeReservedScript`.
 /// An earlier job's script is never replaced.
-fn reserveSubmitScript(a: Allocator, preferred: []const u8) []const u8 {
+fn reserveSubmitScript(a: Allocator, preferred: []const u8, fault: *SubmitFault) error{SubmitFailed}![]const u8 {
     var n: usize = 0;
     while (n < 1000) : (n += 1) {
         const path = if (n == 0) preferred else submitScriptSuffix(a, preferred, n + 1);
-        if (openExclusive(path)) |fd| {
-            sys.close(fd);
-            return path;
+        switch (openExclusive(path)) {
+            .busy => {},
+            .fd => |fd| {
+                sys.close(fd);
+                return path;
+            },
+            .fail => |f| {
+                fault.* = f;
+                return error.SubmitFailed;
+            },
         }
     }
-    die("cannot write {s}: the name and its suffixes are already taken", .{preferred});
+    fault.* = .{ .kind = .taken, .path = preferred, .err = error.Unexpected };
+    return error.SubmitFailed;
 }
 
 /// Write `body` into a file `reserveSubmitScript` already created.
-fn writeReservedScript(path: []const u8, body: []const u8) void {
+fn writeReservedScript(path: []const u8, body: []const u8, fault: *SubmitFault) error{SubmitFailed}!void {
     const fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .WRONLY,
         .TRUNC = true,
         .NOFOLLOW = true,
-    }, 0) catch |e| die("cannot open {s} ({s})", .{ path, storage.describeError(e) });
+    }, 0) catch |e| {
+        fault.* = .{ .kind = .open, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
     sys.writeAll(fd, body) catch |e| {
         sys.close(fd);
-        sys.unlinkat(fsx.cwd, path, 0) catch {};
-        die("cannot write {s} ({s})", .{ path, storage.describeError(e) });
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
     };
     sys.close(fd);
 }
@@ -5913,8 +6044,12 @@ fn writeReservedScript(path: []const u8, body: []const u8) void {
 /// suffix when the final path is already taken. An earlier job's script is
 /// never replaced.
 fn retainSubmitScript(a: Allocator, preferred: []const u8, script: []const u8) []const u8 {
-    const path = reserveSubmitScript(a, preferred);
-    writeReservedScript(path, script);
+    var fault: SubmitFault = undefined;
+    const path = reserveSubmitScript(a, preferred, &fault) catch raiseSubmitFault(fault);
+    writeReservedScript(path, script, &fault) catch {
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        raiseSubmitFault(fault);
+    };
     return path;
 }
 
@@ -5970,16 +6105,84 @@ test "a candidate created between the stat and the exclusive create is not submi
     const chosen = chooseSubmitPath(a, preferred);
     try std.testing.expectEqualStrings(preferred, chosen);
     try std.testing.expect(createExclusiveScript(preferred, "#!/bin/bash\n# raced\n"));
-    const reserved = reserveSubmitScript(a, preferred);
+    var fault: SubmitFault = .{ .kind = .create, .path = preferred, .err = error.Unexpected };
+    const reserved = try reserveSubmitScript(a, preferred, &fault);
     const suffixed = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe-2.sh", .{root});
     try std.testing.expectEqualStrings(suffixed, reserved);
     const script = "#!/bin/bash\n# second\n";
-    writeReservedScript(reserved, script);
+    try writeReservedScript(reserved, script, &fault);
     try std.testing.expectEqualStrings(reserved, suffixed);
     try std.testing.expectEqualStrings("#!/bin/bash\n# raced\n", try readRetainedScript(a, preferred));
     try std.testing.expectEqualStrings(script, try readRetainedScript(a, reserved));
     const st = try fsx.statAt(fsx.cwd, reserved, false);
     try std.testing.expectEqual(@as(u32, 0o700), st.perm());
+}
+
+test "failure after reservation leaves no reserved files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-reserve-fail-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const keep = try std.fmt.allocPrint(a, "{s}/keep.txt", .{root});
+    try std.testing.expect(createExclusiveScript(keep, "foreign\n"));
+    const first = try std.fmt.allocPrint(a, "{s}/job.sh", .{root});
+    const second = try std.fmt.allocPrint(a, "{s}/job.sh/next.sh", .{root});
+    var jobs = [_]SubmitJob{
+        .{ .name = "cpu", .script = "#!/bin/bash\n", .preferred = first, .options = "", .path = "", .argv = &.{} },
+        .{ .name = "gpu", .script = "#!/bin/bash\n", .preferred = second, .options = "", .path = "", .argv = &.{} },
+    };
+    var map: std.process.Environ.Map = .init(a);
+    const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = root };
+    var fault: SubmitFault = .{ .kind = .create, .path = first, .err = error.Unexpected };
+    try std.testing.expectError(error.SubmitFailed, submitReserved(c, &jobs, "sbatch", root, root, null, null, &fault));
+    try std.testing.expect(!exists(first));
+    try std.testing.expect(!exists(second));
+    try std.testing.expectEqualStrings("foreign\n", try readRetainedScript(a, keep));
+    try std.testing.expect(exists(root));
+}
+
+test "rollback with a foreign file in a newly created directory keeps that file and directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-rollback-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const jobs = try std.fmt.allocPrint(a, "{s}/fresh/jobs", .{root});
+    const logs = try std.fmt.allocPrint(a, "{s}/fresh/logs", .{root});
+    const jobs_missing = firstMissingAncestor(jobs);
+    const logs_missing = firstMissingAncestor(logs);
+    try common.atomic.makedirs(jobs);
+    try common.atomic.makedirs(logs);
+    const own = try std.fmt.allocPrint(a, "{s}/own.sh", .{jobs});
+    const kept = try std.fmt.allocPrint(a, "{s}/foreign.sh", .{jobs});
+    try std.testing.expect(createExclusiveScript(kept, "theirs\n"));
+    var plan = [_]SubmitJob{
+        .{ .name = "cpu", .script = "#!/bin/bash\n", .preferred = own, .options = "", .path = "", .argv = &.{} },
+    };
+    var map: std.process.Environ.Map = .init(a);
+    const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = root };
+    const saved = stdout;
+    const full_fd = try sys.openat(linux.AT.FDCWD, "/dev/full", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    defer sys.close(full_fd);
+    const quiet = try sys.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    defer sys.close(quiet);
+    stdout = .{ .tool = tool, .fd = full_fd, .err_fd = quiet };
+    defer stdout = saved;
+    var fault: SubmitFault = .{ .kind = .create, .path = own, .err = error.Unexpected };
+    try std.testing.expectError(error.PlanNotPrinted, submitReserved(c, &plan, "/no/such/sbatch", jobs, logs, jobs_missing, logs_missing, &fault));
+    try std.testing.expect(!exists(own));
+    try std.testing.expectEqualStrings("theirs\n", try readRetainedScript(a, kept));
+    try std.testing.expect(exists(jobs));
+    try std.testing.expect(!exists(logs));
+    const fresh = try std.fmt.allocPrint(a, "{s}/fresh", .{root});
+    try std.testing.expect(exists(fresh));
 }
 
 // ---- uninstall ------------------------------------------------------------
@@ -7347,7 +7550,7 @@ test "Guard.run does not launch child when a guarded signal already arrived" {
         _ = linux.kill(linux.getpid(), sig);
         const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
         const cmd = try std.fmt.allocPrint(a, "echo ran > '{s}'", .{marker});
-        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env);
+        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env) catch return error.TestUnexpectedResult;
         switch (ran) {
             .signal => |got| try std.testing.expectEqual(sig, got),
             .exit => return error.TestUnexpectedResult,
