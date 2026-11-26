@@ -22,6 +22,7 @@ const default_allow = @embedFile("isa/dispatch-allow.txt");
 /// A set of features, one bit per interned name.
 pub const Mask = u256;
 
+/// The architectures the audit reads: the machine of the ELF file selects one.
 pub const Arch = enum {
     x86_64,
     aarch64,
@@ -34,6 +35,7 @@ pub const Arch = enum {
     }
 };
 
+/// An EESSI software subdirectory, its architecture and the features its CPU has.
 pub const Target = struct { name: []const u8, arch: Arch, has: Mask };
 
 const Span = struct { start: u32, len: u32 };
@@ -43,6 +45,7 @@ const need_nosve: u8 = 2;
 const need_hreg: u8 = 4;
 const Rule = struct { flags: u8, op: []const u8, feat: u8 };
 
+/// Why `Db.load` read nothing: memory, or a table the generator did not write.
 pub const LoadError = Allocator.Error || error{BadTable};
 
 /// The tables of the generator, parsed.
@@ -78,6 +81,7 @@ pub const Db = struct {
         return m;
     }
 
+    /// Parse the embedded tables into a database allocated from `a`.
     pub fn load(a: Allocator) LoadError!*Db {
         const db = try a.create(Db);
         db.* = .{};
@@ -161,6 +165,7 @@ pub const Db = struct {
         return db.ids.get(feature_name);
     }
 
+    /// The name of a feature id.
     pub fn nameOf(db: *const Db, feature: u8) []const u8 {
         return db.names.items[feature];
     }
@@ -460,6 +465,8 @@ pub fn allowed(entries: []const AllowEntry, path: []const u8, feature: u8) bool 
 
 // ---- report ---------------------------------------------------------------
 
+/// One feature a file needs and the target lacks: how many instructions, the first
+/// one, and whether the allow list covers it.
 pub const Finding = struct {
     feature: []const u8,
     count: u64,
@@ -467,14 +474,18 @@ pub const Finding = struct {
     instruction: []const u8,
     dispatch: bool,
 };
+/// A file with at least one finding.
 pub const FileReport = struct {
     path: []const u8,
     instructions: u64,
     zmm: u64,
     findings: []const Finding,
 };
+/// A feature or mnemonic the tables cannot judge, and how often it occurs.
 pub const Unclassified = struct { name: []const u8, kind: []const u8, count: u64 };
+/// A file or directory the audit could not read or disassemble, and why.
 pub const Problem = struct { path: []const u8, message: []const u8 };
+/// The result of an audit, and the document `--json` prints.
 pub const Report = struct {
     schema_version: u32 = jsonout.schema_version,
     kind: []const u8 = "audit-isa",
@@ -492,6 +503,7 @@ pub const Report = struct {
     errors: []const Problem,
 };
 
+/// The text `audit-isa` prints for a report.
 pub fn renderText(a: Allocator, r: Report) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.print(a, "eb-local audit-isa: target {s}, {d} ELF files, {d} instructions\n", .{ r.target, r.files_audited, r.instructions });
@@ -709,6 +721,7 @@ const Scan = struct {
     }
 };
 
+/// What the command line asks for.
 pub const Options = struct {
     path: []const u8,
     target: []const u8,
