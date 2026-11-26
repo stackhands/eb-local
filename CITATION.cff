@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+title: 'eb-local: EasyBuild installs of your own on top of EESSI'
+message: If you use eb-local, please cite it using the metadata below.
+type: software
+authors:
+- given-names: Rohit
+  family-names: Goswami
+  email: rgoswami@ieee.org
+  orcid: https://orcid.org/0000-0002-2393-8056
+license: MIT
+repository-code: https://github.com/stackhands/eb-local
+url: https://stackhands.github.io/eb-local/
+keywords:
+- EasyBuild
+- EESSI
+- HPC
+- workstation
+- RPATH
+abstract: Static Zig CLI that builds your own code and installs EasyBuild software
+  on top of EESSI-extend, on a Slurm node-local disk or a workstation, with RPATH
+  wrappers, per-target list and uninstall, doctor checks and scoped secrets.
