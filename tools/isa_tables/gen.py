@@ -262,6 +262,12 @@ def x86_rows():
         keep = frozenset.intersection(*sets)
         if any(s != keep for s in sets):
             ambiguous += 1
+            if not keep and key[1] != "L":
+                # Forms of one vector mnemonic that need different sets
+                # (vbroadcastss from memory is AVX, from a register AVX2):
+                # the smaller requirement, so that no form is reported
+                # against a target that has the instruction.
+                keep = min((s for s in sets if s), key=lambda s: (len(s), sorted(s)), default=keep)
         if not keep:
             continue
         shown = ",".join(sorted(f if f in X86_FEATURES else "?" + f for f in keep))

@@ -533,9 +533,12 @@ vbroadcasti64x2	E	512	avx512dq
 vbroadcasti64x4	E	512	avx512f
 vbroadcastsd	E	256	avx512f,avx512vl
 vbroadcastsd	E	512	avx512f
+vbroadcastsd	V	256	avx
 vbroadcastss	E	128	avx512f,avx512vl
 vbroadcastss	E	256	avx512f,avx512vl
 vbroadcastss	E	512	avx512f
+vbroadcastss	V	128	avx
+vbroadcastss	V	256	avx
 vcmppd	E	128	avx512f,avx512vl
 vcmppd	E	256	avx512f,avx512vl
 vcmppd	E	512	avx512f

@@ -751,7 +751,7 @@ pub fn run(a: Allocator, o: Options, path_env: []const u8, tmpdir: []const u8, e
         files.append(a, root) catch oom();
     } else cli.die("eb-local", "{s} is neither a file nor a directory", .{root});
 
-    const work = fsx.mkdtemp(a, tmpdir, "eb-local-isa-") catch |e| cli.die("eb-local", "cannot make a work directory in {s} ({s})", .{ tmpdir, sys.describe(e) });
+    const work = fsx.mkdtemp(a, tmpdir, "eb-local-isa-") catch |e| cli.die("eb-local", "cannot make a work directory in {s} ({s})", .{ tmpdir, @errorName(e) });
     defer fsx.deleteTree(a, fsx.cwd, work) catch {};
     const out_path = std.fs.path.join(a, &.{ work, "disassembly" }) catch oom();
 
@@ -789,7 +789,7 @@ pub fn run(a: Allocator, o: Options, path_env: []const u8, tmpdir: []const u8, e
         stats.* = .{};
         var scan: Scan = .{ .a = a, .db = db, .target = target, .stats = stats, .unclassified_features = &unclassified_features, .unclassified_mnemonics = &unclassified_mnemonics };
         scan.file(out_path) catch |e| {
-            errors.append(a, .{ .path = path, .message = std.fmt.allocPrint(a, "cannot read the disassembly ({s})", .{sys.describe(e)}) catch oom() }) catch oom();
+            errors.append(a, .{ .path = path, .message = std.fmt.allocPrint(a, "cannot read the disassembly ({s})", .{@errorName(e)}) catch oom() }) catch oom();
             continue;
         };
         audited += 1;
