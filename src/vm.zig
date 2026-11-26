@@ -465,7 +465,11 @@ fn cpuCount() u32 {
 }
 
 fn kernelPath(a: Allocator, env: *const std.process.Environ.Map) ?[]const u8 {
-    if (env.get("EB_LOCAL_VM_KERNEL")) |k| if (k.len > 0) return k;
+    if (env.get("EB_LOCAL_VM_KERNEL")) |k| if (k.len > 0) {
+        const fd = sys.openat(fsx.cwd, k, .{}, 0) catch return null;
+        sys.close(fd);
+        return k;
+    };
     var uts: linux.utsname = undefined;
     if (linux.errno(linux.uname(&uts)) != .SUCCESS) return null;
     const rel = std.mem.sliceTo(&uts.release, 0);
