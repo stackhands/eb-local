@@ -33,9 +33,9 @@ eb-local __vm-run --mode kvm --cpu-target x86_64/amd/zen4 -- \
 
 The guest boots in a few seconds, checks the CPU, and prints one line before the command output:
 
-#+begin_example
+#+begin_src text
 eb-local: vm-run: x86_64/amd/zen4 presented: vendor=AuthenticAMD archdetect=x86_64/amd/zen4 archspec=zen4 gcc=znver4
-#+end_example
+#+end_src
 
 The compiler then names =znver4= on a Zen 5 host.
 The command runs in your working directory, as your user and group, and its exit status is the helper's.

@@ -32,7 +32,9 @@ pub const status_failed: u8 = 125;
 /// command did not run.
 pub const status_unverified: u8 = 126;
 
+/// The kind of virtual CPU: KVM for the host's architecture, qemu user mode for the other.
 pub const Mode = enum { kvm, tcg };
+/// The CPU architectures a target can have.
 pub const Arch = enum { x86_64, aarch64 };
 
 /// The architecture this binary runs on.
@@ -72,6 +74,7 @@ const no_avx512 = "TCG has no AVX-512, so the guest would be a zen3 or a haswell
 const no_arm_kvm = "KVM on Arm offers the host CPU only; use --mode tcg from an x86_64 host";
 const no_x86_kvm = "an x86_64 target needs an x86_64 host under KVM, or --mode tcg from an aarch64 host";
 
+/// Every target `__vm-run` knows.
 pub const targets = [_]Target{
     .{ .name = "x86_64/amd/zen2", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen2", .gcc = "znver2", .kvm = "EPYC-Rome," ++ amd_bits, .tcg = "EPYC-Rome" },
     .{ .name = "x86_64/amd/zen3", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen3", .gcc = "znver3", .kvm = "EPYC-Milan,pcid=off," ++ amd_bits, .tcg = "EPYC-Milan" },
@@ -103,6 +106,7 @@ pub const Plan = union(enum) {
     refused: []const u8,
 };
 
+/// What `mode` does for target `t` on a `host`: the QEMU CPU, or why it cannot.
 pub fn plan(a: Allocator, t: *const Target, mode: Mode, host: Arch) Allocator.Error!Plan {
     switch (mode) {
         .kvm => {
@@ -130,6 +134,7 @@ pub const Request = struct {
     command: []const []const u8,
 };
 
+/// The result of `parseArgs`.
 pub const Parsed = union(enum) {
     ok: Request,
     /// The message for stderr.
@@ -221,6 +226,7 @@ pub const KvmConfig = struct {
     shares: []const Share,
 };
 
+/// The vhost-user socket of share `tag` in the job directory.
 pub fn socketPath(a: Allocator, rundir: []const u8, tag: []const u8) Allocator.Error![]u8 {
     return std.fmt.allocPrint(a, "{s}/{s}.sock", .{ rundir, tag });
 }
@@ -270,6 +276,7 @@ pub fn qemuArgv(a: Allocator, cfg: KvmConfig) Allocator.Error![]const []const u8
     return v.toOwnedSlice(a);
 }
 
+/// The virtiofsd command line for share `s`: no sandbox, read-only when the share is.
 pub fn virtiofsdArgv(a: Allocator, virtiofsd: []const u8, rundir: []const u8, s: Share) Allocator.Error![]const []const u8 {
     var v: std.ArrayList([]const u8) = .empty;
     try v.append(a, virtiofsd);
@@ -362,6 +369,7 @@ pub const Job = struct {
     command: []const []const u8,
 };
 
+/// The script the guest runs as the caller: the environment, the working directory, the CPU check, then the command.
 pub fn jobScript(a: Allocator, j: Job) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(a, "#!/bin/bash\n");
