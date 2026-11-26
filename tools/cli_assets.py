@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import errno
 import os
 import pathlib
 import re
@@ -87,6 +88,8 @@ def esc_roff(text: str) -> str:
 
 
 def write_atomic_bytes(path: pathlib.Path, data: bytes) -> None:
+    if os.environ.get("EB_LOCAL_TEST_CLI_ASSETS_WRITE") == "ENOSPC":
+        raise OSError(errno.ENOSPC, "No space left on device", str(path))
     if path.is_symlink():
         raise OSError(f"refusing to replace symlink: {path}")
     try:

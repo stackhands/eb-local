@@ -12,11 +12,12 @@ import binary
 import hostile_fs
 
 
-def run(args, *, text=True):
+def run(args, *, text=True, env=None):
     return subprocess.run(
         [binary.ZIG, "modulerc", *args],
         capture_output=True,
         text=text,
+        env=env,
     )
 
 
@@ -262,16 +263,20 @@ class Modulerc(unittest.TestCase):
                 self.assertEqual(ro.stdout, "")
                 self.assertIn("symlink", ro.stderr)
 
-    def test_tmpfs_enospc_fails_cleanly(self):
-        mnt = hostile_fs.enter_full_tmpfs(self)
-        if mnt is None:
-            return
-        got = run(["--module-tree", str(mnt / "mods"), "--default", "Example/2.0"])
-        self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
-        self.assertEqual(got.stdout, "")
-        self.assertIn("[Errno 28] No space left on device", got.stderr)
-        self.assertNotIn("NoSpace", got.stderr)
+    def test_enospc_on_the_modulerc_write_names_errno(self):
+        import os
 
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "mods"
+            got = run(
+                ["--module-tree", str(tree), "--default", "Example/2.0"],
+                env=dict(os.environ, EB_LOCAL_TEST_WRITE_ERRNO="ENOSPC"),
+            )
+            self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
+            self.assertEqual(got.stdout, "")
+            self.assertIn("[Errno 28] No space left on device", got.stderr)
+            self.assertNotIn("NoSpace", got.stderr)
+            self.assertFalse(tree.exists())
 
 if __name__ == "__main__":
     unittest.main()

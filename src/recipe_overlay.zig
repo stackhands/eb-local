@@ -3,6 +3,8 @@
 const std = @import("std");
 const common = @import("zig_common");
 const toml = @import("toml.zig");
+const storage = @import("storage.zig");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 
 /// One parameter assignment to add to or replace in the upstream easyconfig.
@@ -957,6 +959,13 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     };
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
+    if (comptime build_options.test_ops) {
+        if (storage.takeWriteErrno()) |e| {
+            failMsg("cannot write {s}: {s}", .{ recipe_path, common.sys.describeErrno(e) });
+            if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
+            return 1;
+        }
+    }
     common.atomic.atomicWrite(a, recipe_path, recipe, .{ .mode = 0o644 }, &why) catch |err| {
         failMsg("cannot write {s}: {s}", .{ recipe_path, if (why.msg.len > 0) why.msg else @errorName(err) });
         if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};

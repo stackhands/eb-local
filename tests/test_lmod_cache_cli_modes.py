@@ -108,25 +108,29 @@ class LmodCacheCliModes(unittest.TestCase):
         self.assertEqual(ts_got.returncode, 1, ts_got.stdout + ts_got.stderr)
         self.assertFalse((clean_cache / "spiderT.lua").exists())
 
-    def test_tmpfs_enospc_rolls_back_cache_and_timestamp(self):
-        mnt = hostile_fs.enter_full_tmpfs(self)
-        if mnt is None:
-            return
+    def test_enospc_on_the_cache_write_names_errno(self):
         mods = self.root / "mods-enospc"
         mods.mkdir()
         spider = self.root / "spider-enospc.sh"
         spider.write_text("#!/bin/sh\necho 'spiderT = {}'\n", encoding="utf-8")
         spider.chmod(0o755)
-        got = self.run_cache([
-            "--modulepath", str(mods),
-            "--cache-dir", str(mnt / "lc"),
-            "--timestamp", str(mnt / "ts"),
-            "--spider", str(spider),
-        ])
+        cache = self.root / "lc"
+        stamp = self.root / "ts"
+        got = subprocess.run(
+            [binary.ZIG, "lmod-cache", "--modulepath", str(mods), "--cache-dir", str(cache),
+             "--timestamp", str(stamp), "--spider", str(spider)],
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(self.root),
+                "EB_LOCAL_TEST_CLOSE_ERRNO": "ENOSPC",
+            },
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
         self.assertIn("[Errno 28] No space left on device", got.stderr)
         self.assertNotIn("NoSpace", got.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,12 +16,13 @@ def digest_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def run(args, *, cwd=None, text=True):
+def run(args, *, cwd=None, text=True, env=None):
     return subprocess.run(
         [binary.ZIG, "overlay", *args],
         capture_output=True,
         cwd=cwd,
         text=text,
+        env=env,
     )
 
 
@@ -197,10 +198,9 @@ class OverlayMaterialize(unittest.TestCase):
                     if name == "provenance.toml":
                         self.assertFalse((sym_out / "materialized-base.eb").exists())
 
-    def test_materialize_tmpfs_enospc_keeps_destination_clean(self):
-        mnt = hostile_fs.enter_full_tmpfs(self)
-        if mnt is None:
-            return
+    def test_enospc_on_materialize_write_keeps_destination_clean(self):
+        import os
+
         base_bytes = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -209,14 +209,16 @@ class OverlayMaterialize(unittest.TestCase):
                 f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n',
                 encoding="utf-8",
             )
-            target = mnt / "out"
+            target = root / "out"
             got = run(
                 ["materialize", "--overlay", "site.overlay.toml", "--base", "base.eb", "--out-dir", str(target)],
                 cwd=root,
+                env=dict(os.environ, EB_LOCAL_TEST_WRITE_ERRNO="ENOSPC"),
             )
             self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
             self.assertEqual(got.stdout, "")
             self.assertNotEqual(got.stderr.strip(), "")
+            self.assertIn("No space left on device", got.stderr)
             self.assertFalse(target.exists())
 
     def test_dry_run_validates_and_writes_nothing(self):

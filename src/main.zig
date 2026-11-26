@@ -2728,6 +2728,10 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
+    if (comptime build_options.test_ops) {
+        if (storage.takeWriteErrno()) |e|
+            die("cannot write {s}: {s}", .{ target, sys.describeErrno(e) });
+    }
     common.atomic.atomicWrite(a, target, text, .{ .mode = 0o644 }, &why) catch |e|
         die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else storage.describeError(e) });
     say("wrote {s} from template {s}; eb-local config shows what it sets", .{ target, t.name });
@@ -4746,6 +4750,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         var zb: [sys.path_max:0]u8 = undefined;
         const zp = sys.z(&zb, p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
         const acc_err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+        if (comptime build_options.test_ops) {
+            if (storage.test_prefix_errno) |e|
+                die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(e) });
+        }
         if (acc_err != .SUCCESS)
             die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
         var buf: [sys.path_max]u8 = undefined;
@@ -4776,6 +4784,12 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     var ws_lock: ?sys.fd_t = ws_held.lock;
     defer storage.releaseLockAfterError(&ws_lock);
     const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
+    if (comptime build_options.test_ops) {
+        if (storage.test_workspace_errno) |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("cannot create {s} ({s})", .{ d.sources, storage.describeError(storage.injectedSysError(e)) });
+        }
+    }
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
@@ -4790,6 +4804,12 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
             die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
         };
+        if (comptime build_options.test_ops) {
+            if (storage.test_logs_errno) |e| {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("logs directory {s} is not writable ({s})", .{ d.logs, sys.describeErrno(e) });
+            }
+        }
         _ = sys.call(linux.faccessat, .{ linux.AT.FDCWD, zl.ptr, linux.W_OK | linux.X_OK, 0 }) catch |e| {
             if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
             die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
@@ -7166,6 +7186,11 @@ fn runMain(init: std.process.Init) u8 {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_AFTER"))) |v| storage.test_fsync_after = std.fmt.parseInt(u32, v, 10) catch 0;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_COUNT"))) |v| storage.test_fsync_count = std.fmt.parseInt(u32, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_RECORD_OPEN_ERRNO"))) |v| test_record_open_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_ERRNO"))) |v| storage.test_prefix_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_LOGS_ERRNO"))) |v| storage.test_logs_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_REDACT_ERRNO"))) |v| storage.test_redact_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_ERRNO"))) |v| storage.test_workspace_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WRITE_ERRNO"))) |v| storage.test_write_errno = storage.testErrno(v);
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
