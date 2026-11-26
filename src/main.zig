@@ -6446,6 +6446,10 @@ fn submitReserved(
     var rollback_dirs = false;
     var created: std.ArrayList([]const u8) = .empty;
     errdefer {
+        // Cleanup runs before the failure is described. A failed unlink
+        // must not replace the errno of the write, sync or close.
+        const kept = sys.last_errno;
+        defer sys.last_errno = kept;
         if (rollback_dirs) {
             undoSubmitReserve(a, jobs_dir, logs_dir, jobs_missing, logs_missing, created.items);
         } else {
@@ -6655,6 +6659,9 @@ fn reserveSubmitScript(a: Allocator, preferred: []const u8, fault: *SubmitFault)
 }
 
 /// Write `body` into a file `reserveSubmitScript` already created.
+/// The bytes are synced and the close is checked. NFS reports a lost
+/// write from those calls, so either failure is `error.SubmitFailed`
+/// and the script is not handed to sbatch.
 fn writeReservedScript(path: []const u8, body: []const u8, fault: *SubmitFault) error{SubmitFailed}!void {
     const fd = sys.openat(fsx.cwd, path, .{
         .ACCMODE = .WRONLY,
@@ -6669,7 +6676,15 @@ fn writeReservedScript(path: []const u8, body: []const u8, fault: *SubmitFault) 
         fault.* = .{ .kind = .write, .path = path, .err = e };
         return error.SubmitFailed;
     };
-    sys.close(fd);
+    storage.fsyncWritten(fd) catch |e| {
+        sys.close(fd);
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+    storage.closeWritten(fd) catch |e| {
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
 }
 
 /// Write `script` at `preferred`, or at that path with a `-2`, `-3`, ...
@@ -6679,7 +6694,9 @@ fn retainSubmitScript(a: Allocator, preferred: []const u8, script: []const u8) [
     var fault: SubmitFault = undefined;
     const path = reserveSubmitScript(a, preferred, &fault) catch raiseSubmitFault(fault);
     writeReservedScript(path, script, &fault) catch {
+        const kept = sys.last_errno;
         sys.unlinkat(fsx.cwd, path, 0) catch {};
+        sys.last_errno = kept;
         raiseSubmitFault(fault);
     };
     return path;
