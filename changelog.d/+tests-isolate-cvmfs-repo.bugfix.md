@@ -1,1 +1,0 @@
-Isolate command-line tests in `tests/test_dev_cli_modes.py`, `tests/test_env_strict.py`, and `tests/test_list_doctor_cli.py` from a host `/cvmfs/software.eessi.io` mount using the shared helper in `tests/support.py`.

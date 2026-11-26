@@ -1,1 +1,0 @@
-The cooperative reap test records the worker's `getppid` in `worker.reparented` only after a pidfd reports that the leader has exited, and keeps the worker blocked on a fifo until that parent id is the eb-local process.

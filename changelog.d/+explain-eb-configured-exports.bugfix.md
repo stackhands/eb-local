@@ -1,1 +1,0 @@
-`eb-local --explain eb` now emits `export` lines for the configured `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, `[eessi]` variables, `EBLOCAL_EB_SITE_TOOLCHAINS`, and `EBLOCAL_EB_SOURCEPATH` so replaying the printed script in a clean shell matches `eb-local eb`.
