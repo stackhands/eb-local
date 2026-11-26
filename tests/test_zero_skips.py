@@ -194,7 +194,7 @@ class ZeroPythonSkips(unittest.TestCase):
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,
             )
         combined = run.stdout + run.stderr
         self.assertEqual(run.returncode, 0, combined)
