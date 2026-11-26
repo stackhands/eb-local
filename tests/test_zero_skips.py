@@ -207,23 +207,36 @@ class LiveEessiOutsideZeroSkipDiscovery(unittest.TestCase):
 
     def test_discovery_does_not_collect_the_site_module(self):
         site = TESTS_DIR / "site"
-        self.assertFalse((site / "__init__.py").exists(), "tests/site must not be a package")
-        self.assertTrue((site / "test_dev_locked_eessi.py").is_file())
-        loader = unittest.TestLoader()
-        suite = loader.discover(str(TESTS_DIR), pattern="test_dev_locked_eessi.py")
-        self.assertEqual(loader.errors, [])
-        self.assertEqual(suite.countTestCases(), 0)
+        self.assertFalse(
+            (site / "__init__.py").exists(), "tests/site must not be a package"
+        )
+        names = sorted(path.name for path in site.rglob("test_*.py"))
+        self.assertIn("test_dev_locked_eessi.py", names)
+        for name in names:
+            loader = unittest.TestLoader()
+            suite = loader.discover(str(TESTS_DIR), pattern=name)
+            self.assertEqual(loader.errors, [])
+            self.assertEqual(suite.countTestCases(), 0, name)
 
     def test_the_live_class_has_no_skip_mark(self):
         import importlib.util
+
         path = TESTS_DIR / "site" / "test_dev_locked_eessi.py"
-        spec = importlib.util.spec_from_file_location("dev_locked_live_eessi_policy", path)
+        spec = importlib.util.spec_from_file_location(
+            "dev_locked_live_eessi_policy", path
+        )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         cls = module.DevLockedLiveEessiTests
         self.assertFalse(getattr(cls, "__unittest_skip__", False))
-        self.assertTrue(hasattr(cls, "test_locked_avoids_duplicate_eessi_and_extend_reloads"))
-        self.assertTrue(hasattr(cls, "test_locked_llvm_compilers_build_gets_rpath_without_not_found"))
+        self.assertTrue(
+            hasattr(cls, "test_locked_avoids_duplicate_eessi_and_extend_reloads")
+        )
+        self.assertTrue(
+            hasattr(
+                cls, "test_locked_llvm_compilers_build_gets_rpath_without_not_found"
+            )
+        )
 
     def test_running_the_module_without_the_mount_fails(self):
         missing = TESTS_DIR / "site" / "no-such-eessi-init"
@@ -235,7 +248,14 @@ class LiveEessiOutsideZeroSkipDiscovery(unittest.TestCase):
         if binary.BIN:
             env["EB_LOCAL_BIN"] = binary.BIN
         run = subprocess.run(
-            [sys.executable, "-m", "unittest", "-v", "tests/site/test_dev_locked_eessi.py"],
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "-v",
+                "tests/site/test_dev_locked_eessi.py",
+            ],
+            check=False,
             cwd=ROOT,
             env=env,
             stdin=subprocess.DEVNULL,

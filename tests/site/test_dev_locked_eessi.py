@@ -8,6 +8,7 @@ the run.
 `EB_LOCAL_LIVE_EESSI_INIT`, when set, is that init file. The default is
 `/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash`.
 """
+
 import os
 import sys
 from pathlib import Path

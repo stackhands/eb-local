@@ -44,6 +44,7 @@ With `-Dtest-ops=true`, as the `zig` workflow runs it, that binary is the one th
 
 `tests/site/test_dev_locked_eessi.py` checks `eb-local dev --locked` on a live EESSI 2026.06 mount.
 `tests/site` is not a Python package, so that discover leaves the file out of the zero-skip `zig` job.
+The `live-eessi` job in the `zig` workflow mounts EESSI 2026.06 and runs the file.
 Run the file where the init file is present. Without the Zig build or that file, the run fails.
 `EB_LOCAL_LIVE_EESSI_INIT` selects the init file. The default is `/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash`.
 
