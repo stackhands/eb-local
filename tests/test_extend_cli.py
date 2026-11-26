@@ -50,7 +50,7 @@ sys.exit(15 if got else 0)
 '''
 
 
-@unittest.skipUnless(binary.BIN, "eb and --explain eb are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "eb and --explain eb are features of the Zig build")
 class ExtendCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-extend-")
@@ -100,7 +100,7 @@ class ExtendCli(unittest.TestCase):
         self.assertFalse(mine.exists())
         self.assertFalse((self.root / "eb-ran").exists())
         run = self.run_tool(["--explain", "eb", "x.eb"])
-        self.assertIn("No install variable is set: a user install into the module's default, $HOME/eessi", run.stdout)
+        self.assertIn(f"EESSI_USER_INSTALL={self.root}/home/eessi selects a user install", run.stdout)
 
     def test_the_printed_script_runs_as_eb_local_eb_does(self):
         mine = self.root / "mine"
@@ -136,17 +136,17 @@ class ExtendCli(unittest.TestCase):
         self.assertEqual(run.stdout, "")
         self.assertIn("EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL", run.stderr)
 
-    def test_at_most_one_install_variable_and_none_is_the_modules_default(self):
+    def test_at_most_one_install_variable_and_none_uses_the_configured_default(self):
         help_text = self.run_tool(["--help"]).stdout
         self.assertIn("At most one of EESSI_USER_INSTALL", help_text)
         self.assertNotIn("Exactly one", help_text)
         none = self.run_tool(["eb", "x.eb"])
         self.assertEqual(none.returncode, 0, none.stderr)
-        self.assertIn("EESSI_USER_INSTALL=unset", none.stdout)
+        self.assertIn(f"EESSI_USER_INSTALL={self.root}/home/eessi", none.stdout)
         two = self.run_tool(["eb", "x.eb"], EESSI_USER_INSTALL="/x", EESSI_SITE_INSTALL="")
         self.assertEqual(two.returncode, 3, two.stdout)
         self.assertIn("set at most one of EESSI_USER_INSTALL", two.stderr)
-        self.assertIn("with none set, the module installs under $HOME/eessi", two.stderr)
+        self.assertIn("with none set, eb-local uses its configured prefix or project", two.stderr)
 
     def test_a_leftover_user_install_beside_a_project_install_is_named(self):
         run = self.run_tool(["eb", "x.eb"], EESSI_USER_INSTALL="/home/alice/eessi", EESSI_PROJECT_INSTALL="/projects/a")

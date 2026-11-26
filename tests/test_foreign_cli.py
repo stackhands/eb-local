@@ -9,7 +9,7 @@ import binary
 from test_storage import StorageFixture
 
 
-@unittest.skipUnless(binary.BIN, "foreign-prefix checks are part of the Zig build")
+@unittest.skipUnless(binary.ZIG, "foreign-prefix checks are part of the Zig build")
 class ForeignPrefixes(StorageFixture):
     def setUp(self):
         super().setUp()

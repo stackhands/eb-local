@@ -2,6 +2,7 @@
 """Held lock descriptors never occupy closed stdio slots (`1>&-`)."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,7 +24,7 @@ def run_closed_stdout(argv, *, env, cwd):
     )
 
 
-@unittest.skipUnless(binary.BIN, "lock descriptor placement belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "lock descriptor placement belongs to the Zig binary")
 class LockFdAboveStdioCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lock-fd-")
@@ -44,23 +45,26 @@ class LockFdAboveStdioCli(unittest.TestCase):
         env.update(extra)
         return env
 
-    def test_clean_json_closed_stdout_reports_bad_fd_and_keeps_lock_empty(self):
+    def test_clean_json_closed_stdout_reports_bad_fd_and_makes_no_lock(self):
         logs = self.prefix / ".eb-local" / "logs"
         logs.mkdir(parents=True)
-        (logs / "easybuild-old.log").write_text("log\n", encoding="utf-8")
+        old = logs / "easybuild-old.log"
+        old.write_text("log\n", encoding="utf-8")
+        os.utime(old, (1_000_000_000, 1_000_000_000))
 
         got = run_closed_stdout(
-            [binary.BIN, "clean", "--delete", "--json"],
+            [binary.ZIG, "clean", "--delete", "--json"],
             env=self.base_env(),
             cwd=self.root,
         )
         lock_file = self.prefix / ".eb-local" / ".lock"
-        self.assertEqual(lock_file.read_bytes(), b"")
+        self.assertFalse(lock_file.exists())
+        self.assertTrue(old.exists())
         self.assertEqual(got.returncode, 1, got.stderr)
-        self.assertIn("cannot write JSON output", got.stderr)
+        self.assertIn("cannot write output", got.stderr)
         self.assertIn("Bad file descriptor", got.stderr)
 
-    def test_uninstall_closed_stdout_keeps_lock_file_empty(self):
+    def test_uninstall_closed_stdout_makes_no_lock(self):
         arch = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
         inst = arch / "software" / "Demo" / "1.0"
         mod = arch / "modules" / "all" / "Demo" / "1.0.lua"
@@ -70,14 +74,13 @@ class LockFdAboveStdioCli(unittest.TestCase):
         mod.write_text("-- lua\n", encoding="utf-8")
 
         run_closed_stdout(
-            [binary.BIN, "uninstall", "--delete", "Demo/1.0"],
+            [binary.ZIG, "uninstall", "--delete", "Demo/1.0"],
             env=self.base_env(),
             cwd=self.root,
         )
-        lock_file = self.prefix / ".eb-local" / ".lock"
-        self.assertEqual(lock_file.read_bytes(), b"")
+        self.assertFalse((self.prefix / ".eb-local").exists())
 
-    def test_restore_closed_stdout_keeps_lock_file_empty(self):
+    def test_restore_closed_stdout_makes_no_lock(self):
         arch = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
         (arch / "software").mkdir(parents=True)
         (arch / "modules" / "all").mkdir(parents=True)
@@ -102,12 +105,11 @@ class LockFdAboveStdioCli(unittest.TestCase):
         rtrash.chmod(0o755)
 
         run_closed_stdout(
-            [binary.BIN, "restore", "Demo/1.0"],
+            [binary.ZIG, "restore", "Demo/1.0"],
             env=self.base_env(),
             cwd=self.root,
         )
-        lock_file = self.prefix / ".eb-local" / ".lock"
-        self.assertEqual(lock_file.read_bytes(), b"")
+        self.assertFalse((self.prefix / ".eb-local").exists())
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "doctor is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "doctor is a feature of the Zig build")
 class DoctorCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-doctor-modes-")
@@ -31,7 +31,7 @@ class DoctorCliModes(unittest.TestCase):
             env.pop(name, None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,

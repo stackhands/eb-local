@@ -40,6 +40,17 @@ hooks = [
     entry = "shellcheck -S warning",
     language = "system",
     types = ["shell"],
+    exclude = "^src/lmod-init\\.sh$",
+  },
+  # The Lmod init fragment is sourced by sh, bash and zsh and printed byte for
+  # byte by `dev`, so it carries no shebang or directive; its dialect is named
+  # here.
+  {
+    id = "shellcheck-lmod-init",
+    name = "shellcheck (lmod-init.sh as sh)",
+    entry = "shellcheck -S warning --shell=sh",
+    language = "system",
+    files = "^src/lmod-init\\.sh$",
   },
 ]
 

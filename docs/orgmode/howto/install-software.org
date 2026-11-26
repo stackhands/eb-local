@@ -5,7 +5,8 @@ These steps build =pigz= for one node type, use it, and build for a group.
 
 * Before you start
 
-- eb-local with a site file, as [[file:write-a-site-file.org][Write the site file for a cluster]] describes; =eb-local doctor= names the site file on its second line.
+- eb-local.  A cluster needs a site file as [[file:write-a-site-file.org][Write the site file for a cluster]] describes.
+  A workstation outside Slurm needs none; =eb-local site install workstation= provides a starting point for site toolchains and =[eessi]= variables.
 - The file name of the recipe.
   =eb-local eb -- --search NAME= lists those in the EasyBuild that EESSI ships; EESSI 2026.06 builds on the toolchains of 2026.1, such as =GCCcore-15.2.0=:
 
@@ -15,13 +16,15 @@ These steps build =pigz= for one node type, use it, and build for a group.
 
 * Build it
 
-1. Start an allocation on the node type that will run the software, on nodes with a node-local disk:
+1. On a cluster, start an allocation on the node type that will run the software, on nodes with a node-local disk:
 
    #+begin_src bash
    salloc -p cpu -n 16 -t 02:00:00
    #+end_src
 
-   EasyBuild builds for the CPU of the node it runs on.
+   On a workstation, skip this step: local mode is automatic when =sbatch= is absent from =PATH= and no nonempty =SLURM_*= variable marks a Slurm context.
+   If Slurm is installed but this build should deliberately use the workstation's disk, pass =--workstation=.
+   EasyBuild builds for the CPU of the machine it runs on.
    =eb-local config= shows the line the site suggests, as =build.allocation_hint=.
 
 2. Build the recipe, with =--robot= for its dependencies:
@@ -45,7 +48,8 @@ These steps build =pigz= for one node type, use it, and build for a group.
    #+end_example
 
    The options after the recipe are EasyBuild's.
-   The build works in a new workspace in the allocation's node-local mount, and removes it when the build succeeds.
+   The build works in a new private workspace on local disk and removes it when the build succeeds.
+   A workstation uses a safe =$TMPDIR= when available, otherwise =$XDG_CACHE_HOME/eb-local/work=; =clean --workspaces= removes a failed build's retained workspace even after =$TMPDIR= changes.
 
 3. Load the module, in this shell or a new one:
 
@@ -111,6 +115,7 @@ The column marked =*= is this node's CPU target.
 * Related
 
 - [[file:load-eessi.org][Load EESSI and the software you installed]]
+- [[file:install-your-own-recipe.org][Install a recipe of your own, and prebuilt software]]
 - [[file:eb-without-a-site-file.org][Run EasyBuild through EESSI-extend without a site file]]
 - [[file:build-for-every-node-type.org][Build for every node type]]
 - [[file:install-what-eessi-lacks.org][Install the modules EESSI lacks, found with eb-stack]]

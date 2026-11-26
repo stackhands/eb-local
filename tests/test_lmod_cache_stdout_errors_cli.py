@@ -34,7 +34,7 @@ def run_sink(argv, sink, *, env, cwd):
         )
 
 
-@unittest.skipUnless(binary.BIN, "lmod-cache stdout diagnostics belong to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "lmod-cache stdout diagnostics belong to the Zig binary")
 class LmodCacheStdoutErrorsCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lmod-stdout-")
@@ -53,7 +53,7 @@ class LmodCacheStdoutErrorsCli(unittest.TestCase):
         for sink, expected in (("devfull", "No space left on device"), ("closed", "Bad file descriptor")):
             with self.subTest(sink=sink):
                 got = run_sink(
-                    [binary.BIN, "lmod-cache", "--prefix", str(prefix), "--dry-run"],
+                    [binary.ZIG, "lmod-cache", "--prefix", str(prefix), "--dry-run"],
                     sink,
                     env=self.env,
                     cwd=self.root,
@@ -71,7 +71,7 @@ class LmodCacheStdoutErrorsCli(unittest.TestCase):
         for sink, expected in (("devfull", "No space left on device"), ("closed", "Bad file descriptor")):
             with self.subTest(sink=sink):
                 got = run_sink(
-                    [binary.BIN, "lmod-cache", "--prefix", str(prefix), "--update-cmd", str(update)],
+                    [binary.ZIG, "lmod-cache", "--prefix", str(prefix), "--update-cmd", str(update)],
                     sink,
                     env=self.env,
                     cwd=self.root,
@@ -92,7 +92,7 @@ class LmodCacheStdoutErrorsCli(unittest.TestCase):
                 stamp = self.root / f"system-{sink}.txt"
                 got = run_sink(
                     [
-                        binary.BIN,
+                        binary.ZIG,
                         "lmod-cache",
                         "--modulepath",
                         str(modules),

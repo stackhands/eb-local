@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parents[1]
 EXAMPLE = REPO / "examples" / "overlays" / "OpenMPI.site.overlay.toml"
 
 
-@unittest.skipUnless(binary.BIN, "overlay materialize is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "overlay materialize is a feature of the Zig build")
 class OverlayExampleTests(unittest.TestCase):
     def test_shipped_openmpi_example_overlay_materializes_with_matching_digest(self):
         with tempfile.TemporaryDirectory(prefix="eb-local-overlay-ex-") as td:
@@ -29,7 +29,7 @@ class OverlayExampleTests(unittest.TestCase):
             overlay.write_text(text, encoding="utf-8")
 
             run = subprocess.run(
-                [binary.BIN, "overlay", "materialize", "--overlay", str(overlay), "--base", str(base), "--dry-run"],
+                [binary.ZIG, "overlay", "materialize", "--overlay", str(overlay), "--base", str(base), "--dry-run"],
                 capture_output=True,
                 text=True,
                 check=False,

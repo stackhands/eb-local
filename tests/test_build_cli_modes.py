@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "build and --explain modes are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "build and --explain modes are features of the Zig build")
 class BuildCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-build-modes-")
@@ -36,7 +36,7 @@ class BuildCliModes(unittest.TestCase):
         env.pop("SLURM_JOB_ID", None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,
@@ -73,7 +73,7 @@ class BuildCliModes(unittest.TestCase):
         self.assertEqual(missing_cfg.returncode, 2, missing_cfg.stdout + missing_cfg.stderr)
 
     def test_recipe_outside_slurm_job_exits_two_and_prints_sbatch_hints(self):
-        got = self.run_cli(["zlib.eb", "--robot"])
+        got = self.run_cli(["zlib.eb", "--robot"], SLURM_CLUSTER_NAME="cluster")
         self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
         self.assertEqual(got.stdout, "")
         self.assertIn("SLURM_JOB_ID is unset or empty", got.stderr)

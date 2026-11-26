@@ -145,7 +145,7 @@ def pid_gone(pid, timeout=2.0):
     return False
 
 
-@unittest.skipUnless(binary.BIN, "lmod-cache is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "lmod-cache is a feature of the Zig build")
 class LmodCacheSignalGuard(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lmod-sig-")
@@ -182,7 +182,7 @@ class LmodCacheSignalGuard(unittest.TestCase):
                 self.reset_markers()
                 proc = subprocess.Popen(
                     [
-                        binary.BIN,
+                        binary.ZIG,
                         "lmod-cache",
                         "--modulepath",
                         str(self.modules),
@@ -238,7 +238,7 @@ class LmodCacheSignalGuard(unittest.TestCase):
                 self.reset_markers()
                 proc = subprocess.Popen(
                     [
-                        binary.BIN,
+                        binary.ZIG,
                         "lmod-cache",
                         "--modulepath",
                         str(self.modules),
@@ -281,7 +281,7 @@ class LmodCacheSignalGuard(unittest.TestCase):
                 self.reset_markers()
                 proc = subprocess.Popen(
                     [
-                        binary.BIN,
+                        binary.ZIG,
                         "lmod-cache",
                         "--prefix",
                         str(prefix),

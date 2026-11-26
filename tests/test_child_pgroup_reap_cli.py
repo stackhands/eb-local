@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded straggler waiting and reaping on `SIGCHLD` in `Guard.run`."""
 
+import ctypes
 import os
 from pathlib import Path
 import select
@@ -13,44 +14,55 @@ import binary
 from test_storage import StorageFixture
 
 SECRET_VAL = "reap-secret-8d41f2b9"
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
 
 LATE_WRITER = r'''
-import os, select, signal, time
+import os, select, signal
 
 root = os.environ["CONTROL_ROOT"]
+sync = "__SYNC__"
 log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-late.log")
 with open(log, "w", encoding="utf-8") as fh:
     fh.write("started\n")
 
-def write_atomic(path, text):
-    tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
-
-def wait_fd(fd, events, timeout_s):
+def block(fd, events):
     poller = select.poll()
     poller.register(fd, events)
-    deadline = time.monotonic() + timeout_s
     while True:
-        rem_ms = int((deadline - time.monotonic()) * 1000)
-        if rem_ms <= 0:
-            return False
         try:
-            ready = poller.poll(rem_ms)
+            got = poller.poll()
         except InterruptedError:
             continue
-        if ready:
-            return True
+        if got:
+            return got[0][1]
 
-release_fifo = os.path.join(root, "worker.release")
-os.mkfifo(release_fifo)
-ready_r, ready_w = os.pipe()
-leader_alive_r, leader_alive_w = os.pipe()
+def write_fifo(name, text):
+    fd = os.open(os.path.join(sync, name), os.O_WRONLY)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+def read_byte(name):
+    fd = os.open(os.path.join(sync, name), os.O_RDONLY)
+    try:
+        while True:
+            try:
+                got = os.read(fd, 1)
+            except InterruptedError:
+                continue
+            if got:
+                return
+    finally:
+        os.close(fd)
+
+# The worker opens a pidfd on the leader, then writes this pipe. The leader
+# exits only after that write, so the pidfd is opened while the leader is alive.
+armed_r, armed_w = os.pipe()
 worker = os.fork()
 if worker == 0:
-    os.close(ready_r)
-    os.close(leader_alive_w)
+    os.close(armed_r)
     sig_r, sig_w = os.pipe()
     os.set_blocking(sig_w, False)
     def on_sig(_sig, _frame):
@@ -60,31 +72,25 @@ if worker == 0:
             pass
     for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(s, on_sig)
-    gate_r = os.open(release_fifo, os.O_RDONLY | os.O_NONBLOCK)
-    write_atomic(os.path.join(root, "worker.pid"), str(os.getpid()))
-    os.write(ready_w, b"1")
-    os.close(ready_w)
-
-    wait_fd(sig_r, select.POLLIN, 5.0)
+    write_fifo("worker.ready", "%d\n" % os.getpid())
+    block(sig_r, select.POLLIN)
     os.close(sig_r)
     os.close(sig_w)
-
-    wait_fd(leader_alive_r, select.POLLHUP | select.POLLIN, 5.0)
-    os.close(leader_alive_r)
-    write_atomic(os.path.join(root, "worker.reparented"), "1")
-
-    wait_fd(gate_r, select.POLLIN, 2.0)
-    os.close(gate_r)
+    leader = os.getppid()
+    pfd = os.pidfd_open(leader)
+    os.write(armed_w, b"1")
+    os.close(armed_w)
+    block(pfd, select.POLLIN)
+    os.close(pfd)
+    # Readable only after the leader's exit, which reparents this worker first.
+    write_fifo("worker.reparented", "%d\n" % os.getppid())
+    read_byte("worker.release")
     with open(log, "a", encoding="utf-8") as fh:
         fh.write("flushing " + os.environ["LICENCE_KEY"] + "\n")
-    write_atomic(os.path.join(root, "worker.flushed"), "1")
+    write_fifo("worker.flushed", "1\n")
     os._exit(0)
 
-os.close(ready_w)
-os.close(leader_alive_r)
-os.read(ready_r, 1)
-os.close(ready_r)
-
+os.close(armed_w)
 sig_r, sig_w = os.pipe()
 os.set_blocking(sig_w, False)
 def on_leader(_sig, _frame):
@@ -94,21 +100,18 @@ def on_leader(_sig, _frame):
         pass
 for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(s, on_leader)
-
-write_atomic(os.path.join(root, "leader.pid"), str(os.getpid()))
-poller = select.poll()
-poller.register(sig_r, select.POLLIN)
-deadline = time.monotonic() + 5.0
+write_fifo("leader.ready", "%d\n" % os.getpid())
+block(sig_r, select.POLLIN)
+os.close(sig_r)
+os.close(sig_w)
 while True:
-    rem_ms = int((deadline - time.monotonic()) * 1000)
-    if rem_ms <= 0:
-        break
     try:
-        if poller.poll(rem_ms):
-            break
+        got = os.read(armed_r, 1)
     except InterruptedError:
         continue
-os.close(leader_alive_w)
+    if got:
+        break
+os.close(armed_r)
 os._exit(15)
 '''
 
@@ -182,13 +185,12 @@ def wait_file(path: Path, timeout: float = 10.0) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@unittest.skipUnless(binary.BIN, "straggler reaping belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "straggler reaping belongs to the Zig binary")
 class ChildPgroupReapCli(StorageFixture):
     def setUp(self):
         super().setUp()
         for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
             self.env.pop(name, None)
-        (self.root / "late-writer.py").write_text(LATE_WRITER, encoding="utf-8")
         (self.root / "straggler-tree.py").write_text(STRAGGLER_TREE, encoding="utf-8")
         no_eb_fn = self.root / "doubles-nofn.sh"
         no_eb_fn.write_text((self.root / "doubles.sh").read_text() + "\nunset -f eb\n", encoding="utf-8")
@@ -210,38 +212,62 @@ class ChildPgroupReapCli(StorageFixture):
         except Exception:
             pass
 
-    @staticmethod
-    def has_signalfd(pid: int) -> bool:
-        fd_dir = f"/proc/{pid}/fd"
-        try:
-            names = os.listdir(fd_dir)
-        except OSError:
-            return False
-        for name in names:
-            try:
-                if "signalfd" in os.readlink(f"{fd_dir}/{name}"):
-                    return True
-            except OSError:
-                continue
-        return False
+    def hold_subreaper(self):
+        """Orphaned grandchildren reparent here, so a missed reap stays visible."""
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        libc.prctl.restype = ctypes.c_int
+        previous = ctypes.c_int(0)
+        if libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.addressof(previous), 0, 0, 0) != 0:
+            self.fail(f"cannot read PR_GET_CHILD_SUBREAPER ({ctypes.get_errno()})")
+        if previous.value != 0:
+            return
+        if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+            self.fail(f"cannot set PR_SET_CHILD_SUBREAPER ({ctypes.get_errno()})")
+        self.addCleanup(lambda: libc.prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0))
 
-    def release_fifo(self, path: Path, timeout: float = 2.0):
+    def open_fifo(self, directory: Path, name: str) -> int:
+        path = directory / name
+        os.mkfifo(path)
+        fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def read_line(self, fd: int, timeout: float = 10.0) -> str:
+        """Read one line from a fifo. The wait is the writer's rendezvous."""
         poller = select.poll()
+        poller.register(fd, select.POLLIN)
         deadline = time.monotonic() + timeout
-        while True:
+        data = b""
+        while b"\n" not in data:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise AssertionError(f"timed out reading a sync fifo: {data!r}")
             try:
-                wfd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-                try:
-                    os.write(wfd, b"1")
-                finally:
-                    os.close(wfd)
-                return
-            except OSError:
-                if time.monotonic() >= deadline:
-                    return
-                poller.poll(2)
+                ready = poller.poll(max(1, int(rem * 1000)))
+            except InterruptedError:
+                continue
+            if not ready:
+                raise AssertionError(f"timed out reading a sync fifo: {data!r}")
+            try:
+                chunk = os.read(fd, 64)
+            except BlockingIOError:
+                continue
+            if chunk:
+                data += chunk
+        return data.split(b"\n", 1)[0].decode()
 
     def test_cooperative_descendant_wakes_on_sigchld_before_secret_redaction(self):
+        self.hold_subreaper()
+        sync = self.root / f"reap-{os.getpid()}"
+        sync.mkdir()
+        fds = {
+            name: self.open_fifo(sync, name)
+            for name in ("leader.ready", "worker.ready", "worker.reparented", "worker.release", "worker.flushed")
+        }
+        (self.root / "late-writer.py").write_text(
+            LATE_WRITER.replace("__SYNC__", str(sync)), encoding="utf-8")
+
         late_bin = self.root / "late-bin"
         late_bin.mkdir()
         eb = late_bin / "eb"
@@ -270,28 +296,27 @@ class ChildPgroupReapCli(StorageFixture):
             text=True,
         )
         self.addCleanup(self.stop_popen, proc)
-        leader_pid = int(wait_file(self.root / "leader.pid"))
-        worker_pid = int(wait_file(self.root / "worker.pid"))
+        leader_pid = int(self.read_line(fds["leader.ready"]))
+        worker_pid = int(self.read_line(fds["worker.ready"]))
         self.addCleanup(self.kill_if_alive, worker_pid)
         self.addCleanup(self.kill_if_alive, leader_pid)
 
-        t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
-        wait_file(self.root / "worker.reparented", timeout=5.0)
+        ppid = int(self.read_line(fds["worker.reparented"]))
+        self.assertEqual(ppid, proc.pid)
+        self.assertNotEqual(ppid, leader_pid)
+        self.assertNotEqual(ppid, 1)
+        self.assertIsNone(proc.poll())
+        try:
+            os.kill(worker_pid, 0)
+        except ProcessLookupError:
+            self.fail("worker exited before it was released")
 
-        poller = select.poll()
-        settle_deadline = time.monotonic() + 0.4
-        while time.monotonic() < settle_deadline:
-            if proc.poll() is not None or self.has_signalfd(proc.pid):
-                break
-            poller.poll(2)
-
-        self.release_fifo(self.root / "worker.release")
+        os.write(fds["worker.release"], b"1")
+        self.assertEqual(self.read_line(fds["worker.flushed"]), "1")
         out, err = proc.communicate(timeout=5)
-        elapsed = time.monotonic() - t0
 
         self.assertEqual(proc.returncode, -signal.SIGTERM, out + err)
-        wait_file(self.root / "worker.flushed", timeout=2.0)
         with self.assertRaises(ProcessLookupError):
             os.kill(worker_pid, 0)
 
@@ -299,7 +324,6 @@ class ChildPgroupReapCli(StorageFixture):
         log_text = log_path.read_text(encoding="utf-8")
         self.assertNotIn(SECRET_VAL, log_text)
         self.assertIn("flushing <secret LICENCE_KEY removed by eb-local>", log_text)
-        self.assertLess(elapsed, 0.42, f"expected wake on SIGCHLD before 500 ms deadline, took {elapsed:.3f}s")
 
     def test_sig_ign_straggler_is_killed_and_reaped_at_deadline(self):
         strag_bin = self.root / "strag-bin"

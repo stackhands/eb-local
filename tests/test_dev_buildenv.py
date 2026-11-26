@@ -42,7 +42,7 @@ printf '%s\n' "$*" >> "$CONTROL_ROOT/cc-calls"
 '''
 
 
-@unittest.skipUnless(binary.BIN, "compiler-family selection is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "compiler-family selection is a feature of the Zig build")
 class DevBuildenv(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -82,6 +82,84 @@ class DevBuildenv(StorageFixture):
     def test_gcc_modules_load_the_configured_buildenv_as_before(self):
         calls, _ = self.dev("GSL/2.8-GCC-15.2.0")
         self.assertEqual(calls[-2:], ["load GSL/2.8-GCC-15.2.0", "load buildenv/default-foss-2026.1"])
+
+    def test_opt_in_pin_uses_only_the_compatibility_python(self):
+        compat = self.root / "compat"
+        python = compat / "usr" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text('#!/bin/sh\nprintf compat > "$CONTROL_ROOT/python"\n')
+        python.chmod(0o755)
+        for name, text in {
+            "python3": '#!/bin/sh\nprintf foreign > "$CONTROL_ROOT/python"\nexit 1\n',
+            "gcc": "#!/bin/sh\npython3\n",
+            "as": "#!/bin/sh\nexit 0\n",
+        }.items():
+            path = self.bin / name
+            path.write_text(text)
+            path.chmod(0o755)
+
+        base = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        self.assertEqual(base.returncode, 0, base.stderr)
+        failed = subprocess.run(
+            [
+                BASH,
+                "-c",
+                MODULE
+                + base.stdout
+                + 'printf "%s\\n" "$(command -v ld)" "$(command -v gcc)" '
+                + '"$(command -v as)" > "$CONTROL_ROOT/paths-base"\n'
+                + "gcc\n",
+            ],
+            env=dict(self.env, EESSI_EPREFIX=str(compat), EPREFIX=str(compat)),
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual((self.root / "python").read_text(), "foreign")
+
+        pinned = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        pinned_again = self.run_wrapper(["dev", "GSL/2.8-GCC-15.2.0"])
+        runtime = self.root / "runtime"
+        script = (
+            MODULE
+            + pinned.stdout
+            + "gcc\n"
+            + 'printf "%s\\n" "$(command -v ld)" "$(command -v gcc)" '
+            + '"$(command -v as)" > "$CONTROL_ROOT/paths-pinned"\n'
+            + pinned_again.stdout
+            + 'printf "%s" "$PATH" > "$CONTROL_ROOT/path-after-second-dev"\n'
+        )
+        replay = subprocess.run(
+            [BASH, "-c", script],
+            env=dict(
+                self.env,
+                EESSI_EPREFIX=str(compat),
+                EPREFIX=str(compat),
+                EB_LOCAL_PIN_BUILDENV_PYTHON="1",
+                XDG_RUNTIME_DIR=str(runtime),
+                PATH=f"{self.bin}:/usr/bin:/bin",
+            ),
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        pin = runtime / "eb-local" / "python-pin"
+        self.assertEqual(sorted(p.relative_to(runtime) for p in runtime.rglob("*")), [
+            Path("eb-local"),
+            Path("eb-local/python-pin"),
+            Path("eb-local/python-pin/python3"),
+        ])
+        self.assertEqual(
+            (self.root / "path-after-second-dev").read_text().split(":").count(str(pin)),
+            1,
+        )
+        self.assertEqual((self.root / "python").read_text(), "compat")
+        self.assertEqual(
+            (self.root / "paths-base").read_text(),
+            (self.root / "paths-pinned").read_text(),
+        )
 
     def test_the_family_buildenv_when_lmod_has_it(self):
         calls, _ = self.dev("llvm-compilers/21.1.8", CONTROL_AVAILABLE="buildenv/default-lfoss-2026.1")
@@ -165,6 +243,40 @@ class DevBuildenv(StorageFixture):
                                  CONTROL_AVAILABLE="buildenv/default-NVHPC-26.9")
         self.assertEqual(calls[-1], "load NVHPC/26.9")
         self.assertIn("RPATH wrappers for clang ld", replay.stderr)
+
+    def test_a_failed_rpath_wrapper_leaves_no_scratch_variables_in_an_interactive_shell(self):
+        # NVHPC has no buildenv, so dev asks rpath-wrappers to stand in. An
+        # empty PATH has nothing to wrap. An interactive shell must survive,
+        # report that status, and leave the prefix and scratch variables unset.
+        empty = self.root / "empty-path"
+        empty.mkdir()
+        run = self.run_wrapper(["dev", "NVHPC/26.7"])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        script = (MODULE + run.stdout
+                  + '_test_status=$?\n'
+                  + 'printf "survived|%s|%s|%s|%s|%s|%s" "$_test_status" '
+                  + '"${EB_LOCAL_DEV_PREFIX-unset}" "${_eb_local_wrap-unset}" '
+                  + '"${eb_local_family-unset}" "${eb_local_buildenv-unset}" '
+                  + '"${eb_local_level-unset}"\n')
+        shells = [(BASH, ["--noprofile", "--norc"])]
+        if shutil.which("zsh"):
+            shells.append((shutil.which("zsh"), ["-f"]))
+        for shell, flags in shells:
+            with self.subTest(shell=Path(shell).name):
+                replay = subprocess.run(
+                    [shell, *flags, "-ic", script],
+                    env=dict(self.env, PATH=str(empty)),
+                    cwd=self.root,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(
+                    (replay.returncode, replay.stdout),
+                    (0, "survived|1|unset|unset|unset|unset|unset"),
+                    replay.stdout + replay.stderr,
+                )
+                self.assertIn("no compiler or linker on PATH to wrap", replay.stderr)
+                self.assertNotIn("EB_LOCAL_DEV_PREFIX", replay.stdout)
 
     def test_a_later_dev_drops_the_previous_rpath_wrappers(self):
         first = self.run_wrapper(["dev", "NVHPC/26.7"])
@@ -298,6 +410,147 @@ class DevBuildenv(StorageFixture):
         dyn2 = subprocess.run(["readelf", "-d", str(self.root / "prog2")], capture_output=True, text=True).stdout
         self.assertIn(f"Library rpath: [{lib}]", dyn2)
         self.assertNotIn(str(compat), dyn2)
+
+    def test_a_full_path_shared_library_records_its_directory(self):
+        lib = self.root / "dep" / "lib"
+        lib.mkdir(parents=True)
+        versioned = lib / "libfoo.so.3"
+        unversioned = lib / "libbar.so"
+        static = lib / "libfoo.so.a"
+        (self.root / "foo.c").write_text("int foo(void) { return 42; }\n")
+        (self.root / "main.c").write_text(
+            "int foo(void);\nint main(void) { return foo() == 42 ? 0 : 1; }\n"
+        )
+        env = dict(os.environ, XDG_CACHE_HOME=str(self.root / "cache"))
+        env.pop("LD_LIBRARY_PATH", None)
+        env.pop("LIBRARY_PATH", None)
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-Wl,-soname,libfoo.so.3", "-o", versioned, self.root / "foo.c"],
+            check=True,
+            cwd=self.root,
+        )
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-Wl,-soname,libbar.so", "-o", unversioned, self.root / "foo.c"],
+            check=True,
+            cwd=self.root,
+        )
+        subprocess.run(["gcc", "-c", "-o", self.root / "foo.o", self.root / "foo.c"], check=True, cwd=self.root)
+        subprocess.run(["ar", "rcs", static, self.root / "foo.o"], check=True, cwd=self.root)
+        argv, env = binary.command(self.script, ["rpath-wrappers"], env)
+        setup = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        relative = unversioned.relative_to(self.root)
+        build = subprocess.run(
+            [
+                "bash",
+                "-c",
+                setup.stdout
+                + f'''
+set -e
+gcc main.c "{versioned}" -o prog-versioned
+env -u LD_LIBRARY_PATH ./prog-versioned
+gcc main.c "{unversioned}" -o prog-unversioned
+gcc main.c "{static}" -o prog-static
+gcc main.c "{relative}" -o prog-relative
+gcc main.c -L"{lib}" "{versioned}" -o prog-duplicate
+''',
+            ],
+            env=env,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+
+        def dynamic(name):
+            return subprocess.run(
+                ["readelf", "-d", self.root / name],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+        for name in ("prog-versioned", "prog-unversioned"):
+            with self.subTest(name=name):
+                dyn = dynamic(name)
+                self.assertIn(f"Library rpath: [{lib}]", dyn)
+                self.assertNotIn("RUNPATH", dyn)
+        for name in ("prog-static", "prog-relative"):
+            with self.subTest(name=name):
+                dyn = dynamic(name)
+                self.assertNotIn("RPATH", dyn)
+                self.assertNotIn("RUNPATH", dyn)
+        duplicate = dynamic("prog-duplicate")
+        self.assertIn(f"Library rpath: [{lib}]", duplicate)
+        self.assertEqual(duplicate.count(str(lib)), 1)
+
+    def test_cmake_install_keeps_the_wrapper_rpath(self):
+        lib = self.root / "dep" / "lib"
+        search = self.root / "search" / "lib"
+        source = self.root / "project"
+        install = self.root / "install"
+        lib.mkdir(parents=True)
+        search.mkdir(parents=True)
+        source.mkdir()
+        shared = lib / "libfoo.so.3"
+        (self.root / "foo.c").write_text("int foo(void) { return 42; }\n")
+        (source / "main.c").write_text(
+            "int foo(void);\nint main(void) { return foo() == 42 ? 0 : 1; }\n"
+        )
+        subprocess.run(
+            ["gcc", "-shared", "-fPIC", "-Wl,-soname,libfoo.so.3", "-o", shared, self.root / "foo.c"],
+            check=True,
+        )
+        (source / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(wrapper_rpath C)\n"
+            "add_library(foo SHARED IMPORTED)\n"
+            f'set_target_properties(foo PROPERTIES IMPORTED_LOCATION "{shared}")\n'
+            "add_executable(app main.c)\n"
+            "target_link_libraries(app PRIVATE foo)\n"
+            "install(TARGETS app)\n"
+        )
+        after = (
+            "set -e\n"
+            f'cmake $CMAKE_ARGS -S "{source}" -B build -DCMAKE_INSTALL_PREFIX="{install}"\n'
+            "cmake --build build\n"
+            "cmake --install build\n"
+            f'env -u LD_LIBRARY_PATH "{install}/bin/app"\n'
+            f'readelf -d "{install}/bin/app" > "$CONTROL_ROOT/installed.dynamic"\n'
+            'printf %s "$EB_LOCAL_MESON_INSTALL_RPATH" > "$CONTROL_ROOT/meson-rpath"\n'
+        )
+        _, replay = self.dev(
+            "NVHPC/26.7",
+            after=after,
+            PATH=os.environ["PATH"],
+            LIBRARY_PATH=str(search),
+            LD_LIBRARY_PATH="",
+        )
+        self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+        dynamic = (self.root / "installed.dynamic").read_text()
+        self.assertIn("Library rpath:", dynamic)
+        self.assertIn(str(lib), dynamic)
+        self.assertNotIn("RUNPATH", dynamic)
+        self.assertEqual((self.root / "meson-rpath").read_text(), str(search))
+
+    def test_meson_install_rpath_filters_library_path(self):
+        keep = self.root / "keep" / "lib"
+        other = self.root / "other" / "lib64"
+        compat = self.root / "compat"
+        after = 'printf %s "$EB_LOCAL_MESON_INSTALL_RPATH" > "$CONTROL_ROOT/meson-rpath"\n'
+        self.dev(
+            "NVHPC/26.7",
+            after=after,
+            LIBRARY_PATH=(
+                f":relative:{keep}//:{keep}/:{compat}/lib:/lib:/lib64/sub:"
+                f"/usr/lib:{other}:/opt/lib,comma"
+            ),
+            EESSI_EPREFIX=f"{compat}//",
+        )
+        self.assertEqual(
+            (self.root / "meson-rpath").read_text(),
+            f"{keep}:{other}",
+        )
 
 
     def test_config_env_keeps_the_choice_by_family(self):

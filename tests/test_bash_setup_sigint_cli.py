@@ -106,7 +106,7 @@ def wait_file(path: Path, timeout: float = 10.0) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@unittest.skipUnless(binary.BIN, "bash setup SIGINT handling belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "bash setup SIGINT handling belongs to the Zig binary")
 class BashSetupSigintCli(StorageFixture):
     def setUp(self):
         super().setUp()
