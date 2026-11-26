@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Live EESSI 2026.06 verification for `eb-local dev --locked` with llvm-compilers."""
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ EESSI_INIT = Path("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash")
 
 
 @unittest.skipUnless(
-    binary.BIN and EESSI_INIT.is_file(),
+    binary.ZIG and EESSI_INIT.is_file(),
     "requires Zig build and live EESSI 2026.06 on CVMFS",
 )
 class DevLockedLiveEessiTests(unittest.TestCase):
@@ -38,7 +39,7 @@ class DevLockedLiveEessiTests(unittest.TestCase):
             "EB_LOCAL_PREFIX": str(prefix),
         }
         lock_run = subprocess.run(
-            [binary.BIN, "dev", "--lock", "FFTW/3.3.10-llvm-compilers-21.1.8"],
+            [binary.ZIG, "dev", "--lock", "FFTW/3.3.10-llvm-compilers-21.1.8"],
             cwd=root,
             env=env,
             capture_output=True,
@@ -53,7 +54,7 @@ class DevLockedLiveEessiTests(unittest.TestCase):
             root, src, env = self._setup_workspace(td)
             prog = root / "prog"
             build_script = (
-                f'eval "$({binary.BIN} dev --locked)"\n'
+                f'eval "$({shlex.quote(binary.ZIG)} dev --locked)"\n'
                 f'clang -O2 "{src}" -lfftw3 -lm -o "{prog}"\n'
             )
             build_run = subprocess.run(
@@ -66,7 +67,7 @@ class DevLockedLiveEessiTests(unittest.TestCase):
             self.assertEqual(build_run.returncode, 0, build_run.stdout + build_run.stderr)
 
             check_run = subprocess.run(
-                [binary.BIN, "check", str(prog)],
+                [binary.ZIG, "check", str(prog)],
                 cwd=root,
                 env=env,
                 capture_output=True,
