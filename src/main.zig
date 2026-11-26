@@ -406,14 +406,23 @@ fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: 
     return if (is_path) "is in your prefix, as EESSI-extend sets it when eb-local env loads it" else "is EESSI-extend's own, set when eb-local env loads it";
 }
 
+fn isModule(module: []const u8, name: []const u8) bool {
+    if (std.mem.eql(u8, module, name)) return true;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    return std.mem.startsWith(u8, module, name) and module.len > name.len and module[name.len] == '/';
+}
+
 /// Whether Lmod lists MODULE, a name or a name and version, as loaded.
 fn moduleLoaded(c: Ctx, module: []const u8) bool {
     var it = std.mem.splitScalar(u8, c.env.get("LOADEDMODULES") orelse "", ':');
-    while (it.next()) |m| {
-        if (std.mem.eql(u8, m, module)) return true;
-        if (std.mem.startsWith(u8, m, module) and m.len > module.len and m[module.len] == '/') return true;
-    }
+    while (it.next()) |m| if (isModule(m, module)) return true;
     return false;
+}
+
+test "isModule matches an unversioned name or the exact configured module" {
+    try std.testing.expect(isModule("EESSI/2026.06", "EESSI"));
+    try std.testing.expect(isModule("EESSI/2026.06", "EESSI/2026.06"));
+    try std.testing.expect(!isModule("EESSI/2026.06/debug", "EESSI/2026.06"));
 }
 
 /// Before `env` or `dev` lines run, optionally refuse when CVMFS has not mounted EESSI.
@@ -451,6 +460,13 @@ const module_missing =
 ;
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8) []const u8 {
+    return environmentPrelude(c, s, p, pure, setup, true);
+}
+
+/// `load_extend` is false when a dev lock already names the extension, so the
+/// prelude does not load it again. The lock loads that module once, inside
+/// the CPU target guard.
+fn environmentPrelude(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8, load_extend: bool) []const u8 {
     const a = c.a;
     const install = configuredInstall(p);
     var out: std.ArrayList(u8) = .empty;
@@ -498,8 +514,10 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []c
         \\fi
         \\
     );
-    const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
-    if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    if (load_extend) {
+        const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
+        if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    }
     // build.site_toolchains under the version the stack set, as a build
     // exports it, so eb run by hand after env or dev accepts them too.
     if (s.site_toolchains.value.len > 0) {
@@ -1369,6 +1387,11 @@ fn validTarget(text: []const u8) bool {
     return any;
 }
 
+fn lockedModule(modules: []const []const u8, wanted: []const u8) ?[]const u8 {
+    for (modules) |m| if (isModule(m, wanted)) return m;
+    return null;
+}
+
 fn hasBuildenvModule(s: config.Settings, modules: []const []const u8) bool {
     for (modules) |m| {
         if (std.mem.startsWith(u8, m, "buildenv/")) return true;
@@ -1440,8 +1463,12 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     }
     if (!std.mem.eql(u8, lock.stack, s.stack_module.value))
         die("{s} was written with the stack {s}; this configuration loads {s}. Write the lock again, or select that stack", .{ lock_name, lock.stack, s.stack_module.value });
+    const locked_extend = lockedModule(lock.modules, s.extend_module.value);
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed, true, "")) catch oom();
+    // Skip the prelude's extension load when the lock already names it. The
+    // extension is then loaded once inside the target guard, and the stack
+    // is left off the locked module line because the prelude loaded it.
+    out.appendSlice(a, environmentPrelude(c, s, installed, true, "", locked_extend == null)) catch oom();
     out.appendSlice(a, str(a,
         \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
         \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
@@ -1456,9 +1483,19 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
         \\    echo "eb-local: {s} was written for EESSI "{s}", and this shell has ${{EESSI_VERSION:-none}}; its modules are not loaded." >&2
         \\
     , .{ q(a, lock.eessi_version), lock_name, q(a, lock.eessi_version) })) catch oom();
-    out.appendSlice(a, "else\nmodule load") catch oom();
-    for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
-    out.append(a, '\n') catch oom();
+    out.appendSlice(a, "else\n") catch oom();
+    // Lmod resolves every name on one load line before loading any of them,
+    // and the extension is on MODULEPATH only after the stack. Load a
+    // recorded extension on its own line first.
+    if (locked_extend) |m| out.appendSlice(a, str(a, "module load {s}\n", .{q(a, m)})) catch oom();
+    var loaded: usize = 0;
+    for (lock.modules) |m| {
+        if (isModule(m, s.stack_module.value) or isModule(m, s.extend_module.value)) continue;
+        if (loaded == 0) out.appendSlice(a, "module load") catch oom();
+        out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
+        loaded += 1;
+    }
+    if (loaded > 0) out.append(a, '\n') catch oom();
     out.appendSlice(a, drop_rpath_wrappers) catch oom();
     out.appendSlice(a, lockedRpathWrapperLines(c, s, lock.modules)) catch oom();
     out.appendSlice(a, installed_rpath_settings) catch oom();
