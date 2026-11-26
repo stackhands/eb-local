@@ -1,4 +1,4 @@
-ok   eb-local 3.4.0
+ok   eb-local 3.5.0
 ok   site file {root}/site.conf
 ok   builds use the allocation's own xfs mount {root}/node-mounts/%u.%j
 ok   installs go to {root}/durable/owned prefix: a user install, prefix from environment EB_LOCAL_PREFIX

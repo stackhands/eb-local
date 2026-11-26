@@ -1,1 +1,0 @@
-`tests/test_site_cli_modes.py` verifies that `eb-local site` input subcommands reject directory and FIFO paths under a bounded timeout alongside dangling symlinks and malformed byte or oversized files.

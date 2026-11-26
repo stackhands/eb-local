@@ -1,1 +1,0 @@
-`eb-local dev` sets `JULIA_DEPOT_PATH` and `R_LIBS_USER` under `EB_LOCAL_DEV_PREFIX` when the caller has not set them. Julia's depot keeps the bundled depots after it. R's library uses R's `%p-library/%v` layout. An empty value is left as the caller set it.
