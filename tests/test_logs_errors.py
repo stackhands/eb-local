@@ -31,6 +31,18 @@ class LogsDirFilesystemErrors(StorageFixture):
         site.chmod(0o600)
         return site
 
+    def _named_job_mount(self, name):
+        """Create `node-mounts/<name>` and point this job's mount table at it.
+
+        `StorageFixture` creates `<user>.123`. A site that sets
+        `node_local_mount` to a fixed name, such as `ubuntu.%j`, looks
+        for that directory instead, and only finds it when the user is
+        `ubuntu`.
+        """
+        mount = self.nodes / name
+        mount.mkdir(exist_ok=True)
+        return mount, {"CONTROL_JOB_ROOT": str(mount), "TMPDIR": str(mount)}
+
     def test_clean_build_with_secrets_keeps_default_raw_bytes(self):
         site = self._site_with_secret()
         eb_echo = r'''
@@ -75,6 +87,7 @@ export -f eb
     def test_erofs_logs_precheck_stops_before_build(self):
         logs = self.prefix / ".eb-local" / "logs"
         logs.mkdir(parents=True, exist_ok=True)
+        job, mount_env = self._named_job_mount("ubuntu.123")
         token = self.root / "token"
         token.write_text("tok-3141-secret\n")
         token.chmod(0o600)
@@ -94,13 +107,14 @@ export -f eb
                 run = self.run_wrapper(
                     ["--config", str(cfg), "recipe.eb"],
                     EB_LOCAL_TEST_LOGS_ERRNO="EROFS",
+                    **mount_env,
                 )
                 self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
                 self.assertNotIn("eb-local: installing into", run.stdout)
                 self.assertNotIn("eb-local: done.", run.stdout)
                 self.assertIn(str(logs), run.stderr)
                 self.assertIn("[Errno 30] Read-only file system", run.stderr)
-                self.assertEqual(list(self.job.iterdir()), [])
+                self.assertEqual(list(job.iterdir()), [])
 
     def test_unreadable_dir_during_redaction_names_path_and_errno(self):
         rows = [
@@ -204,6 +218,7 @@ export -f eb
         self.assertEqual(list(self.job.iterdir()), [])
 
     def test_enospc_on_log_redaction_names_path_and_errno(self):
+        _, mount_env = self._named_job_mount("ubuntu.123")
         site = self._site_with_secret('node_local_mount = "ubuntu.%j"\n')
         eb_sec = r"""
 eb() {
@@ -223,6 +238,7 @@ export -f eb
             ["--config", str(site), "recipe.eb"],
             BASH_ENV=str(doubles),
             EB_LOCAL_TEST_REDACT_ERRNO="ENOSPC",
+            **mount_env,
         )
         logs = self.prefix / ".eb-local" / "logs"
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
