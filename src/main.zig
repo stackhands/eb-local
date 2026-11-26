@@ -7960,6 +7960,7 @@ test {
     _ = cvmfs;
     _ = mpi;
     _ = recipe_overlay;
+    _ = vm;
 }
 
 test "a build script selects no MPI transport" {
