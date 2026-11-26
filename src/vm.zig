@@ -437,7 +437,7 @@ fn isDir(path: []const u8) bool {
 }
 
 fn executable(a: Allocator, path: []const u8) bool {
-    const z = a.dupeZ(u8, path) catch return false;
+    const z = a.dupeSentinel(u8, path, 0) catch return false;
     return linux.errno(linux.access(z.ptr, 1)) == .SUCCESS;
 }
 
@@ -490,7 +490,7 @@ const Spawned = struct { pid: linux.pid_t };
 
 fn spawn(a: Allocator, argv: []const []const u8, envp: proc.Envp) !Spawned {
     const zargv = try a.allocSentinel(?[*:0]const u8, argv.len, null);
-    for (argv, 0..) |x, i| zargv[i] = (try a.dupeZ(u8, x)).ptr;
+    for (argv, 0..) |x, i| zargv[i] = (try a.dupeSentinel(u8, x, 0)).ptr;
     const rc = linux.fork();
     switch (linux.errno(rc)) {
         .SUCCESS => {},
@@ -641,7 +641,7 @@ fn runKvm(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
         err("no readable host kernel image: set EB_LOCAL_VM_KERNEL (it needs virtiofs and virtio-pci built in)", .{});
         return status_refused;
     };
-    const kvm_z = a.dupeZ(u8, "/dev/kvm") catch return status_failed;
+    const kvm_z = a.dupeSentinel(u8, "/dev/kvm", 0) catch return status_failed;
     if (linux.errno(linux.access(kvm_z.ptr, 6)) != .SUCCESS) {
         err("/dev/kvm is not readable and writable here; --mode kvm needs KVM", .{});
         return status_refused;
