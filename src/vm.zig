@@ -576,8 +576,8 @@ pub fn run(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, a
 }
 
 fn eessiVersion(env: *const std.process.Environ.Map) []const u8 {
-    if (env.get("EB_LOCAL_VM_EESSI_VERSION")) |v| if (v.len > 0) return v;
-    return "2025.06";
+    if (env.get("EESSI_VERSION")) |v| if (v.len > 0) return v;
+    return "2026.06";
 }
 
 /// A directory for the job: `EB_LOCAL_VM_DIR`, TMPDIR, /var/tmp or /tmp.
