@@ -196,6 +196,15 @@ class DevLifecycle(unittest.TestCase):
         self.stub.chmod(0o755)
         prior = self.root / "prior bin's\nnext"
         prior.mkdir()
+        # dev prints the Cargo linker lines, which call env, awk and tr.
+        # leave can restore PATH to only the v2 bin directory, so the
+        # three tools live there and the later dev can run them.
+        v2bin = self.root / "v2" / "bin"
+        v2bin.mkdir(parents=True)
+        for name in ("env", "awk", "tr"):
+            tool = v2bin / name
+            tool.write_text(f"#!/bin/sh\nexec /usr/bin/{name} \"$@\"\n", encoding="utf-8")
+            tool.chmod(0o755)
         self.env = {
             "HOME": str(self.root),
             "PATH": f"{prior}:/usr/bin:/bin",
