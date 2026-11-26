@@ -7820,6 +7820,11 @@ fn runMain(init: std.process.Init) u8 {
     // would run as if it were not there.
     if (g.explain and command != .build and command != .eb)
         die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
+    // --variant changes the easyconfig a recipe build compiles, and submit
+    // puts that option on the batch command. Another command would run as
+    // if it were not there, and eb would install the optimised module.
+    if (g.variant != null and command != .build and command != .submit)
+        die("--variant goes with a recipe or with submit, not with {s}", .{@tagName(command)});
     // The cache is a pair of files. It does not read the site file.
     if (command == .@"lmod-cache") return lmodcache.run(init.io, a, c.env, cache);
     if (command == .overlay) {

@@ -196,6 +196,56 @@ class ExtendCli(unittest.TestCase):
                 self.assertIn(f"--explain goes with a recipe or with eb, not with {args[0]}", run.stderr)
         self.assertTrue(old.exists())
 
+    def test_variant_before_another_command_is_refused(self):
+        # Parsed while the command is still a recipe build, then left set.
+        # eb would install the optimised module; env, config and profiles
+        # would succeed as if --variant were not there.
+        cases = (
+            (["--variant", "perf", "eb", "x.eb"], "eb"),
+            (["--variant=debug", "eb", "x.eb"], "eb"),
+            (["--variant", "perf", "--explain", "eb", "x.eb"], "eb"),
+            (["--variant", "perf", "env"], "env"),
+            (["--variant", "perf", "config"], "config"),
+            (["--variant", "perf", "profiles"], "profiles"),
+            (["--variant", "perf", "dev"], "dev"),
+        )
+        for args, command in cases:
+            with self.subTest(args=args):
+                ran = self.root / "eb-ran"
+                ran.unlink(missing_ok=True)
+                run = self.run_tool(args)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, "")
+                self.assertIn(f"--variant goes with a recipe or with submit, not with {command}", run.stderr)
+                self.assertFalse(ran.exists())
+
+    def test_variant_stays_on_a_recipe_and_on_submit(self):
+        prefix = self.root / "gpu"
+        site = self.root / "site.toml"
+        site.write_text(
+            '[storage]\nnode_local_root = "/local"\n'
+            '[build.node_types]\nmilan = "--constraint=milan"\n'
+            f'[profile.gpu]\nprefix = "{prefix}"\n',
+            encoding="utf-8",
+        )
+        site.chmod(0o600)
+        explained = self.run_tool(
+            ["--config", str(site), "--profile", "gpu", "--explain", "--variant", "perf", "pigz.eb", "--robot"],
+            EB_LOCAL_CONFIG=str(site),
+        )
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        self.assertIn("export EB_LOCAL_VARIANT=perf\n", explained.stdout)
+        self.assertIn("--variant perf", explained.stdout)
+        submitted = self.run_tool(
+            ["--config", str(site), "--profile", "gpu", "--variant", "perf", "submit", "--print", "pigz.eb"],
+            EB_LOCAL_CONFIG=str(site),
+        )
+        self.assertEqual(submitted.returncode, 0, submitted.stdout + submitted.stderr)
+        self.assertIn("--profile gpu", submitted.stdout)
+        self.assertIn("--variant perf", submitted.stdout)
+        self.assertIn("exec ", submitted.stdout)
+        self.assertFalse((self.root / "eb-ran").exists())
+
     def test_eb_accepts_trailing_slash_in_install_variable(self):
         mine = self.root / "mine"
         run = self.run_tool(
