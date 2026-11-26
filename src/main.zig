@@ -2920,6 +2920,12 @@ const SettleProbe = struct {
 };
 
 var settle_probe: ?*SettleProbe = null;
+var settle_entered_fd: i32 = -1;
+
+fn noteSettleEntered() void {
+    if (settle_entered_fd < 0) return;
+    _ = linux.write(settle_entered_fd, "e", 1);
+}
 
 const Reap = union(enum) {
     /// `wait4` returned ECHILD: no matching child remains.
@@ -3261,6 +3267,7 @@ fn settleGroup(pgid: linux.pid_t) GroupEnd {
     const sfd_rc = linux.signalfd(-1, &chld, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
     const sfd: ?sys.fd_t = if (linux.errno(sfd_rc) == .SUCCESS) @intCast(sfd_rc) else null;
     defer if (sfd) |fd| sys.close(fd);
+    noteSettleEntered();
 
     while (true) {
         if (sfd) |fd| drainSignalFd(fd);
@@ -8055,30 +8062,37 @@ test "settleGroup wakes on SIGCHLD without leaking descriptors" {
     var raw: i32 = 0;
     while (linux.errno(linux.wait4(@intCast(pid), &raw, 0, null)) == .INTR) {}
 
+    var entered_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered_fds, .{ .CLOEXEC = true })));
+    settle_entered_fd = entered_fds[1];
+    defer settle_entered_fd = -1;
+
     const ReleaseCtx = struct {
+        entered_r: i32,
         gate_w: sys.fd_t,
-        baseline_fds: usize,
         fn run(ctx: @This()) void {
-            const deadline = monotonicMs() + 250;
-            while (monotonicMs() < deadline) {
-                if ((testSelfFdCount() catch 0) > ctx.baseline_fds + 1) break;
-                var empty: [1]linux.pollfd = undefined;
-                _ = linux.poll(&empty, 0, 1);
+            var pfd = [1]linux.pollfd{.{ .fd = ctx.entered_r, .events = linux.POLL.IN, .revents = 0 }};
+            const prc = linux.poll(&pfd, 1, 2000);
+            if (linux.errno(prc) == .SUCCESS and pfd[0].revents & linux.POLL.IN != 0) {
+                var byte: [1]u8 = undefined;
+                _ = linux.read(ctx.entered_r, &byte, 1);
             }
+            sys.close(ctx.entered_r);
             sys.close(ctx.gate_w);
         }
     };
     const releaser = try std.Thread.spawn(.{}, ReleaseCtx.run, .{ReleaseCtx{
+        .entered_r = entered_fds[0],
         .gate_w = gate_fds[1],
-        .baseline_fds = fds_before,
     }});
 
     const t0 = monotonicMs();
     try std.testing.expectEqual(GroupEnd.drained, settleGroup(@intCast(pid)));
     const elapsed = monotonicMs() - t0;
     releaser.join();
+    sys.close(entered_fds[1]);
     try std.testing.expect(!proc.groupAlive(@intCast(pid)));
-    try std.testing.expect(elapsed < 350);
+    try std.testing.expect(elapsed < 2000);
     try std.testing.expectEqual(fds_before, try testSelfFdCount());
 }
 

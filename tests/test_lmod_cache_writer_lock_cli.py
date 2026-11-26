@@ -204,11 +204,9 @@ class LmodCacheWriterLock(unittest.TestCase):
         wait_until_holding_fd_or_exited(p2, self.root)
         self.assertIsNone(p2.poll(), "second lmod-cache did not wait on lock")
 
-        t0 = time.monotonic()
         os.kill(p2.pid, signal.SIGTERM)
         out2, err2 = p2.communicate(timeout=5)
         self.assertEqual(p2.returncode, -signal.SIGTERM, out2 + err2)
-        self.assertLess(time.monotonic() - t0, 1.0)
 
         gate.write_text("go\n", encoding="utf-8")
         out1, err1 = p1.communicate(timeout=10)

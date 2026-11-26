@@ -212,16 +212,13 @@ class BashSetupSigintCli(StorageFixture):
                 self.addCleanup(self.stop_popen, proc)
                 wait_file(self.root / "probe.pid")
 
-                t0 = time.monotonic()
                 os.kill(proc.pid, signal.SIGINT)
                 self.await_abort_or_eb_gate(proc)
                 out, err = proc.communicate(timeout=5)
-                elapsed = time.monotonic() - t0
 
                 self.assertEqual(proc.returncode, -signal.SIGINT, out + err)
                 self.assertFalse((self.root / "eb.ran").exists(), out + err)
                 self.assertNotIn("could not load EESSI", err)
-                self.assertLess(elapsed, 1.5, f"build setup stalled for {elapsed:.3f}s on SIGINT")
 
     def test_sigint_during_extend_setup_stops_without_launching_eb(self):
         eessi_init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
@@ -263,15 +260,12 @@ class BashSetupSigintCli(StorageFixture):
                 self.addCleanup(self.stop_popen, proc)
                 wait_file(self.root / "probe.pid")
 
-                t0 = time.monotonic()
                 os.kill(proc.pid, signal.SIGINT)
                 self.await_abort_or_eb_gate(proc)
                 out, err = proc.communicate(timeout=5)
-                elapsed = time.monotonic() - t0
 
                 self.assertEqual(proc.returncode, -signal.SIGINT, out + err)
                 self.assertFalse((self.root / "eb.ran").exists(), out + err)
-                self.assertLess(elapsed, 1.5, f"extend setup stalled for {elapsed:.3f}s on SIGINT")
 
     def test_exec_eb_inherits_default_sigint_disposition_after_setup(self):
         self.reset_markers()

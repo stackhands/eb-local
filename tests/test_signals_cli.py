@@ -32,6 +32,16 @@ log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-slow.log")
 with open(log, "w") as f:
     f.write("building\n")
 open(os.path.join(root, "eb.pid"), "w").write(str(os.getpid()))
+ready = os.environ.get("EB_READY")
+done = os.environ.get("EB_DONE")
+if ready and done:
+    open(ready, "w").write("r")
+    limit = time.monotonic() + 10
+    while not os.path.exists(done) and time.monotonic() < limit:
+        time.sleep(0.01)
+    open(done + ".seen", "w").write("d")
+    if not got:
+        sys.exit(0)
 deadline = time.monotonic() + float(os.environ.get("SLOW_EB_WAIT", "10"))
 while not got and time.monotonic() < deadline:
     time.sleep(0.05)
@@ -139,10 +149,27 @@ class Signals(StorageFixture):
         self.assert_stopped_and_clean(eb)
 
     def test_a_signal_ignored_as_nohup_ignores_sighup_stays_ignored(self):
-        self.build_env["SLOW_EB_WAIT"] = "1"
-        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGHUP),
-                                          preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
-        self.assertEqual(rc, 0, out + err)
+        ready = self.root / "eb.ready"
+        done = self.root / "eb.done"
+        self.build_env["EB_READY"] = str(ready)
+        self.build_env["EB_DONE"] = str(done)
+        build = subprocess.Popen(self.argv, env=self.build_env, cwd=self.root, start_new_session=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+        self.addCleanup(lambda: build.poll() is None and os.killpg(build.pid, signal.SIGKILL))
+        self.eb_pid()
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            self.assertLess(time.monotonic(), deadline, "eb did not become ready")
+            time.sleep(0.01)
+        os.killpg(build.pid, signal.SIGHUP)
+        done.write_text("d")
+        seen = Path(str(done) + ".seen")
+        while not seen.exists():
+            self.assertLess(time.monotonic(), deadline + 5, "done byte did not arrive")
+            time.sleep(0.01)
+        out, err = build.communicate(timeout=30)
+        self.assertEqual(build.returncode, 0, out + err)
         self.assertFalse((self.root / "eb.signals").exists())
 
     def test_ctrl_c_on_the_terminal_reaches_easybuild_once(self):
