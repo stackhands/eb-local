@@ -25,7 +25,7 @@ def _can_mount_tmpfs():
     return probe.returncode == 0
 
 
-@unittest.skipUnless(binary.BIN, "prefix filesystem checks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "prefix filesystem checks target the Zig build")
 class PrefixFilesystemErrors(StorageFixture):
     def setUp(self):
         super().setUp()

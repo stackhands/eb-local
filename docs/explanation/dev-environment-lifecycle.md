@@ -9,16 +9,17 @@ Its lifecycle starts only when the caller evaluates `eb-local dev --replace`.
 ## One saved state
 
 The first `dev --replace` records the state from before it changes the shell in the exported `EB_LOCAL_DEV_SAVED` variable.
-The record has a version and stores:
+The current record is `eb-local-dev-v3` and stores:
 
 -   `LOADEDMODULES`, including its load order;
 -   `PATH`;
 -   whether `EB_LOCAL_DEV_PREFIX` and `EB_LOCAL_RPATH_WRAPPERS` were unset, empty or set, and their values when set; and
--   the same presence and value information for `LD_LIBRARY_PATH`, `LD_PRELOAD` and `LD_AUDIT`.
+-   the same presence and value information for `CMAKE_ARGS`, `EB_LOCAL_MESON_INSTALL_RPATH`, `LD_LIBRARY_PATH`, `LD_PRELOAD`, `LD_AUDIT`, `JULIA_DEPOT_PATH`, `R_LIBS_USER`, `PYTHONUSERBASE`, `GOPATH`, `GOMODCACHE` and `EB_LOCAL_DEV_GO_PREFIX`.
 
 Values that may contain shell syntax are encoded as data.
 `leave` validates the record and quotes its output instead of evaluating text from the variable.
 A malformed or unsupported record is an error.
+The earlier `eb-local-dev-v1` and `eb-local-dev-v2` records remain accepted; fields they did not store are unset by `leave`.
 
 After the loads finish, `dev --replace` records the resulting module list in the same variable.
 On a later `dev --replace` it unloads only modules in that resulting list that were absent before the lifecycle began.
@@ -34,7 +35,7 @@ The caller leaves with:
 eval "$(eb-local leave)"
 ```
 
-The code unloads modules that are not in the recorded prior list, reloads the recorded modules in their prior order, and restores the recorded `PATH`, marker variables and loader variables.
+The code unloads modules that are not in the recorded prior list, reloads the recorded modules in their prior order, and restores the recorded `PATH`, marker variables, build-system variables and loader variables.
 It then unsets `EB_LOCAL_DEV_SAVED`.
 Successful module operations restore the recorded module list rather than merely removing the modules named on the `dev` command line.
 

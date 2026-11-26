@@ -19,7 +19,7 @@ If you build on one node type, interactively, and need nothing below, `module lo
 eb-local adds what that leaves to each user:
 
 - `eb-local dev` puts EasyBuild's RPATH compiler wrappers in front of your own `gcc` or `mpicc`, so a program you compile runs later with no modules loaded;
-- a build runs only inside a Slurm job, in the job's node-local disk, and refuses shared scratch as a work or install directory, before it creates anything;
+- a build works on a local disk, the node-local disk of a Slurm job or a workstation's own, and refuses shared scratch, tmpfs and RAM disks as a work directory, before it creates anything;
 - `eb-local list` shows which CPU targets each module you installed was built for, since EESSI-extend keeps one tree per target;
 - `eb-local uninstall` removes an install and its module file for every target, which EasyBuild leaves read-only and neither EasyBuild nor Lmod removes.
 
@@ -36,25 +36,27 @@ gcc -O2 -fopenmp prog.c -lfftw3 -o prog
 ## Install software with EasyBuild
 
 ```sh
-salloc -p <partition> -n 16 -t 02:00:00   # on nodes with a node-local disk
-eb-local pigz-2.8-GCCcore-15.2.0.eb --robot
+eb-local pigz-2.8-GCCcore-15.2.0.eb --robot   # on a workstation, or inside a Slurm job
 ```
+
+On a cluster, run it inside an allocation on the node type that will run the software, such as `salloc -p <partition> -n 16 -t 02:00:00` on nodes with a node-local disk.
+On a workstation, a laptop or a CI runner with the EESSI mount, it needs no site file and no Slurm: with no `sbatch` on `PATH` and no `SLURM_*` variable set, the build works under `$TMPDIR` when that is a local disk, else under `$XDG_CACHE_HOME` or `~/.cache`. `--workstation` asks for the same where Slurm is installed.
 
 [Install software on top of EESSI with EasyBuild](docs/howto/install-software.md) has the steps, a build for a group, and what each failure means; [Load EESSI and the software you installed](docs/howto/load-eessi.md) loads the modules in a new shell or job.
 
-## EESSI-extend, without a site file
+## EESSI-extend, without a Slurm job
 
 ```sh
-eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot   # no site file or Slurm job; installs into $HOME/eessi
+eb-local eb -- pigz-2.8-GCCcore-15.2.0.eb --robot   # configured prefix, no Slurm job
 ```
 
-`eb-local eb` sources the EESSI init, loads `EESSI-extend`, and runs `eb`, where there is no site file and no Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced.
+`eb-local eb` sources the EESSI init, loads `EESSI-extend`, and runs `eb` without a Slurm job: inside `eessi_container.sh`, on a laptop with the CernVM File System (CVMFS) mount, or anywhere else the EESSI init can be sourced. It uses the configured prefix or project unless an install variable is already exported.
 [Run EasyBuild through EESSI-extend without a site file](docs/howto/eb-without-a-site-file.md) has the steps, and [Where EESSI-extend installs](docs/explanation/install-variables.md) says where each install variable sends an install and what eb-local checks.
 `eb-local --explain RECIPE` prints the script a build runs, and `eb-local --explain eb -- ARGS` the one `eb-local eb` runs; [The eb-local command](docs/reference/cli.md) says what each holds.
 
 ## Where things go
 
-Installs go into `$HOME/eessi`, EESSI-extend's own default, the `prefix` setting or `--project DIR`; a build works in a new workspace in its allocation's node-local mount, and keeps source archives and logs in `<install-prefix>/.eb-local`.
+Installs go into `$HOME/eessi`, EESSI-extend's own default, the `prefix` setting or `--project DIR`; a build works in a new workspace on a local disk, its allocation's node-local mount or the workstation's own, and keeps source archives and logs in `<install-prefix>/.eb-local`.
 [Where a build puts things, and why](docs/explanation/where-things-go.md) says why, and [Refusals](docs/reference/refusals.md) lists what a build refuses before it makes anything.
 
 ## A site's defaults
@@ -103,7 +105,6 @@ A build gets every secret unless `build.secrets` names the ones it gets, and the
 On a cluster whose site installs eb-local, load its module.
 Otherwise, download the static binary for your architecture from a [release](https://github.com/stackhands/eb-local/releases), or build it from source with Zig 0.17.1: [Install eb-local](docs/howto/install.md) has the steps and the checks.
 In a source checkout, `./eb-local` is a small shell shim that resolves its real directory, tries `zig-out/bin/eb-local` there, then searches each `PATH` directory for another `eb-local`.
-It passes an adjacent `eb-local.conf` to Zig when `EB_LOCAL_CONFIG` is unset.
 The shim has no command behavior of its own.
 
 ## Contributing

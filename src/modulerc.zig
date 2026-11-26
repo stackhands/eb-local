@@ -177,16 +177,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     {
         var probe: []const u8 = opts.tree;
         while (probe.len > 1) {
-            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
-                if (st.isDir()) break;
-                break;
-            } else |_| {}
+            if (common.fsx.statAt(common.fsx.cwd, probe, false)) |_| break else |_| {}
             first_missing = probe;
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
     common.atomic.makedirs(opts.tree) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.tree, @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     var why: common.atomic.Why = .{};

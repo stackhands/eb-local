@@ -14,13 +14,13 @@ REPO = Path(__file__).resolve().parents[1]
 TOOL = REPO / "tools" / "cli_assets.py"
 
 
-@unittest.skipUnless(binary.BIN, "cli_assets runs against the compiled eb-local binary")
+@unittest.skipUnless(binary.ZIG, "cli_assets runs against the compiled eb-local binary")
 class CliAssets(unittest.TestCase):
     def test_completions_exclude_prose_and_include_subcommands_and_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "share"
             cp = subprocess.run(
-                ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.BIN}"],
+                ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.ZIG}"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -51,13 +51,13 @@ class CliAssets(unittest.TestCase):
             self.assertTrue((out / "man" / "eb-local.1").is_file())
 
     def test_help_and_version_raw_bytes_and_repro(self):
-        h = subprocess.run([binary.BIN, "--help"], capture_output=True, text=False)
+        h = subprocess.run([binary.ZIG, "--help"], capture_output=True, text=False)
         self.assertEqual(h.returncode, 0)
         self.assertEqual(h.stderr, b"")
         self.assertTrue(h.stdout.startswith(b"eb-local: install and build software on top of EESSI"))
 
         repro = subprocess.run(
-            ["python3", str(TOOL), "--check-repro", "--tool", f"eb-local::{binary.BIN}"],
+            ["python3", str(TOOL), "--check-repro", "--tool", f"eb-local::{binary.ZIG}"],
             capture_output=True,
             text=True,
             check=False,
@@ -89,7 +89,7 @@ class CliAssets(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "share"
             cp = subprocess.run(
-                ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.BIN}"],
+                ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.ZIG}"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -112,7 +112,7 @@ class CliAssets(unittest.TestCase):
             comps_ro.mkdir(parents=True)
             with hostile_fs.readonly_dir(comps_ro):
                 cp_ro = subprocess.run(
-                    ["python3", str(TOOL), "--out", str(out_ro), "--tool", f"eb-local::{binary.BIN}"],
+                    ["python3", str(TOOL), "--out", str(out_ro), "--tool", f"eb-local::{binary.ZIG}"],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -124,7 +124,7 @@ class CliAssets(unittest.TestCase):
             out_dir_collision = root / "dir-collision"
             (out_dir_collision / "completions" / "eb-local.bash").mkdir(parents=True)
             cp_dir = subprocess.run(
-                ["python3", str(TOOL), "--out", str(out_dir_collision), "--tool", f"eb-local::{binary.BIN}"],
+                ["python3", str(TOOL), "--out", str(out_dir_collision), "--tool", f"eb-local::{binary.ZIG}"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -141,7 +141,7 @@ class CliAssets(unittest.TestCase):
                     outside = root / f"outside-{rel.replace('/', '-')}"
                     hostile_fs.dangling_symlink(link_path, outside)
                     cp_sym = subprocess.run(
-                        ["python3", str(TOOL), "--out", str(out_sym), "--tool", f"eb-local::{binary.BIN}"],
+                        ["python3", str(TOOL), "--out", str(out_sym), "--tool", f"eb-local::{binary.ZIG}"],
                         capture_output=True,
                         text=True,
                         check=False,
@@ -159,7 +159,7 @@ class CliAssets(unittest.TestCase):
             return
         out = mnt / "share"
         cp = subprocess.run(
-            ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.BIN}"],
+            ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.ZIG}"],
             capture_output=True,
             text=True,
             check=False,

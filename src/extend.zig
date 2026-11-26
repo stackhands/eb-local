@@ -1,4 +1,4 @@
-//! Run EasyBuild through EESSI-extend with no site file and no Slurm job.
+//! Run EasyBuild through EESSI-extend with no Slurm job.
 //!
 //! EESSI-extend reads EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
 //! EESSI_SITE_INSTALL and EESSI_CVMFS_INSTALL when it loads, and treats a
@@ -111,7 +111,7 @@ pub fn tooMany(a: Allocator, env: *const std.process.Environ.Map) Allocator.Erro
     }
     try out.appendSlice(a,
         \\  Unset the one an earlier session left (a shell startup file, or eval "$(eb-local env)" for another prefix):
-        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, the module installs under $HOME/eessi
+        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, eb-local uses its configured prefix or project
         \\
     );
     return out.toOwnedSlice(a);
@@ -182,6 +182,16 @@ pub const script =
     \\fi
     \\# shellcheck disable=SC1090
     \\source "$init"
+    \\# The command supplies the configured prefix's durable source directory
+    \\# only when the caller did not export one. Set it after the init so an
+    \\# initializer cannot send default sources back to /tmp/$USER, but never
+    \\# replace an EASYBUILD_SOURCEPATH inherited from the caller.
+    \\if [[ -n ${EBLOCAL_EB_SOURCEPATH:-} ]]; then
+    \\  if [[ -z ${EASYBUILD_SOURCEPATH+x} ]]; then
+    \\    export EASYBUILD_SOURCEPATH=$EBLOCAL_EB_SOURCEPATH
+    \\  fi
+    \\  unset EBLOCAL_EB_SOURCEPATH
+    \\fi
     \\# The module sets EASYBUILD_UMASK (077 and the sticky bit for a user
     \\# prefix, 002 with the setgid bit for a project, 022 for site and
     \\# cvmfs). The process umask matches, for the user prefix created here
@@ -242,6 +252,13 @@ pub const script =
     \\installs=(EESSI_USER_INSTALL EESSI_PROJECT_INSTALL EESSI_SITE_INSTALL EESSI_CVMFS_INSTALL)
     \\declare -A was
     \\for v in "${installs[@]}"; do was[$v]=${!v+set:${!v}}; done
+    \\if [[ -n ${EBLOCAL_EB_SITE_TOOLCHAINS:-} ]]; then
+    \\  toolchains_var=EESSI_SITE_TOP_LEVEL_TOOLCHAINS_${ver//./_}
+    \\  if [[ -z ${!toolchains_var+x} ]]; then
+    \\    export "$toolchains_var=$EBLOCAL_EB_SITE_TOOLCHAINS"
+    \\  fi
+    \\  unset EBLOCAL_EB_SITE_TOOLCHAINS
+    \\fi
     \\module load EESSI-extend
     \\# An install variable a load hook sets acts only on the next load, so
     \\# this install is not moved by it; a shell that keeps it is.
@@ -680,7 +697,7 @@ test "the refusal of several install variables names each and what EESSI-extend 
     try testing.expectEqualStrings(
         \\eb-local: EESSI_USER_INSTALL=/home/alice/eessi and EESSI_SITE_INSTALL='' are both set; EESSI-extend refuses to load with EESSI_SITE_INSTALL and a user or project install variable.
         \\  Unset the one an earlier session left (a shell startup file, or eval "$(eb-local env)" for another prefix):
-        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, the module installs under $HOME/eessi
+        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, eb-local uses its configured prefix or project
         \\
     , site);
 

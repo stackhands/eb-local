@@ -2,6 +2,130 @@
 
 <!-- towncrier release notes start -->
 
+## 3.5.0 (2026-11-26)
+
+### Features
+
+- Build managed EasyBuild recipes automatically when Slurm is absent, or explicitly with `--workstation`/`storage.mode = "local"`, using securely opened private local workspace roots that `clean --workspaces` can find after `$TMPDIR` changes.
+- Recipe overlays can add typed top-level easyconfig assignments without a Python hook.
+- `EB_LOCAL_PIN_BUILDENV_PYTHON=1` puts only the compatibility-layer `python3` before a foreign interpreter when `dev` loads a build environment.
+- `eb-local dev` sets `JULIA_DEPOT_PATH` and `R_LIBS_USER` under `EB_LOCAL_DEV_PREFIX` when the caller has not set them. Julia's depot keeps the bundled depots after it. R's library uses R's `%p-library/%v` layout. An empty value is left as the caller set it.
+- `eb-local dev` sets `PYTHONUSERBASE` under `EB_LOCAL_DEV_PREFIX` when the caller has not set it, so pip's user install stays on that CPU target. An empty value is left as the caller set it.
+- `eb-local dev` sets matching Go paths under `EB_LOCAL_DEV_PREFIX` only when the caller has not set them, preserves empty and custom values, and records language directory state in the backward-compatible dev-v3 lifecycle record.
+- `eb-local env` and a build unset install locations from `install_vars`, the same names in the same order as `share/env-scrub.json`.
+
+### Fixes
+
+- A lock that cannot be released at the end of a successful `clean`,
+  `uninstall`, `restore`, build or `lmod-cache` is reported as
+  `eb-local: cannot release the lock on PATH: [Errno N] text`, and the
+  command exits 1. After an earlier failure, including a failed write to
+  standard output, the release error is dropped and the first failure's
+  message and exit status stand. A signal that stops the command, such as
+  one received while a build cleans its logs, drops it too. The
+  descriptor is closed either way.
+- Check diagnostics name each installed binary or library and the NEEDED entry it cannot resolve.
+- Compiler wrappers record the directories of shared libraries linked by absolute path as run paths.
+- Development environments preserve wrapper run paths across CMake and Meson installs.
+- Five eb-local writers report a failed close or `fsync` as an error
+  where they used to drop it. `dev --envrc` and `dev --lock` exit 2 with
+  `eb-local: cannot write NAME ([Errno N] text)` when the close of a new
+  `.envrc` or `eb-local.lock` fails. A build on a workstation stops with
+  `cannot record workstation workspace root` when that record cannot be
+  synced or closed. `doctor --workspace` fails its probe when the close
+  of the probe fails, where it used to report the probe as written. If
+  the directory of the `timestamp` cannot be synced after the rename,
+  `lmod-cache` exits 1 and puts the cache back. The Network File
+  System (NFS) and some quota setups report a lost write only at these
+  calls.
+- If `clean` cannot write its list to standard output, it stops before it removes anything or makes the prefix lock.
+  When there is nothing to clean, `clean` forgets a recorded workstation workspace root that has no workspace only after it has written that, so a failed write changes nothing.
+- If `restore` cannot write its list to standard output, it stops before it restores anything or makes the prefix lock.
+- If `uninstall` cannot write its list to standard output, it stops before it removes anything or makes the prefix lock.
+  If a module file or link for what it listed appears while it waits for the prefix lock, `uninstall` removes nothing, so it leaves no dangling link behind.
+- Isolate command-line tests in `tests/test_dev_cli_modes.py`, `tests/test_env_strict.py`, and `tests/test_list_doctor_cli.py` from a host `/cvmfs/software.eessi.io` mount using the shared helper in `tests/support.py`.
+- Keep the compiler-family scratch variables local when `rpath-wrappers` fails during `eb-local dev`.
+- Move held lock descriptors out of standard-stream slots 0, 1, and 2 via
+  `zig-common` `sys.keepAboveStdio` so `clean`, `uninstall`, `restore`,
+  `build`, and `lmod-cache` do not write standard output into `.lock`
+  files when invoked with standard output closed.
+- Name every job `submit` sends on standard output before it makes a directory or runs `sbatch`, and submit nothing when that fails.
+- Report standard output write errors on standard error and return exit
+  status 1 across human-readable and shell-evaluation subcommands when
+  standard output is full or closed.
+- Roll back newly created parent directories when recursive directory creation fails partway through in `lmod-cache`, `modulerc`, `overlay materialize`, and `rpath-wrappers`.
+- Stop dev-shell evaluation when the architecture guard fails, including in
+  conditional callers and JSON or lock evaluation.
+- Warn in `eb-local doctor` when an explicitly exported install variable for the shared software stack selects a different mode or path from the configured user or project destination.
+- Write the `clean --json` document before `clean` removes anything, and stop with nothing removed when it cannot be written.
+  When that document is a refusal or says there is nothing to clean and cannot be written, `clean` keeps the recorded workstation workspace roots it would have forgotten.
+- `build` says what it runs before it makes the install prefix. It keeps the build workspace when it cannot write the report of redacted secrets.
+- `eb-local --explain eb` now emits `export` lines for the configured `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, `[eessi]` variables, `EBLOCAL_EB_SITE_TOOLCHAINS`, and `EBLOCAL_EB_SOURCEPATH` so replaying the printed script in a clean shell matches `eb-local eb`.
+- `eb-local dev` now stops with the status of `rpath-wrappers` when that command fails, before it sets `EB_LOCAL_DEV_PREFIX`.
+- `eb-local eb` now uses the configured user prefix or project, exports configured hook settings without replacing shell overrides, and keeps downloaded sources below the install prefix.
+- `eb-local env` and `eb-local dev` now return failure before they change the shell when it has no `module` command.
+- `lmod-cache` reports a failed close of the new `timestamp` and keeps
+  the old one. When the directory of the `timestamp` cannot be written
+  and the file is rewritten in place, a failed truncate, `fsync` or close
+  of it is reported, and a file put in its place after it was checked is
+  refused and not changed. If a failed update already changed the file,
+  `lmod-cache` writes its previous bytes and times back through a
+  duplicate of the descriptor that changed it, so a file renamed into
+  its place is left alone. With `--verify`, a failed write or close of
+  the candidate `spiderT.lua` or `lmodrc.lua`, or a failed close of the
+  candidate `timestamp`, is reported and the cache is not changed. Each
+  of these exits 1 with `eb-local: cannot write PATH: [Errno N] text`. A
+  previous `spiderT.lua` that cannot be read, or is larger than 64 MiB,
+  is not replaced: `lmod-cache` exits 1 with
+  `eb-local: cannot read PATH: REASON; the cache was not changed`. A
+  cache that was already replaced is put back through a new file that is
+  renamed over it once it is written, synced and closed, and a cache with
+  no previous one is removed. Each restore is tried once, and one that
+  fails is reported after the error that started it, as
+  `eb-local: cannot restore PATH: REASON` or
+  `eb-local: cannot remove PATH: REASON`. A workstation build whose
+  workspace-root record cannot be written, or whose registry or existing
+  entry cannot be used, removes the workspace of the build before it
+  exits 2. The record is written to a temporary file that is renamed over
+  it only after the write, `fsync` and close succeed, so a failure before
+  the rename removes only the temporary file and `clean --workspaces`
+  still finds older workspaces under that root. A failed sync of the
+  registry after the rename keeps the new entry, which names the same
+  root as any entry it replaced.
+- `settleGroup` keeps waiting while `wait4` reports a child in the signalled process group, so a child the `/proc` scan misses is reaped instead of being orphaned when `stop` re-raises the signal.
+
+### Documentation
+
+- The README describes builds on a workstation, laptop or CI runner without Slurm, and no longer says the shim passes an eb-local.conf.
+
+### Miscellaneous
+
+- A unit test pins that `eb-local lmod-cache`, updating `--timestamp` in place with standard input, output and error closed, keeps the duplicate it restores the timestamp through off descriptors 0, 1 and 2.
+- Add shared Bash and zsh helpers for dev-shell lifecycle tests.
+- Drop the unreachable no-install-variable branch from `explainExtend`, because configured defaults always populate the selected install variable.
+- Let the test build fail standard output after the number of writes in `EB_LOCAL_TEST_STDOUT_WRITES`.
+- Pin `zig-common` to 3119105, the `develop` merge of the checked stdout writer that adds `cli.Stdout` and `cli.writeOut`.
+- Pin `zig-common` to `3c3b1720`, the `main` commit that merges
+  `sys.keepAboveStdio`, so it is available for lock descriptor placement.
+- Pin `zig-common` to `a45142a`, the `develop` merge of `zig-common` #89,
+  where `state.RootLock.release` returns `sys.Error!void`. eb-local takes no
+  `RootLock`, so no call site changes. A failed write in `lmod-cache`,
+  `modulerc` and `overlay materialize` reports Python's `[Errno N] ...`
+  text, with the file it names, where it used to print the error name such
+  as `NoSpace` or `AccessDenied`; `site`, `submit` and
+  `doctor` add that file name to the errno text they already printed.
+- Run the tests that need the Zig build in the run through the shell shim as well, so `python3 -m unittest discover -s tests` without `EB_LOCAL_BIN` skips almost nothing.
+- The SBOM test accepts a zig-common dependency pinned to a full
+  commit as well as to a release tag.
+- The cooperative reap test records the worker's `getppid` in `worker.reparented` only after a pidfd reports that the leader has exited, and keeps the worker blocked on a fifo until that parent id is the eb-local process.
+- Write `main.zig` standard output through `cli.Stdout` and keep a failed heap allocation in `say` a fatal out of memory exit.
+- `tests/hostile_fs.py` adds an `oversized_file` helper that creates sparse or byte-filled files with mode `0o600` for oversized CLI input checks.
+- `tests/test_config_cli_modes.py` verifies that `eb-local` configuration loading rejects directory and FIFO inputs under a bounded timeout as well as dangling symlinks and malformed byte or oversized files.
+- `tests/test_dev_shell_lifecycle.py` checks that `eb-local dev` keeps non-wrapper `PATH` entries in order when dropping a recorded `EB_LOCAL_RPATH_WRAPPERS` directory.
+- `tests/test_hardening_cli.py` verifies that `file:` secret resolution rejects directory and FIFO paths under a bounded timeout as well as dangling symlinks and oversized inputs, and that log redaction leaves special files untouched while scrubbing byte-order mark and non-UTF-8 logs.
+- `tests/test_site_cli_modes.py` verifies that `eb-local site` input subcommands reject directory and FIFO paths under a bounded timeout alongside dangling symlinks and malformed byte or oversized files.
+
+
 ## 3.4.0 (2026-11-22)
 
 ### Features

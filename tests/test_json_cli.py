@@ -31,7 +31,7 @@ def validate(doc, schema):
             raise AssertionError(f"kind {doc.get('kind')}")
 
 
-@unittest.skipUnless(binary.BIN, "--json is a Zig build feature")
+@unittest.skipUnless(binary.ZIG, "--json is a Zig build feature")
 class JsonCli(StorageFixture):
     def run_json(self, args, allow_fail=False, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))

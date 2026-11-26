@@ -33,14 +33,16 @@ pub const marker = ".eb-local-rpath";
 /// PATH. An empty entry is the current directory, including the one a
 /// trailing colon names, as execvp searches. When that command links, it
 /// adds a run path for each absolute
-/// library directory named with -L, for the directory of each shared
-/// library named by its absolute path, and for a compiler driver for each
-/// LIBRARY_PATH entry, which EESSI's modules set and the driver passes to
-/// the linker; system and compatibility-layer directories are left out, as
-/// the loader finds those itself. The arguments of a response file, @FILE,
-/// count as arguments of the command: Meson and CMake put a long link line
-/// in one. --disable-new-dtags writes RPATH rather than RUNPATH, so
-/// LD_LIBRARY_PATH cannot override it, as in EasyBuild.
+/// library directory named with -L or by the absolute path of an existing
+/// `lib*.so` file, and for
+/// a compiler driver for each LIBRARY_PATH entry, which EESSI's modules set
+/// and the driver passes to the linker; system and compatibility-layer
+/// directories are left out, as the loader finds those itself. Other `.so`
+/// names are commonly runtime-loaded plugins, not link inputs that create a
+/// DT_NEEDED entry, so they are not inferred here. The arguments of a
+/// response file, @FILE, count as arguments of the command: Meson and CMake
+/// put a long link line in one. --disable-new-dtags writes RPATH rather
+/// than RUNPATH, so LD_LIBRARY_PATH cannot override it, as in EasyBuild.
 pub const script =
     \\#!/bin/bash
     \\# RPATH wrapper written by eb-local; see `eb-local help`.
@@ -79,15 +81,13 @@ pub const script =
     \\        return
     \\    fi
     \\    case $arg in
-    \\        /*.so | /*.so.*) [ -f "$arg" ] && dirs+=("${arg%/*}") ;;
-    \\    esac
-    \\    case $arg in
     \\        -c | -S | -E | -M | -MM | -fsyntax-only | --analyze | --precompile | --preprocess | -emit-ast | -emit-pch) [ $linker = 0 ] && link=0 ;;
     \\        -i) [ $linker = 1 ] && link=0 ;;
     \\        -r | -Ur | --relocatable | -help | --help-hidden | --help-list | --help-list-hidden | -version | --version | -qversion | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') link=0 ;;
     \\        -L | --library-path) want_dir=1 ;;
     \\        -L*) dirs+=("${arg#-L}") ;;
     \\        --library-path=*) dirs+=("${arg#--library-path=}") ;;
+    \\        /?*/lib*.so | /?*/lib*.so.[0-9]*) [ -f "$arg" ] && dirs+=("${arg%/*}") ;;
     \\    esac
     \\    case $arg in
     \\        -v | -V | --version | -qversion | --help | --help=* | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
@@ -222,13 +222,13 @@ pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!voi
     {
         var probe: []const u8 = dir;
         while (probe.len > 1) {
-            if (fsx.statAt(fsx.cwd, probe, true)) |_| break else |_| {}
+            if (fsx.statAt(fsx.cwd, probe, false)) |_| break else |_| {}
             first_missing = probe;
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
-    common.atomic.makedirs(dir) catch |e| return e;
     errdefer if (first_missing) |missing| fsx.deleteTree(a, fsx.cwd, missing) catch {};
+    common.atomic.makedirs(dir) catch |e| return e;
     const st = try fsx.statAt(fsx.cwd, dir, false);
     if (!st.isDir() or st.uid != linux.getuid()) return error.Unsafe;
     if (std.fs.path.dirname(dir)) |parent| {
@@ -379,4 +379,30 @@ test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's come
 
 test "wrapper script recognizes --help=class flags as info-only" {
     try std.testing.expect(std.mem.indexOf(u8, script, "--help | --help=*") != null);
+}
+
+test "write rolls back newly created parent on makedirs failure and keeps dangling symlink" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const here = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/rpath-makedirs-rb-{d}", .{ here, linux.getpid() });
+    try common.atomic.makedirs(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+
+    const created_parent = try std.fs.path.join(a, &.{ root, "created-parent" });
+    const overlong: [260]u8 = @splat('a');
+    const bad_dir = try std.fs.path.join(a, &.{ created_parent, &overlong });
+    try std.testing.expectError(error.NameTooLong, write(a, bad_dir, &.{"gcc"}));
+    try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, created_parent, false));
+
+    const dangling = try std.fs.path.join(a, &.{ root, "dangling-link" });
+    var zb_target: [sys.path_max:0]u8 = undefined;
+    var zb_link: [sys.path_max:0]u8 = undefined;
+    _ = try sys.call(linux.symlinkat, .{ (try sys.z(&zb_target, "/nonexistent/target")).ptr, fsx.cwd, (try sys.z(&zb_link, dangling)).ptr });
+    const under_dangling = try std.fs.path.join(a, &.{ dangling, "eb-local", "rpath" });
+    try std.testing.expectError(error.NotFound, write(a, under_dangling, &.{"gcc"}));
+    const lst = try fsx.statAt(fsx.cwd, dangling, false);
+    try std.testing.expect(lst.isLink());
 }
