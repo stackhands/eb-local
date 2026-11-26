@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -205,10 +206,27 @@ class DevCliModes(unittest.TestCase):
         load = "module load " + " ".join(self.LOADED.split(":")) + "\n"
         self.assertEqual(got.stdout.count(load), 1)
         self.assertEqual(got.stdout.count("module load"), 2)  # the stack, then the lock
+        self.assertIn("unset EB_LOCAL_RPATH_WRAPPERS", got.stdout)
+        self.assertIn("rpath-wrappers --unwrapped", got.stdout)
+        self.assertNotIn("rpath-wrappers --for", got.stdout)
         # purged first, and the lock's modules only on its own CPU target
         self.assertLess(got.stdout.index("module purge"), got.stdout.index(load))
         self.assertIn('if [ "${EESSI_SOFTWARE_SUBDIR-}" != x86_64/amd/zen4 ]; then', got.stdout)
         self.assertIn("export EB_LOCAL_DEV_PREFIX=", got.stdout)
+
+        # A lock with no buildenv module emits only `rpath-wrappers --for`.
+        # `--unwrapped` would run before that result is on PATH and wrap the
+        # same self-linking compilers a second time.
+        no_be = "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
+        self.assertEqual(self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=no_be)).returncode, 0)
+        got_no_be = self.run_dev(["--locked"])
+        self.assertEqual(got_no_be.returncode, 0, got_no_be.stderr)
+        self.assertIn('rpath-wrappers --for "$eb_local_family"', got_no_be.stdout)
+        self.assertNotIn("rpath-wrappers --unwrapped", got_no_be.stdout)
+        self.assertIn('eval "$_eb_local_wrap"', got_no_be.stdout)
+
+        # Restore lock for subsequent checks in this test.
+        self.assertEqual(self.run_dev(["--lock"], **self.RESOLVED).returncode, 0)
 
         def run_lines(subdir):
             return subprocess.run(
@@ -339,6 +357,138 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(got.stdout.count("ScaLAPACK/2.2.2-lfoss-2026.1"), 1)
         self.assertIn("module load buildenv/default-foss-2026.1\n", got.stdout)
         self.assertIn("export EB_LOCAL_DEV_PREFIX=", got.stdout)
+
+    def test_locked_wrapper_failure_exports_neither_prefix_nor_wrappers(self):
+        compilers = self.root / "compilers"
+        compilers.mkdir()
+        # `--for` wraps gcc; `--unwrapped` wraps clang. Either one makes
+        # rpath-wrappers ask for a cache directory.
+        for name in ("gcc", "clang"):
+            tool = compilers / name
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(0o755)
+        cases = (
+            ("buildenv", self.LOADED),
+            ("no-buildenv", "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"),
+        )
+        trap = (
+            "trap 'rc=$?; printf \"prefix=%s\\nwrappers=%s\\n\" "
+            "\"${EB_LOCAL_DEV_PREFIX-unset}\" \"${EB_LOCAL_RPATH_WRAPPERS-unset}\"; "
+            "exit $rc' EXIT\n"
+        )
+        for label, modules in cases:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=modules)).returncode,
+                    0,
+                )
+                got = self.run_dev(["--locked"])
+                self.assertEqual(got.returncode, 0, got.stderr)
+                run = subprocess.run(
+                    ["/bin/bash", "--noprofile", "--norc", "-c", trap + "module() { return 0; }\n" + got.stdout],
+                    env={
+                        "PATH": str(compilers),
+                        "HOME": str(self.root),
+                        "XDG_CACHE_HOME": "relative-cache",
+                        "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4",
+                        "EESSI_VERSION": "2026.06",
+                    },
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn("absolute XDG_CACHE_HOME", run.stderr)
+                self.assertIn("prefix=unset\n", run.stdout)
+                self.assertIn("wrappers=unset\n", run.stdout)
+                self.assertNotRegex(got.stdout, r'eval "\$\([^"]*rpath-wrappers')
+                prefix_at = got.stdout.index("export EB_LOCAL_DEV_PREFIX")
+                if label == "buildenv":
+                    self.assertLess(got.stdout.rindex('eval "$_eb_local_unwrapped"'), prefix_at)
+                else:
+                    self.assertNotIn("rpath-wrappers --unwrapped", got.stdout)
+                    self.assertIn('rpath-wrappers --for "$eb_local_family"', got.stdout)
+                    self.assertLess(got.stdout.rindex('eval "$_eb_local_wrap"'), prefix_at)
+
+    def test_locked_no_buildenv_puts_one_wrapper_dir_on_path(self):
+        # `self_linking` is a subset of the names `--for` wraps. Both sets
+        # are on PATH, so a second `--unwrapped` would add another directory
+        # and print "does not wrap".
+        compilers = self.root / "compilers"
+        compilers.mkdir()
+        for name in ("gcc", "clang", "clang++", "flang", "flang-new", "ld.lld"):
+            tool = compilers / name
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(0o755)
+        modules = "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
+        self.assertEqual(
+            self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=modules)).returncode,
+            0,
+        )
+        got = self.run_dev(["--locked"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertNotIn("rpath-wrappers --unwrapped", got.stdout)
+        drop_at = got.stdout.index('if [ -n "${EB_LOCAL_RPATH_WRAPPERS-}" ]; then\n')
+        unset_at = got.stdout.index("unset EB_LOCAL_RPATH_WRAPPERS", drop_at)
+        drop_end = got.stdout.index("\nfi\n", unset_at)
+        drop = got.stdout[drop_at:drop_end + len("\nfi\n")]
+        path1 = self.root / "path1"
+        wrap1 = self.root / "wrap1"
+        path2 = self.root / "path2"
+        wrap2 = self.root / "wrap2"
+        script = (
+            "module() { return 0; }\n"
+            + got.stdout
+            + f"printf '%s\\n' \"$PATH\" > {shlex.quote(str(path1))}\n"
+            + f"printf '%s\\n' \"$EB_LOCAL_RPATH_WRAPPERS\" > {shlex.quote(str(wrap1))}\n"
+            + drop
+            + f"printf '%s\\n' \"$PATH\" > {shlex.quote(str(path2))}\n"
+            + f"printf '%s\\n' \"${{EB_LOCAL_RPATH_WRAPPERS-unset}}\" > {shlex.quote(str(wrap2))}\n"
+        )
+        cache = self.root / "cache"
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={
+                # Only the planted compilers, so `--for` cannot wrap a host `ld`.
+                "PATH": str(compilers),
+                "HOME": str(self.root),
+                "XDG_CACHE_HOME": str(cache),
+                "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4",
+                "EESSI_VERSION": "2026.06",
+                "EBROOTLLVMMINCOMPILERS": "/opt/llvm",
+            },
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # `--for` says it is standing in for the missing build environment.
+        # A second wrap would add "the build environment does not wrap".
+        self.assertEqual(run.stderr.count("eb-local:"), 1, run.stderr)
+        self.assertIn("no build environment module for the llvm compilers is available", run.stderr)
+        self.assertNotIn("does not wrap", run.stderr)
+        self.assertNotIn("warning", run.stderr.lower())
+
+        def marker_dirs(path):
+            found = []
+            for entry in path.split(":"):
+                if entry and (Path(entry) / ".eb-local-rpath").is_file():
+                    found.append(entry)
+            return found
+
+        wrapped = wrap1.read_text().rstrip("\n")
+        self.assertEqual(marker_dirs(path1.read_text().rstrip("\n")), [wrapped])
+        names = sorted(p.name for p in Path(wrapped).iterdir())
+        self.assertEqual(
+            names,
+            [".eb-local-rpath", "clang", "clang++", "flang", "flang-new", "gcc", "ld.lld"],
+        )
+        cache_dirs = sorted(p for p in (cache / "eb-local").iterdir() if p.name.startswith("rpath-"))
+        self.assertEqual([str(p) for p in cache_dirs], [wrapped])
+
+        self.assertEqual(wrap2.read_text().rstrip("\n"), "unset")
+        self.assertNotIn(wrapped, path2.read_text().rstrip("\n").split(":"))
+        self.assertEqual(marker_dirs(path2.read_text().rstrip("\n")), [])
 
     def test_strict_prepends_cvmfs_init_check_before_module_loads(self):
         got = self.run_dev(["--strict", "--buildenv", "buildenv/custom", "Demo/1.0"])

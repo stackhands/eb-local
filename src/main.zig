@@ -1369,6 +1369,54 @@ fn validTarget(text: []const u8) bool {
     return any;
 }
 
+fn hasBuildenvModule(s: config.Settings, modules: []const []const u8) bool {
+    for (modules) |m| {
+        if (std.mem.startsWith(u8, m, "buildenv/")) return true;
+        if (std.mem.eql(u8, m, s.dev_buildenv.value)) return true;
+        for (s.buildenv_for) |b| if (b.value.len > 0 and std.mem.eql(u8, m, b.value)) return true;
+    }
+    return false;
+}
+
+/// Shell that stores `eb-local rpath-wrappers ARGS` in `name` and returns
+/// that command's status when it fails. The lines run inside `eb_local_apply`,
+/// so a failure returns from that function instead of exiting the shell.
+/// `eval "$(...)"` would discard the status and let the function continue.
+fn rpathCapture(a: Allocator, exe: []const u8, args: []const u8, name: []const u8) []const u8 {
+    return str(a, "{s}=$({s} rpath-wrappers {s}) || return $?\n", .{ name, exe, args });
+}
+
+/// The `rpath-wrappers` lines for a locked dev shell. Each command is
+/// captured and checked before it is evaluated, so a failure leaves
+/// `EB_LOCAL_RPATH_WRAPPERS` unset. The caller exports
+/// `EB_LOCAL_DEV_PREFIX` only after these lines, which return on failure.
+/// A lock with no build environment runs only `--for`. That wraps every
+/// name in `rpath.names`, and `rpath.self_linking` is a subset, so a
+/// following `--unwrapped` is not needed. Capturing it before `--for` is
+/// on `PATH` would miss `.eb-local-rpath`, wrap those compilers again,
+/// and leave the first directory behind after `drop_rpath_wrappers`.
+fn lockedRpathWrapperLines(c: Ctx, s: config.Settings, modules: []const []const u8) []const u8 {
+    const a = c.a;
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const exe = q(a, selfExe(&exe_buf) orelse tool);
+    if (hasBuildenvModule(s, modules)) {
+        const cap_unwrapped = rpathCapture(a, exe, "--unwrapped", "_eb_local_unwrapped");
+        return str(a, "{s}{s}{s}", .{
+            \\local _eb_local_unwrapped
+            \\
+            ,
+            cap_unwrapped,
+            \\eval "$_eb_local_unwrapped"
+            \\unset _eb_local_unwrapped
+            \\
+        });
+    }
+    return str(a, "{s}{s}unset eb_local_family\n", .{
+        familyDetectLines(a),
+        rpathEval(a, str(a, "{s} rpath-wrappers --for \"$eb_local_family\"", .{exe})),
+    });
+}
+
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
 /// from a purged shell, and that load nothing when this shell's CPU target is
 /// not the lock's, or when the lock records an EESSI version and this shell's
@@ -1411,6 +1459,8 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, "else\nmodule load") catch oom();
     for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
     out.append(a, '\n') catch oom();
+    out.appendSlice(a, drop_rpath_wrappers) catch oom();
+    out.appendSlice(a, lockedRpathWrapperLines(c, s, lock.modules)) catch oom();
     out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
@@ -1669,6 +1719,14 @@ fn rpathEval(a: Allocator, command: []const u8) []const u8 {
     return str(a, "_eb_local_wrap=$({s}) || return $?\neval \"$_eb_local_wrap\"\nunset _eb_local_wrap\n", .{command});
 }
 
+fn familyDetectLines(a: Allocator) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, "eb_local_family=gcc\n") catch oom();
+    for (config.families) |f|
+        out.appendSlice(a, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name })) catch oom();
+    return out.items;
+}
+
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
@@ -1710,9 +1768,7 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
-    add(a, &out, "eb_local_family=gcc\n");
-    for (config.families) |f|
-        add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
+    add(a, &out, familyDetectLines(a));
     add(a, &out, "case $eb_local_family in\n");
     for (config.families, s.buildenv_for) |f, b| {
         // "none" from a site or the environment means the wrappers, with no
