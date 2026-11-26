@@ -55,6 +55,10 @@ const usage_text =
     \\  eb-local --explain <easyconfig> [eb options]
     \\                                       the commands that build runs, as shell lines,
     \\                                       its checks as comments; creates and runs nothing
+    \\  eb-local --variant perf|debug <easyconfig> [eb options]
+    \\                                       build that easyconfig with debug symbols and frame
+    \\                                       pointers (perf) or unoptimised (debug), as a module
+    \\                                       whose version ends in -perf or -debug
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
     \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
@@ -107,7 +111,7 @@ const usage_text =
     \\                                       what this node's target lacks; --json prints one
     \\                                       line of JSON with schema_version 1; --missing
     \\                                       lists only modules missing on this node's target
-    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing;
     \\                                       --json prints one line of JSON with schema_version 1.
@@ -118,6 +122,8 @@ const usage_text =
     \\                                       metadata from N tasks inside an allocation.
     \\                                       --mpi reports libfabric and UCX, and inside an
     \\                                       allocation runs a two-rank hello per approved transport
+    \\                                       --profiling reports whether perf may sample and
+    \\                                       debuggers attach, and finds perf, valgrind and gdb
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
     \\                      --timestamp FILE [--spider CMD] [--verify]
     \\                                       write Lmod's spiderT.lua for those module
@@ -582,6 +588,7 @@ fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, cano
     if (s.profile) |p| parts.appendSlice(a, &.{ "--profile", q(a, p) }) catch oom();
     if (s.project.value != null) parts.appendSlice(a, &.{ "--project", q(a, canonical_prefix) }) catch oom();
     parts.append(a, command) catch oom();
+    if (std.mem.eql(u8, command, "--explain")) if (g.variant) |v| parts.appendSlice(a, &.{ "--variant", v }) catch oom();
     if (std.mem.eql(u8, command, "dev")) {
         if (g.pure) parts.append(a, "--pure") catch oom();
         if (g.replace) parts.append(a, "--replace") catch oom();
@@ -695,6 +702,8 @@ const Global = struct {
     explain: bool = false,
     /// Force a managed build to use this machine's private local storage.
     workstation: bool = false,
+    /// `--variant NAME`: build the named easyconfig as that variant.
+    variant: ?[]const u8 = null,
     /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
@@ -4562,8 +4571,62 @@ const build_script_tail =
     \\# sticky bit for a user one, 002 and the setgid bit for a project.
     \\# eb replaces this shell, so the program eb-local waits for, and passes
     \\# a signal on to, is EasyBuild, which writes the logs it then cleans.
+    \\# --variant: a copy of the named easyconfig with the variant's block
+    \\# appended, so only that easyconfig is built with the variant's flags and
+    \\# its module version ends in the variant's name.
+    \\if [ -n "${EB_LOCAL_VARIANT:-}" ]; then
+    \\    vdir="${saved[EASYBUILD_BUILDPATH]%/build}/variant"
+    \\    mkdir -p "$vdir"
+    \\    ec=$1
+    \\    shift
+    \\    if [[ $ec == */* ]]; then
+    \\        base=$ec
+    \\    else
+    \\        base="$vdir/base.eb"
+    \\        eb --copy-ec "$ec" "$base" >/dev/null || {
+    \\            echo "eb-local: eb found no easyconfig $ec to make the $EB_LOCAL_VARIANT variant of; nothing was built" >&2
+    \\            exit 1
+    \\        }
+    \\    fi
+    \\    out="$vdir/${ec##*/}"
+    \\    out="${out%.eb}-$EB_LOCAL_VARIANT.eb"
+    \\    { cat "$base"; printf '\n%s\n' "$EB_LOCAL_VARIANT_BLOCK"; } > "$out"
+    \\    echo "eb-local: building the $EB_LOCAL_VARIANT variant from $out; its module version ends in -$EB_LOCAL_VARIANT"
+    \\    set -- "$out" "$@"
+    \\fi
+    \\unset EB_LOCAL_VARIANT EB_LOCAL_VARIANT_BLOCK
     \\trap - INT
     \\exec eb "$@"
+;
+
+/// The easyconfig lines `--variant NAME` appends, or null for an unknown NAME.
+/// Both keep a SYSTEM-toolchain easyconfig's options, which has none, and add
+/// the variant's name to `versionsuffix`, so the module does not replace the
+/// optimised one.
+fn variantBlock(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "perf")) return variant_perf;
+    if (std.mem.eql(u8, name, "debug")) return variant_debug;
+    return null;
+}
+
+const variant_perf =
+    \\# eb-local --variant perf: debug symbols and frame pointers for profilers.
+    \\local_variant_flags = '-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer'
+    \\if toolchain['name'].lower() != 'system':
+    \\    toolchainopts = dict(locals().get('toolchainopts') or {})
+    \\    toolchainopts['debug'] = True
+    \\    for local_key in ('extra_cflags', 'extra_cxxflags', 'extra_fflags', 'extra_fcflags', 'extra_f90flags'):
+    \\        toolchainopts[local_key] = ' '.join(x for x in (toolchainopts.get(local_key), local_variant_flags) if x)
+    \\versionsuffix = (locals().get('versionsuffix') or '') + '-perf'
+;
+
+const variant_debug =
+    \\# eb-local --variant debug: no optimisation and debug symbols, for debuggers and valgrind.
+    \\if toolchain['name'].lower() != 'system':
+    \\    toolchainopts = dict(locals().get('toolchainopts') or {})
+    \\    toolchainopts['debug'] = True
+    \\    toolchainopts['noopt'] = True
+    \\versionsuffix = (locals().get('versionsuffix') or '') + '-debug'
 ;
 
 /// `build_script_head`, the `unset` lines for `names`, then `build_script_tail`.
@@ -4688,6 +4751,10 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     for (s.eessi.items) |v| out.print(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }) catch oom();
     if (s.site_toolchains.value.len > 0)
         out.print(a, "export EB_LOCAL_SITE_TOOLCHAINS={s}\n", .{q(a, config.toolchainsJson(a, s.site_toolchains.value) catch oom())}) catch oom();
+    if (g.variant) |v| {
+        out.print(a, "export EB_LOCAL_VARIANT={s}\n", .{q(a, v)}) catch oom();
+        out.print(a, "export EB_LOCAL_VARIANT_BLOCK={s}\n", .{q(a, variantBlock(v).?)}) catch oom();
+    }
     out.print(a, "umask {o:0>3}\n", .{buildUmask(p)}) catch oom();
     const argv = buildCommand(a, c, s, p, args);
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
@@ -4747,6 +4814,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         cli.err("{s}", .{usage_text});
         return 2;
     }
+    if (g.variant != null and !std.mem.endsWith(u8, args[0], ".eb"))
+        die("--variant needs the easyconfig as the first argument; got '{s}'", .{args[0]});
     if (g.explain) return explainBuild(c, s, g, args);
     if (!localStorage(s, c, g) and nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.", .{});
@@ -4934,6 +5003,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
+    _ = env.swapRemove("EB_LOCAL_VARIANT");
+    _ = env.swapRemove("EB_LOCAL_VARIANT_BLOCK");
     for (shell_startup) |name| _ = env.swapRemove(name);
     for (s.secrets.items) |sec| if (config.withheldSource(s, sec)) |name| {
         _ = env.swapRemove(name);
@@ -4953,6 +5024,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     if (s.site_toolchains.value.len > 0)
         env.put("EB_LOCAL_SITE_TOOLCHAINS", config.toolchainsJson(a, s.site_toolchains.value) catch oom()) catch oom();
+    if (g.variant) |v| {
+        env.put("EB_LOCAL_VARIANT", v) catch oom();
+        env.put("EB_LOCAL_VARIANT_BLOCK", variantBlock(v).?) catch oom();
+    }
     for (buildVariables(a, work, d)) |kv| env.put(kv[0], kv[1]) catch oom();
     for (s.eessi.items) |v| env.put(v.name, v.value) catch oom();
     for (values) |v| env.put(v.name, v.value) catch oom();
@@ -5369,6 +5444,8 @@ const DoctorOpts = struct {
     parallel: ?u8 = null,
     /// `--mpi`: report fabrics and, in an allocation, run the hello. Off unless the flag asks.
     mpi: bool = false,
+    /// `--profiling`: report what perf, valgrind and debuggers may do here.
+    profiling: bool = false,
     /// `--workspace`: exercise and describe this existing build workspace.
     workspace: ?[]const u8 = null,
 };
@@ -5552,6 +5629,79 @@ fn bindWord(c: Ctx, name: []const u8) []const u8 {
 /// libfabric, UCX and Slurm binding, then a two-rank hello for each
 /// site-approved transport. The hello's variables are not put in this
 /// process, and a build does not set them. Nothing here is a FAIL.
+/// A kernel setting under /proc/sys, as a number, or null when it cannot be
+/// read. Test builds read EB_LOCAL_TEST_PROC_SYS in place of /proc/sys.
+fn procSysNumber(c: Ctx, rel: []const u8) ?i64 {
+    var root: []const u8 = "/proc/sys";
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PROC_SYS"))) |p| root = p;
+    }
+    const path = std.fs.path.join(c.a, &.{ root, rel }) catch oom();
+    const text = readSmall(c.a, path) orelse return null;
+    return std.fmt.parseInt(i64, std.mem.trim(u8, text, " \t\n"), 10) catch null;
+}
+
+/// The doctor level for kernel.perf_event_paranoid N: 2 and below let a user
+/// sample their own processes; above 2, as some distributions set it, perf
+/// needs privileges.
+fn perfParanoidLevel(n: i64) []const u8 {
+    return if (n <= 2) "ok  " else "warn";
+}
+
+/// The doctor level for kernel.yama.ptrace_scope N: 0 lets a debugger attach
+/// to any of the user's processes, 1 only to its own children, 2 and 3 to
+/// none without privileges.
+fn ptraceScopeLevel(n: i64) []const u8 {
+    return switch (n) {
+        0 => "ok  ",
+        1 => "info",
+        else => "warn",
+    };
+}
+
+fn reportProfiling(c: Ctx, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) void {
+    const a = c.a;
+    if (procSysNumber(c, "kernel/perf_event_paranoid")) |n| {
+        if (n <= 2) {
+            note(a, out, json_lines, perfParanoidLevel(n), "perf can sample your own processes (kernel.perf_event_paranoid {d})", .{n});
+        } else note(a, out, json_lines, perfParanoidLevel(n), "perf cannot sample unprivileged processes (kernel.perf_event_paranoid {d}); ask the administrators for 2 or less", .{n});
+    } else note(a, out, json_lines, "info", "kernel.perf_event_paranoid cannot be read", .{});
+    if (procSysNumber(c, "kernel/yama/ptrace_scope")) |n| {
+        const level = ptraceScopeLevel(n);
+        switch (n) {
+            0 => note(a, out, json_lines, level, "debuggers can attach to your running processes (kernel.yama.ptrace_scope 0)", .{}),
+            1 => note(a, out, json_lines, level, "gdb and other debuggers can start a program but not attach to a running one you did not start under them (kernel.yama.ptrace_scope 1)", .{}),
+            else => note(a, out, json_lines, level, "debuggers cannot attach to processes without privileges (kernel.yama.ptrace_scope {d}); starting a program under valgrind still works", .{n}),
+        }
+    } else note(a, out, json_lines, "info", "no Yama ptrace restriction", .{});
+    const path_env = c.env.get("PATH") orelse "";
+    for ([_][]const u8{ "perf", "valgrind", "gdb" }) |name| {
+        if (proc.which(a, name, path_env) catch null) |exe| {
+            note(a, out, json_lines, "ok  ", "{s}: {s}", .{ name, exe });
+        } else note(a, out, json_lines, "info", "{s} is not on PATH; `module spider {s}` finds a module where the stack has one", .{ name, name });
+    }
+}
+
+test "profiling levels follow the kernel settings" {
+    try std.testing.expectEqualStrings("ok  ", perfParanoidLevel(-1));
+    try std.testing.expectEqualStrings("ok  ", perfParanoidLevel(2));
+    try std.testing.expectEqualStrings("warn", perfParanoidLevel(3));
+    try std.testing.expectEqualStrings("warn", perfParanoidLevel(4));
+    try std.testing.expectEqualStrings("ok  ", ptraceScopeLevel(0));
+    try std.testing.expectEqualStrings("info", ptraceScopeLevel(1));
+    try std.testing.expectEqualStrings("warn", ptraceScopeLevel(2));
+    try std.testing.expectEqualStrings("warn", ptraceScopeLevel(3));
+}
+
+test "variant blocks are known by name only" {
+    try std.testing.expect(std.mem.indexOf(u8, variantBlock("perf").?, "-fno-omit-frame-pointer") != null);
+    try std.testing.expect(std.mem.endsWith(u8, variantBlock("perf").?, "+ '-perf'"));
+    try std.testing.expect(std.mem.indexOf(u8, variantBlock("debug").?, "toolchainopts['noopt'] = True") != null);
+    try std.testing.expect(std.mem.endsWith(u8, variantBlock("debug").?, "+ '-debug'"));
+    try std.testing.expect(variantBlock("asan") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build_script_tail, "EB_LOCAL_VARIANT_BLOCK") != null);
+}
+
 fn reportMpi(c: Ctx, s: config.Settings, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) void {
     const a = c.a;
     const path_env = c.env.get("PATH") orelse "";
@@ -5966,6 +6116,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         if (reportCvmfs(c, tasks, &out, lines_ptr)) failed = true;
     }
     if (opts.mpi) reportMpi(c, s, &out, lines_ptr);
+    if (opts.profiling) reportProfiling(c, &out, lines_ptr);
     if (opts.workspace) |workspace| {
         if (reportWorkspace(c, s, workspace, &out, lines_ptr)) failed = true;
     }
@@ -6039,6 +6190,7 @@ fn appendConfigurationOptions(c: Ctx, s: config.Settings, g: Global, p: Place, l
     if (g.config_file) |f| line.appendSlice(a, &.{ "--config", qSingleLine(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
     if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
     if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
+    if (g.variant) |v| line.appendSlice(a, &.{ "--variant", v }) catch oom();
 }
 
 /// The command a batch job runs to build: this program, the options that
@@ -7296,6 +7448,7 @@ fn runMain(init: std.process.Init) u8 {
     var doctor_cvmfs = false;
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
+    var doctor_profiling = false;
     var doctor_workspace: ?[]const u8 = null;
     var list_missing = false;
     var overlay_action: []const u8 = "";
@@ -7350,6 +7503,10 @@ fn runMain(init: std.process.Init) u8 {
             command = .env;
         } else if (std.mem.eql(u8, x, "--explain") and command == .build and rest.items.len == 0) {
             g.explain = true;
+        } else if ((std.mem.eql(u8, x, "--variant") or joined(x, "--variant") != null) and command == .build and rest.items.len == 0) {
+            const v = if (joined(x, "--variant")) |j| j else value(args, &i, "--variant");
+            if (variantBlock(v) == null) die("--variant takes perf or debug", .{});
+            g.variant = v;
         } else if (command == .build and rest.items.len == 0 and subcommand(x) != null) {
             // Global options may come first: eb-local --profile gpu dev.
             command = subcommand(x).?;
@@ -7416,13 +7573,15 @@ fn runMain(init: std.process.Init) u8 {
                     doctor_cvmfs = true;
                 } else if (std.mem.eql(u8, x, "--mpi")) {
                     doctor_mpi = true;
+                } else if (std.mem.eql(u8, x, "--profiling")) {
+                    doctor_profiling = true;
                 } else if (std.mem.eql(u8, x, "--workspace")) {
                     if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = value(args, &i, "--workspace");
                 } else if (joined(x, "--workspace")) |v| {
                     if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = v;
-                } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel and --mpi; got '{s}'", .{x});
+                } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel, --mpi and --profiling; got '{s}'", .{x});
             },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
@@ -7741,7 +7900,7 @@ fn runMain(init: std.process.Init) u8 {
             if (list_missing and g.json_out) die("list takes --missing or --json, not both", .{});
             break :blk cmdList(c, s, rest.items, g.json_out, list_missing);
         },
-        .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .workspace = doctor_workspace }),
+        .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .profiling = doctor_profiling, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
         .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
     };

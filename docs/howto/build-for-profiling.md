@@ -1,0 +1,63 @@
+<!-- Generated from docs/orgmode/howto/build-for-profiling.org by docs/export.el; edit that file. -->
+
+# Build software to profile or debug
+
+An optimised build has no debug symbols and no frame pointers, so `perf` cannot walk its call stacks and `gdb` and `valgrind` cannot name its source lines.
+These steps build a second copy of a package for each job: one for profilers, one for debuggers, each as its own module beside the optimised one.
+
+## Before you start
+
+-   eb-local with a site file, and an allocation on the node type that will run the software, as [Install software on top of EESSI with EasyBuild](install-software.md) describes.
+-   The easyconfig of the package, by name or by path. Here it is `pigz-2.8-GCCcore-15.2.0.eb`.
+
+## Check what this node allows
+
+```bash
+eb-local doctor --profiling
+```
+
+A `warn` line on `kernel.perf_event_paranoid` means `perf` cannot sample your processes on this node; the administrators set it.
+A `kernel.yama.ptrace_scope` of 1 still lets `gdb` start a program; it cannot attach to one already running.
+For a tool the report says is not on `PATH`, `module spider NAME` finds its module, as in `module spider Valgrind`.
+
+## Build for a profiler
+
+```bash
+eb-local --variant perf pigz-2.8-GCCcore-15.2.0.eb --robot
+```
+
+The build keeps the optimisation and adds `-g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer` to the C, C++ and Fortran flags.
+Its module is `pigz/2.8-GCCcore-15.2.0-perf`.
+
+Load it and record call stacks through the frame pointers:
+
+```bash
+eval "$(eb-local env)"
+module load pigz/2.8-GCCcore-15.2.0-perf
+perf record --call-graph fp -o pigz.perf.data -- pigz -k -p 4 big.tar
+perf report -i pigz.perf.data
+```
+
+## Build for a debugger or valgrind
+
+```bash
+eb-local --variant debug pigz-2.8-GCCcore-15.2.0.eb --robot
+```
+
+The build has `-O0 -g`. Its module is `pigz/2.8-GCCcore-15.2.0-debug`.
+
+```bash
+eval "$(eb-local env)"
+module load pigz/2.8-GCCcore-15.2.0-debug Valgrind
+valgrind --tool=memcheck --track-origins=yes pigz -k small.tar
+valgrind --tool=callgrind pigz -k small.tar
+gdb --args pigz -k small.tar
+```
+
+`-O0` runs several times slower than the optimised build, so time it with the `perf` variant instead.
+
+## What the variants change, and what they do not
+
+Only the easyconfig named first gets the flags; its dependencies build, or stay, as usual.
+The flags reach C, C++ and Fortran through EasyBuild's toolchain; Rust, Go and other compilers do not get them.
+`eb-local --explain --variant perf ...` prints the lines appended to the easyconfig, and [the command reference](../reference/cli.md) lists them for both variants.

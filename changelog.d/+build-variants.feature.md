@@ -1,0 +1,1 @@
+`--variant perf` and `--variant debug` build the named easyconfig with debug symbols and frame pointers, or unoptimised with debug symbols, as a module whose version ends in `-perf` or `-debug`; `doctor --profiling` reports whether perf may sample and debuggers attach, and finds perf, valgrind and gdb.

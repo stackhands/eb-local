@@ -45,6 +45,7 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 | `EB_LOCAL_CONFIG` | Names a configuration file to read when `--config` does not. |
 | `EB_LOCAL_PIN_BUILDENV_PYTHON` | `1` prepends the stable private compatibility-layer `python3` directory after `dev` loads a build environment. |
 | `EB_LOCAL_KEEP_WORK` | `1` keeps the workspace of a build that succeeds. |
+| `EB_LOCAL_VARIANT`, `EB_LOCAL_VARIANT_BLOCK` | Set by a build with `--variant` for its script, which unsets them; a value in your shell is dropped. |
 | `EB_LOCAL_LOCK_TIMEOUT_MS` | Positive integer milliseconds to wait for a busy `flock` lock before exiting non-zero; default `300000`. |
 | `EB_LOCAL_EESSI_EXTEND` | Set, not empty and not `0`, it sends every argument to `eb`, as after `eb-local eb --`. An eb-stack EESSI target runs eb-local this way. |
 | `EB_LOCAL_ENV_STRICT` | Set, not empty and not `0` or `false`, `env` and `dev` prepend the same CVMFS check as `--strict` before their load lines. |
