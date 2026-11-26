@@ -1391,8 +1391,8 @@ test "a dot segment or a doubled slash stays approved, and each refusal names it
     };
     // `validAbsolute` refuses a path shorter than two characters or ending
     // in a slash, so `/`, `/./`, and `//` never reach `isRootEquivalent`.
-    // `/.//.` and `//.` do not end in a slash, and only empty and `.`
-    // components remain, so the root check refuses them.
+    // `/.` passes that check. Only an empty component and `.` remain, so
+    // `isRootEquivalent` is the refusal. `/.//.` and `//.` are the same case.
     const rows = [_]Row{
         .{ .path = "/opt/host", .refused_by = null },
         .{ .path = "/opt/./host", .refused_by = null },
@@ -1400,6 +1400,7 @@ test "a dot segment or a doubled slash stays approved, and each refusal names it
         .{ .path = "/", .refused_by = "validAbsolute" },
         .{ .path = "/./", .refused_by = "validAbsolute" },
         .{ .path = "//", .refused_by = "validAbsolute" },
+        .{ .path = "/.", .refused_by = "isRootEquivalent" },
         .{ .path = "/.//.", .refused_by = "isRootEquivalent" },
         .{ .path = "//.", .refused_by = "isRootEquivalent" },
     };
