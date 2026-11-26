@@ -63,6 +63,9 @@ jobs:
       - run: zig fmt --check src build.zig
       - run: zig build unit --summary all
       - run: zig build -Dtest-ops=true
+      # tests/site is not a package, so this discover leaves out
+      # tests/site/test_dev_locked_eessi.py. Run that file where live
+      # EESSI is mounted. A missing mount fails the file.
       - name: Run full Python suite with zero skips
         run: |
           set -euo pipefail
