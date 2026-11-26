@@ -1386,38 +1386,35 @@ fn rpathCapture(a: Allocator, exe: []const u8, args: []const u8, name: []const u
     return str(a, "{s}=$({s} rpath-wrappers {s}) || return $?\n", .{ name, exe, args });
 }
 
-/// The `rpath-wrappers` lines for a locked dev shell. Every command is
-/// captured and checked before any of them is evaluated, so one failure
-/// leaves `EB_LOCAL_RPATH_WRAPPERS` unset. The caller exports
+/// The `rpath-wrappers` lines for a locked dev shell. Each command is
+/// captured and checked before it is evaluated, so a failure leaves
+/// `EB_LOCAL_RPATH_WRAPPERS` unset. The caller exports
 /// `EB_LOCAL_DEV_PREFIX` only after these lines, which return on failure.
+/// A lock with no build environment runs only `--for`. That wraps every
+/// name in `rpath.names`, and `rpath.self_linking` is a subset, so a
+/// following `--unwrapped` is not needed. Capturing it before `--for` is
+/// on `PATH` would miss `.eb-local-rpath`, wrap those compilers again,
+/// and leave the first directory behind after `drop_rpath_wrappers`.
 fn lockedRpathWrapperLines(c: Ctx, s: config.Settings, modules: []const []const u8) []const u8 {
     const a = c.a;
     var exe_buf: [sys.path_max]u8 = undefined;
     const exe = q(a, selfExe(&exe_buf) orelse tool);
-    const cap_unwrapped = rpathCapture(a, exe, "--unwrapped", "_eb_local_unwrapped");
-    const scratch =
-        \\local _eb_local_for _eb_local_unwrapped
-        \\
-    ;
-    if (hasBuildenvModule(s, modules)) return str(a, "{s}{s}{s}", .{
-        scratch,
-        cap_unwrapped,
-        \\eval "$_eb_local_unwrapped"
-        \\unset _eb_local_unwrapped
-        \\
+    if (hasBuildenvModule(s, modules)) {
+        const cap_unwrapped = rpathCapture(a, exe, "--unwrapped", "_eb_local_unwrapped");
+        return str(a, "{s}{s}{s}", .{
+            \\local _eb_local_unwrapped
+            \\
+            ,
+            cap_unwrapped,
+            \\eval "$_eb_local_unwrapped"
+            \\unset _eb_local_unwrapped
+            \\
+        });
+    }
+    return str(a, "{s}{s}unset eb_local_family\n", .{
+        familyDetectLines(a),
+        rpathEval(a, str(a, "{s} rpath-wrappers --for \"$eb_local_family\"", .{exe})),
     });
-    var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, scratch) catch oom();
-    out.appendSlice(a, familyDetectLines(a)) catch oom();
-    out.appendSlice(a, rpathCapture(a, exe, "--for \"$eb_local_family\"", "_eb_local_for")) catch oom();
-    out.appendSlice(a, cap_unwrapped) catch oom();
-    out.appendSlice(a,
-        \\eval "$_eb_local_for"
-        \\eval "$_eb_local_unwrapped"
-        \\unset _eb_local_for _eb_local_unwrapped eb_local_family
-        \\
-    ) catch oom();
-    return out.items;
 }
 
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
