@@ -2720,6 +2720,9 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
 const Run = union(enum) {
     exit: u8,
     signal: linux.SIG,
+    /// The process group was still occupied when the SIGKILL deadline
+    /// passed. Callers must not clean logs as though it had been reaped.
+    unreaped,
 };
 
 /// An exit code as it is. A signal is raised again, with the disposition this
@@ -2729,6 +2732,7 @@ const Run = union(enum) {
 fn stop(run: Run) u8 {
     switch (run) {
         .exit => |c| return c,
+        .unreaped => return 1,
         .signal => |sig| {
             var cur: linux.Sigaction = undefined;
             _ = linux.sigaction(sig, null, &cur);
@@ -2769,7 +2773,27 @@ var first_signal = std.atomic.Value(u32).init(0);
 /// ignores `SIGINT`, `SIGTERM`, or `SIGHUP`.
 const group_settle_grace_ms: i64 = 500;
 
+/// How long to keep sending SIGKILL and reaping after the grace period.
+/// This is the bound `proc.stopGroup` uses. A child in uninterruptible
+/// sleep can sit with SIGKILL pending, and a blocking wait never
+/// returns. A member forked after one signal can miss that signal.
+/// Reaching this deadline without ECHILD is a timeout, not an empty group.
+const group_kill_reap_ms: i64 = 10_000;
+
+/// Pause between kill attempts, so a late fork is signalled again soon.
+const group_kill_slice_ms: i64 = 10;
+
+/// Most `wait4` calls in one `reapPending` pass. `EINTR` and a reaped pid
+/// are retries. A signal storm or a stream of exiting children returns
+/// `.busy` at this cap, or at the deadline, so the caller can pause.
+const reap_pass_cap: u32 = 64;
+
 fn monotonicMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.clock) |clock| return clock.load(.acquire);
+        }
+    }
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.MONOTONIC, &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
@@ -2779,31 +2803,213 @@ fn monotonicMs() i64 {
 /// into a `-Dtest-ops` build. `phase` 0 makes `wait4` report a live child;
 /// `phase` 1 makes it report `ECHILD`. While installed, the scan reports no
 /// live member. `entered` is written once `settleGroup` commits to waiting,
-/// and a byte on `wake` releases that wait.
+/// and a byte on `wake` releases that wait. After the first `SIGKILL`,
+/// `script` replaces `phase` one result at a time. `script_from_start`
+/// uses `script` before that signal as well. `eintr` is `EINTR` and
+/// `reaped` is a collected pid. Both are retries, so one pass may read
+/// several of them. `clock`, when set, replaces the monotonic clock, and
+/// `pauseUntil` jumps it to the wake time.
+const ProbeStep = enum { live, empty, unknown, eintr, reaped };
+
 const SettleProbe = struct {
     phase: *std.atomic.Value(u8),
     entered: i32,
     wake: i32,
     told: std.atomic.Value(u8) = .init(0),
+    /// When false, the grace loop keeps its own deadline instead of
+    /// blocking on `wake`. `phase` still stands in for `wait4`.
+    hold: bool = true,
+    /// Skip the grace wait and go straight to SIGKILL.
+    force_kill: bool = false,
+    /// `wait4` results after the first SIGKILL, in order. Empty keeps `phase`.
+    /// The last entry repeats. `eintr` and `reaped` stay in the reap loop.
+    script: []const ProbeStep = &.{},
+    /// Apply `script` to the grace reaps as well, before the first SIGKILL.
+    script_from_start: bool = false,
+    script_i: std.atomic.Value(u32) = .init(0),
+    /// SIGKILL calls that returned something other than EINTR.
+    kills: std.atomic.Value(u32) = .init(0),
+    /// Block inside the post-kill reap with this 1-based index until
+    /// `release` is set. 0 disables the barrier.
+    barrier_at: u32 = 0,
+    release: std.atomic.Value(u8) = .init(0),
+    /// 0 off, 1 armed, 2 consumed. Armed turns the next scripted empty
+    /// result into one live result: a member forked after SIGKILL.
+    late: std.atomic.Value(u8) = .init(0),
+    /// SIGKILL count when that late member was observed.
+    kills_at_fork: std.atomic.Value(u32) = .init(0),
+    /// Times an unexpected reap errno was reported.
+    reported: std.atomic.Value(u32) = .init(0),
+    /// Times the kill deadline passed on a live child or a busy reap.
+    timeouts: std.atomic.Value(u32) = .init(0),
+    /// Override `group_settle_grace_ms` when non-negative. `force_kill` wins.
+    grace_ms: i64 = -1,
+    /// Override `group_kill_reap_ms` when positive.
+    kill_ms: i64 = 0,
+    /// Monotonic milliseconds. Null uses the real clock.
+    clock: ?*std.atomic.Value(i64) = null,
+    /// `wait4` reads observed through the probe.
+    wait_calls: std.atomic.Value(u32) = .init(0),
+    /// Most `wait4` reads inside one `reapPending` call.
+    max_pass_waits: std.atomic.Value(u32) = .init(0),
+    /// `wait4` reads in the latest `reapPending` call.
+    last_pass_waits: std.atomic.Value(u32) = .init(0),
+    /// `reapPending` calls that read `wait4` at least once.
+    passes: std.atomic.Value(u32) = .init(0),
 };
 
 var settle_probe: ?*SettleProbe = null;
 
-/// Reap any exited children in process group `pgid` without blocking; return
-/// whether live reparented children of this process remain in `pgid`.
-fn reapGroupState(pgid: linux.pid_t) bool {
-    if (pgid <= 0) return false;
-    if (comptime build_options.test_ops) {
-        if (settle_probe) |probe| return probe.phase.load(.acquire) == 0;
+const Reap = union(enum) {
+    /// `wait4` returned ECHILD: no matching child remains.
+    empty,
+    /// A child of this process is still in the group.
+    live,
+    /// `wait4` failed with an errno other than EINTR or ECHILD.
+    unknown: linux.E,
+    /// The pass stopped on `EINTR` or a reaped pid. The cap or the
+    /// deadline was reached, and the group is not drained.
+    busy,
+};
+
+const GroupEnd = enum { drained, timed_out };
+
+/// One `wait4` result. `.retry` is a reaped zombie or EINTR; the caller
+/// calls `wait4` again. Only ECHILD is an empty group.
+const WaitRead = union(enum) { retry, reap: Reap };
+
+fn readWait(rc: usize) WaitRead {
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            if (rc == 0) return .{ .reap = .live };
+            return .retry;
+        },
+        .INTR => return .retry,
+        .CHILD => return .{ .reap = .empty },
+        else => |e| return .{ .reap = .{ .unknown = e } },
     }
-    var raw: i32 = 0;
-    while (true) {
-        const rc = linux.wait4(-pgid, &raw, linux.W.NOHANG, null);
-        switch (linux.errno(rc)) {
-            .SUCCESS => if (rc == 0) return true,
-            .INTR => continue,
-            else => return false,
+}
+
+fn probeForceKill() bool {
+    if (comptime !build_options.test_ops) return false;
+    const probe = settle_probe orelse return false;
+    return probe.force_kill;
+}
+
+fn probeUsesScript(probe: *SettleProbe) bool {
+    if (probe.script.len == 0) return false;
+    if (probe.script_from_start) return true;
+    return probe.kills.load(.acquire) != 0;
+}
+
+fn probeRead(probe: *SettleProbe) WaitRead {
+    const seen = probe.wait_calls.fetchAdd(1, .monotonic);
+    // A retry script that ignored the cap would spin. Stop so the test
+    // fails instead of hanging.
+    if (seen >= 1_000_000) return .{ .reap = .empty };
+    if (!probeUsesScript(probe)) {
+        const reap: Reap = if (probe.phase.load(.acquire) == 0) .live else .empty;
+        return .{ .reap = reap };
+    }
+    const n = probe.script.len;
+    const i = probe.script_i.fetchAdd(1, .acq_rel);
+    var step: ProbeStep = if (i < n) probe.script[i] else probe.script[n - 1];
+    if (step == .empty and probe.late.load(.acquire) == 1) {
+        if (probe.late.cmpxchgStrong(1, 2, .acq_rel, .acquire) == null) {
+            probe.kills_at_fork.store(probe.kills.load(.acquire), .release);
+            step = .live;
         }
+    }
+    if (probe.barrier_at != 0 and i + 1 == probe.barrier_at) {
+        _ = linux.write(probe.entered, "b", 1);
+        while (probe.release.load(.acquire) == 0) {
+            var pfd = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+            if (linux.errno(linux.poll(&pfd, 1, 1000)) == .INTR) continue;
+        }
+        var drain = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+        const got = linux.poll(&drain, 1, 0);
+        if (linux.errno(got) == .SUCCESS and got > 0) {
+            var buf: [16]u8 = undefined;
+            while (linux.errno(linux.read(probe.wake, &buf, buf.len)) == .INTR) {}
+        }
+    }
+    return switch (step) {
+        .live => .{ .reap = .live },
+        .empty => .{ .reap = .empty },
+        .unknown => .{ .reap = .{ .unknown = .IO } },
+        .eintr, .reaped => .retry,
+    };
+}
+
+fn nextWait(pgid: linux.pid_t, raw: *i32) WaitRead {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| return probeRead(probe);
+    }
+    return readWait(linux.wait4(-pgid, raw, linux.W.NOHANG, null));
+}
+
+fn noteReapPass(calls: u32) void {
+    if (comptime !build_options.test_ops) return;
+    const probe = settle_probe orelse return;
+    _ = probe.passes.fetchAdd(1, .monotonic);
+    probe.last_pass_waits.store(calls, .monotonic);
+    const prev = probe.max_pass_waits.load(.monotonic);
+    if (calls > prev) probe.max_pass_waits.store(calls, .monotonic);
+}
+
+/// Reap zombies in `pgid` without blocking. One pass calls `wait4` at
+/// most `reap_pass_cap` times. After `EINTR` and after each reaped pid
+/// it checks `deadline`. The cap or the deadline returns `.busy`, which
+/// is not an empty group.
+fn reapPending(pgid: linux.pid_t, deadline: i64) Reap {
+    if (pgid <= 0) return .empty;
+    var calls: u32 = 0;
+    var raw: i32 = 0;
+    var result: Reap = .busy;
+    while (calls < reap_pass_cap) {
+        calls += 1;
+        switch (nextWait(pgid, &raw)) {
+            .reap => |r| {
+                result = r;
+                break;
+            },
+            .retry => if (monotonicMs() >= deadline) break,
+        }
+    }
+    noteReapPass(calls);
+    return result;
+}
+
+/// Report an unexpected `wait4` errno once per settle. EINTR is retried in
+/// `readWait` and is not an unknown result.
+fn noteUnknown(noted: *bool, pgid: linux.pid_t, reap: Reap) void {
+    const err = switch (reap) {
+        .unknown => |e| e,
+        else => return,
+    };
+    if (noted.*) return;
+    noted.* = true;
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| _ = probe.reported.fetchAdd(1, .monotonic);
+    }
+    // A test binary's stderr is captured, and zig build prints "failed
+    // command" for that capture even when every test passed.
+    if (@import("builtin").is_test) return;
+    warn("cannot reap process group {d} ({s})", .{ pgid, sys.describeErrno(err) });
+}
+
+/// Reap exited children in `pgid` in bounded passes. True only when a
+/// child of this process is still in `pgid`. A pass that returns `.busy`
+/// pauses and tries again until `ECHILD`, a live child, an unexpected
+/// errno, or the deadline.
+fn reapGroupState(pgid: linux.pid_t) bool {
+    const deadline = monotonicMs() + group_kill_reap_ms;
+    while (true) {
+        const reap = reapPending(pgid, deadline);
+        if (reap == .live) return true;
+        if (reap != .busy) return false;
+        if (monotonicMs() >= deadline) return false;
+        pauseUntil(null, @min(deadline, monotonicMs() + group_kill_slice_ms));
     }
 }
 
@@ -2815,10 +3021,12 @@ fn settleScan(pgid: linux.pid_t) bool {
 }
 
 /// Block until the test releases the probe. True when the probe handled the
-/// wait, so the caller checks `wait4` again.
+/// wait, so the caller checks `wait4` again. A probe with `hold` false
+/// does not handle it, and the caller waits out the grace deadline.
 fn probeWait() bool {
     if (comptime !build_options.test_ops) return false;
     const probe = settle_probe orelse return false;
+    if (!probe.hold) return false;
     if (probe.told.swap(1, .acq_rel) == 0) {
         _ = linux.write(probe.entered, "e", 1);
     }
@@ -2841,15 +3049,145 @@ fn drainSignalFd(sfd: sys.fd_t) void {
     }
 }
 
+/// Wait until `until` (monotonic milliseconds), or until `SIGCHLD` is
+/// readable on `sfd`. `EINTR` retries. A failed poll sleeps instead, so a
+/// missing signalfd cannot spin. A null `sfd` always sleeps, so a signal
+/// storm cannot skip the pause between reap passes.
+fn pauseUntil(sfd: ?sys.fd_t, until: i64) void {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.clock) |clock| {
+                const now = clock.load(.acquire);
+                if (now < until) clock.store(until, .release);
+                return;
+            }
+        }
+    }
+    while (true) {
+        const rem = until - monotonicMs();
+        if (rem <= 0) return;
+        if (sfd) |fd| {
+            var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+            const rc = linux.poll(&pfd, 1, @intCast(rem));
+            switch (linux.errno(rc)) {
+                .INTR => continue,
+                .SUCCESS => {
+                    drainSignalFd(fd);
+                    return;
+                },
+                else => {},
+            }
+        }
+        const left = until - monotonicMs();
+        if (left <= 0) return;
+        const sec = @divTrunc(left, 1000);
+        var ts: linux.timespec = .{
+            .sec = @intCast(sec),
+            .nsec = @intCast((left - sec * 1000) * 1_000_000),
+        };
+        if (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) continue;
+        return;
+    }
+}
+
+/// Send one SIGKILL, retrying EINTR until `deadline`. False means the
+/// deadline passed during those retries. Other errnos count as one attempt:
+/// the group may already be gone, and the following reap decides.
+fn sendKill(pgid: linux.pid_t, deadline: i64) bool {
+    while (true) {
+        const kr = linux.kill(-pgid, .KILL);
+        if (linux.errno(kr) != .INTR) {
+            if (comptime build_options.test_ops) {
+                if (settle_probe) |probe| _ = probe.kills.fetchAdd(1, .release);
+            }
+            return true;
+        }
+        if (monotonicMs() >= deadline) return false;
+    }
+}
+
+fn killBudgetMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| if (probe.kill_ms > 0) return probe.kill_ms;
+    }
+    return group_kill_reap_ms;
+}
+
+/// Send SIGKILL to process group `pgid` and reap until `wait4` returns
+/// `ECHILD`, or the kill deadline passes. Each pass signals the group
+/// again, so a member forked after the previous `SIGKILL` is killed too.
+/// `wait4` does not block. `EINTR` or a reaped pid stops the pass at
+/// `reap_pass_cap` or at the deadline and returns `.busy`. The loop
+/// pauses before the next pass. The last reap result is kept. At the
+/// deadline one more bounded reap runs. `ECHILD` is `.drained`. Anything
+/// else is `.timed_out`: a diagnostic is printed, and the caller must
+/// not clean logs or otherwise treat the group as empty.
+fn reapKilledGroup(pgid: linux.pid_t, sfd: ?sys.fd_t, noted: *bool) GroupEnd {
+    if (pgid <= 0) return .drained;
+    const deadline = monotonicMs() + killBudgetMs();
+    var last: Reap = .live;
+    while (true) {
+        if (!sendKill(pgid, deadline)) break;
+        last = reapPending(pgid, deadline);
+        if (last == .empty) return .drained;
+        noteUnknown(noted, pgid, last);
+        const now = monotonicMs();
+        if (now >= deadline) break;
+        const until = @min(deadline, now + group_kill_slice_ms);
+        // A busy pass is a storm of `EINTR` or exiting children. Sleep
+        // even when `SIGCHLD` is already readable, so the next pass does
+        // not start at once.
+        if (last == .busy) {
+            pauseUntil(null, until);
+        } else {
+            pauseUntil(sfd, until);
+        }
+    }
+    last = reapPending(pgid, deadline);
+    if (last == .empty) return .drained;
+    noteUnknown(noted, pgid, last);
+    if (last == .live or last == .busy) noteLiveTimeout(pgid);
+    return .timed_out;
+}
+
+fn noteLiveTimeout(pgid: linux.pid_t) void {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| _ = probe.timeouts.fetchAdd(1, .monotonic);
+    }
+    // See noteUnknown: a passing test must not write this to stderr.
+    if (@import("builtin").is_test) return;
+    warn("a descendant is still in process group {d} after SIGKILL; it was not reaped", .{pgid});
+}
+
+fn graceBudgetMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.force_kill) return 0;
+            if (probe.grace_ms >= 0) return probe.grace_ms;
+        }
+    }
+    return group_settle_grace_ms;
+}
+
 /// Wait on `SIGCHLD` via `signalfd` and `poll` up to `group_settle_grace_ms`
-/// for reparented descendants in `pgid` to exit, then escalate to `SIGKILL`
-/// (`proc.stopGroup`) and reap remaining zombies.
-fn settleGroup(pgid: linux.pid_t) void {
-    if (pgid <= 0) return;
+/// for reparented descendants in `pgid` to exit, then `SIGKILL` and reap
+/// until none remain or `group_kill_reap_ms` passes. Only `ECHILD` ends the
+/// wait. Any other `wait4` error stays in that bounded retry. Each reap
+/// pass stops at `reap_pass_cap` or at its deadline and returns `.busy`
+/// rather than spinning. The grace loop pauses between those passes.
+/// Grace expiry is not an empty group: it goes on to `SIGKILL`. The kill
+/// deadline without `ECHILD` is `.timed_out`.
+fn settleGroup(pgid: linux.pid_t) GroupEnd {
+    if (pgid <= 0) return .drained;
+    var noted = false;
+    const skip_grace = probeForceKill();
+    const grace_deadline = monotonicMs() + graceBudgetMs();
     // wait4 is authoritative for children of this process. The /proc scan
     // can miss a live member, and returning then orphans it when stop()
-    // re-raises the signal.
-    if (!reapGroupState(pgid) and !settleScan(pgid)) return;
+    // re-raises the signal. Only ECHILD means no child remains.
+    const opened = reapPending(pgid, grace_deadline);
+    noteUnknown(&noted, pgid, opened);
+    if (opened == .empty and !settleScan(pgid)) return .drained;
 
     var chld = linux.sigemptyset();
     linux.sigaddset(&chld, .CHLD);
@@ -2861,28 +3199,28 @@ fn settleGroup(pgid: linux.pid_t) void {
     const sfd: ?sys.fd_t = if (linux.errno(sfd_rc) == .SUCCESS) @intCast(sfd_rc) else null;
     defer if (sfd) |fd| sys.close(fd);
 
-    const deadline = monotonicMs() + group_settle_grace_ms;
     while (true) {
         if (sfd) |fd| drainSignalFd(fd);
-        const live = reapGroupState(pgid);
-        if (!live and !settleScan(pgid)) return;
-        const rem = deadline - monotonicMs();
+        const pending = reapPending(pgid, grace_deadline);
+        noteUnknown(&noted, pgid, pending);
+        if (pending == .empty and !settleScan(pgid)) return .drained;
+        if (skip_grace) break;
+        const rem = grace_deadline - monotonicMs();
         if (rem <= 0) break;
-        if (live and probeWait()) continue;
-        if (live and sfd != null) {
+        if (pending == .live and probeWait()) continue;
+        if (pending == .live and sfd != null) {
             var pfd = [1]linux.pollfd{.{ .fd = sfd.?, .events = linux.POLL.IN, .revents = 0 }};
             _ = linux.poll(&pfd, 1, @intCast(rem));
         } else {
-            var empty: [1]linux.pollfd = undefined;
-            _ = linux.poll(&empty, 0, @intCast(@min(rem, 10)));
+            pauseUntil(null, @min(grace_deadline, monotonicMs() + group_kill_slice_ms));
         }
     }
 
-    if (reapGroupState(pgid) or settleScan(pgid)) {
-        _ = linux.kill(-pgid, .CONT);
-        proc.stopGroup(pgid);
-        _ = reapGroupState(pgid);
-    }
+    const after = reapPending(pgid, grace_deadline);
+    noteUnknown(&noted, pgid, after);
+    if (after == .empty and !settleScan(pgid)) return .drained;
+    while (linux.errno(linux.kill(-pgid, .CONT)) == .INTR) {}
+    return reapKilledGroup(pgid, sfd, &noted);
 }
 
 fn selfPgrp() linux.pid_t {
@@ -3036,7 +3374,9 @@ const Guard = struct {
         const status: u32 = @bitCast(raw);
         if (own_group) {
             if (g.received() != null or !linux.W.IFEXITED(status)) {
-                settleGroup(@intCast(pid));
+                // A timeout is not a reaped group. Returning the child's
+                // status here would let the caller clean logs anyway.
+                if (settleGroup(@intCast(pid)) == .timed_out) return .unreaped;
             } else {
                 _ = reapGroupState(@intCast(pid));
             }
@@ -3910,6 +4250,7 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}", .{rc}),
                 .signal => return stop(run),
+                .unreaped => return 1,
             }
             removed_items = targets.len;
         } else {
@@ -4499,15 +4840,24 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         return stop(.{ .signal = sig });
     }
     // The guard stays until the logs are clean: a signal stops the build, but
-    // eb-local first waits for EasyBuild, which writes them, to exit.
+    // eb-local first waits for EasyBuild, which writes them, to exit. Logs
+    // are cleaned only after the process group is reaped. A SIGKILL timeout
+    // leaves them in place.
     const build_argv = buildCommand(a, c, s, p, args);
     const ran = guard.run(a, build_argv, envpOf(a, &env)) catch die("cannot start {s}", .{build_argv[0]});
     const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
+        .unreaped => 1,
     };
 
-    if (values.len > 0) {
+    // Redaction requires ECHILD. A descendant still alive after the SIGKILL
+    // deadline can write a secret into a log that was just cleaned, so a
+    // timed-out reap leaves the logs alone and the build exits 1.
+    if (ran == .unreaped) {
+        if (values.len > 0)
+            warn("build logs were not cleaned of secrets, because a descendant may still write them", .{});
+    } else if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
         secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
@@ -4557,6 +4907,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const code: u8 = switch (ended) {
         .exit => |x| if (x != 0) x else released,
         .signal => 1,
+        .unreaped => 1,
     };
     const final = endLock(endLock(code, &ws_lock, ws_lock_path), &prefix_lock, prefixLockPath(c, p.prefix));
     restoreMask(&mask);
@@ -5889,6 +6240,9 @@ fn submitReserved(
                 guard.release();
                 return stop(.{ .signal = guard.received() orelse sig });
             },
+            .unreaped => {
+                failed = true;
+            },
         }
     }
     if (guard.received()) |sig| {
@@ -6534,6 +6888,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
                     storage.releaseLockAfterError(&prefix_lock);
                     return stop(run);
                 },
+                .unreaped => return 1,
             }
         }
     } else {
@@ -6702,6 +7057,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
                 storage.releaseLockAfterError(&prefix_lock);
                 return stop(run);
             },
+            .unreaped => return 1,
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
@@ -7556,7 +7912,7 @@ test "Guard.run does not launch child when a guarded signal already arrived" {
         const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env) catch return error.TestUnexpectedResult;
         switch (ran) {
             .signal => |got| try std.testing.expectEqual(sig, got),
-            .exit => return error.TestUnexpectedResult,
+            .exit, .unreaped => return error.TestUnexpectedResult,
         }
         try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, marker, false));
     }
@@ -7633,7 +7989,7 @@ test "settleGroup wakes on SIGCHLD without leaking descriptors" {
     }});
 
     const t0 = monotonicMs();
-    settleGroup(@intCast(pid));
+    try std.testing.expectEqual(GroupEnd.drained, settleGroup(@intCast(pid)));
     const elapsed = monotonicMs() - t0;
     releaser.join();
     try std.testing.expect(!proc.groupAlive(@intCast(pid)));
@@ -7671,8 +8027,8 @@ test "settleGroup waits while wait4 reports a child the scan missed" {
     const Runner = struct {
         done_fd: i32,
         fn run(ctx: @This()) void {
-            settleGroup(2147483646);
-            _ = linux.write(ctx.done_fd, "d", 1);
+            const end = settleGroup(2147483646);
+            _ = linux.write(ctx.done_fd, if (end == .drained) "d" else "x", 1);
         }
     };
     const thread = try std.Thread.spawn(.{}, Runner.run, .{Runner{ .done_fd = done[1] }});
@@ -7706,7 +8062,269 @@ test "settleGroup waits while wait4 reports a child the scan missed" {
         if (linux.errno(n) == .INTR) continue;
         try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(n));
         try std.testing.expectEqual(@as(usize, 1), n);
+        try std.testing.expectEqual(@as(u8, 'd'), byte[0]);
         break;
+    }
+}
+
+fn waitErrno(e: linux.E) usize {
+    return @bitCast(-@as(isize, @backingInt(e)));
+}
+
+test "only ECHILD means a process group has no child" {
+    switch (readWait(waitErrno(.CHILD))) {
+        .reap => |r| try std.testing.expect(r == .empty),
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(waitErrno(.INTR))) {
+        .retry => {},
+        .reap => return error.TestUnexpectedResult,
+    }
+    switch (readWait(waitErrno(.IO))) {
+        .reap => |r| switch (r) {
+            .unknown => |err| try std.testing.expectEqual(linux.E.IO, err),
+            else => return error.TestUnexpectedResult,
+        },
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(0)) {
+        .reap => |r| try std.testing.expect(r == .live),
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(42)) {
+        .retry => {},
+        .reap => return error.TestUnexpectedResult,
+    }
+}
+
+const ScriptedEnd = struct {
+    done_fd: i32,
+    end: *std.atomic.Value(u8),
+    fn run(ctx: @This()) void {
+        const got = settleGroup(2147483646);
+        ctx.end.store(if (got == .drained) 0 else 1, .release);
+        _ = linux.write(ctx.done_fd, "d", 1);
+    }
+};
+
+fn readReady(fd: i32, timeout_ms: i32) !usize {
+    var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+    while (true) {
+        const rc = linux.poll(&pfd, 1, timeout_ms);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        return rc;
+    }
+}
+
+test "settleGroup keeps killing until the scripted reap is empty" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    // Post-kill wait4 stays live twice, then ECHILD. The first live result
+    // blocks in the probe so the test can see that settleGroup has not
+    // returned and has not stopped signalling.
+    const script = [_]ProbeStep{ .live, .live, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var end = std.atomic.Value(u8).init(255);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+        .barrier_at = 1,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+    const thread = try std.Thread.spawn(.{}, ScriptedEnd.run, .{ScriptedEnd{ .done_fd = done[1], .end = &end }});
+    defer {
+        probe.release.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), try readReady(entered[0], 5000));
+    try std.testing.expectEqual(@as(usize, 0), try readReady(done[0], 0));
+    try std.testing.expectEqual(@as(u32, 1), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), probe.script_i.load(.acquire));
+
+    probe.release.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    try std.testing.expectEqual(@as(usize, 1), try readReady(done[0], 5000));
+    try std.testing.expectEqual(@as(u8, 0), end.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.script_i.load(.acquire));
+}
+
+test "settleGroup signals a member forked after SIGKILL" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    // The script would go live, then empty. At the barrier the test arms a
+    // late fork, which turns that empty into one more live result. The group
+    // must be signalled again after that result and only then reach ECHILD.
+    const script = [_]ProbeStep{ .live, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var end = std.atomic.Value(u8).init(255);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+        .barrier_at = 1,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+    const thread = try std.Thread.spawn(.{}, ScriptedEnd.run, .{ScriptedEnd{ .done_fd = done[1], .end = &end }});
+    defer {
+        probe.release.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), try readReady(entered[0], 5000));
+    try std.testing.expectEqual(@as(usize, 0), try readReady(done[0], 0));
+    const kills_before = probe.kills.load(.acquire);
+    try std.testing.expectEqual(@as(u32, 1), kills_before);
+    probe.late.store(1, .release);
+
+    probe.release.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    try std.testing.expectEqual(@as(usize, 1), try readReady(done[0], 5000));
+    try std.testing.expectEqual(@as(u8, 0), end.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 2), probe.late.load(.acquire));
+    const at_fork = probe.kills_at_fork.load(.acquire);
+    const kills = probe.kills.load(.acquire);
+    try std.testing.expect(at_fork > kills_before);
+    try std.testing.expect(kills > at_fork);
+    try std.testing.expectEqual(@as(u32, 3), kills);
+}
+
+test "settleGroup retries an unexpected reap error until ECHILD" {
+    if (comptime !build_options.test_ops) return;
+
+    const script = [_]ProbeStep{ .unknown, .unknown, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = -1,
+        .wake = -1,
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    try std.testing.expectEqual(GroupEnd.drained, settleGroup(2147483646));
+    try std.testing.expectEqual(@as(u32, 3), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.script_i.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), probe.reported.load(.acquire));
+}
+
+test "settleGroup returns at the kill deadline while a member stays unreaped" {
+    if (comptime !build_options.test_ops) return;
+
+    // phase stays 0, so wait4 keeps reporting a live member. SIGKILL
+    // does not clear that answer. The call must return timed_out at the
+    // deadline, which is not a drained group, and must not block in wait4.
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = -1,
+        .wake = -1,
+        .hold = false,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    const fds_before = try testSelfFdCount();
+    const t0 = monotonicMs();
+    const end = settleGroup(2147483646);
+    const elapsed = monotonicMs() - t0;
+
+    const lower = group_settle_grace_ms + group_kill_reap_ms;
+    try std.testing.expectEqual(GroupEnd.timed_out, end);
+    try std.testing.expectEqual(@as(u32, 1), probe.timeouts.load(.acquire));
+    try std.testing.expect(elapsed + 30 >= lower);
+    try std.testing.expect(elapsed < lower + 2000);
+    try std.testing.expectEqual(fds_before, try testSelfFdCount());
+}
+
+test "settleGroup bounds an EINTR storm and a reaped-pid storm" {
+    if (comptime !build_options.test_ops) return;
+
+    // Each step repeats. The injected clock stands still during a pass
+    // and jumps forward in `pauseUntil`, so a pass runs to the cap and
+    // the deadline is what ends the call.
+    const steps = [_]ProbeStep{ .eintr, .reaped };
+    for (steps) |step| {
+        var clock = std.atomic.Value(i64).init(0);
+        const script = [_]ProbeStep{step};
+        var phase = std.atomic.Value(u8).init(0);
+        var probe = SettleProbe{
+            .phase = &phase,
+            .entered = -1,
+            .wake = -1,
+            .hold = false,
+            .grace_ms = 30,
+            .kill_ms = 30,
+            .script = &script,
+            .script_from_start = true,
+            .clock = &clock,
+        };
+        settle_probe = &probe;
+        defer settle_probe = null;
+
+        const end = settleGroup(2147483646);
+
+        try std.testing.expectEqual(GroupEnd.timed_out, end);
+        const waits = probe.wait_calls.load(.acquire);
+        const passes = probe.passes.load(.acquire);
+        const most = probe.max_pass_waits.load(.acquire);
+        try std.testing.expect(passes > 1);
+        try std.testing.expect(most <= reap_pass_cap);
+        try std.testing.expectEqual(reap_pass_cap, most);
+        // The deadline is already due on the last pass, so that pass
+        // stops after one `EINTR` or reaped pid instead of filling the cap.
+        try std.testing.expectEqual(@as(u32, 1), probe.last_pass_waits.load(.acquire));
+        try std.testing.expect(waits <= passes * reap_pass_cap);
+        try std.testing.expect(waits > reap_pass_cap);
+        try std.testing.expect(clock.load(.acquire) >= probe.grace_ms + probe.kill_ms);
+        try std.testing.expectEqual(@as(u32, 1), probe.timeouts.load(.acquire));
+        try std.testing.expectEqual(@as(u32, 0), probe.reported.load(.acquire));
     }
 }
 
