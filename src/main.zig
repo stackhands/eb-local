@@ -4508,6 +4508,12 @@ fn installedSince(c: Ctx, prefix: []const u8, subdir: []const u8, started: i64) 
     return out.items;
 }
 
+fn setMode(path: []const u8, mode: u32) void {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const z = sys.z(&zb, path) catch return;
+    _ = linux.fchmodat(linux.AT.FDCWD, z.ptr, @as(linux.mode_t, @intCast(mode)));
+}
+
 /// After a successful `--cpu-target` build: audit what it installed for
 /// instructions the target lacks, and write the provenance record into each
 /// installed directory. Returns false when the audit fails.
@@ -4545,7 +4551,11 @@ fn maskAfterBuild(c: Ctx, g: Global, plan: MaskPlan, prefix: []const u8, started
             .version = version,
             .audit = audit,
         });
+        // EasyBuild leaves an installation read-only; the record goes in and the mode goes back.
+        const old_mode: ?u32 = if (fsx.statAt(fsx.cwd, eb_dir, false)) |st| st.perm() else |_| null;
+        if (old_mode) |m| setMode(eb_dir, m | 0o200);
         if (!cpumask.writeProvenance(a, eb_dir, text)) warn("cannot write the build-mode record in {s}", .{eb_dir});
+        if (old_mode) |m| setMode(eb_dir, m);
     }
     return !failed;
 }
