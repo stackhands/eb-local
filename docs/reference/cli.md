@@ -422,6 +422,44 @@ Without `--unwrapped`, finding nothing to wrap is exit 1.
 
 A wrapper adds a run path, when its command links, for each directory named with `-L` or `--library-path`, for the directory of each existing `lib*.so` or `lib*.so.N` file named by its absolute path, and for each `LIBRARY_PATH` entry when it wraps a compiler driver. The arguments in a response file, `@FILE`, count as its own; one it cannot read is passed on unchanged.
 
+### \_\_vm-run
+
+Internal: eb-local runs it for the builds that mask the CPU view, and it is not in `--help`; its options can change in any release.
+
+```text
+eb-local __vm-run --mode kvm|tcg --cpu-target TARGET [--memory MiB] [--cpus N]
+                  [--share DIR] [--share-ro DIR] [--allow-archspec-mismatch] -- COMMAND [ARG...]
+```
+
+Run COMMAND, in the working directory, as the caller's user and group, with the environment variables EasyBuild and EESSI read, inside a virtual CPU that presents TARGET, an EESSI software subdirectory such as `x86_64/amd/zen4`, `x86_64/intel/icelake` or `aarch64/neoverse_n1`.
+Before COMMAND starts, the guest checks that the CPU vendor, EESSI archdetect, archspec and `gcc -march=native` (`gcc -mcpu=native` on aarch64) all name TARGET, and that `/dev/fd` exists, and COMMAND does not run when one does not.
+`--mode kvm` is for a target of the host's architecture and boots the host kernel under QEMU with KVM, a named CPU model and `enforce`; it never uses the host CPU.
+`--mode tcg` is for a target of the other architecture and runs COMMAND in qemu user mode with `QEMU_CPU` set, on the EESSI compatibility layer of that architecture.
+[Build under a virtual CPU with QEMU](../howto/build-under-qemu.md) describes both and what each needs.
+
+| Option | Meaning |
+|---|---|
+| `--mode kvm`, `--mode tcg` | The kind of virtual CPU. |
+| `--cpu-target TARGET` | The target to present; `x86_64/amd/zen2`, `zen3`, `zen4`, `x86_64/intel/haswell`, `skylake_avx512`, `cascadelake`, `icelake`, `sapphirerapids`, `aarch64/neoverse_n1`, `neoverse_v1` or `a64fx`. |
+| `--memory MiB` | Guest memory under `kvm`, at least 256; default 8192. `tcg` has none to set. |
+| `--cpus N` | Guest CPUs under `kvm`; default the CPUs this process may run on. |
+| `--share DIR` | Also mount DIR writable in the guest, under `kvm`. The working directory and the directories named by `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `WORKING_DIR`, `EASYBUILD_PREFIX`, `EASYBUILD_BUILDPATH`, `EASYBUILD_INSTALLPATH`, `EASYBUILD_SOURCEPATH`, `EASYBUILD_REPOSITORYPATH` and the `EESSI_*_INSTALL` variables are mounted writable already. |
+| `--share-ro DIR` | Also mount DIR read-only in the guest, under `kvm`, for a directory on a file system other than `/` that COMMAND needs. |
+| `--allow-archspec-mismatch` | Run COMMAND although archspec names another CPU than TARGET, and say so on stderr. The other checks still refuse. |
+
+The guest receives `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TZ`, `TMPDIR`, `MODULEPATH`, `LOADEDMODULES`, `_LMFILES_`, `LMOD*`, `XDG_*`, `EASYBUILD_*`, `EESSI_*`, `EB_*`, `SLURM_*`, `WORKING_DIR` and `SOURCE_DATE_EPOCH`, and no other variable; under `tcg` the compatibility layer's directories come first in `PATH`.
+
+Exit status:
+
+| Status | Meaning |
+|---|---|
+| 0 to 255 | COMMAND's own status, or 128 and the signal number when a signal ended it. |
+| 2 | Refused before anything started: wrong options, an unknown target, a target the mode cannot present, or a missing tool, with the reason on stderr. |
+| 125 | The VM or the emulation failed and COMMAND reported no status; the console log of a failed `kvm` run is kept and its path printed. |
+| 126 | The guest refused: its CPU view does not name TARGET. COMMAND did not run, and stderr says which check failed. |
+
+A COMMAND that itself exits 2, 125 or 126 cannot be told from the helper's own statuses by the number alone; the helper's statuses come with a line on stderr that starts with `eb-local: vm-run:`.
+
 ### check
 
 For each `FILE`, print its machine, its program interpreter (the loader), its `RPATH` or `RUNPATH`, and where each library it needs resolves, ignoring `LD_LIBRARY_PATH`, then one line for all of them:
