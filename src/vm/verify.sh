@@ -38,7 +38,7 @@ esac
 rm -rf "$tmp"
 gcc_ok=
 for want in $EBVM_GCC; do [ "$march" = "$want" ] && gcc_ok=1; done
-[ -n "$gcc_ok" ] || refuse "gcc native reads '$march' ($(command -v "$EBVM_GCC_BIN")), $EBVM_TARGET needs one of: $EBVM_GCC"
+[ -n "$gcc_ok" ] || refuse "gcc native reads '$march' (compiler: $(command -v "$EBVM_GCC_BIN" || echo none)), $EBVM_TARGET needs one of: $EBVM_GCC"
 module load EasyBuild > /dev/null 2>&1
 spec=$(python3 -c 'import archspec.cpu as c; print(c.host().name)' 2> /dev/null)
 [ -n "$spec" ] || refuse "archspec is not importable after loading EasyBuild"

@@ -779,7 +779,6 @@ fn runKvm(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
         if (qemuRefusedModel(raw)) err("QEMU refused the CPU model {s}: this host lacks a feature it needs (enforce is on, and the helper never falls back to the host CPU)", .{cpu});
         return status_failed;
     }
-    if (outcome.refused) |m| err("not run: {s}", .{std.mem.trim(u8, m, "\n")});
     if (std.mem.eql(u8, env.get("EB_LOCAL_VM_KEEP") orelse "", "1")) {
         err("job directory kept: {s}", .{rundir});
     } else fsx.deleteTree(a, fsx.cwd, rundir) catch {};
@@ -879,10 +878,7 @@ fn runTcg(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
     const raw = waitFor(child.pid);
     const refused = readSmall(a, std.fs.path.join(a, &.{ rundir, "refused" }) catch return status_failed);
     var code = termStatus(raw);
-    if (refused != null) {
-        code = status_unverified;
-        err("not run: {s}", .{std.mem.trim(u8, refused.?, "\n")});
-    }
+    if (refused != null) code = status_unverified;
     fsx.deleteTree(a, fsx.cwd, rundir) catch {};
     return code;
 }
