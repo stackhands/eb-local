@@ -121,7 +121,7 @@ const usage_text =
     \\                                       what this node's target lacks; --json prints one
     \\                                       line of JSON with schema_version 1; --missing
     \\                                       lists only modules missing on this node's target
-    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
+    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling] [--cpu-target TARGET]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing;
     \\                                       --json prints one line of JSON with schema_version 1.
@@ -134,6 +134,8 @@ const usage_text =
     \\                                       allocation runs a two-rank hello per approved transport
     \\                                       --profiling reports whether perf may sample and
     \\                                       debuggers attach, and finds perf, valgrind and gdb
+    \\                                       --cpu-target TARGET reports whether this machine can
+    \\                                       present TARGET, and by which route
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
     \\                      --timestamp FILE [--spider CMD] [--verify]
     \\                                       write Lmod's spiderT.lua for those module
@@ -4868,6 +4870,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
     _ = env.swapRemove("EB_LOCAL_VARIANT");
     _ = env.swapRemove("EB_LOCAL_VARIANT_BLOCK");
+    for ([_][]const u8{ "EB_LOCAL_CPU_TARGET", "EB_LOCAL_MASK_ROUTE", "EB_LOCAL_PROBE", "EB_LOCAL_SELF", "EB_LOCAL_HOOKS_FILE", "EB_LOCAL_BASE_HOOKS" }) |name| _ = env.swapRemove(name);
     for (shell_startup) |name| _ = env.swapRemove(name);
     for (s.secrets.items) |sec| if (config.withheldSource(s, sec)) |name| {
         _ = env.swapRemove(name);
