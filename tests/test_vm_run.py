@@ -56,61 +56,61 @@ class Refusals(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stderr)
 
     def test_a_host_without_the_tools_refuses_and_does_not_start_a_vm(self):
-        target = "x86_64/amd/zen4" if HOST == "x86_64" else "aarch64/neoverse_n1"
+        target = "x86_64/amd/zen4" if HOST == "x86_64" else "x86_64/amd/zen3"
         mode = "kvm" if HOST == "x86_64" else "tcg"
         run = vm_run("--mode", mode, "--cpu-target", target, "--",
                      "true", env={"PATH": "/nonexistent", "EB_LOCAL_QEMU_DIR": "/nonexistent",
                                   "EB_LOCAL_VIRTIOFSD": "/nonexistent/virtiofsd",
                                   "EB_LOCAL_VM_KERNEL": "/nonexistent/vmlinuz"})
-        if mode == "kvm":
-            self.assertEqual(run.returncode, 2, run.stderr)
-        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(run.returncode, 2, run.stderr)
+        self.assertTrue(run.stderr.startswith("eb-local: vm-run: "), run.stderr)
 
 
-@unittest.skipUnless(binary.ZIG and RUN_VMS, "set EB_LOCAL_VM_TESTS=1 on a host with KVM, QEMU, virtiofsd and EESSI")
-class Runs(unittest.TestCase):
-    def timed(self, *args, **kw):
-        start = time.monotonic()
-        run = vm_run(*args, **kw)
-        print(f"\n{' '.join(args[:4])}: {time.monotonic() - start:.1f} s, status {run.returncode}")
-        return run
+# Defined only when asked for, so that a host without KVM lists no skipped tests.
+if binary.ZIG and RUN_VMS:
+    class Runs(unittest.TestCase):
+        def timed(self, *args, **kw):
+            start = time.monotonic()
+            run = vm_run(*args, **kw)
+            print(f"\n{' '.join(args[:4])}: {time.monotonic() - start:.1f} s, status {run.returncode}")
+            return run
 
-    @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
-    def test_kvm_zen4_reports_znver4_and_passes_the_status_through(self):
-        run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/amd/zen4", "--",
-                         "bash", "-c", "gcc -march=native -Q --help=target | grep -- '-march='; exit 7")
-        self.assertEqual(run.returncode, 7, run.stderr)
-        self.assertIn("znver4", run.stdout)
-        self.assertIn("archdetect=x86_64/amd/zen4", run.stderr)
-        self.assertIn("archspec=zen4", run.stderr)
+        @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
+        def test_kvm_zen4_reports_znver4_and_passes_the_status_through(self):
+            run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/amd/zen4", "--",
+                             "bash", "-c", "gcc -march=native -Q --help=target | grep -- '-march='; exit 7")
+            self.assertEqual(run.returncode, 7, run.stderr)
+            self.assertIn("znver4", run.stdout)
+            self.assertIn("archdetect=x86_64/amd/zen4", run.stderr)
+            self.assertIn("archspec=zen4", run.stderr)
 
-    @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
-    def test_kvm_icelake_reports_an_intel_part(self):
-        run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/intel/icelake", "--",
-                         "bash", "-c", "gcc -march=native -Q --help=target | grep -- '-march='; grep -m1 vendor_id /proc/cpuinfo")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("icelake-server", run.stdout)
-        self.assertIn("GenuineIntel", run.stdout)
-        self.assertIn("archspec=icelake", run.stderr)
+        @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
+        def test_kvm_icelake_reports_an_intel_part(self):
+            run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/intel/icelake", "--",
+                             "bash", "-c", "gcc -march=native -Q --help=target | grep -- '-march='; grep -m1 vendor_id /proc/cpuinfo")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("icelake-server", run.stdout)
+            self.assertIn("GenuineIntel", run.stdout)
+            self.assertIn("archspec=icelake", run.stderr)
 
-    @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
-    def test_a_cpu_view_that_does_not_name_the_target_is_refused_before_the_command(self):
-        marker = f"/tmp/eb-local-vm-test-{os.getpid()}"
-        run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/amd/zen4", "--",
-                         "bash", "-c", f"touch {marker}", env={"EB_LOCAL_VM_GCC": "/nonexistent/gcc"})
-        self.assertEqual(run.returncode, 126, run.stderr)
-        self.assertIn("refused", run.stderr)
-        self.assertFalse(os.path.exists(marker))
+        @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
+        def test_a_cpu_view_that_does_not_name_the_target_is_refused_before_the_command(self):
+            marker = f"/tmp/eb-local-vm-test-{os.getpid()}"
+            run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/amd/zen4", "--",
+                             "bash", "-c", f"touch {marker}", env={"EB_LOCAL_VM_GCC": "/nonexistent/gcc"})
+            self.assertEqual(run.returncode, 126, run.stderr)
+            self.assertIn("refused", run.stderr)
+            self.assertFalse(os.path.exists(marker))
 
-    @unittest.skipUnless(HOST == "x86_64", "the aarch64 emulation runs on an x86_64 host here")
-    def test_tcg_neoverse_n1_runs_the_eessi_aarch64_stack(self):
-        run = self.timed("--mode", "tcg", "--cpu-target", "aarch64/neoverse_n1",
-                         "--allow-archspec-mismatch", "--",
-                         "bash", "-c", "uname -m; echo 'int main(void){return 0;}' > /tmp/x.c; gcc -mcpu=native -### -c /tmp/x.c 2>&1 | grep -o -- '-mcpu=[^ ]*'")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("aarch64", run.stdout)
-        self.assertIn("neoverse-n1", run.stdout)
-        self.assertIn("archdetect=aarch64/neoverse_n1", run.stderr)
+        @unittest.skipUnless(HOST == "x86_64", "the aarch64 emulation runs on an x86_64 host here")
+        def test_tcg_neoverse_n1_runs_the_eessi_aarch64_stack(self):
+            run = self.timed("--mode", "tcg", "--cpu-target", "aarch64/neoverse_n1",
+                             "--allow-archspec-mismatch", "--",
+                             "bash", "-c", "uname -m; echo 'int main(void){return 0;}' > /tmp/x.c; gcc -mcpu=native -### -c /tmp/x.c 2>&1 | grep -o -- '-mcpu=[^ ]*'")
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("aarch64", run.stdout)
+            self.assertIn("neoverse-n1", run.stdout)
+            self.assertIn("archdetect=aarch64/neoverse_n1", run.stderr)
 
 
 if __name__ == "__main__":

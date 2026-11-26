@@ -645,6 +645,10 @@ fn runKvm(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
         err("virtiofsd not found: put it on PATH, in EB_LOCAL_QEMU_DIR, or set EB_LOCAL_VIRTIOFSD to its path", .{});
         return status_refused;
     };
+    if (!executable(a, vfsd)) {
+        err("virtiofsd is not executable at {s}", .{vfsd});
+        return status_refused;
+    }
     const kernel = kernelPath(a, env) orelse {
         err("no readable host kernel image: set EB_LOCAL_VM_KERNEL (it needs virtiofs and virtio-pci built in)", .{});
         return status_refused;
