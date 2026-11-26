@@ -354,6 +354,39 @@ class Submit(StorageFixture):
         self.assertEqual(self.calls(), [])
         self.assertFalse((self.prefix / ".eb-local").exists())
 
+    def test_submit_script_sync_or_close_failure_is_not_success(self):
+        # A lost write shows up from fsync or close. The script must not be
+        # handed to sbatch, and the errno must be the one those calls return.
+        jobs = self.prefix / ".eb-local" / "jobs"
+        calls = self.root / "sbatch-calls"
+
+        def reset():
+            if calls.exists():
+                calls.unlink()
+            if jobs.exists():
+                for path in jobs.iterdir():
+                    path.unlink()
+
+        control = self.run_tool(["submit", "--on", "cpu", "recipe.eb"], SLURM_JOB_ID="")
+        self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+        self.assertEqual(len(self.calls()), 1)
+        reset()
+
+        for hook in ("EB_LOCAL_TEST_FSYNC_ERRNO", "EB_LOCAL_TEST_CLOSE_ERRNO"):
+            with self.subTest(hook=hook):
+                reset()
+                got = self.run_tool(
+                    ["submit", "--on", "cpu", "recipe.eb"],
+                    SLURM_JOB_ID="",
+                    **{hook: "EIO"},
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertIn("cannot write ", got.stderr)
+                self.assertIn("[Errno 5] Input/output error", got.stderr)
+                self.assertNotIn("Submitted batch job", got.stdout)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(list(jobs.iterdir()), [])
+
     def test_sbatch_directives_quote_paths_containing_spaces(self):
         spaced_cwd = self.root / "work dir"
         spaced_cwd.mkdir()
