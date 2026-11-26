@@ -309,6 +309,50 @@ class Submit(StorageFixture):
         kept = (jobs / f"{stamp}-cpu-recipe.eb-2.sh").read_text(encoding="utf-8")
         self.assertIn("--marker", kept)
         self.assertNotIn("# planted", kept)
+        planned = [line for line in run.stdout.splitlines() if line.startswith("eb-local: cpu: ")]
+        self.assertEqual(len(planned), 1, run.stdout)
+        self.assertTrue(planned[0].endswith(str(jobs / f"{stamp}-cpu-recipe.eb-2.sh")), planned[0])
+        self.assertTrue(self.calls()[0].endswith(str(jobs / f"{stamp}-cpu-recipe.eb-2.sh")), self.calls())
+
+    def test_raced_candidate_is_the_path_the_plan_submits(self):
+        # The test build plants the preferred name after a stat would have
+        # chosen it and before the exclusive create. The plan and sbatch
+        # must both name the path that create took.
+        jobs = self.prefix / ".eb-local" / "jobs"
+        stamp = "1700000000.42"
+        run = self.run_tool(
+            ["submit", "--on", "cpu", "recipe.eb", "--marker"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_TEST_SUBMIT_STAMP=stamp,
+            EB_LOCAL_TEST_SUBMIT_RACE="1",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        planted = jobs / f"{stamp}-cpu-recipe.eb.sh"
+        taken = jobs / f"{stamp}-cpu-recipe.eb-2.sh"
+        self.assertEqual(planted.read_text(encoding="utf-8"), "#!/bin/bash\n# raced\n")
+        self.assertNotIn("--marker", planted.read_text(encoding="utf-8"))
+        kept = taken.read_text(encoding="utf-8")
+        self.assertIn("--marker", kept)
+        self.assertNotIn("# raced", kept)
+        self.assertEqual(os.stat(taken).st_mode & 0o777, 0o700)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1, calls)
+        planned = [line for line in run.stdout.splitlines() if line.startswith("eb-local: cpu: ")]
+        self.assertEqual(len(planned), 1, run.stdout)
+        self.assertTrue(planned[0].endswith(" " + str(taken)), planned[0])
+        self.assertFalse(planned[0].endswith(" " + str(planted)), planned[0])
+        self.assertTrue(calls[0].endswith(" " + str(taken)), calls[0])
+
+    def test_print_does_not_create_a_raced_submit_script(self):
+        run = self.run_tool(
+            ["submit", "--print", "--on", "cpu", "recipe.eb"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_TEST_SUBMIT_STAMP="1700000000.42",
+            EB_LOCAL_TEST_SUBMIT_RACE="1",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.prefix / ".eb-local").exists())
 
     def test_sbatch_directives_quote_paths_containing_spaces(self):
         spaced_cwd = self.root / "work dir"

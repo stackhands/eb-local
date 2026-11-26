@@ -61,15 +61,16 @@ def run_with_stdout(argv, sink, *, env, cwd):
     return subprocess.run(argv, stdout=subprocess.PIPE, **common)
 
 
-EPOCH = re.compile(rb"(?<!\d)1\d{9}(?!\d)")
+# The second, or that second plus the submitting process id after a dot.
+EPOCH = re.compile(rb"(?<!\d)1\d{9}(?:\.\d+)?(?!\d)")
 
 
 def snapshot(root):
     """Every path below root with its type, mode and content, links unfollowed.
 
-    A job script is named for the second it was made in, and a double that
-    records the call names it too, so that second is written as <epoch> and two
-    runs a second apart compare equal.
+    A job script is named for the second it was made in and the process that
+    wrote it, and a double that records the call names it too, so that stamp
+    is written as <epoch> and two runs compare equal.
     """
     state = {}
     for dirpath, dirnames, filenames in os.walk(root):
