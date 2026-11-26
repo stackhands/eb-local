@@ -623,43 +623,38 @@ test "a project prefix is not created" {
     try kept(out.stdout);
 }
 
-test "an empty site install is not a user prefix" {
-    var r = try Run.init();
-    defer r.deinit();
-    try r.fake("2026.06", null);
-    try r.env.put("EESSI_SITE_INSTALL", "");
-    const out = try r.launch(&.{});
-    try ok(out);
-    try noDefaultPrefix(&r);
-    try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
-    try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_SITE_INSTALL").?);
-    try testing.expectEqualStrings("0022", firstLine(out.stdout));
-    try kept(out.stdout);
-}
-
-test "an empty cvmfs install is not a user prefix" {
-    var r = try Run.init();
-    defer r.deinit();
-    try r.fake("2026.06", null);
-    try r.env.put("EESSI_CVMFS_INSTALL", "");
-    const out = try r.launch(&.{});
-    try ok(out);
-    try noDefaultPrefix(&r);
-    try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
-    try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_CVMFS_INSTALL").?);
-    try testing.expectEqualStrings("0022", firstLine(out.stdout));
-}
-
-test "an empty user install does not create the default prefix" {
-    var r = try Run.init();
-    defer r.deinit();
-    try r.fake("2026.06", null);
-    try r.env.put("EESSI_USER_INSTALL", "");
-    const out = try r.launch(&.{});
-    try ok(out);
-    try noDefaultPrefix(&r);
-    try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_USER_INSTALL").?);
-    try testing.expectEqualStrings("0077", firstLine(out.stdout));
+test "an empty install variable is not a user prefix" {
+    const Row = struct {
+        variable: []const u8,
+        umask: []const u8,
+        echoed: bool,
+        default_tree: bool,
+        keep_module: bool,
+    };
+    const rows = [_]Row{
+        .{ .variable = "EESSI_SITE_INSTALL", .umask = "0022", .echoed = true, .default_tree = false, .keep_module = true },
+        .{ .variable = "EESSI_CVMFS_INSTALL", .umask = "0022", .echoed = true, .default_tree = false, .keep_module = false },
+        .{ .variable = "EESSI_USER_INSTALL", .umask = "0077", .echoed = true, .default_tree = false, .keep_module = false },
+    };
+    for (rows) |row| {
+        var r = try Run.init();
+        defer r.deinit();
+        try r.fake("2026.06", null);
+        try r.env.put(row.variable, "");
+        const out = try r.launch(&.{});
+        try ok(out);
+        if (row.default_tree) return error.TestUnexpectedResult else try noDefaultPrefix(&r);
+        if (!std.mem.eql(u8, row.variable, "EESSI_USER_INSTALL")) {
+            try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
+        }
+        if (row.echoed) {
+            try testing.expectEqualStrings("", envVar(out.stdout, row.variable).?);
+        } else {
+            try testing.expect(envVar(out.stdout, row.variable) == null);
+        }
+        try testing.expectEqualStrings(row.umask, firstLine(out.stdout));
+        if (row.keep_module) try kept(out.stdout);
+    }
 }
 
 test "an empty site install with a user prefix is refused" {

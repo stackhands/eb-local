@@ -1081,56 +1081,50 @@ test "materialize populates diagnostic on failing edits" {
     try std.testing.expectEqualStrings("easyconfig dependency 'zlib' has no closing parenthesis", d4.message);
 }
 
-test "parameter replacement preserves leading indent when line has trailing spaces or CR" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const base = "  name = 'demo'   \nversion = '1.0'\r\n";
-    const digest = try sha256Hex(a, base);
-    const spec: Spec = .{
-        .base_digest = digest,
-        .parameters = &.{
-            .{ .name = "name", .value = "'custom'" },
-            .{ .name = "version", .value = "'2.0'" },
+test "materialize keeps indent, trailing commas and brackets in strings" {
+    const Row = struct {
+        base: []const u8,
+        parameters: []const Parameter = &.{},
+        dependencies: []const Dependency = &.{},
+        patches: []const Patch = &.{},
+        expected: []const u8,
+    };
+    const params = [_]Parameter{
+        .{ .name = "name", .value = "'custom'" },
+        .{ .name = "version", .value = "'2.0'" },
+    };
+    const deps = [_]Dependency{.{ .action = "add", .name = "pkg", .spec = "('pkg', '1.0')" }};
+    const patches = [_]Patch{.{ .name = "site", .file = "site.patch" }};
+    const rows = [_]Row{
+        .{
+            .base = "  name = 'demo'   \nversion = '1.0'\r\n",
+            .parameters = &params,
+            .expected = "  name = 'custom'\nversion = '2.0'\n",
+        },
+        .{
+            .base = "dependencies = [\n    ('zlib', '1.3'),\n]\n",
+            .dependencies = &deps,
+            .expected = "dependencies = [\n    ('zlib', '1.3'),\n    ('pkg', '1.0'),\n]\n",
+        },
+        .{
+            .base = "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n]\n",
+            .patches = &patches,
+            .expected = "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n    ('site', 'site.patch'),\n]\n",
         },
     };
-    var d: Diagnostic = .{};
-    const out = try materialize(a, base, spec, &d);
-    try std.testing.expectEqualStrings("  name = 'custom'\nversion = '2.0'\n", out);
-}
-
-test "appendToArray handles trailing commas without producing double commas" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const base = "dependencies = [\n    ('zlib', '1.3'),\n]\n";
-    const digest = try sha256Hex(a, base);
-    const deps = [_]Dependency{.{ .action = "add", .name = "pkg", .spec = "('pkg', '1.0')" }};
-    const spec: Spec = .{
-        .base_digest = digest,
-        .dependencies = &deps,
-    };
-    var d: Diagnostic = .{};
-    const out = try materialize(a, base, spec, &d);
-    try std.testing.expect(std.mem.indexOf(u8, out, ",,") == null);
-    try std.testing.expectEqualStrings("dependencies = [\n    ('zlib', '1.3'),\n    ('pkg', '1.0'),\n]\n", out);
-}
-
-test "findMatchingBracket ignores brackets inside string literals and comments" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const base = "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n]\n";
-    const digest = try sha256Hex(a, base);
-    const patches = [_]Patch{.{ .name = "site", .file = "site.patch" }};
-    const spec: Spec = .{
-        .base_digest = digest,
-        .patches = &patches,
-    };
-    var d: Diagnostic = .{};
-    const out = try materialize(a, base, spec, &d);
-    try std.testing.expectEqualStrings(
-        "patches = [\n    # [unbalanced comment\n    ('only-[one.patch', 1),\n    ('a]b.patch', 1),\n    ('site', 'site.patch'),\n]\n",
-        out,
-    );
+    for (rows) |row| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const spec: Spec = .{
+            .base_digest = try sha256Hex(a, row.base),
+            .parameters = row.parameters,
+            .dependencies = row.dependencies,
+            .patches = row.patches,
+        };
+        var d: Diagnostic = .{};
+        const out = try materialize(a, row.base, spec, &d);
+        try std.testing.expect(std.mem.indexOf(u8, out, ",,") == null);
+        try std.testing.expectEqualStrings(row.expected, out);
+    }
 }

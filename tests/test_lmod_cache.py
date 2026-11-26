@@ -164,38 +164,32 @@ class LmodCache(unittest.TestCase):
             self.assertEqual(bad.returncode, 1, bad.stderr)
             self.assertIn("cannot parse the candidate cache inventory", bad.stderr)
 
-    def test_verify_refuses_a_candidate_that_hides_a_module(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            args, cache, stamp = self.single_target(root)
-            cache.mkdir()
-            previous = cache / "spiderT.lua"
-            previous.write_text("previous\n")
-            stamp.write_text("old\n")
-            before_stamp = stamp.stat().st_mtime_ns
-            env = self.verify_env(root, "GSL/2.7\n", "GSL/2.7\nGSL/2.8\n")
-            got = run([*args, "--verify"], env=env)
-            self.assertEqual(got.returncode, 1, got.stderr)
-            self.assertIn("inventories differ; the cache was not changed", got.stderr)
-            self.assertEqual(previous.read_text(), "previous\n")
-            self.assertEqual(stamp.stat().st_mtime_ns, before_stamp)
-            self.assertEqual(sorted(path.name for path in cache.iterdir()), ["spiderT.lua"])
-
-    def test_verify_refuses_a_candidate_lmod_cannot_parse(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            args, cache, stamp = self.single_target(root, MALFORMED_SPIDER)
-            cache.mkdir()
-            previous = cache / "spiderT.lua"
-            previous.write_text("previous\n")
-            stamp.write_text("old\n")
-            env = self.verify_env(root, "ignored\n", "ignored\n")
-            got = run([*args, "--verify"], env=env)
-            self.assertEqual(got.returncode, 1, got.stderr)
-            self.assertIn("cannot parse the candidate cache inventory", got.stderr)
-            self.assertEqual(previous.read_text(), "previous\n")
-            self.assertEqual(stamp.read_text(), "old\n")
-            self.assertEqual(sorted(path.name for path in cache.iterdir()), ["spiderT.lua"])
+    def test_verify_refuses_a_bad_candidate(self):
+        rows = [
+            ("GSL/2.7\n", "GSL/2.7\nGSL/2.8\n", None, "inventories differ; the cache was not changed"),
+            ("ignored\n", "ignored\n", MALFORMED_SPIDER, "cannot parse the candidate cache inventory"),
+        ]
+        for live, candidate, spider, sentence in rows:
+            with self.subTest(sentence=sentence):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    if spider is None:
+                        args, cache, stamp = self.single_target(root)
+                    else:
+                        args, cache, stamp = self.single_target(root, spider)
+                    cache.mkdir()
+                    previous = cache / "spiderT.lua"
+                    previous.write_text("previous\n")
+                    stamp.write_text("old\n")
+                    before_stamp = stamp.stat().st_mtime_ns
+                    env = self.verify_env(root, live, candidate)
+                    got = run([*args, "--verify"], env=env)
+                    self.assertEqual(got.returncode, 1, got.stderr)
+                    self.assertIn(sentence, got.stderr)
+                    self.assertEqual(previous.read_text(), "previous\n")
+                    self.assertEqual(stamp.read_text(), "old\n")
+                    self.assertEqual(stamp.stat().st_mtime_ns, before_stamp)
+                    self.assertEqual(sorted(path.name for path in cache.iterdir()), ["spiderT.lua"])
 
     def test_verify_cleans_missing_cache_dir_and_reports_missing_module_command(self):
         import shutil

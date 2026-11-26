@@ -134,70 +134,58 @@ export -f eb
             self.assertIn("[Errno 30] Read-only file system", ro_run.stderr)
             self.assertEqual(list(self.job.iterdir()), [])
 
-    def test_unreadable_logs_dir_during_redaction_names_path_and_errno(self):
-        site = self._site_with_secret()
-        eb_lock = r'''
-eb() {
-    python3 - "$@" <<'PY'
-import os
-v = os.environ["SOURCE_TOKEN"]
-logs = os.environ["EASYBUILD_TMP_LOGDIR"]
-open(os.path.join(logs, "easybuild-x.log"), "w").write(f"raw {v}\n")
-os.chmod(logs, 0o000)
-PY
-}
-export -f eb
-'''
-        doubles = self.root / "doubles-lock.sh"
-        doubles.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_lock)
-        argv, env = binary.command(
-            self.script,
-            ["--config", str(site), "recipe.eb"],
-            dict(self.env, BASH_ENV=str(doubles)),
-        )
-        logs = self.prefix / ".eb-local" / "logs"
-        try:
-            run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
-        finally:
-            if logs.exists():
-                logs.chmod(0o700)
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn(str(logs), run.stderr)
-        self.assertIn("[Errno 13] Permission denied", run.stderr)
-        self.assertIn("inspect it before sharing", run.stderr)
-
-    def test_unreadable_versions_dir_during_redaction_names_path_and_errno(self):
-        site = self._site_with_secret()
-        eb_lock = r'''
-eb() {
-    python3 - "$@" <<'PY'
-import os
-v = os.environ["SOURCE_TOKEN"]
-versions = os.path.join(os.environ["EESSI_USER_INSTALL"], "versions")
-os.makedirs(versions, exist_ok=True)
-open(os.path.join(versions, "easybuild-v.log"), "w").write(f"raw {v}\n")
-os.chmod(versions, 0o000)
-PY
-}
-export -f eb
-'''
-        doubles = self.root / "doubles-lock-versions.sh"
-        doubles.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_lock)
-        argv, env = binary.command(
-            self.script,
-            ["--config", str(site), "recipe.eb"],
-            dict(self.env, BASH_ENV=str(doubles)),
-        )
-        versions = self.prefix / "versions"
-        try:
-            run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
-        finally:
-            if versions.exists():
-                versions.chmod(0o700)
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertIn(str(versions), run.stderr)
-        self.assertIn("[Errno 13] Permission denied", run.stderr)
-        self.assertIn("inspect it before sharing", run.stderr)
+    def test_unreadable_dir_during_redaction_names_path_and_errno(self):
+        rows = [
+            (
+                "logs",
+                "easybuild-x.log",
+                "logs = os.environ[\"EASYBUILD_TMP_LOGDIR\"]\n"
+                "open(os.path.join(logs, \"easybuild-x.log\"), \"w\").write(f\"raw {v}\\n\")\n"
+                "os.chmod(logs, 0o000)\n",
+            ),
+            (
+                "versions",
+                "easybuild-v.log",
+                "versions = os.path.join(os.environ[\"EESSI_USER_INSTALL\"], \"versions\")\n"
+                "os.makedirs(versions, exist_ok=True)\n"
+                "open(os.path.join(versions, \"easybuild-v.log\"), \"w\").write(f\"raw {v}\\n\")\n"
+                "os.chmod(versions, 0o000)\n",
+            ),
+        ]
+        for kind, log_name, setup in rows:
+            with self.subTest(directory=kind, log_name=log_name):
+                site = self._site_with_secret()
+                eb_lock = (
+                    "eb() {\n"
+                    "    python3 - \"$@\" <<'PY'\n"
+                    "import os\n"
+                    "v = os.environ[\"SOURCE_TOKEN\"]\n"
+                    f"{setup}"
+                    "PY\n"
+                    "}\n"
+                    "export -f eb\n"
+                )
+                doubles = self.root / f"doubles-lock-{kind}.sh"
+                doubles.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_lock)
+                argv, env = binary.command(
+                    self.script,
+                    ["--config", str(site), "recipe.eb"],
+                    dict(self.env, BASH_ENV=str(doubles)),
+                )
+                expected = (
+                    self.prefix / ".eb-local" / "logs"
+                    if kind == "logs"
+                    else self.prefix / "versions"
+                )
+                try:
+                    run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=True)
+                finally:
+                    if expected.exists():
+                        expected.chmod(0o700)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn(str(expected), run.stderr)
+                self.assertIn("[Errno 13] Permission denied", run.stderr)
+                self.assertIn("inspect it before sharing", run.stderr)
 
     def test_rlimit_fsize_on_logs_reports_path_and_errno_truthfully(self):
         site = self._site_with_secret()
