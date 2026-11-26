@@ -608,7 +608,7 @@ fn supports(a: Allocator, exe: []const u8, arch: Arch, envp: proc.Envp) ?bool {
 
 fn pickTool(a: Allocator, arch: Arch, override: ?[]const u8, path_env: []const u8, envp: proc.Envp) ?Tool {
     if (override) |o| {
-        const exe = (proc.which(a, o, path_env) catch null) orelse return null;
+        const exe = (proc.resolveExecutable(a, o, path_env) catch null) orelse return null;
         return .{ .exe = exe, .gnu = !std.mem.startsWith(u8, std.fs.path.basename(exe), "llvm-") };
     }
     const names: []const []const u8 = switch (arch) {

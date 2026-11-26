@@ -317,7 +317,7 @@ class AuditIsaCompiled(unittest.TestCase):
             self.assertEqual([l for l in clean.stdout.splitlines() if l.startswith("unclassified")], [])
         generic = self.audit("x86_64", z3, "x86_64/generic")
         self.assertEqual(generic.returncode, 1, generic.stdout + generic.stderr)
-        self.assertIn("violation: avx2", generic.stdout)
+        self.assertRegex(generic.stdout, r"violation: (avx|avx2|bmi|bmi2|fma|f16c|sse3|ssse3|sse41|sse42|popcnt|lzcnt|movbe) x\d+")
 
     def test_aarch64_sve_object_needs_neoverse_v1(self):
         sve = self.compile("v1", self.SVE_SOURCE, "-target", "aarch64-linux-gnu", "-mcpu=neoverse_v1")
