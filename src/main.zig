@@ -23,6 +23,8 @@ pub const storage = @import("storage.zig");
 pub const rpath = @import("rpath.zig");
 /// `eb-local check`: what a program needs, and where it finds it.
 pub const elfcheck = @import("elfcheck.zig");
+/// `eb-local audit-isa`: instructions a CPU target cannot run.
+pub const isa_audit = @import("isa_audit.zig");
 /// `eb-local eb`: EasyBuild through EESSI-extend, without a site file.
 pub const extend = @import("extend.zig");
 /// `eb-local lmod-cache`: the spider cache Lmod trusts.
@@ -100,6 +102,13 @@ const usage_text =
     \\                                       the same for every ELF file in those installations,
     \\                                       the dev tree, or DIR; a file that is not ELF is skipped.
     \\                                       --quiet prints a file only when it has a problem
+    \\  eb-local audit-isa PATH --target TARGET [--json] [--allow FILE] [--objdump PATH]
+    \\                                       every instruction under PATH that needs a CPU feature
+    \\                                       TARGET, an EESSI subdirectory such as x86_64/amd/zen3
+    \\                                       or aarch64/neoverse_n1, lacks, per ELF file, with counts;
+    \\                                       exit 1 when there is one. --allow FILE replaces the list
+    \\                                       of packages with run-time dispatch; --objdump names the
+    \\                                       disassembler
     \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
     \\                                       one batch job per node type the site file lists
     \\                                       in build.node_types, each building the recipe for
@@ -7359,7 +7368,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit };
+const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, @"audit-isa", list, doctor, @"lmod-cache", modulerc, overlay, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -7449,6 +7458,9 @@ fn runMain(init: std.process.Init) u8 {
     var check_dev = false;
     var check_prefix: ?[]const u8 = null;
     var check_modules: std.ArrayList([]const u8) = .empty;
+    var audit_target: ?[]const u8 = null;
+    var audit_allow: ?[]const u8 = null;
+    var audit_objdump: ?[]const u8 = null;
     var as_env = false;
     var config_get: ?[]const u8 = null;
     var site: SiteOpts = .{};
@@ -7560,6 +7572,31 @@ fn runMain(init: std.process.Init) u8 {
                     die("check does not know '{s}'", .{x});
                 } else if (check_modules.items.len > 0) {
                     check_modules.append(a, x) catch oom();
+                } else rest.append(a, x) catch oom();
+            },
+            .@"audit-isa" => {
+                if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--target")) {
+                    if (audit_target != null) die("audit-isa takes one --target", .{});
+                    audit_target = value(args, &i, "--target");
+                } else if (joined(x, "--target")) |v| {
+                    if (audit_target != null) die("audit-isa takes one --target", .{});
+                    audit_target = v;
+                } else if (std.mem.eql(u8, x, "--allow")) {
+                    if (audit_allow != null) die("audit-isa takes one --allow", .{});
+                    audit_allow = value(args, &i, "--allow");
+                } else if (joined(x, "--allow")) |v| {
+                    if (audit_allow != null) die("audit-isa takes one --allow", .{});
+                    audit_allow = v;
+                } else if (std.mem.eql(u8, x, "--objdump")) {
+                    if (audit_objdump != null) die("audit-isa takes one --objdump", .{});
+                    audit_objdump = value(args, &i, "--objdump");
+                } else if (joined(x, "--objdump")) |v| {
+                    if (audit_objdump != null) die("audit-isa takes one --objdump", .{});
+                    audit_objdump = v;
+                } else if (x.len > 0 and x[0] == '-') {
+                    die("audit-isa does not know '{s}'", .{x});
                 } else rest.append(a, x) catch oom();
             },
             .env => {
@@ -7879,6 +7916,17 @@ fn runMain(init: std.process.Init) u8 {
         if (only_unwrapped and family.len > 0) die("rpath-wrappers takes --for FAMILY or --unwrapped, not both", .{});
         return cmdRpathWrappers(c, family, only_unwrapped);
     }
+    if (command == .@"audit-isa") {
+        if (rest.items.len != 1) die("audit-isa takes one PATH, the installed prefix to audit", .{});
+        const want = audit_target orelse die("audit-isa needs --target TARGET, an EESSI subdirectory such as x86_64/amd/zen3", .{});
+        return isa_audit.run(a, .{
+            .path = rest.items[0],
+            .target = want,
+            .json = g.json_out,
+            .allow = audit_allow,
+            .objdump = audit_objdump,
+        }, c.env.get("PATH") orelse "", nonEmpty(c.env.get("TMPDIR")) orelse "/tmp", c.envp);
+    }
     if (command == .check) {
         const modes: usize = @as(usize, @intFromBool(check_dev)) + @intFromBool(check_prefix != null) + @intFromBool(check_modules.items.len > 0);
         if (modes > 1 or (modes == 1 and rest.items.len > 0))
@@ -7919,7 +7967,7 @@ fn runMain(init: std.process.Init) u8 {
         },
         .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .profiling = doctor_profiling, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
+        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"audit-isa", .@"lmod-cache", .modulerc, .overlay => unreachable,
     };
 }
 
@@ -7950,6 +7998,7 @@ test {
     _ = cvmfs;
     _ = mpi;
     _ = recipe_overlay;
+    _ = isa_audit;
 }
 
 test "a build script selects no MPI transport" {
