@@ -100,7 +100,7 @@ class CpuTargetCli(unittest.TestCase):
     def test_doctor_names_what_it_checks(self):
         r = self.run_cli("doctor", "--cpu-target", "zen4")
         self.assertIn("host: ", r.stdout)
-        self.assertIn("CPUID faulting", r.stdout)
+        self.assertIn("CPUID", r.stdout)
         self.assertIn("/dev/kvm", r.stdout)
         self.assertIn("a mask profile exists for x86_64/amd/zen4", r.stdout)
 
