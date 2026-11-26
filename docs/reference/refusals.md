@@ -38,7 +38,16 @@ A site file that sets a storage setting wrongly, such as a `storage.node_local_m
 
 ## Outside a Slurm job
 
-A build needs an allocation on the node type that will run the software:
+When `sbatch` is absent from `PATH` and no nonempty `SLURM_*` variable marks
+a Slurm context, a build uses workstation mode automatically. It creates a private workspace below
+`$XDG_CACHE_HOME/eb-local/work`, unless `$TMPDIR` is on a local,
+non-tmpfs file system.  Network, shared and memory-backed file systems are
+refused. `--workstation` or `storage.mode = "local"` selects this mode explicitly.
+
+When Slurm is present, a managed build needs an allocation and configured
+`storage.node_local_root`. Without that site storage, the refusal names the
+missing setting and `--workstation` as the explicit local opt-in. With it,
+the build needs an allocation on the node type that will run the software:
 
 ```text
 eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.
@@ -50,12 +59,9 @@ eb-local: not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was bu
 The example is `build.allocation_hint`.
 When the site file lists `[build.node_types]`, the same build as a batch job for each type follows.
 
-`eb-local clean --workspaces` removes only the workspaces of the job it runs in:
-
-```text
-eb-local: clean --workspaces works only inside the Slurm job that made the workspaces, and SLURM_JOB_ID is unset or empty; nothing was removed.
-  A build workspace is in its job's node-local mount, which goes when the job ends; run eb-local clean --workspaces inside that job, in its batch script or with srun --jobid=JOBID --overlap.
-```
+`eb-local clean --workspaces` reads workstation roots recorded below the
+durable prefix state, so it finds failed workspaces even when `$TMPDIR`
+changed. Inside a cluster allocation it also removes workspaces of that job.
 
 ## The node-local mount
 
@@ -66,7 +72,7 @@ With `storage.node_local_root` set to `/local` and `storage.node_local_mount` at
 The checks run in this order, and the first that fails is the refusal:
 
 `no site file sets storage.node_local_root`
-: Set it in the site file, which `eb-local site install slurm --set node_local_root=DIR` writes, or name a site file that root or this program's owner owns with `--config FILE` or `EB_LOCAL_CONFIG=FILE`. `eb-local eb` needs no site file.
+: Set it in the site file, which `eb-local site install slurm --set node_local_root=DIR` writes, name a trusted site file with `--config FILE` or `EB_LOCAL_CONFIG=FILE`, or deliberately opt in to local storage with `--workstation`.
 
 `cannot tell your user name: /usr/bin/id -un failed with status N`
 : eb-local puts it for `%u` in `storage.node_local_mount`: run eb-local where `id -un` prints your user name.

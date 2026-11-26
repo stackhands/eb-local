@@ -63,7 +63,7 @@ def wait_until_holding_fd_or_exited(proc, target_dir, timeout=5.0):
     raise AssertionError(f"process {proc.pid} neither exited nor opened {target}")
 
 
-@unittest.skipUnless(binary.BIN, "lmod-cache is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "lmod-cache is a feature of the Zig build")
 class LmodCacheWriterLock(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lmod-lock-")
@@ -92,7 +92,7 @@ class LmodCacheWriterLock(unittest.TestCase):
         stamp = self.root / "serial-stamp"
         p1 = subprocess.Popen(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--modulepath",
                 str(self.modules),
@@ -120,7 +120,7 @@ class LmodCacheWriterLock(unittest.TestCase):
 
         p2 = subprocess.Popen(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--modulepath",
                 str(self.modules),
@@ -155,7 +155,7 @@ class LmodCacheWriterLock(unittest.TestCase):
         stamp = self.root / "contended-stamp"
         p1 = subprocess.Popen(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--modulepath",
                 str(self.modules),
@@ -183,7 +183,7 @@ class LmodCacheWriterLock(unittest.TestCase):
 
         p2 = subprocess.Popen(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--modulepath",
                 str(self.modules),

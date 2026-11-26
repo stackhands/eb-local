@@ -1,4 +1,4 @@
-//! Run EasyBuild through EESSI-extend with no site file and no Slurm job.
+//! Run EasyBuild through EESSI-extend with no Slurm job.
 //!
 //! EESSI-extend reads EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
 //! EESSI_SITE_INSTALL and EESSI_CVMFS_INSTALL when it loads, and treats a
@@ -111,7 +111,7 @@ pub fn tooMany(a: Allocator, env: *const std.process.Environ.Map) Allocator.Erro
     }
     try out.appendSlice(a,
         \\  Unset the one an earlier session left (a shell startup file, or eval "$(eb-local env)" for another prefix):
-        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, the module installs under $HOME/eessi
+        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, eb-local uses its configured prefix or project
         \\
     );
     return out.toOwnedSlice(a);
@@ -150,18 +150,14 @@ pub fn initPath(a: Allocator, env: *const std.process.Environ.Map) Allocator.Err
     });
 }
 
-/// `$1` is the umask, `$2` is the mode, and the rest are eb's arguments.
-/// EESSI's init is not safe under `nounset`. The compat-layer `ld` goes on
-/// `PATH` even when `rustc` is absent: a failing command substitution under
-/// `pipefail` would exit before the module loads. `WORKING_DIR` is the
-/// caller's: unset, the module's default is `/tmp/$USER`, one per user,
-/// where a shared default would leave every other user's build unable to
-/// write the first one's directories. Once the module has loaded, eb runs
-/// only if EASYBUILD_INSTALLPATH is in the tree the install variable
-/// selects and no EASYBUILD_INSTALLPATH_SOFTWARE or _MODULES moves part of
-/// the install elsewhere.
-pub const script =
+/// Lines that drop a host Cargo linker and point Cargo at `${CC:-gcc}`
+/// when `rustc -vV` prints a host. `script` includes this file, and `dev`
+/// prints the same bytes.
+pub const cargo_linker = @embedFile("cargo-linker.sh");
+
+const script_before =
     \\set -eo pipefail
+    \\trap 'trap - INT; kill -s INT "$$"' INT
     \\unset EB_LOCAL_EESSI_EXTEND || true
     \\umask_bits=$1
     \\mode=$2
@@ -181,6 +177,16 @@ pub const script =
     \\fi
     \\# shellcheck disable=SC1090
     \\source "$init"
+    \\# The command supplies the configured prefix's durable source directory
+    \\# only when the caller did not export one. Set it after the init so an
+    \\# initializer cannot send default sources back to /tmp/$USER, but never
+    \\# replace an EASYBUILD_SOURCEPATH inherited from the caller.
+    \\if [[ -n ${EBLOCAL_EB_SOURCEPATH:-} ]]; then
+    \\  if [[ -z ${EASYBUILD_SOURCEPATH+x} ]]; then
+    \\    export EASYBUILD_SOURCEPATH=$EBLOCAL_EB_SOURCEPATH
+    \\  fi
+    \\  unset EBLOCAL_EB_SOURCEPATH
+    \\fi
     \\# The module sets EASYBUILD_UMASK (077 and the sticky bit for a user
     \\# prefix, 002 with the setgid bit for a project, 022 for site and
     \\# cvmfs). The process umask matches, for the user prefix created here
@@ -201,18 +207,10 @@ pub const script =
     \\    exit 2
     \\  fi
     \\fi
-    \\unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
-    \\  CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER CMAKE_Fortran_COMPILER_LAUNCHER || true
-    \\eval "$(env | awk -F= '/^CARGO_TARGET_[A-Z0-9_]*_(LINKER|RUSTFLAGS)=/{print "unset "$1}')"
-    \\export LINKER=${CC:-gcc}
-    \\_triple=""
-    \\if _host=$(rustc -vV 2>/dev/null); then
-    \\  _triple=$(printf '%s\n' "$_host" | awk '/^host:/{print $2}')
-    \\fi
-    \\_triple_env=$(printf %s "${_triple}" | tr '[:lower:]-' '[:upper:]_')
-    \\if [[ -n ${_triple_env} ]]; then
-    \\  eval "export CARGO_TARGET_${_triple_env}_LINKER=\${CC:-gcc}"
-    \\fi
+    \\
+;
+
+const script_after =
     \\_arch=$(uname -m)
     \\export PATH="${EESSI_EPREFIX:-${repo}/versions/${ver}/compat/linux/${_arch}}/usr/bin:${PATH}"
     \\# Where the module installs, read before it loads: below the tree a user
@@ -241,6 +239,13 @@ pub const script =
     \\installs=(EESSI_USER_INSTALL EESSI_PROJECT_INSTALL EESSI_SITE_INSTALL EESSI_CVMFS_INSTALL)
     \\declare -A was
     \\for v in "${installs[@]}"; do was[$v]=${!v+set:${!v}}; done
+    \\if [[ -n ${EBLOCAL_EB_SITE_TOOLCHAINS:-} ]]; then
+    \\  toolchains_var=EESSI_SITE_TOP_LEVEL_TOOLCHAINS_${ver//./_}
+    \\  if [[ -z ${!toolchains_var+x} ]]; then
+    \\    export "$toolchains_var=$EBLOCAL_EB_SITE_TOOLCHAINS"
+    \\  fi
+    \\  unset EBLOCAL_EB_SITE_TOOLCHAINS
+    \\fi
     \\module load EESSI-extend
     \\# An install variable a load hook sets acts only on the next load, so
     \\# this install is not moved by it; a shell that keeps it is.
@@ -271,8 +276,21 @@ pub const script =
     \\  echo "  The install variable did not choose it: a site Lmod hook, a changed EESSI-extend, or a character such as - in EESSI_CVMFS_REPO, which EESSI-extend matches as a Lua pattern, did. ${see}" >&2
     \\  exit 2
     \\fi
+    \\trap - INT
     \\exec eb "$@"
 ;
+
+/// `$1` is the umask, `$2` is the mode, and the rest are eb's arguments.
+/// EESSI's init is not safe under `nounset`. The compat-layer `ld` goes on
+/// `PATH` even when `rustc` is absent: a failing command substitution under
+/// `pipefail` would exit before the module loads. `WORKING_DIR` is the
+/// caller's: unset, the module's default is `/tmp/$USER`, one per user,
+/// where a shared default would leave every other user's build unable to
+/// write the first one's directories. Once the module has loaded, eb runs
+/// only if EASYBUILD_INSTALLPATH is in the tree the install variable
+/// selects and no EASYBUILD_INSTALLPATH_SOFTWARE or _MODULES moves part of
+/// the install elsewhere. The Cargo linker lines are `cargo_linker`.
+pub const script = script_before ++ cargo_linker ++ script_after;
 
 /// The argument vector that runs eb through EESSI-extend for `sel`: a bash
 /// with no profile and no rc file running the launcher script, with the
@@ -678,7 +696,7 @@ test "the refusal of several install variables names each and what EESSI-extend 
     try testing.expectEqualStrings(
         \\eb-local: EESSI_USER_INSTALL=/home/alice/eessi and EESSI_SITE_INSTALL='' are both set; EESSI-extend refuses to load with EESSI_SITE_INSTALL and a user or project install variable.
         \\  Unset the one an earlier session left (a shell startup file, or eval "$(eb-local env)" for another prefix):
-        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, the module installs under $HOME/eessi
+        \\  set at most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL; with none set, eb-local uses its configured prefix or project
         \\
     , site);
 
@@ -834,6 +852,14 @@ test "the build directory is the caller's WORKING_DIR or one of the user's own" 
     try ok(chosen);
     try testing.expectEqualStrings("/local/alice", envVar(chosen.stdout, "WORKING_DIR").?);
     try testing.expectEqualStrings("/local/alice/easybuild", envVar(chosen.stdout, "EASYBUILD_PREFIX").?);
+}
+
+test "eb includes the cargo linker file once" {
+    try std.testing.expect(std.mem.indexOf(u8, script_before, "CARGO_TARGET_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script_after, "CARGO_TARGET_") == null);
+    const at = std.mem.indexOf(u8, script, cargo_linker) orelse return error.Missing;
+    try std.testing.expect(std.mem.indexOfPos(u8, script, at + cargo_linker.len, cargo_linker) == null);
+    try std.testing.expect(std.mem.endsWith(u8, cargo_linker, "fi\n"));
 }
 
 test "rustc is optional and a host wrapper does not reach eb" {

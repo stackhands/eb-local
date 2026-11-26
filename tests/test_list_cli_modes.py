@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "list is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "list is a feature of the Zig build")
 class ListCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-list-modes-")
@@ -26,7 +26,7 @@ class ListCliModes(unittest.TestCase):
         }
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, "list", *args],
+            [binary.ZIG, "list", *args],
             env=env,
             cwd=self.root,
             capture_output=True,

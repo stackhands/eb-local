@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TOML configuration, profiles, EB_LOCAL_* overrides and secrets, through
-the command line of the Zig build (EB_LOCAL_BIN), so the tests run only
-against a directly named binary.
+the command line of the Zig build, so the tests run only when there is a
+Zig build: the one EB_LOCAL_BIN names, or the one the shell shim runs.
 """
 import json
 import os
@@ -68,7 +68,7 @@ export -f eb
 '''
 
 
-@unittest.skipUnless(binary.BIN, "configuration files and secrets are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "configuration files and secrets are features of the Zig build")
 class ConfigCli(StorageFixture):
     def setUp(self):
         super().setUp()

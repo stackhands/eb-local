@@ -62,7 +62,7 @@ def resolve_eb_stack(env=None, which=shutil.which):
 EB_STACK, EB_STACK_SKIP_REASON = resolve_eb_stack()
 
 
-@unittest.skipUnless(binary.BIN, "overlay is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "overlay is a feature of the Zig build")
 @unittest.skipUnless(EB_STACK, EB_STACK_SKIP_REASON or "EB_STACK_BIN names no eb-stack program")
 class OverlayRealEbStack(unittest.TestCase):
     def setUp(self):
@@ -73,7 +73,7 @@ class OverlayRealEbStack(unittest.TestCase):
 
     def through_eb_local(self, action, args):
         return subprocess.run(
-            [binary.BIN, "overlay", action, "--eb-stack", EB_STACK, "--", *args],
+            [binary.ZIG, "overlay", action, "--eb-stack", EB_STACK, "--", *args],
             env=self.env,
             cwd=self.root,
             stdin=subprocess.DEVNULL,

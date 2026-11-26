@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for shared hostile filesystem helpers in tests/hostile_fs.py."""
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 
@@ -28,6 +29,17 @@ class HostileFsHelpers(unittest.TestCase):
         with self.assertRaises(OSError):
             with open(mnt / "probe", "wb") as handle:
                 handle.write(b"x" * 4096)
+
+    def test_oversized_file_creates_sparse_and_filled_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sparse = hostile_fs.oversized_file(root / "sparse.bin", 131072)
+            self.assertEqual(sparse.stat().st_size, 131072)
+            self.assertEqual(stat.S_IMODE(sparse.stat().st_mode), 0o600)
+
+            filled = hostile_fs.oversized_file(root / "filled.bin", 70000, fill=b"a", mode=0o600)
+            self.assertEqual(filled.stat().st_size, 70000)
+            self.assertEqual(filled.read_bytes()[:64], b"a" * 64)
 
 
 if __name__ == "__main__":

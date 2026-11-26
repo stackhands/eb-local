@@ -43,21 +43,23 @@ const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
 /// The version `eb-local --version` prints, and the release it is.
-pub const version = "3.3.0";
+pub const version = "3.5.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a
     \\directory you own.
+    \\  Global: --workstation forces managed recipe builds onto private local
+    \\          storage on this machine, even when Slurm is present.
     \\
     \\  eb-local <easyconfig> [eb options]   build and install with EasyBuild
     \\  eb-local --explain <easyconfig> [eb options]
     \\                                       the commands that build runs, as shell lines,
     \\                                       its checks as comments; creates and runs nothing
-    \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; no site file, no Slurm job.
+    \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
     \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
-    \\                                       present empty value counts as set; with none set, the
-    \\                                       module uses $HOME/eessi and nothing is exported.
+    \\                                       present empty value counts as set; with none set,
+    \\                                       configuration selects a user or project install.
     \\                                       eb runs only if the module's install path is in the
     \\                                       tree that variable selects
     \\  eb-local --explain eb [--] [eb options]
@@ -176,8 +178,10 @@ const usage_text =
     \\                                       run eb-stack package bump or plan by subprocess only
     \\  eb-local help | --version
     \\
-    \\Every command but eb takes --profile NAME, --project DIR (a shared project
-    \\directory instead of $HOME/eessi) and --config FILE. Use env and dev with eval:
+    \\Every configured command, including eb, takes --profile NAME, --project DIR
+    \\(a shared project directory instead of $HOME/eessi), --config FILE and
+    \\--workstation. The last forces managed builds onto this machine's disk.
+    \\Use env and dev with eval:
     \\
     \\  eval "$(eb-local env)"
     \\  eval "$(eb-local dev FFTW/3.3.10-GCC-15.2.0)"
@@ -187,8 +191,9 @@ const usage_text =
     \\program or its checkout root, and /etc/eb-local.conf), then
     \\~/.config/eb-local/config.toml,
     \\then EB_LOCAL_* variables (EB_LOCAL_SECRET_NAME=SOURCE for a secret),
-    \\then options. Builds use the allocation's own
-    \\node-local mount; a successful build removes its workspace unless
+    \\then options. Without sbatch on PATH or a nonempty SLURM_* variable,
+    \\managed builds use private workstation storage automatically. Otherwise
+    \\they use the allocation's own node-local mount; a successful build removes its workspace unless
     \\EB_LOCAL_KEEP_WORK=1. Secrets reach eb's environment only, and logs
     \\written during a build are cleaned of them. A build gets every secret,
     \\unless build.secrets or EB_LOCAL_BUILD_SECRETS names the ones it gets.
@@ -216,8 +221,64 @@ fn warn(comptime fmt: []const u8, args: anytype) void {
     cli.err(tool ++ ": " ++ fmt ++ "\n", args);
 }
 
+/// The list of what a command would change did not reach standard output, so
+/// the command changes nothing.
+fn unlisted(done: []const u8) u8 {
+    warn("standard output is not writable; nothing was {s}", .{done});
+    return 1;
+}
+
+var stdout: cli.Stdout = .{ .tool = tool };
+
+/// Set in main from EB_LOCAL_TEST_STDOUT_WRITES, only in the test artifact:
+/// that many writes to standard output succeed, and the next one and every
+/// one after it fail as a full disk would, so a test can fail the write that
+/// follows any given one.
+var test_stdout_writes: ?usize = null;
+
+fn emit(bytes: []const u8) bool {
+    if (comptime build_options.test_ops) {
+        if (test_stdout_writes) |left| {
+            if (left == 0) {
+                stdout.fd = sys.openat(linux.AT.FDCWD, "/dev/full", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0) catch stdout.fd;
+                test_stdout_writes = null;
+            } else {
+                test_stdout_writes = left - 1;
+            }
+        }
+    }
+    return stdout.write(bytes);
+}
+
+/// `fmt` and a newline in `buf`, or on `a` when `buf` is too small. Running
+/// out of memory is an error to the caller, not a failed write.
+fn formatLine(a: Allocator, buf: []u8, comptime fmt: []const u8, args: anytype) error{OutOfMemory}![]const u8 {
+    if (std.fmt.bufPrint(buf, fmt ++ "\n", args)) |s| return s else |_| {}
+    return std.fmt.allocPrint(a, fmt ++ "\n", args);
+}
+
 fn say(comptime fmt: []const u8, args: anytype) void {
-    cli.out(fmt ++ "\n", args);
+    if (stdout.failed) return;
+    var buf: [4096]u8 = undefined;
+    const s = formatLine(std.heap.page_allocator, &buf, fmt, args) catch oom();
+    defer if (@intFromPtr(s.ptr) != @intFromPtr(&buf)) std.heap.page_allocator.free(s);
+    _ = emit(s);
+}
+
+test "formatLine reports running out of memory instead of a failed write" {
+    var small: [4]u8 = undefined;
+    var big: [64]u8 = undefined;
+
+    var never = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectEqualStrings("fits\n", try formatLine(never.allocator(), &big, "{s}", .{"fits"}));
+    try std.testing.expect(!never.has_induced_failure);
+    try std.testing.expectError(error.OutOfMemory, formatLine(never.allocator(), &small, "{s}", .{"too long for it"}));
+    try std.testing.expect(never.has_induced_failure);
+
+    var plenty = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const heap = try formatLine(plenty.allocator(), &small, "{s}", .{"too long for it"});
+    defer std.testing.allocator.free(heap);
+    try std.testing.expectEqualStrings("too long for it\n", heap);
 }
 
 const Ctx = struct {
@@ -245,6 +306,45 @@ const install_vars = [_][]const u8{
     "EASYBUILD_INSTALLPATH_SOFTWARE",    "EASYBUILD_INSTALLPATH_MODULES", "EASYBUILD_PREFIX",
 };
 
+/// How many names each `unset` line `env` and a build print takes, in the
+/// order of `install_vars`: four names, one name, three names, four names.
+const install_unset_groups = [_]usize{ 4, 1, 3, 4 };
+
+comptime {
+    var n: usize = 0;
+    for (install_unset_groups) |size| n += size;
+    std.debug.assert(n == install_vars.len);
+}
+
+/// The names `env` and a build unset: `install_vars`. The test artifact
+/// takes another list of as many names from EB_LOCAL_TEST_INSTALL_VARS, so a
+/// test sees both read one list.
+fn installNames(a: Allocator, c: Ctx) []const []const u8 {
+    if (build_options.test_ops) if (nonEmpty(c.env.get("EB_LOCAL_TEST_INSTALL_VARS"))) |value| {
+        var names: std.ArrayList([]const u8) = .empty;
+        var words = std.mem.tokenizeScalar(u8, value, ' ');
+        while (words.next()) |word| {
+            for (word) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '_') return &install_vars;
+            names.append(a, word) catch oom();
+        }
+        if (names.items.len == install_vars.len) return names.items;
+    };
+    return &install_vars;
+}
+
+/// The `unset` lines for `names`, grouped as `install_unset_groups` says.
+fn installUnsetLines(a: Allocator, names: []const []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var next: usize = 0;
+    for (install_unset_groups) |size| {
+        out.appendSlice(a, "unset") catch oom();
+        for (names[next .. next + size]) |name| out.print(a, " {s}", .{name}) catch oom();
+        out.append(a, '\n') catch oom();
+        next += size;
+    }
+    return out.items;
+}
+
 /// What, left in a shell, sends a later load of EESSI-extend, or eb after
 /// it, somewhere else: EESSI-extend sets the other install variables itself.
 const leftover_vars = [_][]const u8{
@@ -257,12 +357,42 @@ const Place = struct {
     project: bool,
 };
 
+/// The configured user or project install selected by `place`. Env, builds,
+/// eb and doctor all use this value, so they cannot disagree about the
+/// variable that names the configured prefix.
+const ConfiguredInstall = struct {
+    prefix: []const u8,
+    mode: extend.Mode,
+
+    fn variable(self: ConfiguredInstall) []const u8 {
+        return extend.variable(self.mode);
+    }
+
+    fn exportLine(self: ConfiguredInstall, a: Allocator) []const u8 {
+        return str(a, "export {s}={s}\n", .{ self.variable(), q(a, self.prefix) });
+    }
+
+    fn setting(self: ConfiguredInstall) []const u8 {
+        return if (self.mode == .project) "project" else "prefix";
+    }
+};
+
+fn configuredInstall(p: Place) ConfiguredInstall {
+    return .{ .prefix = p.prefix, .mode = if (p.project) .project else .user };
+}
+
+fn matchesConfiguredInstall(c: Ctx, configured: ConfiguredInstall, selected: extend.Selection, value: []const u8) bool {
+    if (selected.mode != configured.mode) return false;
+    const explicit = storage.canonical(c.a, value, c.cwd) catch return false;
+    return std.mem.eql(u8, explicit, configured.prefix);
+}
+
 /// What `eb-local env` set, if NAME=VALUE is that: its install variable,
 /// naming P's prefix, or, when the extension env loads for a prefix that
 /// exists is loaded, the install path it chose in the prefix's versions
 /// tree, or the EasyBuild prefix it sets beside that path.
 fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: []const u8) ?[]const u8 {
-    const mine = if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL";
+    const mine = configuredInstall(p).variable();
     if (std.mem.eql(u8, name, mine)) {
         return if (std.mem.eql(u8, storage.canonical(c.a, value, c.cwd) catch oom(), p.prefix)) "names your prefix, as eb-local env sets it" else null;
     }
@@ -276,14 +406,23 @@ fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: 
     return if (is_path) "is in your prefix, as EESSI-extend sets it when eb-local env loads it" else "is EESSI-extend's own, set when eb-local env loads it";
 }
 
+fn isModule(module: []const u8, name: []const u8) bool {
+    if (std.mem.eql(u8, module, name)) return true;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    return std.mem.startsWith(u8, module, name) and module.len > name.len and module[name.len] == '/';
+}
+
 /// Whether Lmod lists MODULE, a name or a name and version, as loaded.
 fn moduleLoaded(c: Ctx, module: []const u8) bool {
     var it = std.mem.splitScalar(u8, c.env.get("LOADEDMODULES") orelse "", ':');
-    while (it.next()) |m| {
-        if (std.mem.eql(u8, m, module)) return true;
-        if (std.mem.startsWith(u8, m, module) and m.len > module.len and m[module.len] == '/') return true;
-    }
+    while (it.next()) |m| if (isModule(m, module)) return true;
     return false;
+}
+
+test "isModule matches an unversioned name or the exact configured module" {
+    try std.testing.expect(isModule("EESSI/2026.06", "EESSI"));
+    try std.testing.expect(isModule("EESSI/2026.06", "EESSI/2026.06"));
+    try std.testing.expect(!isModule("EESSI/2026.06/debug", "EESSI/2026.06"));
 }
 
 /// Before `env` or `dev` lines run, optionally refuse when CVMFS has not mounted EESSI.
@@ -310,29 +449,44 @@ const pure_prelude =
     \\
 ;
 
-fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bool) []const u8 {
+/// The wrapper makes a missing module command fail the evaluated lines without
+/// ending an interactive shell or applying a partial environment.
+const module_missing =
+    \\type module >/dev/null 2>&1 || {
+    \\    echo "eb-local: no module command found; the lines change nothing" >&2
+    \\    return 1
+    \\}
+    \\
+;
+
+fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8) []const u8 {
+    return environmentPrelude(c, s, p, pure, setup, true);
+}
+
+/// `load_extend` is false when a dev lock already names the extension, so the
+/// prelude does not load it again. The lock loads that module once, inside
+/// the CPU target guard.
+fn environmentPrelude(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8, load_extend: bool) []const u8 {
     const a = c.a;
+    const install = configuredInstall(p);
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
-    if (strict) add(a, &out, env_strict_prelude);
     add(a, &out, lmod_init);
+    add(a, &out, module_missing);
+    add(a, &out, setup);
     if (pure) add(a, &out, pure_prelude);
     add(a, &out, str(a, "module unload {s} >/dev/null 2>&1 || true\n", .{q(a, s.extend_module.value)}));
-    add(a, &out,
-        \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
-        \\unset EESSI_SITE_SOFTWARE_PREFIX
-        \\unset EESSI_SOFTWARE_SUBDIR_OVERRIDE EESSI_ACCELERATOR_TARGET_OVERRIDE EESSI_OVERRIDE_GPU_CHECK
-        \\unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
-        \\
-    );
-    add(a, &out, str(a, "export {s}={s}\n", .{ if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", q(a, p.prefix) }));
+    add(a, &out, installUnsetLines(a, installNames(a, c)));
+    add(a, &out, install.exportLine(a));
     // [eessi] settings before the stack loads: the EESSI module and its
     // hooks read them then.
     for (s.eessi.items) |v| add(a, &out, str(a, "export {s}={s}\n", .{ v.name, q(a, v.value) }));
+    add(a, &out, str(a, "eb_local_stack={s}\n", .{q(a, s.stack_module.value)}));
+    add(a, &out, eessi_modules ++ "unset eb_local_stack\n");
     // Lmod finds every module of a load before it loads any, and the
     // extension is on MODULEPATH only once the stack is loaded, so each has
     // a load of its own. EESSI-extend refuses an install directory that does
@@ -342,9 +496,28 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
     // Tasks run with the CPU target eessi-arch-guard selects, which can be
     // below the one EESSI detects; where the guard is installed, it moves the
     // stack there before EESSI-extend reads its install path.
-    add(a, &out, "if command -v eessi-arch-guard >/dev/null 2>&1; then eval \"$(eessi-arch-guard --shell)\"; fi\n");
-    const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
-    if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    add(a, &out,
+        \\if command -v eessi-arch-guard >/dev/null 2>&1; then
+        \\    if _eb_local_arch_delta=$(eessi-arch-guard --shell); then
+        \\        eval "$_eb_local_arch_delta"
+        \\        unset _eb_local_arch_delta
+        \\    else
+        \\        local _eb_local_arch_status=$?
+        \\        unset _eb_local_arch_delta
+        \\        if [ -n "${eb_local_dev_saved_base+x}" ]; then
+        \\            EB_LOCAL_DEV_SAVED=$(printf '%s\nactive:%s' "$eb_local_dev_saved_base" "${LOADEDMODULES-}")
+        \\            export EB_LOCAL_DEV_SAVED
+        \\            unset eb_local_dev_saved_base
+        \\        fi
+        \\        return "$_eb_local_arch_status"
+        \\    fi
+        \\fi
+        \\
+    );
+    if (load_extend) {
+        const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
+        if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    }
     // build.site_toolchains under the version the stack set, as a build
     // exports it, so eb run by hand after env or dev accepts them too.
     if (s.site_toolchains.value.len > 0) {
@@ -357,6 +530,28 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, strict: bool, pure: bo
         , .{q(a, json)}));
     }
     return out.items;
+}
+
+/// Run `body` in one function so a guard can return without exiting the
+/// evaluating shell. Strict setup remains outside the wrapper.
+fn shellApply(a: Allocator, body: []const u8) []const u8 {
+    const nl = if (body.len == 0 or body[body.len - 1] != '\n') "\n" else "";
+    return str(a,
+        \\eb_local_apply() {{
+        \\    local _eb_local_wrap eb_local_family eb_local_buildenv eb_local_level
+        \\{s}{s}}}
+        \\eb_local_apply
+        \\_eb_local_status=$?
+        \\unset -f eb_local_apply
+        \\eval "unset _eb_local_status; (exit $_eb_local_status)"
+        \\
+    , .{ body, nl });
+}
+
+fn emittedLines(a: Allocator, strict: bool, body: []const u8) []const u8 {
+    const applied = shellApply(a, body);
+    if (!strict) return applied;
+    return str(a, "{s}{s}", .{ env_strict_prelude, applied });
 }
 
 fn nowSecs() i64 {
@@ -498,6 +693,8 @@ const Global = struct {
     buildenv: ?[]const u8 = null,
     /// Print what a build would run, as shell commands, and run nothing.
     explain: bool = false,
+    /// Force a managed build to use this machine's private local storage.
+    workstation: bool = false,
     /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
@@ -687,13 +884,12 @@ fn envVarLess(_: void, x: EnvVar, y: EnvVar) bool {
     return std.mem.lessThan(u8, x.name, y.name);
 }
 
-/// Run `lines` in a bash child and print, as one JSON document, how its
-/// environment then differs from this process's. The child's own output goes
-/// to stderr, so stdout carries the document alone.
 /// Run `lines` in a bash child and return its environment afterwards, as
 /// `env -0` prints it. What the lines print goes to stderr. Null, with a
-/// message, when the child cannot run or the lines fail.
-fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
+/// message, when the child cannot run or the lines fail. `status` is the child
+/// status on failure and zero when the environment is captured.
+fn runLines(c: Ctx, kind: []const u8, lines: []const u8, status: *u8) ?[]const u8 {
+    status.* = 1;
     const a = c.a;
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
     const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
@@ -704,7 +900,8 @@ fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
     };
     defer storage.removeTree(a, dir) catch {};
     const out_path = std.fs.path.join(a, &.{ dir, "env0" }) catch oom();
-    const script = str(a, "_eb_local_env0=$1\nshift\nexec 1>&2\n{s}\nenv -0 >\"$_eb_local_env0\"\n", .{lines});
+    const nl = if (lines.len == 0 or lines[lines.len - 1] != '\n') "\n" else "";
+    const script = str(a, "_eb_local_env0=$1\nshift\nexec 1>&2\n{s}{s}_eb_local_lines_status=$?\n[ \"$_eb_local_lines_status\" -eq 0 ] || exit \"$_eb_local_lines_status\"\nenv -0 >\"$_eb_local_env0\"\n", .{ lines, nl });
     const r = proc.run(a, bash, &.{ bash, "--noprofile", "--norc", "-c", script, "eb-local", out_path }, c.envp, .{
         .stdout_limit = 4096,
         .stderr_limit = 1 << 20,
@@ -718,6 +915,7 @@ fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
     defer r.deinit(a);
     if (r.stderr.len > 0) cli.put(2, r.stderr);
     if (r.term.code() != 0) {
+        status.* = @intCast(r.term.code());
         warn("the {s} lines failed in bash (status {d}); nothing is written", .{ kind, r.term.code() });
         return null;
     }
@@ -726,10 +924,12 @@ fn runLines(c: Ctx, kind: []const u8, lines: []const u8) ?[]const u8 {
         return null;
     };
     defer sys.close(opened.fd);
-    return fsx.readAll(a, opened.fd, 8 << 20) catch |e| {
+    const env0 = fsx.readAll(a, opened.fd, 8 << 20) catch |e| {
         warn("could not read captured {s} environment: {s}", .{ kind, @errorName(e) });
         return null;
     };
+    status.* = 0;
+    return env0;
 }
 
 /// The value of `name` in the output of `env -0`, or "" when it is not set.
@@ -794,19 +994,25 @@ test "runLines cleans temporary directory and descriptors on failure and success
         defer sys.close(null_fd);
         _ = linux.dup2(null_fd, 2);
         defer _ = linux.dup2(saved_err, 2);
-        break :blk runLines(ctx, "env", "exit 7");
+        var status: u8 = 0;
+        const result = runLines(ctx, "env", "exit 7", &status);
+        try std.testing.expectEqual(@as(u8, 7), status);
+        break :blk result;
     };
     try std.testing.expect(failed_res == null);
     try std.testing.expectEqual(before, try testSelfFdCount());
 
-    const ok = runLines(ctx, "env", "export DEMO_KEY=ok") orelse return error.TestUnexpectedResult;
+    var status: u8 = 1;
+    const ok = runLines(ctx, "env", "export DEMO_KEY=ok", &status) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0), status);
     try std.testing.expectEqualStrings("ok", env0Value(ok, "DEMO_KEY"));
     try std.testing.expectEqual(before, try testSelfFdCount());
 }
 
 fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
     const a = c.a;
-    const env0 = runLines(c, kind, lines) orelse return 1;
+    var status: u8 = 1;
+    const env0 = runLines(c, kind, lines, &status) orelse return status;
     var set: std.ArrayList(EnvVar) = .empty;
     var after: std.StringHashMapUnmanaged(void) = .empty;
     var it = std.mem.splitScalar(u8, env0, 0);
@@ -836,14 +1042,41 @@ fn emitEnvChange(c: Ctx, kind: []const u8, lines: []const u8) u8 {
 
 fn cmdEnv(c: Ctx, s: config.Settings, g: Global) u8 {
     const p = place(c, s);
-    const lines = environmentLines(c, s, p, envStrict(c, g), false);
+    const lines = emittedLines(c.a, envStrict(c, g), environmentLines(c, s, p, false, ""));
     if (g.json_out) return emitEnvChange(c, "env", lines);
     evalHint(replay(c.a, "env", s, g, p.prefix, &.{}));
-    cli.put(1, lines);
-    return 0;
+    return if (emit(lines)) 0 else 1;
 }
 
 const dev_saved_names = [_][]const u8{
+    "PATH",
+    "EB_LOCAL_DEV_PREFIX",
+    "EB_LOCAL_RPATH_WRAPPERS",
+    "CMAKE_ARGS",
+    "EB_LOCAL_MESON_INSTALL_RPATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "JULIA_DEPOT_PATH",
+    "R_LIBS_USER",
+    "PYTHONUSERBASE",
+    "GOPATH",
+    "GOMODCACHE",
+    "EB_LOCAL_DEV_GO_PREFIX",
+};
+
+const dev_saved_names_v2 = [_][]const u8{
+    "PATH",
+    "EB_LOCAL_DEV_PREFIX",
+    "EB_LOCAL_RPATH_WRAPPERS",
+    "CMAKE_ARGS",
+    "EB_LOCAL_MESON_INSTALL_RPATH",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+};
+
+const dev_saved_names_v1 = [_][]const u8{
     "PATH",
     "EB_LOCAL_DEV_PREFIX",
     "EB_LOCAL_RPATH_WRAPPERS",
@@ -928,26 +1161,37 @@ fn savedValue(c: Ctx, line: []const u8, name: []const u8) SavedVar {
 }
 
 fn parseDevSaved(c: Ctx, text: []const u8) DevSaved {
-    var lines: [9][]const u8 = undefined;
+    var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
-    for (&lines) |*line| {
-        line.* = it.next() orelse
-            die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    }
-    if (it.next() != null)
+    while (it.next()) |line| lines.append(c.a, line) catch oom();
+    if (lines.items.len == 0)
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    if (!std.mem.eql(u8, lines[0], "eb-local-dev-v1"))
+    const names: []const []const u8 = if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v3"))
+        &dev_saved_names
+    else if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v2"))
+        &dev_saved_names_v2
+    else if (std.mem.eql(u8, lines.items[0], "eb-local-dev-v1"))
+        &dev_saved_names_v1
+    else
         die("EB_LOCAL_DEV_SAVED has an unsupported version", .{});
-    if (!std.mem.startsWith(u8, lines[1], "prior:"))
+    if (lines.items.len != names.len + 3)
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    const prior = lines[1]["prior:".len..];
+    if (!std.mem.startsWith(u8, lines.items[1], "prior:"))
+        die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
+    const prior = lines.items[1]["prior:".len..];
     if (!validModuleList(prior))
         die("EB_LOCAL_DEV_SAVED contains an invalid prior module list", .{});
-    var values: [dev_saved_names.len]SavedVar = undefined;
-    for (dev_saved_names, 0..) |name, i| values[i] = savedValue(c, lines[i + 2], name);
-    if (!std.mem.startsWith(u8, lines[8], "active:"))
+    var values: [dev_saved_names.len]SavedVar = @splat(.{ .present = false });
+    for (names, 0..) |name, i| {
+        const value = savedValue(c, lines.items[i + 2], name);
+        for (dev_saved_names, 0..) |current, j| {
+            if (std.mem.eql(u8, name, current)) values[j] = value;
+        }
+    }
+    const active_line = lines.items[names.len + 2];
+    if (!std.mem.startsWith(u8, active_line, "active:"))
         die("EB_LOCAL_DEV_SAVED is not a state eb-local can restore", .{});
-    const active = lines[8]["active:".len..];
+    const active = active_line["active:".len..];
     if (!validModuleList(active))
         die("EB_LOCAL_DEV_SAVED contains an invalid active module list", .{});
     const marker = std.mem.lastIndexOf(u8, text, "\nactive:") orelse unreachable;
@@ -960,7 +1204,7 @@ fn newDevSaved(c: Ctx) DevSaved {
         die("LOADEDMODULES contains a module name that cannot be recorded", .{});
     var values: [dev_saved_names.len]SavedVar = undefined;
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(c.a, "eb-local-dev-v1\nprior:") catch oom();
+    out.appendSlice(c.a, "eb-local-dev-v3\nprior:") catch oom();
     out.appendSlice(c.a, prior) catch oom();
     for (dev_saved_names, 0..) |name, i| {
         out.append(c.a, '\n') catch oom();
@@ -1023,8 +1267,7 @@ fn cmdLeave(c: Ctx) u8 {
     }
     out.appendSlice(c.a, "unset EB_LOCAL_DEV_SAVED\n") catch oom();
     evalHint("leave");
-    cli.put(1, out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// The first and last line of the lines `dev --envrc` owns in `.envrc`.
@@ -1065,8 +1308,8 @@ fn writeEnvrc(c: Ctx, words: []const u8) u8 {
     } else {
         const fd = sys.openat(fsx.cwd, ".envrc", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
             die("cannot create .envrc ({s})", .{storage.describeError(e)});
-        defer sys.close(fd);
         sys.writeAll(fd, text) catch |e| die("cannot write .envrc ({s})", .{storage.describeError(e)});
+        storage.closeWritten(fd) catch |e| die("cannot write .envrc ({s})", .{storage.describeError(e)});
     }
     cli.err("eb-local: wrote .envrc in {s}; run `direnv allow` there to load it\n", .{c.cwd});
     return 0;
@@ -1098,15 +1341,16 @@ fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
     } else |_| {
         const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
             die("cannot create {s} ({s})", .{ name, storage.describeError(e) });
-        defer sys.close(fd);
         sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+        storage.closeWritten(fd) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
     }
 }
 
 /// `dev --lock`: run the dev lines in a bash child and record what loaded.
 fn writeLock(c: Ctx, s: config.Settings, lines: []const u8) u8 {
     const a = c.a;
-    const env0 = runLines(c, "dev", lines) orelse return 1;
+    var status: u8 = 1;
+    const env0 = runLines(c, "dev", lines, &status) orelse return status;
     var modules: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, env0Value(env0, "LOADEDMODULES"), ':');
     while (it.next()) |m| {
@@ -1143,6 +1387,59 @@ fn validTarget(text: []const u8) bool {
     return any;
 }
 
+fn lockedModule(modules: []const []const u8, wanted: []const u8) ?[]const u8 {
+    for (modules) |m| if (isModule(m, wanted)) return m;
+    return null;
+}
+
+fn hasBuildenvModule(s: config.Settings, modules: []const []const u8) bool {
+    for (modules) |m| {
+        if (std.mem.startsWith(u8, m, "buildenv/")) return true;
+        if (std.mem.eql(u8, m, s.dev_buildenv.value)) return true;
+        for (s.buildenv_for) |b| if (b.value.len > 0 and std.mem.eql(u8, m, b.value)) return true;
+    }
+    return false;
+}
+
+/// Shell that stores `eb-local rpath-wrappers ARGS` in `name` and returns
+/// that command's status when it fails. The lines run inside `eb_local_apply`,
+/// so a failure returns from that function instead of exiting the shell.
+/// `eval "$(...)"` would discard the status and let the function continue.
+fn rpathCapture(a: Allocator, exe: []const u8, args: []const u8, name: []const u8) []const u8 {
+    return str(a, "{s}=$({s} rpath-wrappers {s}) || return $?\n", .{ name, exe, args });
+}
+
+/// The `rpath-wrappers` lines for a locked dev shell. Each command is
+/// captured and checked before it is evaluated, so a failure leaves
+/// `EB_LOCAL_RPATH_WRAPPERS` unset. The caller exports
+/// `EB_LOCAL_DEV_PREFIX` only after these lines, which return on failure.
+/// A lock with no build environment runs only `--for`. That wraps every
+/// name in `rpath.names`, and `rpath.self_linking` is a subset, so a
+/// following `--unwrapped` is not needed. Capturing it before `--for` is
+/// on `PATH` would miss `.eb-local-rpath`, wrap those compilers again,
+/// and leave the first directory behind after `drop_rpath_wrappers`.
+fn lockedRpathWrapperLines(c: Ctx, s: config.Settings, modules: []const []const u8) []const u8 {
+    const a = c.a;
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const exe = q(a, selfExe(&exe_buf) orelse tool);
+    if (hasBuildenvModule(s, modules)) {
+        const cap_unwrapped = rpathCapture(a, exe, "--unwrapped", "_eb_local_unwrapped");
+        return str(a, "{s}{s}{s}", .{
+            \\local _eb_local_unwrapped
+            \\
+            ,
+            cap_unwrapped,
+            \\eval "$_eb_local_unwrapped"
+            \\unset _eb_local_unwrapped
+            \\
+        });
+    }
+    return str(a, "{s}{s}unset eb_local_family\n", .{
+        familyDetectLines(a),
+        rpathEval(a, str(a, "{s} rpath-wrappers --for \"$eb_local_family\"", .{exe})),
+    });
+}
+
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
 /// from a purged shell, and that load nothing when this shell's CPU target is
 /// not the lock's, or when the lock records an EESSI version and this shell's
@@ -1166,8 +1463,12 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     }
     if (!std.mem.eql(u8, lock.stack, s.stack_module.value))
         die("{s} was written with the stack {s}; this configuration loads {s}. Write the lock again, or select that stack", .{ lock_name, lock.stack, s.stack_module.value });
+    const locked_extend = lockedModule(lock.modules, s.extend_module.value);
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), true)) catch oom();
+    // Skip the prelude's extension load when the lock already names it. The
+    // extension is then loaded once inside the target guard, and the stack
+    // is left off the locked module line because the prelude loaded it.
+    out.appendSlice(a, environmentPrelude(c, s, installed, true, "", locked_extend == null)) catch oom();
     out.appendSlice(a, str(a,
         \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
         \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
@@ -1182,16 +1483,32 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
         \\    echo "eb-local: {s} was written for EESSI "{s}", and this shell has ${{EESSI_VERSION:-none}}; its modules are not loaded." >&2
         \\
     , .{ q(a, lock.eessi_version), lock_name, q(a, lock.eessi_version) })) catch oom();
-    out.appendSlice(a, "else\nmodule load") catch oom();
-    for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
-    out.append(a, '\n') catch oom();
+    out.appendSlice(a, "else\n") catch oom();
+    // Lmod resolves every name on one load line before loading any of them,
+    // and the extension is on MODULEPATH only after the stack. Load a
+    // recorded extension on its own line first.
+    if (locked_extend) |m| out.appendSlice(a, str(a, "module load {s}\n", .{q(a, m)})) catch oom();
+    var loaded: usize = 0;
+    for (lock.modules) |m| {
+        if (isModule(m, s.stack_module.value) or isModule(m, s.extend_module.value)) continue;
+        if (loaded == 0) out.appendSlice(a, "module load") catch oom();
+        out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
+        loaded += 1;
+    }
+    if (loaded > 0) out.append(a, '\n') catch oom();
+    out.appendSlice(a, drop_rpath_wrappers) catch oom();
+    out.appendSlice(a, lockedRpathWrapperLines(c, s, lock.modules)) catch oom();
+    out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
-    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\nfi\n", .{q(a, dev_root)})) catch oom();
-    if (g.json_out) return emitEnvChange(c, "dev", out.items);
+    out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, extend.cargo_linker) catch oom();
+    out.appendSlice(a, dev_lang_dirs) catch oom();
+    out.appendSlice(a, "fi\n") catch oom();
+    const lines = emittedLines(a, envStrict(c, g), out.items);
+    if (g.json_out) return emitEnvChange(c, "dev", lines);
     evalHint("dev --locked");
-    cli.put(1, out.items);
-    return 0;
+    return if (emit(lines)) 0 else 1;
 }
 
 fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
@@ -1199,8 +1516,7 @@ fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
     if (!validModuleList(current))
         die("LOADEDMODULES contains a module name that cannot be replaced", .{});
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(c.a, lmod_init) catch oom();
-    out.appendSlice(c.a, str(c.a, "export EB_LOCAL_DEV_SAVED={s}\n", .{q(c.a, saved.base)})) catch oom();
+    out.appendSlice(c.a, str(c.a, "local eb_local_dev_saved_base={s}\n", .{q(c.a, saved.base)})) catch oom();
     var wrote_unload = false;
     var it = std.mem.splitScalar(u8, saved.active, ':');
     while (it.next()) |module| {
@@ -1216,7 +1532,8 @@ fn replacePrelude(c: Ctx, saved: DevSaved) []const u8 {
 }
 
 const record_active_modules =
-    \\EB_LOCAL_DEV_SAVED=$(printf '%s\nactive:%s' "$EB_LOCAL_DEV_SAVED" "${LOADEDMODULES-}")
+    \\EB_LOCAL_DEV_SAVED=$(printf '%s\nactive:%s' "$eb_local_dev_saved_base" "${LOADEDMODULES-}")
+    \\unset eb_local_dev_saved_base
     \\export EB_LOCAL_DEV_SAVED
     \\
 ;
@@ -1245,8 +1562,8 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     if (g.envrc) return writeEnvrc(c, replay(a, "dev", s, g, installed.prefix, extra));
     if (!g.json_out and !g.lock) evalHint(replay(a, "dev", s, g, installed.prefix, extra));
     var out: std.ArrayList(u8) = .empty;
-    if (g.replace) out.appendSlice(a, replacePrelude(c, currentDevSaved(c))) catch oom();
-    out.appendSlice(a, environmentLines(c, s, installed, envStrict(c, g), g.pure)) catch oom();
+    const setup = if (g.replace) replacePrelude(c, currentDevSaved(c)) else "";
+    out.appendSlice(a, environmentLines(c, s, installed, g.pure, setup)) catch oom();
     // The modules the program uses first, the build environment last, so
     // its wrappers come first on PATH. When the program links, they record
     // a run path for each directory on LIBRARY_PATH, which the modules set
@@ -1261,16 +1578,21 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // stays hidden behind the wrappers.
     out.appendSlice(a, drop_rpath_wrappers) catch oom();
     out.appendSlice(a, buildenvLines(c, s)) catch oom();
+    out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     // A program linked here belongs to this shell's CPU (and GPU) target, so
     // its install directory names them; the shell fills them in once EESSI
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    // Same bytes as eb: src/cargo-linker.sh, embedded as extend.cargo_linker.
+    out.appendSlice(a, extend.cargo_linker) catch oom();
+    out.appendSlice(a, dev_lang_dirs) catch oom();
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
-    if (g.lock) return writeLock(c, s, out.items);
-    if (g.json_out) return emitEnvChange(c, "dev", out.items);
-    cli.put(1, out.items);
+    const lines = emittedLines(a, envStrict(c, g), out.items);
+    if (g.lock) return writeLock(c, s, lines);
+    if (g.json_out) return emitEnvChange(c, "dev", lines);
+    if (!emit(lines)) return 1;
     if (!g.pure and nonEmpty(c.env.get("LD_LIBRARY_PATH")) != null) {
         warn("LD_LIBRARY_PATH is set in this shell; programs built here do not need it,", .{});
         cli.err("  and it can mix host libraries into EESSI's. Unset it unless you know you need it.\n", .{});
@@ -1394,6 +1716,54 @@ const host_ca_bundle =
     \\
 ;
 
+/// Build-system settings that preserve run paths supplied by compiler
+/// wrappers when a project is installed.
+const installed_rpath_settings =
+    \\case " ${CMAKE_ARGS-} " in
+    \\    *" -DCMAKE_SKIP_RPATH="* | *" -DCMAKE_SKIP_RPATH:"*) ;;
+    \\    *) CMAKE_ARGS="-DCMAKE_SKIP_RPATH=ON${CMAKE_ARGS:+ $CMAKE_ARGS}" ;;
+    \\esac
+    \\export CMAKE_ARGS
+    \\EB_LOCAL_MESON_INSTALL_RPATH=
+    \\_eb_local_seen=:
+    \\_eb_local_eprefix=${EESSI_EPREFIX-}
+    \\while [[ $_eb_local_eprefix == *//* ]]; do _eb_local_eprefix=${_eb_local_eprefix//\/\//\/}; done
+    \\while [ "${_eb_local_eprefix%/}" != "$_eb_local_eprefix" ] && [ "$_eb_local_eprefix" != / ]; do _eb_local_eprefix=${_eb_local_eprefix%/}; done
+    \\_eb_local_rest=${LIBRARY_PATH-}:
+    \\while [ -n "$_eb_local_rest" ]; do
+    \\    _eb_local_dir=${_eb_local_rest%%:*}
+    \\    _eb_local_rest=${_eb_local_rest#*:}
+    \\    while [[ $_eb_local_dir == *//* ]]; do _eb_local_dir=${_eb_local_dir//\/\//\/}; done
+    \\    while [ "${_eb_local_dir%/}" != "$_eb_local_dir" ] && [ "$_eb_local_dir" != / ]; do _eb_local_dir=${_eb_local_dir%/}; done
+    \\    case $_eb_local_dir in /?*) ;; *) continue ;; esac
+    \\    case $_eb_local_dir in *,* | *:*) continue ;; esac
+    \\    case $_eb_local_dir in /lib | /lib/* | /lib64 | /lib64/* | /usr | /usr/*) continue ;; esac
+    \\    if [ -n "$_eb_local_eprefix" ]; then
+    \\        case $_eb_local_dir in "$_eb_local_eprefix" | "$_eb_local_eprefix"/*) continue ;; esac
+    \\    fi
+    \\    case $_eb_local_seen in *":$_eb_local_dir:"*) continue ;; esac
+    \\    _eb_local_seen=$_eb_local_seen$_eb_local_dir:
+    \\    EB_LOCAL_MESON_INSTALL_RPATH=${EB_LOCAL_MESON_INSTALL_RPATH:+$EB_LOCAL_MESON_INSTALL_RPATH:}$_eb_local_dir
+    \\done
+    \\export EB_LOCAL_MESON_INSTALL_RPATH
+    \\unset _eb_local_seen _eb_local_eprefix _eb_local_rest _eb_local_dir
+    \\
+;
+
+/// Propagate an rpath wrapper failure through the shell function that applies
+/// generated dev lines, so later exports do not report a successful dev.
+fn rpathEval(a: Allocator, command: []const u8) []const u8 {
+    return str(a, "_eb_local_wrap=$({s}) || return $?\neval \"$_eb_local_wrap\"\nunset _eb_local_wrap\n", .{command});
+}
+
+fn familyDetectLines(a: Allocator) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, "eb_local_family=gcc\n") catch oom();
+    for (config.families) |f|
+        out.appendSlice(a, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name })) catch oom();
+    return out.items;
+}
+
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
@@ -1409,17 +1779,33 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
     const gcc = q(a, s.dev_buildenv.value);
     var exe_buf: [sys.path_max]u8 = undefined;
     const exe = q(a, selfExe(&exe_buf) orelse tool);
-    const unwrapped = str(a, "eval \"$({s} rpath-wrappers --unwrapped)\"\n", .{exe});
-    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}", .{ gcc, unwrapped });
+    const unwrapped = rpathEval(a, str(a, "{s} rpath-wrappers --unwrapped", .{exe}));
+    const pin_python =
+        \\if [ "${EB_LOCAL_PIN_BUILDENV_PYTHON-}" = 1 ] && [ -x "${EPREFIX-}/usr/bin/python3" ]; then
+        \\    _eb_local_python_root=${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}
+        \\    _eb_local_python_dir=$_eb_local_python_root/eb-local/python-pin
+        \\    if mkdir -p "$_eb_local_python_dir" && chmod 700 "$_eb_local_python_dir"; then
+        \\        if ln -sfn "$EPREFIX/usr/bin/python3" "$_eb_local_python_dir/python3"; then
+        \\            case $PATH in "$_eb_local_python_dir"|"$_eb_local_python_dir":*) ;; *) PATH="$_eb_local_python_dir:$PATH" ;; esac
+        \\            export PATH
+        \\        else
+        \\            echo "eb-local: cannot pin build environment Python" >&2
+        \\        fi
+        \\    else
+        \\        echo "eb-local: cannot create a private Python wrapper directory" >&2
+        \\    fi
+        \\    unset _eb_local_python_root _eb_local_python_dir
+        \\fi
+        \\
+    ;
+    if (!std.mem.eql(u8, s.dev_buildenv.from, "default")) return str(a, "module load {s}\n{s}{s}", .{ gcc, pin_python, unwrapped });
     var out: std.ArrayList(u8) = .empty;
     const add = struct {
         fn f(al: Allocator, o: *std.ArrayList(u8), text: []const u8) void {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
-    add(a, &out, "eb_local_family=gcc\n");
-    for (config.families) |f|
-        add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
+    add(a, &out, familyDetectLines(a));
     add(a, &out, "case $eb_local_family in\n");
     for (config.families, s.buildenv_for) |f, b| {
         // "none" from a site or the environment means the wrappers, with no
@@ -1442,11 +1828,12 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
         \\elif [ "$eb_local_family" = cuda ]; then
         \\    module load {s}
         \\else
-        \\    eval "$({s} rpath-wrappers --for "$eb_local_family")"
+        \\    {s}
         \\fi
         \\unset eb_local_family eb_local_buildenv eb_local_level
         \\
-    , .{ gcc, gcc, exe }));
+    , .{ gcc, gcc, rpathEval(a, str(a, "{s} rpath-wrappers --for \"$eb_local_family\"", .{exe})) }));
+    add(a, &out, pin_python);
     add(a, &out, unwrapped);
     return out.items;
 }
@@ -1476,8 +1863,7 @@ fn cmdRpathWrappers(c: Ctx, family: []const u8, only_unwrapped: bool) u8 {
         warn("no build environment module for the {s} compilers is available;", .{family});
         cli.err("  RPATH wrappers for {s} stand in for it ({s}).\n", .{ names, dir });
     }
-    cli.put(1, str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }));
-    return 0;
+    return if (emit(str(a, "export PATH={s}:\"$PATH\"\nexport EB_LOCAL_RPATH_WRAPPERS={s}\n", .{ q(a, dir), q(a, dir) }))) 0 else 1;
 }
 
 // ---- check ----------------------------------------------------------------
@@ -1805,7 +2191,7 @@ fn reportElf(
             }
             if (!isFile(needed_path)) {
                 showHeader(&shown, path, machine);
-                k.problem(a, "{s} does not exist", .{needed_path});
+                k.problem(a, "NEEDED library {s} cannot be resolved for {s}", .{ n, path });
             } else k.enqueue(a, needed_path, effective_loader_root, child_rpath_list.items);
             continue;
         }
@@ -1820,7 +2206,7 @@ fn reportElf(
                 k.problem(a, "{s} is found only through LD_LIBRARY_PATH", .{n});
             } else {
                 if (!quiet) say("  needs    {s} => not found", .{n});
-                k.problem(a, "{s} is not found", .{n});
+                k.problem(a, "NEEDED library {s} cannot be resolved for {s}", .{ n, path });
             }
             continue;
         };
@@ -2069,6 +2455,7 @@ fn cmdConfig(c: Ctx, s: config.Settings, check: bool, json: bool) u8 {
     row(&settings, a, json, "clean.logs_older_than_days", str(a, "{d}", .{s.logs_older_than_days.value}), s.logs_older_than_days.from);
     row(&settings, a, json, "nimvault.program", if (s.nimvault_program.value.len == 0) "(nimvault on PATH)" else s.nimvault_program.value, s.nimvault_program.from);
     row(&settings, a, json, "nimvault.vault", if (s.nimvault_vault.value.len == 0) "(nimvault finds it)" else s.nimvault_vault.value, s.nimvault_vault.from);
+    row(&settings, a, json, "storage.mode", @tagName(s.storage_mode.value), s.storage_mode.from);
     row(&settings, a, json, "storage.node_local_root", if (s.node_local_root.value.len == 0) "(not set)" else s.node_local_root.value, s.node_local_root.from);
     row(&settings, a, json, "storage.node_local_mount", s.node_local_mount.value, s.node_local_mount.from);
     row(&settings, a, json, "storage.node_local_fstype", s.node_local_fstype.value, s.node_local_fstype.from);
@@ -2171,8 +2558,7 @@ fn cmdConfigEnv(c: Ctx, s: config.Settings) u8 {
     // themselves. An empty one is a profile clearing a site setting; the
     // clear has to be exported or the site value stays in the job.
     for (s.eessi.items) |e| line(a, &out, e.name, e.value);
-    cli.put(1, out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 /// Print the resolved value(s) of one configuration key for scripts and
@@ -2367,8 +2753,7 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     const label = std.fmt.allocPrint(a, "template {s}", .{t.name}) catch oom();
     checkSiteConfig(a, label, text);
     if (show) {
-        cli.put(1, text);
-        return 0;
+        return if (emit(text)) 0 else 1;
     }
     if (fsx.statAt(fsx.cwd, target, false)) |st| {
         if (st.isDir()) {
@@ -2428,6 +2813,9 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
 const Run = union(enum) {
     exit: u8,
     signal: linux.SIG,
+    /// The process group was still occupied when the SIGKILL deadline
+    /// passed. Callers must not clean logs as though it had been reaped.
+    unreaped,
 };
 
 /// An exit code as it is. A signal is raised again, with the disposition this
@@ -2437,6 +2825,7 @@ const Run = union(enum) {
 fn stop(run: Run) u8 {
     switch (run) {
         .exit => |c| return c,
+        .unreaped => return 1,
         .signal => |sig| {
             var cur: linux.Sigaction = undefined;
             _ = linux.sigaction(sig, null, &cur);
@@ -2469,6 +2858,463 @@ const si_kernel: i32 = 0x80;
 var waited_pid = std.atomic.Value(linux.pid_t).init(0);
 var waited_pgroup = std.atomic.Value(bool).init(false);
 var first_signal = std.atomic.Value(u32).init(0);
+
+/// Grace deadline in milliseconds for cooperative descendants in a signalled
+/// non-TTY process group to flush logs and exit on `SIGCHLD` before `SIGKILL`.
+/// Half a second accommodates Python and Lua signal teardown without delaying
+/// interactive cancellation past sub-second responsiveness when a descendant
+/// ignores `SIGINT`, `SIGTERM`, or `SIGHUP`.
+const group_settle_grace_ms: i64 = 500;
+
+/// How long to keep sending SIGKILL and reaping after the grace period.
+/// This is the bound `proc.stopGroup` uses. A child in uninterruptible
+/// sleep can sit with SIGKILL pending, and a blocking wait never
+/// returns. A member forked after one signal can miss that signal.
+/// Reaching this deadline without ECHILD is a timeout, not an empty group.
+const group_kill_reap_ms: i64 = 10_000;
+
+/// Pause between kill attempts, so a late fork is signalled again soon.
+const group_kill_slice_ms: i64 = 10;
+
+/// Most `wait4` calls in one `reapPending` pass. `EINTR` and a reaped pid
+/// are retries. A signal storm or a stream of exiting children returns
+/// `.busy` at this cap, or at the deadline, so the caller can pause.
+const reap_pass_cap: u32 = 64;
+
+fn monotonicMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.clock) |clock| return clock.load(.acquire);
+        }
+    }
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+/// Stand-in for `wait4(-pgid, WNOHANG)` and the group scan, compiled only
+/// into a `-Dtest-ops` build. `phase` 0 makes `wait4` report a live child;
+/// `phase` 1 makes it report `ECHILD`. While installed, the scan reports no
+/// live member. `entered` is written once `settleGroup` commits to waiting,
+/// and a byte on `wake` releases that wait. After the first `SIGKILL`,
+/// `script` replaces `phase` one result at a time. `script_from_start`
+/// uses `script` before that signal as well. `eintr` is `EINTR` and
+/// `reaped` is a collected pid. Both are retries, so one pass may read
+/// several of them. `clock`, when set, replaces the monotonic clock, and
+/// `pauseUntil` jumps it to the wake time.
+const ProbeStep = enum { live, empty, unknown, eintr, reaped };
+
+const SettleProbe = struct {
+    phase: *std.atomic.Value(u8),
+    entered: i32,
+    wake: i32,
+    told: std.atomic.Value(u8) = .init(0),
+    /// When false, the grace loop keeps its own deadline instead of
+    /// blocking on `wake`. `phase` still stands in for `wait4`.
+    hold: bool = true,
+    /// Skip the grace wait and go straight to SIGKILL.
+    force_kill: bool = false,
+    /// `wait4` results after the first SIGKILL, in order. Empty keeps `phase`.
+    /// The last entry repeats. `eintr` and `reaped` stay in the reap loop.
+    script: []const ProbeStep = &.{},
+    /// Apply `script` to the grace reaps as well, before the first SIGKILL.
+    script_from_start: bool = false,
+    script_i: std.atomic.Value(u32) = .init(0),
+    /// SIGKILL calls that returned something other than EINTR.
+    kills: std.atomic.Value(u32) = .init(0),
+    /// Block inside the post-kill reap with this 1-based index until
+    /// `release` is set. 0 disables the barrier.
+    barrier_at: u32 = 0,
+    release: std.atomic.Value(u8) = .init(0),
+    /// 0 off, 1 armed, 2 consumed. Armed turns the next scripted empty
+    /// result into one live result: a member forked after SIGKILL.
+    late: std.atomic.Value(u8) = .init(0),
+    /// SIGKILL count when that late member was observed.
+    kills_at_fork: std.atomic.Value(u32) = .init(0),
+    /// Times an unexpected reap errno was reported.
+    reported: std.atomic.Value(u32) = .init(0),
+    /// Times the kill deadline passed on a live child or a busy reap.
+    timeouts: std.atomic.Value(u32) = .init(0),
+    /// Override `group_settle_grace_ms` when non-negative. `force_kill` wins.
+    grace_ms: i64 = -1,
+    /// Override `group_kill_reap_ms` when positive.
+    kill_ms: i64 = 0,
+    /// Monotonic milliseconds. Null uses the real clock.
+    clock: ?*std.atomic.Value(i64) = null,
+    /// `wait4` reads observed through the probe.
+    wait_calls: std.atomic.Value(u32) = .init(0),
+    /// Most `wait4` reads inside one `reapPending` call.
+    max_pass_waits: std.atomic.Value(u32) = .init(0),
+    /// `wait4` reads in the latest `reapPending` call.
+    last_pass_waits: std.atomic.Value(u32) = .init(0),
+    /// `reapPending` calls that read `wait4` at least once.
+    passes: std.atomic.Value(u32) = .init(0),
+};
+
+var settle_probe: ?*SettleProbe = null;
+
+const Reap = union(enum) {
+    /// `wait4` returned ECHILD: no matching child remains.
+    empty,
+    /// A child of this process is still in the group.
+    live,
+    /// `wait4` failed with an errno other than EINTR or ECHILD.
+    unknown: linux.E,
+    /// The pass stopped on `EINTR` or a reaped pid. The cap or the
+    /// deadline was reached, and the group is not drained.
+    busy,
+};
+
+const GroupEnd = enum { drained, timed_out };
+
+/// One `wait4` result. `.retry` is a reaped zombie or EINTR; the caller
+/// calls `wait4` again. Only ECHILD is an empty group.
+const WaitRead = union(enum) { retry, reap: Reap };
+
+fn readWait(rc: usize) WaitRead {
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            if (rc == 0) return .{ .reap = .live };
+            return .retry;
+        },
+        .INTR => return .retry,
+        .CHILD => return .{ .reap = .empty },
+        else => |e| return .{ .reap = .{ .unknown = e } },
+    }
+}
+
+fn probeForceKill() bool {
+    if (comptime !build_options.test_ops) return false;
+    const probe = settle_probe orelse return false;
+    return probe.force_kill;
+}
+
+fn probeUsesScript(probe: *SettleProbe) bool {
+    if (probe.script.len == 0) return false;
+    if (probe.script_from_start) return true;
+    return probe.kills.load(.acquire) != 0;
+}
+
+fn probeRead(probe: *SettleProbe) WaitRead {
+    const seen = probe.wait_calls.fetchAdd(1, .monotonic);
+    // A retry script that ignored the cap would spin. Stop so the test
+    // fails instead of hanging.
+    if (seen >= 1_000_000) return .{ .reap = .empty };
+    if (!probeUsesScript(probe)) {
+        const reap: Reap = if (probe.phase.load(.acquire) == 0) .live else .empty;
+        return .{ .reap = reap };
+    }
+    const n = probe.script.len;
+    const i = probe.script_i.fetchAdd(1, .acq_rel);
+    var step: ProbeStep = if (i < n) probe.script[i] else probe.script[n - 1];
+    if (step == .empty and probe.late.load(.acquire) == 1) {
+        if (probe.late.cmpxchgStrong(1, 2, .acq_rel, .acquire) == null) {
+            probe.kills_at_fork.store(probe.kills.load(.acquire), .release);
+            step = .live;
+        }
+    }
+    if (probe.barrier_at != 0 and i + 1 == probe.barrier_at) {
+        _ = linux.write(probe.entered, "b", 1);
+        while (probe.release.load(.acquire) == 0) {
+            var pfd = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+            if (linux.errno(linux.poll(&pfd, 1, 1000)) == .INTR) continue;
+        }
+        var drain = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+        const got = linux.poll(&drain, 1, 0);
+        if (linux.errno(got) == .SUCCESS and got > 0) {
+            var buf: [16]u8 = undefined;
+            while (linux.errno(linux.read(probe.wake, &buf, buf.len)) == .INTR) {}
+        }
+    }
+    return switch (step) {
+        .live => .{ .reap = .live },
+        .empty => .{ .reap = .empty },
+        .unknown => .{ .reap = .{ .unknown = .IO } },
+        .eintr, .reaped => .retry,
+    };
+}
+
+fn nextWait(pgid: linux.pid_t, raw: *i32) WaitRead {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| return probeRead(probe);
+    }
+    return readWait(linux.wait4(-pgid, raw, linux.W.NOHANG, null));
+}
+
+fn noteReapPass(calls: u32) void {
+    if (comptime !build_options.test_ops) return;
+    const probe = settle_probe orelse return;
+    _ = probe.passes.fetchAdd(1, .monotonic);
+    probe.last_pass_waits.store(calls, .monotonic);
+    const prev = probe.max_pass_waits.load(.monotonic);
+    if (calls > prev) probe.max_pass_waits.store(calls, .monotonic);
+}
+
+/// Reap zombies in `pgid` without blocking. One pass calls `wait4` at
+/// most `reap_pass_cap` times. After `EINTR` and after each reaped pid
+/// it checks `deadline`. The cap or the deadline returns `.busy`, which
+/// is not an empty group.
+fn reapPending(pgid: linux.pid_t, deadline: i64) Reap {
+    if (pgid <= 0) return .empty;
+    var calls: u32 = 0;
+    var raw: i32 = 0;
+    var result: Reap = .busy;
+    while (calls < reap_pass_cap) {
+        calls += 1;
+        switch (nextWait(pgid, &raw)) {
+            .reap => |r| {
+                result = r;
+                break;
+            },
+            .retry => if (monotonicMs() >= deadline) break,
+        }
+    }
+    noteReapPass(calls);
+    return result;
+}
+
+/// Report an unexpected `wait4` errno once per settle. EINTR is retried in
+/// `readWait` and is not an unknown result.
+fn noteUnknown(noted: *bool, pgid: linux.pid_t, reap: Reap) void {
+    const err = switch (reap) {
+        .unknown => |e| e,
+        else => return,
+    };
+    if (noted.*) return;
+    noted.* = true;
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| _ = probe.reported.fetchAdd(1, .monotonic);
+    }
+    // A test binary's stderr is captured, and zig build prints "failed
+    // command" for that capture even when every test passed.
+    if (@import("builtin").is_test) return;
+    warn("cannot reap process group {d} ({s})", .{ pgid, sys.describeErrno(err) });
+}
+
+/// Reap exited children in `pgid` in bounded passes. True only when a
+/// child of this process is still in `pgid`. A pass that returns `.busy`
+/// pauses and tries again until `ECHILD`, a live child, an unexpected
+/// errno, or the deadline.
+fn reapGroupState(pgid: linux.pid_t) bool {
+    const deadline = monotonicMs() + group_kill_reap_ms;
+    while (true) {
+        const reap = reapPending(pgid, deadline);
+        if (reap == .live) return true;
+        if (reap != .busy) return false;
+        if (monotonicMs() >= deadline) return false;
+        pauseUntil(null, @min(deadline, monotonicMs() + group_kill_slice_ms));
+    }
+}
+
+fn settleScan(pgid: linux.pid_t) bool {
+    if (comptime build_options.test_ops) {
+        if (settle_probe != null) return false;
+    }
+    return proc.groupAlive(pgid);
+}
+
+/// Block until the test releases the probe. True when the probe handled the
+/// wait, so the caller checks `wait4` again. A probe with `hold` false
+/// does not handle it, and the caller waits out the grace deadline.
+fn probeWait() bool {
+    if (comptime !build_options.test_ops) return false;
+    const probe = settle_probe orelse return false;
+    if (!probe.hold) return false;
+    if (probe.told.swap(1, .acq_rel) == 0) {
+        _ = linux.write(probe.entered, "e", 1);
+    }
+    var pfd = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+    while (linux.errno(linux.poll(&pfd, 1, -1)) == .INTR) {}
+    var buf: [16]u8 = undefined;
+    while (linux.errno(linux.read(probe.wake, &buf, buf.len)) == .INTR) {}
+    return true;
+}
+
+fn drainSignalFd(sfd: sys.fd_t) void {
+    var buf: [8 * @sizeOf(linux.signalfd_siginfo)]u8 align(@alignOf(linux.signalfd_siginfo)) = undefined;
+    while (true) {
+        const rc = linux.read(sfd, &buf, buf.len);
+        switch (linux.errno(rc)) {
+            .SUCCESS => if (rc == 0) return,
+            .INTR => continue,
+            else => return,
+        }
+    }
+}
+
+/// Wait until `until` (monotonic milliseconds), or until `SIGCHLD` is
+/// readable on `sfd`. `EINTR` retries. A failed poll sleeps instead, so a
+/// missing signalfd cannot spin. A null `sfd` always sleeps, so a signal
+/// storm cannot skip the pause between reap passes.
+fn pauseUntil(sfd: ?sys.fd_t, until: i64) void {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.clock) |clock| {
+                const now = clock.load(.acquire);
+                if (now < until) clock.store(until, .release);
+                return;
+            }
+        }
+    }
+    while (true) {
+        const rem = until - monotonicMs();
+        if (rem <= 0) return;
+        if (sfd) |fd| {
+            var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+            const rc = linux.poll(&pfd, 1, @intCast(rem));
+            switch (linux.errno(rc)) {
+                .INTR => continue,
+                .SUCCESS => {
+                    drainSignalFd(fd);
+                    return;
+                },
+                else => {},
+            }
+        }
+        const left = until - monotonicMs();
+        if (left <= 0) return;
+        const sec = @divTrunc(left, 1000);
+        var ts: linux.timespec = .{
+            .sec = @intCast(sec),
+            .nsec = @intCast((left - sec * 1000) * 1_000_000),
+        };
+        if (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) continue;
+        return;
+    }
+}
+
+/// Send one SIGKILL, retrying EINTR until `deadline`. False means the
+/// deadline passed during those retries. Other errnos count as one attempt:
+/// the group may already be gone, and the following reap decides.
+fn sendKill(pgid: linux.pid_t, deadline: i64) bool {
+    while (true) {
+        const kr = linux.kill(-pgid, .KILL);
+        if (linux.errno(kr) != .INTR) {
+            if (comptime build_options.test_ops) {
+                if (settle_probe) |probe| _ = probe.kills.fetchAdd(1, .release);
+            }
+            return true;
+        }
+        if (monotonicMs() >= deadline) return false;
+    }
+}
+
+fn killBudgetMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| if (probe.kill_ms > 0) return probe.kill_ms;
+    }
+    return group_kill_reap_ms;
+}
+
+/// Send SIGKILL to process group `pgid` and reap until `wait4` returns
+/// `ECHILD`, or the kill deadline passes. Each pass signals the group
+/// again, so a member forked after the previous `SIGKILL` is killed too.
+/// `wait4` does not block. `EINTR` or a reaped pid stops the pass at
+/// `reap_pass_cap` or at the deadline and returns `.busy`. The loop
+/// pauses before the next pass. The last reap result is kept. At the
+/// deadline one more bounded reap runs. `ECHILD` is `.drained`. Anything
+/// else is `.timed_out`: a diagnostic is printed, and the caller must
+/// not clean logs or otherwise treat the group as empty.
+fn reapKilledGroup(pgid: linux.pid_t, sfd: ?sys.fd_t, noted: *bool) GroupEnd {
+    if (pgid <= 0) return .drained;
+    const deadline = monotonicMs() + killBudgetMs();
+    var last: Reap = .live;
+    while (true) {
+        if (!sendKill(pgid, deadline)) break;
+        last = reapPending(pgid, deadline);
+        if (last == .empty) return .drained;
+        noteUnknown(noted, pgid, last);
+        const now = monotonicMs();
+        if (now >= deadline) break;
+        const until = @min(deadline, now + group_kill_slice_ms);
+        // A busy pass is a storm of `EINTR` or exiting children. Sleep
+        // even when `SIGCHLD` is already readable, so the next pass does
+        // not start at once.
+        if (last == .busy) {
+            pauseUntil(null, until);
+        } else {
+            pauseUntil(sfd, until);
+        }
+    }
+    last = reapPending(pgid, deadline);
+    if (last == .empty) return .drained;
+    noteUnknown(noted, pgid, last);
+    if (last == .live or last == .busy) noteLiveTimeout(pgid);
+    return .timed_out;
+}
+
+fn noteLiveTimeout(pgid: linux.pid_t) void {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| _ = probe.timeouts.fetchAdd(1, .monotonic);
+    }
+    // See noteUnknown: a passing test must not write this to stderr.
+    if (@import("builtin").is_test) return;
+    warn("a descendant is still in process group {d} after SIGKILL; it was not reaped", .{pgid});
+}
+
+fn graceBudgetMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.force_kill) return 0;
+            if (probe.grace_ms >= 0) return probe.grace_ms;
+        }
+    }
+    return group_settle_grace_ms;
+}
+
+/// Wait on `SIGCHLD` via `signalfd` and `poll` up to `group_settle_grace_ms`
+/// for reparented descendants in `pgid` to exit, then `SIGKILL` and reap
+/// until none remain or `group_kill_reap_ms` passes. Only `ECHILD` ends the
+/// wait. Any other `wait4` error stays in that bounded retry. Each reap
+/// pass stops at `reap_pass_cap` or at its deadline and returns `.busy`
+/// rather than spinning. The grace loop pauses between those passes.
+/// Grace expiry is not an empty group: it goes on to `SIGKILL`. The kill
+/// deadline without `ECHILD` is `.timed_out`.
+fn settleGroup(pgid: linux.pid_t) GroupEnd {
+    if (pgid <= 0) return .drained;
+    var noted = false;
+    const skip_grace = probeForceKill();
+    const grace_deadline = monotonicMs() + graceBudgetMs();
+    // wait4 is authoritative for children of this process. The /proc scan
+    // can miss a live member, and returning then orphans it when stop()
+    // re-raises the signal. Only ECHILD means no child remains.
+    const opened = reapPending(pgid, grace_deadline);
+    noteUnknown(&noted, pgid, opened);
+    if (opened == .empty and !settleScan(pgid)) return .drained;
+
+    var chld = linux.sigemptyset();
+    linux.sigaddset(&chld, .CHLD);
+    var old_mask: linux.sigset_t = undefined;
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &chld, &old_mask);
+    defer _ = linux.sigprocmask(linux.SIG.SETMASK, &old_mask, null);
+
+    const sfd_rc = linux.signalfd(-1, &chld, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
+    const sfd: ?sys.fd_t = if (linux.errno(sfd_rc) == .SUCCESS) @intCast(sfd_rc) else null;
+    defer if (sfd) |fd| sys.close(fd);
+
+    while (true) {
+        if (sfd) |fd| drainSignalFd(fd);
+        const pending = reapPending(pgid, grace_deadline);
+        noteUnknown(&noted, pgid, pending);
+        if (pending == .empty and !settleScan(pgid)) return .drained;
+        if (skip_grace) break;
+        const rem = grace_deadline - monotonicMs();
+        if (rem <= 0) break;
+        if (pending == .live and probeWait()) continue;
+        if (pending == .live and sfd != null) {
+            var pfd = [1]linux.pollfd{.{ .fd = sfd.?, .events = linux.POLL.IN, .revents = 0 }};
+            _ = linux.poll(&pfd, 1, @intCast(rem));
+        } else {
+            pauseUntil(null, @min(grace_deadline, monotonicMs() + group_kill_slice_ms));
+        }
+    }
+
+    const after = reapPending(pgid, grace_deadline);
+    noteUnknown(&noted, pgid, after);
+    if (after == .empty and !settleScan(pgid)) return .drained;
+    while (linux.errno(linux.kill(-pgid, .CONT)) == .INTR) {}
+    return reapKilledGroup(pgid, sfd, &noted);
+}
 
 fn selfPgrp() linux.pid_t {
     const rc: isize = @bitCast(linux.getpgid(0));
@@ -2507,6 +3353,20 @@ fn passOn(sig: linux.SIG, info: *const linux.siginfo_t, _: ?*anyopaque) callconv
     }
 }
 
+/// Block `passed_on` while a guard is held, so that a signal is either seen
+/// by the check that follows or comes after the step the check decides.
+fn blockPassedOn() linux.sigset_t {
+    var block = linux.sigemptyset();
+    for (passed_on) |sig| linux.sigaddset(&block, sig);
+    var prev: linux.sigset_t = undefined;
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &block, &prev);
+    return prev;
+}
+
+fn restoreMask(prev: *const linux.sigset_t) void {
+    _ = linux.sigprocmask(linux.SIG.SETMASK, prev, null);
+}
+
 /// While a guard is held, a signal of `passed_on` does not stop eb-local.
 /// One another process sent, as `kill PID` does, is passed on to the program
 /// eb-local waits for; one from the terminal is not, as it reached that
@@ -2541,7 +3401,8 @@ const Guard = struct {
     }
 
     /// Run a program on this terminal and wait for it to exit.
-    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
+    /// `error.ForkFailed` is a `fork` that did not start the program.
+    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) error{ForkFailed}!Run {
         const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch oom();
         for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch oom()).ptr;
         // Blocked until this process knows the child, and the child has the
@@ -2557,6 +3418,14 @@ const Guard = struct {
         }
         const self_pgrp = selfPgrp();
         const own_group = !isForegroundTty(self_pgrp);
+        var prev_subreaper: c_int = 0;
+        const set_subreaper = own_group and
+            linux.errno(linux.prctl(@backingInt(linux.PR.GET_CHILD_SUBREAPER), @intFromPtr(&prev_subreaper), 0, 0, 0)) == .SUCCESS and
+            prev_subreaper == 0 and
+            linux.errno(linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0)) == .SUCCESS;
+        defer if (set_subreaper) {
+            _ = linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 0, 0, 0, 0);
+        };
         const pid: isize = @bitCast(linux.fork());
         if (pid == 0) {
             if (own_group) _ = linux.setpgid(0, 0);
@@ -2572,7 +3441,7 @@ const Guard = struct {
             waited_pid.store(@intCast(pid), .seq_cst);
         }
         _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
-        if (pid < 0) die("cannot start {s}", .{argv[0]});
+        if (pid < 0) return error.ForkFailed;
         // Waited for without reaping, so that its pid cannot be reused
         // before the handler forgets it.
         var info: linux.siginfo_t = undefined;
@@ -2596,6 +3465,15 @@ const Guard = struct {
             }
         }
         const status: u32 = @bitCast(raw);
+        if (own_group) {
+            if (g.received() != null or !linux.W.IFEXITED(status)) {
+                // A timeout is not a reaped group. Returning the child's
+                // status here would let the caller clean logs anyway.
+                if (settleGroup(@intCast(pid)) == .timed_out) return .unreaped;
+            } else {
+                _ = reapGroupState(@intCast(pid));
+            }
+        }
         if (linux.W.IFEXITED(status)) return .{ .exit = linux.W.EXITSTATUS(status) };
         if (linux.W.IFSIGNALED(status)) return .{ .signal = linux.W.TERMSIG(status) };
         return .{ .exit = 1 };
@@ -2608,7 +3486,7 @@ const Guard = struct {
 fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
     const guard = Guard.hold();
     defer guard.release();
-    const ran = guard.run(a, argv, envp);
+    const ran = guard.run(a, argv, envp) catch die("cannot start {s}", .{argv[0]});
     return if (guard.received()) |sig| .{ .signal = sig } else ran;
 }
 
@@ -2710,6 +3588,13 @@ fn callerUid(c: Ctx) linux.uid_t {
     return linux.getuid();
 }
 
+fn tmpdirUid(c: Ctx, actual: linux.uid_t) linux.uid_t {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_TMPDIR_UID"))) |v| return std.fmt.parseInt(linux.uid_t, v, 10) catch actual;
+    }
+    return actual;
+}
+
 fn nodeLocal(s: config.Settings) storage.NodeLocal {
     return .{
         .root = s.node_local_root.value,
@@ -2727,7 +3612,7 @@ fn checkedJobRoot(c: Ctx, s: config.Settings, undone: []const u8) []const u8 {
     if (s.node_local_root.value.len == 0)
         die("no site file sets storage.node_local_root, the directory that holds each job's node-local mount; {s}.\n" ++
             "  Set it in the site file, which eb-local site install slurm --set node_local_root=DIR writes, or name a site file " ++
-            "that root or this program's owner owns with --config FILE or EB_LOCAL_CONFIG=FILE. eb-local eb needs no site file.", .{undone});
+            "that root or this program's owner owns with --config FILE or EB_LOCAL_CONFIG=FILE. To build deliberately on this machine, pass --workstation.", .{undone});
     var r: storage.Refusal = .{};
     const job_id = c.env.get("SLURM_JOB_ID") orelse "";
     const jr = storage.jobRoot(c.a, nodeLocal(s), job_id, userName(c, s, undone), mountinfoText(c), callerUid(c), &r) catch |e| switch (e) {
@@ -2735,6 +3620,172 @@ fn checkedJobRoot(c: Ctx, s: config.Settings, undone: []const u8) []const u8 {
         error.OutOfMemory => oom(),
     };
     return jr.path;
+}
+
+fn slurmEnvironment(c: Ctx) bool {
+    var it = c.env.iterator();
+    while (it.next()) |kv| {
+        if (std.mem.startsWith(u8, kv.key_ptr.*, "SLURM_") and kv.value_ptr.*.len > 0) return true;
+    }
+    return false;
+}
+
+fn schedulerPresent(c: Ctx) bool {
+    return slurmEnvironment(c) or (proc.which(c.a, "sbatch", c.env.get("PATH") orelse "") catch null) != null;
+}
+
+fn localStorage(s: config.Settings, c: Ctx, g: Global) bool {
+    return g.workstation or s.storage_mode.value == .local or !schedulerPresent(c);
+}
+
+fn localFilesystemAllowed(c: Ctx, s: config.Settings, path: []const u8) bool {
+    const m = storage.mountOf(c.a, mountinfoText(c), path) catch oom() orelse return false;
+    if (std.mem.eql(u8, m.fstype, "tmpfs") or std.mem.eql(u8, m.fstype, "ramfs"))
+        return false;
+    if (std.mem.eql(u8, storage.workspaceClass(path, m.fstype, s.shared_scratch.value), "shared"))
+        return false;
+    for (s.shared_scratch.value) |shared| {
+        const canonical_shared = storage.canonical(c.a, shared, c.cwd) catch oom();
+        if (storage.under(path, canonical_shared)) return false;
+    }
+    return true;
+}
+
+const PrivateChild = union(enum) {
+    fd: sys.fd_t,
+    missing,
+    refused: []const u8,
+};
+
+fn openPrivateChild(c: Ctx, parent: sys.fd_t, name: []const u8, path: []const u8, create: bool) PrivateChild {
+    var made = false;
+    if (fsx.statAt(parent, name, false)) |st| {
+        if (st.isLink()) return .{ .refused = str(c.a, "workstation workspace parent {s} is a symbolic link", .{path}) };
+    } else |e| switch (e) {
+        error.NotFound => {
+            if (!create) return .missing;
+            var zbuf: [sys.path_max:0]u8 = undefined;
+            const zname = sys.z(&zbuf, name) catch return .{ .refused = str(c.a, "workstation workspace parent {s} is too long", .{path}) };
+            const previous: linux.mode_t = @intCast(linux.syscall1(.umask, 0));
+            const rc = linux.mkdirat(parent, zname.ptr, 0o700);
+            _ = linux.syscall1(.umask, previous);
+            if (sys.result(rc)) |_| made = true else |se| if (se != error.Exists)
+                return .{ .refused = str(c.a, "cannot create workstation workspace parent {s} ({s})", .{ path, storage.describeError(se) }) };
+        },
+        else => return .{ .refused = str(c.a, "cannot inspect workstation workspace parent {s} ({s})", .{ path, storage.describeError(e) }) },
+    }
+    const fd = sys.openat(parent, name, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0) catch |e|
+        return .{ .refused = str(c.a, "cannot securely open workstation workspace parent {s} ({s})", .{ path, storage.describeError(e) }) };
+    const st = fsx.fstat(fd) catch |e| {
+        sys.close(fd);
+        return .{ .refused = str(c.a, "cannot inspect workstation workspace parent {s} ({s})", .{ path, storage.describeError(e) }) };
+    };
+    if (!st.isDir() or st.uid != callerUid(c) or st.mode & 0o022 != 0) {
+        sys.close(fd);
+        return .{ .refused = str(c.a, "workstation workspace parent {s} must be a directory you own and must not be writable by group or others", .{path}) };
+    }
+    if (made or st.perm() != 0o700) sys.fchmod(fd, 0o700) catch |e| {
+        sys.close(fd);
+        return .{ .refused = str(c.a, "cannot make workstation workspace parent {s} private ({s})", .{ path, storage.describeError(e) }) };
+    };
+    return .{ .fd = fd };
+}
+
+const LocalRoot = struct {
+    path: []const u8,
+    capacity_path: []const u8,
+    refused_fstype: ?[]const u8 = null,
+    refused_reason: ?[]const u8 = null,
+};
+
+/// Select and securely validate every eb-local-owned workspace parent.
+/// Doctor calls this with create=false; builds call it with create=true.
+fn checkedLocalRoot(c: Ctx, s: config.Settings, undone: []const u8, create: bool) LocalRoot {
+    const a = c.a;
+    var base: ?[]const u8 = null;
+    var first: []const u8 = "eb-local";
+    if (nonEmpty(c.env.get("TMPDIR"))) |tmp| {
+        if (std.fs.path.isAbsolute(tmp)) {
+            if (fsx.statAt(fsx.cwd, tmp, false)) |st| {
+                const owner = tmpdirUid(c, st.uid);
+                const owner_ok = owner == callerUid(c) or owner == 0;
+                const writable_ok = st.mode & 0o022 == 0 or st.mode & 0o1000 != 0;
+                if (st.isDir() and owner_ok and writable_ok) {
+                    const canonical_tmp = storage.canonical(a, tmp, c.cwd) catch oom();
+                    if (localFilesystemAllowed(c, s, canonical_tmp)) {
+                        base = canonical_tmp;
+                        first = std.fmt.allocPrint(a, "eb-local-{d}", .{callerUid(c)}) catch oom();
+                    }
+                }
+            } else |_| {}
+        }
+    }
+    if (base == null) {
+        const cache = rpath.cacheHome(a, c.env) catch
+            die("a workstation build needs an absolute XDG_CACHE_HOME or HOME; {s}.", .{undone});
+        if (create) common.atomic.makedirs(cache) catch |e|
+            die("cannot create workstation cache directory {s} ({s}); {s}.", .{ cache, storage.describeError(e), undone });
+        base = storage.canonical(a, cache, c.cwd) catch oom();
+    }
+    const first_path = std.fs.path.join(a, &.{ base.?, first }) catch oom();
+    const root = std.fs.path.join(a, &.{ first_path, "work" }) catch oom();
+    if (!localFilesystemAllowed(c, s, base.?)) {
+        const m = storage.mountOf(a, mountinfoText(c), base.?) catch oom();
+        if (!create) return .{
+            .path = root,
+            .capacity_path = nearestExistingParent(base.?),
+            .refused_fstype = if (m) |mount| mount.fstype else "an unknown file system",
+        };
+        die("workstation workspace directory {s} is on {s}, which is memory-backed, network or shared storage; {s}.\n" ++
+            "  Set XDG_CACHE_HOME to a directory on this workstation's local disk.", .{ base.?, if (m) |mount| mount.fstype else "an unknown file system", undone });
+    }
+    if (!create) {
+        if (fsx.statAt(fsx.cwd, base.?, false)) |_| {} else |_| {
+            return .{ .path = root, .capacity_path = nearestExistingParent(base.?) };
+        }
+    }
+    const base_fd = sys.openat(fsx.cwd, base.?, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch |e| {
+        const why = str(a, "cannot open workstation workspace directory {s} ({s})", .{ base.?, storage.describeError(e) });
+        if (!create) return .{ .path = root, .capacity_path = nearestExistingParent(base.?), .refused_reason = why };
+        die("{s}; {s}.", .{ why, undone });
+    };
+    defer sys.close(base_fd);
+    const first_result = openPrivateChild(c, base_fd, first, first_path, create);
+    const first_fd = switch (first_result) {
+        .fd => |fd| fd,
+        .missing => return .{ .path = std.fs.path.join(a, &.{ first_path, "work" }) catch oom(), .capacity_path = base.? },
+        .refused => |why| {
+            if (!create) return .{ .path = root, .capacity_path = base.?, .refused_reason = why };
+            die("{s}; {s}.", .{ why, undone });
+        },
+    };
+    defer sys.close(first_fd);
+    const work_result = openPrivateChild(c, first_fd, "work", root, create);
+    const work_fd = switch (work_result) {
+        .fd => |fd| fd,
+        .missing => return .{ .path = root, .capacity_path = first_path },
+        .refused => |why| {
+            if (!create) return .{ .path = root, .capacity_path = first_path, .refused_reason = why };
+            die("{s}; {s}.", .{ why, undone });
+        },
+    };
+    sys.close(work_fd);
+    return .{ .path = root, .capacity_path = root };
+}
+
+fn nearestExistingParent(path: []const u8) []const u8 {
+    var current = path;
+    while (true) {
+        if (fsx.statAt(fsx.cwd, current, false)) |st| {
+            if (st.isDir()) return current;
+        } else |_| {}
+        if (std.mem.eql(u8, current, "/")) return "/";
+        current = std.fs.path.dirname(current) orelse "/";
+    }
+}
+
+fn checkedWorkspaceRoot(c: Ctx, s: config.Settings, g: Global, undone: []const u8) []const u8 {
+    return if (localStorage(s, c, g)) checkedLocalRoot(c, s, undone, true).path else checkedJobRoot(c, s, undone);
 }
 
 /// Where the prefix in force was set, as `eb-local config` shows it.
@@ -2792,13 +3843,43 @@ fn durableDirs(c: Ctx, prefix: []const u8, undone: []const u8) Durable {
     return d;
 }
 
+/// The prefix lock file is made when a command first takes the lock. One that
+/// is there and is not a regular file would stop the command only after its
+/// list is out, so it is refused before anything is written.
+fn refuseIrregularPrefixLock(c: Ctx, prefix: []const u8) void {
+    const lock_path = std.fs.path.join(c.a, &.{ prefix, ".eb-local", ".lock" }) catch oom();
+    const st = fsx.statAt(fsx.cwd, lock_path, false) catch return;
+    if (!st.isReg()) die("cannot lock {s}: not a regular file", .{lock_path});
+}
+
+fn prefixLockPath(c: Ctx, prefix: []const u8) []const u8 {
+    return std.fs.path.join(c.a, &.{ prefix, ".eb-local", ".lock" }) catch oom();
+}
+
+/// Release `lock`, the lock file at `lock_path`, at the end of a command
+/// that exits `code`. After a success a failed release is reported with
+/// its errno and the command exits 1. After a failure, a failed write to
+/// standard output among them, it is dropped and `sys.last_errno` is put
+/// back, so the failure already reported stands.
+fn endLock(code: u8, lock: *?sys.fd_t, lock_path: []const u8) u8 {
+    if (code != 0 or stdout.failed) {
+        storage.releaseLockAfterError(lock);
+        return if (code != 0) code else 1;
+    }
+    storage.releaseLock(lock) catch |e| {
+        warn("cannot release the lock on {s}: {s}", .{ lock_path, sys.describe(e) });
+        return 1;
+    };
+    return 0;
+}
+
 fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
     const a = c.a;
     var err_msg: []const u8 = "";
     const timeout_ms = storage.lockTimeoutMs(c.env, &err_msg) orelse die("{s}", .{err_msg});
     const dir = std.fs.path.join(a, &.{ prefix, ".eb-local" }) catch oom();
     common.atomic.makedirs(dir) catch |e| die("cannot create {s} ({s})", .{ dir, sys.describe(e) });
-    const lock_path = std.fs.path.join(a, &.{ dir, ".lock" }) catch oom();
+    const lock_path = prefixLockPath(c, prefix);
     return switch (storage.acquireBoundedLock(a, lock_path, timeout_ms, true, &err_msg)) {
         .held => |fd| fd,
         .unlocked => null,
@@ -2809,8 +3890,8 @@ fn acquirePrefixLock(c: Ctx, prefix: []const u8) ?sys.fd_t {
 /// The stop when the checked node-local mount takes no workspace.
 fn workspaceFailed(a: Allocator, job_root: []const u8, e: anyerror) noreturn {
     if (e == error.OutOfMemory) oom();
-    die("cannot make a build workspace in the node-local mount {s} ({s}); nothing was built.\n" ++
-        "  The mount passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, storage.describeError(e), q(a, job_root) });
+    die("cannot make a build workspace in {s} ({s}); nothing was built.\n" ++
+        "  The directory passed eb-local's checks, so it may be full or have changed since; df {s} shows its free space.", .{ job_root, storage.describeError(e), q(a, job_root) });
 }
 
 // ---- clean ----------------------------------------------------------------
@@ -2932,10 +4013,153 @@ const CleanReport = struct {
     removed_workspaces: usize,
 };
 
-fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) void {
+const WorkspaceRootRecord = struct {
+    path: []const u8,
+    dir_fd: ?sys.fd_t = null,
+    name: []const u8 = "",
+};
+
+fn workspaceRegistryName(a: Allocator, root: []const u8) []const u8 {
+    return std.fmt.allocPrint(a, "{x}", .{std.hash.Wyhash.hash(0, root)}) catch oom();
+}
+
+fn openWorkspaceRegistryDir(c: Ctx, prefix: []const u8, create: bool) PrivateChild {
+    const state = std.fs.path.join(c.a, &.{ prefix, ".eb-local" }) catch oom();
+    const state_fd = sys.openat(fsx.cwd, state, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch |e| switch (e) {
+        error.NotFound => return .missing,
+        else => return .{ .refused = str(c.a, "cannot open durable state directory {s} ({s})", .{ state, storage.describeError(e) }) },
+    };
+    defer sys.close(state_fd);
+    const name = std.fmt.allocPrint(c.a, "workspace-roots-{d}", .{callerUid(c)}) catch oom();
+    const path = std.fs.path.join(c.a, &.{ state, name }) catch oom();
+    return switch (openPrivateChild(c, state_fd, name, path, create)) {
+        .refused => |why| .{ .refused = str(c.a, "{s}; the workspace-root registry was not opened.", .{why}) },
+        else => |got| got,
+    };
+}
+
+fn workspaceRegistryDir(c: Ctx, prefix: []const u8, create: bool) ?sys.fd_t {
+    return switch (openWorkspaceRegistryDir(c, prefix, create)) {
+        .fd => |fd| fd,
+        .missing => null,
+        .refused => |why| die("{s}", .{why}),
+    };
+}
+
+/// Set in main from EB_LOCAL_TEST_RECORD_OPEN_ERRNO, only in the test
+/// artifact, so the temporary file of a workspace-root record is not
+/// created and the open fails with that errno.
+var test_record_open_errno: ?linux.E = null;
+
+/// Write the registry entry for `root` and return null, or return why it
+/// was not written, so the caller removes the workspace before it reports
+/// that. Every failure, the registry and an entry that cannot be used
+/// included, is returned. The entry is written to a temporary file in the
+/// registry and renamed over the entry once the write, fsync and close
+/// succeed. A failure before the rename removes only the temporary file,
+/// so an entry that older workspaces under `root` were recorded in is
+/// kept. A failed sync of the registry after the rename leaves the new
+/// entry, which names the same root as any it replaced.
+fn recordWorkspaceRoot(c: Ctx, prefix: []const u8, root: []const u8) ?[]const u8 {
+    const dir = switch (openWorkspaceRegistryDir(c, prefix, true)) {
+        .fd => |fd| fd,
+        .missing => return str(c.a, "cannot create the workspace-root registry", .{}),
+        .refused => |why| return why,
+    };
+    defer sys.close(dir);
+    const name = workspaceRegistryName(c.a, root);
+    if (fsx.statAt(dir, name, false)) |st| {
+        if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0)
+            return str(c.a, "workstation workspace-root registry entry {s} must be a private regular file you own", .{name});
+    } else |e| if (e != error.NotFound) return str(c.a, "cannot inspect workstation workspace-root registry ({s})", .{storage.describeError(e)});
+    writeWorkspaceRecord(c.a, dir, name, root) catch |e|
+        return str(c.a, "cannot record workstation workspace root {s} ({s})", .{ root, storage.describeError(e) });
+    return null;
+}
+
+fn writeWorkspaceRecord(a: Allocator, dir: sys.fd_t, name: []const u8, root: []const u8) sys.Error!void {
+    var rnd: [6]u8 = undefined;
+    _ = try sys.call(linux.getrandom, .{ &rnd, rnd.len, @as(u32, 0) });
+    const tmp = std.fmt.allocPrint(a, ".{s}.{x}.tmp", .{ name, std.mem.readInt(u48, &rnd, .little) }) catch oom();
+    if (comptime build_options.test_ops) if (test_record_open_errno) |e| {
+        _ = try sys.result(@bitCast(-@as(isize, @backingInt(e))));
+    };
+    const fd = try sys.openat(dir, tmp, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0o600);
+    errdefer {
+        const kept = sys.last_errno;
+        sys.unlinkat(dir, tmp, 0) catch {};
+        sys.last_errno = kept;
+    }
+    {
+        errdefer sys.close(fd);
+        try sys.writeAll(fd, root);
+        try storage.fsyncWritten(fd);
+    }
+    try storage.closeWritten(fd);
+    try sys.renameat(dir, tmp, dir, name);
+    try storage.fsyncWritten(dir);
+}
+
+fn recordedWorkspaceRoots(c: Ctx, prefix: []const u8) []const WorkspaceRootRecord {
+    const dir = workspaceRegistryDir(c, prefix, false) orelse return &.{};
+    var out: std.ArrayList(WorkspaceRootRecord) = .empty;
+    var it = fsx.DirIter.init(c.a, dir) catch {
+        sys.close(dir);
+        return &.{};
+    };
+    while (it.next() catch null) |entry| {
+        // `recordWorkspaceRoot` names its temporary files with a leading dot.
+        if (std.mem.startsWith(u8, entry.name, ".")) continue;
+        const fd = sys.openat(dir, entry.name, .{ .NOFOLLOW = true, .CLOEXEC = true }, 0) catch continue;
+        const st = fsx.fstat(fd) catch {
+            sys.close(fd);
+            continue;
+        };
+        if (!st.isReg() or st.uid != callerUid(c) or st.mode & 0o077 != 0) {
+            sys.close(fd);
+            continue;
+        }
+        const root = fsx.readAll(c.a, fd, sys.path_max) catch {
+            sys.close(fd);
+            continue;
+        };
+        sys.close(fd);
+        if (!std.fs.path.isAbsolute(root)) continue;
+        out.append(c.a, .{ .path = root, .dir_fd = dir, .name = c.a.dupe(u8, entry.name) catch oom() }) catch oom();
+    }
+    if (out.items.len == 0) sys.close(dir);
+    return out.items;
+}
+
+fn rootHasOwnWorkspace(c: Ctx, root: []const u8) bool {
+    const fd = fsx.openDir(fsx.cwd, root, false) catch return false;
+    defer sys.close(fd);
+    var it = fsx.DirIter.init(c.a, fd) catch return false;
+    while (it.next() catch null) |entry| {
+        const full = std.fs.path.join(c.a, &.{ root, entry.name }) catch oom();
+        if (storage.ownWorkspace(root, full, callerUid(c))) return true;
+    }
+    return false;
+}
+
+fn forgetWorkspaceRootIfEmpty(c: Ctx, prefix: []const u8, root: []const u8) void {
+    if (rootHasOwnWorkspace(c, root)) return;
+    const dir = workspaceRegistryDir(c, prefix, false) orelse return;
+    defer sys.close(dir);
+    sys.unlinkat(dir, workspaceRegistryName(c.a, root), 0) catch {};
+}
+
+/// Write the one JSON document `clean --json` prints, and say whether it got out.
+fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []const u8, targets: []const Target, spaces: []const []const u8, removed_items: usize, removed_workspaces: usize) bool {
     var items: std.ArrayList(CleanItemJson) = .empty;
     for (targets) |t| items.append(a, .{ .path = t.path, .kind = if (t.dir) "dir" else "file" }) catch oom();
-    jsonout.emit(a, CleanReport{
+    const line = jsonout.renderLine(a, CleanReport{
         .prefix = prefix,
         .dry_run = dry_run,
         .action = action,
@@ -2943,45 +4167,57 @@ fn emitCleanJson(a: Allocator, prefix: []const u8, dry_run: bool, action: []cons
         .workspaces = spaces,
         .removed_items = removed_items,
         .removed_workspaces = removed_workspaces,
-    });
+    }) catch oom();
+    return emit(line);
 }
 
-fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
+/// What `clean` would remove: the files and directories under the prefix, and
+/// the build workspaces of this job that no build holds.
+const CleanPlan = struct {
+    targets: []const Target,
+    spaces: []const []const u8,
+    /// Recorded workspace roots whose directory no longer exists.
+    gone: []const WorkspaceRootRecord,
+
+    /// Whether everything in `self` is still in `now`.
+    fn holds(self: CleanPlan, now: CleanPlan) bool {
+        for (self.targets) |t| {
+            const found = for (now.targets) |u| {
+                if (u.dir == t.dir and std.mem.eql(u8, u.path, t.path)) break true;
+            } else false;
+            if (!found) return false;
+        }
+        for (self.spaces) |w| {
+            const found = for (now.spaces) |v| {
+                if (std.mem.eql(u8, v, w)) break true;
+            } else false;
+            if (!found) return false;
+        }
+        return true;
+    }
+};
+
+/// Recorded workspace roots that are gone are forgotten once the list is out.
+fn forgetGoneRoots(plan: CleanPlan) void {
+    for (plan.gone) |record| if (record.dir_fd) |dir| sys.unlinkat(dir, record.name, 0) catch {};
+}
+
+fn cleanPlan(c: Ctx, o: CleanOpts, d: Durable, roots: []const WorkspaceRootRecord, aged_before: i64) CleanPlan {
     const a = c.a;
-    var job_root: ?[]const u8 = null;
-    if (o.workspaces) {
-        if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null)
-            die("clean --workspaces works only inside the Slurm job that made the workspaces, and SLURM_JOB_ID is unset or empty; nothing was removed.\n" ++
-                "  A build workspace is in its job's node-local mount, which goes when the job ends; run eb-local clean --workspaces inside that job, " ++
-                "in its batch script or with srun --jobid=JOBID --overlap.", .{});
-        job_root = checkedJobRoot(c, s, "nothing was removed");
-    }
-    const p = place(c, s);
-    const d = durableDirs(c, p.prefix, "nothing was removed");
-    var trash = s.trash.value;
-    const rtrash = proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null;
-    switch (trash) {
-        .auto => trash = if (rtrash != null) .rtrash else .none,
-        .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
-        .none => {},
-    }
-    var prefix_lock: ?sys.fd_t = null;
-    defer storage.releaseLock(&prefix_lock);
-    if (!o.dry_run and (o.logs or o.sources)) {
-        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
-        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
-            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
-        } else |_| {}
-    }
-    // find -mtime +N: more than N whole days old.
-    const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
-    const now: i64 = nowSecs();
     var collect: Collect = .{ .c = c };
-    if (o.logs) collect.aged(d.logs, now - (days + 1) * 86400 + 1);
+    if (o.logs) collect.aged(d.logs, aged_before);
     if (o.sources) collect.files(d.sources);
     var spaces: std.ArrayList([]const u8) = .empty;
-    if (job_root) |jr| {
-        const fd = fsx.openDir(fsx.cwd, jr, false) catch die("cannot read {s}", .{jr});
+    var gone: std.ArrayList(WorkspaceRootRecord) = .empty;
+    for (roots) |record| {
+        const jr = record.path;
+        const fd = fsx.openDir(fsx.cwd, jr, false) catch |e| switch (e) {
+            error.NotFound => {
+                gone.append(a, record) catch oom();
+                continue;
+            },
+            else => die("cannot read {s} ({s})", .{ jr, storage.describeError(e) }),
+        };
         defer sys.close(fd);
         var it = fsx.DirIter.init(a, fd) catch die("cannot read {s}", .{jr});
         while (it.next() catch null) |e| {
@@ -2992,43 +4228,107 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
             }
         }
     }
-    const targets = collect.out.items;
-    if (targets.len == 0 and spaces.items.len == 0) {
+    return .{ .targets = collect.out.items, .spaces = spaces.items, .gone = gone.items };
+}
+
+fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 {
+    const a = c.a;
+    const p = place(c, s);
+    const d = durableDirs(c, p.prefix, "nothing was removed");
+    var roots: std.ArrayList(WorkspaceRootRecord) = .empty;
+    if (o.workspaces) {
+        roots.appendSlice(a, recordedWorkspaceRoots(c, p.prefix)) catch oom();
+        if (nonEmpty(c.env.get("SLURM_JOB_ID")) != null and s.node_local_root.value.len > 0) {
+            roots.append(a, .{ .path = checkedJobRoot(c, s, "nothing was removed") }) catch oom();
+        } else if (localStorage(s, c, g) and roots.items.len == 0) {
+            const local = checkedLocalRoot(c, s, "nothing was removed", false).path;
+            if (fsx.statAt(fsx.cwd, local, false)) |st| {
+                if (st.isDir()) roots.append(a, .{ .path = local }) catch oom();
+            } else |_| {}
+        } else if (roots.items.len == 0) {
+            die("clean --workspaces found no recorded workstation roots and is not inside a Slurm job that made workspaces; nothing was removed.", .{});
+        }
+    }
+    defer if (roots.items.len > 0 and roots.items[0].dir_fd != null) sys.close(roots.items[0].dir_fd.?);
+    var trash = s.trash.value;
+    const rtrash = proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null;
+    switch (trash) {
+        .auto => trash = if (rtrash != null) .rtrash else .none,
+        .rtrash => if (rtrash == null) die("clean.trash is rtrash, but rtrash is not on PATH.", .{}),
+        .none => {},
+    }
+    // find -mtime +N: more than N whole days old.
+    const days: i64 = o.logs_days orelse s.logs_older_than_days.value;
+    const aged_before: i64 = nowSecs() - (days + 1) * 86400 + 1;
+    if (!o.dry_run and (o.logs or o.sources)) refuseIrregularPrefixLock(c, p.prefix);
+    const plan = cleanPlan(c, o, d, roots.items, aged_before);
+    const targets = plan.targets;
+    const spaces = plan.spaces;
+    if (targets.len == 0 and spaces.len == 0) {
         if (json) {
-            emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces.items, 0, 0);
+            if (!emitCleanJson(a, p.prefix, o.dry_run, "nothing", targets, spaces, 0, 0)) return unlisted("removed");
         } else {
             say("eb-local: nothing to clean in {s}", .{p.prefix});
+            if (stdout.failed) return unlisted("removed");
         }
+        if (!o.dry_run) for (roots.items) |record| if (record.dir_fd) |dir| {
+            if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
+        };
         return 0;
     }
     if (!json) {
         for (targets) |t| say("  {s}{s}", .{ t.path, if (t.dir) "/" else "" });
-        for (spaces.items) |w| say("  {s}/ (build workspace)", .{w});
+        for (spaces) |w| say("  {s}/ (build workspace)", .{w});
+        if (stdout.failed) return unlisted("removed");
     }
     if (o.dry_run) {
         if (json) {
-            emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces.items, 0, 0);
+            _ = emitCleanJson(a, p.prefix, true, "dry-run", targets, spaces, 0, 0);
         } else {
-            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.items.len });
+            say("eb-local: dry run, nothing removed ({d} item(s), {d} workspace(s))", .{ targets.len, spaces.len });
         }
         return 0;
     }
     if (targets.len > 0 and trash != .rtrash and !o.delete) {
         notTrashed(s);
-        if (json) emitCleanJson(a, p.prefix, false, "refused", targets, spaces.items, 0, 0);
+        if (json and !emitCleanJson(a, p.prefix, false, "refused", targets, spaces, 0, 0)) return unlisted("removed");
+        forgetGoneRoots(plan);
         return 1;
     }
-    // Build workspaces are node-local scratch the scheduler removes anyway;
-    // they are deleted, not trashed.
+    // With `--json` the document is the list. It says what clean is about to
+    // remove, so it is written, and has reached standard output, before the
+    // first removal; a removal that then fails is a warning and exit status 1.
+    if (json) {
+        const planned = if (targets.len == 0) "workspaces-only" else if (trash == .rtrash) "trashed" else "deleted";
+        if (!emitCleanJson(a, p.prefix, false, planned, targets, spaces, targets.len, spaces.len)) return unlisted("removed");
+    }
+    forgetGoneRoots(plan);
+    // The list is out. Only now does clean hold the prefix lock, which makes
+    // `.eb-local/.lock`, and check that the lock did not wait through a change
+    // to what it listed.
+    var prefix_lock: ?sys.fd_t = null;
+    defer storage.releaseLockAfterError(&prefix_lock);
+    if (o.logs or o.sources) {
+        const eb_local_dir = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
+        if (fsx.statAt(fsx.cwd, eb_local_dir, false)) |st| {
+            if (st.isDir()) prefix_lock = acquirePrefixLock(c, p.prefix);
+        } else |_| {}
+    }
+    if (!plan.holds(cleanPlan(c, o, d, roots.items, aged_before))) {
+        warn("what clean listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
+        return 1;
+    }
+    // Build workspaces are disposable scratch; they are deleted, not trashed.
     var removed_ws: usize = 0;
-    for (spaces.items) |w| {
+    for (spaces) |w| {
         if (storage.removeTree(a, w)) |_| {
             removed_ws += 1;
         } else |e| warn("cannot remove {s} ({s})", .{ w, storage.describeError(e) });
     }
-    if (!json and spaces.items.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
+    for (roots.items) |record| if (record.dir_fd) |dir| {
+        if (!rootHasOwnWorkspace(c, record.path)) sys.unlinkat(dir, record.name, 0) catch {};
+    };
     var removed_items: usize = 0;
-    var action: []const u8 = "workspaces-only";
     if (targets.len > 0) {
         if (trash == .rtrash) {
             var argv: std.ArrayList([]const u8) = .empty;
@@ -3043,10 +4343,9 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}", .{rc}),
                 .signal => return stop(run),
+                .unreaped => return 1,
             }
             removed_items = targets.len;
-            action = "trashed";
-            if (!json) say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
         } else {
             for (targets) |t| {
                 if (t.dir) {
@@ -3059,17 +4358,23 @@ fn cmdClean(c: Ctx, s: config.Settings, o: CleanOpts, json: bool) u8 {
                     } else |e| warn("cannot remove {s} ({s})", .{ t.path, storage.describeError(e) });
                 }
             }
-            action = "deleted";
-            if (!json) say("eb-local: deleted {d} item(s)", .{removed_items});
         }
         for ([_][]const u8{ d.logs, d.sources }) |dir| {
             const st = fsx.statAt(fsx.cwd, dir, false) catch continue;
             removeEmptyDirs(c, dir, st.dev, 0);
         }
     }
-    if (json) emitCleanJson(a, p.prefix, false, action, targets, spaces.items, removed_items, removed_ws);
-    if (removed_ws < spaces.items.len or removed_items < targets.len) return 1;
-    return 0;
+    // Nothing is left to change, so no report below can stop a later step.
+    if (!json) {
+        if (spaces.len > 0) say("eb-local: removed {d} build workspace(s)", .{removed_ws});
+        if (targets.len > 0 and trash == .rtrash) {
+            say("eb-local: moved {d} item(s) to the trash (rtrash list, rtrash restore)", .{targets.len});
+        } else if (targets.len > 0) {
+            say("eb-local: deleted {d} item(s)", .{removed_items});
+        }
+    }
+    const code: u8 = if (removed_ws < spaces.len or removed_items < targets.len) 1 else 0;
+    return endLock(code, &prefix_lock, prefixLockPath(c, p.prefix));
 }
 
 // ---- build ----------------------------------------------------------------
@@ -3089,6 +4394,19 @@ const test_prelude =
 
 /// What a shell without a module command sources for one.
 const lmod_init = @embedFile("lmod-init.sh");
+const dev_lang_dirs = @embedFile("dev-lang-dirs.sh");
+
+/// A shell whose `module` is a host Lmod, such as a distribution's package
+/// sets up in every login shell, sourced no init that puts EESSI's modules
+/// on MODULEPATH. Where `$eb_local_stack` is not on MODULEPATH, EESSI's own
+/// module directory goes first; a site's directory that holds it stays as is.
+const eessi_modules =
+    \\if ! module is-avail "$eb_local_stack" >/dev/null 2>&1 &&
+    \\    [ -d "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/init/modules" ]; then
+    \\    module use "${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/init/modules" || :
+    \\fi
+    \\
+;
 
 /// The files an internal Bash build tries, in order. Doctor reports this list
 /// for builds; env and dev select the evaluating shell through `lmod_init`.
@@ -3137,7 +4455,8 @@ fn initDefinesModule(c: Ctx, envp: proc.Envp, file: []const u8) bool {
     return r.term.code() == 0;
 }
 
-const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
+const build_script_head = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_prelude else "") ++
+    \\trap 'trap - INT; kill -s INT "$$"' INT
     \\stack=$1 extend=$2 install_var=$3 prefix=$4 mode=$5
     \\shift 5
     \\keep=(WORKING_DIR TMPDIR TMP TEMP EASYBUILD_BUILDPATH EASYBUILD_TMPDIR XDG_CACHE_HOME CARGO_HOME EASYBUILD_SOURCEPATH EASYBUILD_TMP_LOGDIR)
@@ -3159,12 +4478,15 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\    echo "eb-local: no module command found; none of ${LMOD_PKG:-/usr/share/lmod/lmod}/init/bash, /etc/profile.d/lmod.sh or ${EESSI_CVMFS_REPO:-/cvmfs/software.eessi.io}/versions/${EESSI_VERSION:-2026.06}/init/lmod/bash defined one" >&2
     \\    exit 1
     \\}
+    \\eb_local_stack=$stack
+    \\
+++ eessi_modules ++
     \\# EESSI-extend reads the variables when it loads, so it is loaded fresh.
     \\module unload "$extend" >/dev/null 2>&1 || true
-    \\unset EESSI_CVMFS_INSTALL EESSI_SITE_INSTALL EESSI_USER_INSTALL EESSI_PROJECT_INSTALL
-    \\unset EESSI_SITE_SOFTWARE_PREFIX
-    \\unset EESSI_SOFTWARE_SUBDIR_OVERRIDE EESSI_ACCELERATOR_TARGET_OVERRIDE EESSI_OVERRIDE_GPU_CHECK
-    \\unset EASYBUILD_INSTALLPATH EASYBUILD_INSTALLPATH_SOFTWARE EASYBUILD_INSTALLPATH_MODULES EASYBUILD_PREFIX
+    \\
+;
+
+const build_script_tail =
     \\restore
     \\export "$install_var=$prefix"
     \\# Lmod finds every module of a load before it loads any; the extension
@@ -3226,8 +4548,14 @@ const build_script = "set -eo pipefail\n" ++ (if (build_options.test_ops) test_p
     \\# sticky bit for a user one, 002 and the setgid bit for a project.
     \\# eb replaces this shell, so the program eb-local waits for, and passes
     \\# a signal on to, is EasyBuild, which writes the logs it then cleans.
+    \\trap - INT
     \\exec eb "$@"
 ;
+
+/// `build_script_head`, the `unset` lines for `names`, then `build_script_tail`.
+fn buildScript(a: Allocator, names: []const []const u8) []const u8 {
+    return std.mem.concat(a, u8, &.{ build_script_head, installUnsetLines(a, names), build_script_tail }) catch oom();
+}
 
 /// What bash would run before the script could unset it: bash runs BASH_ENV
 /// first, and SHELLOPTS=xtrace prints the commands into the job log.
@@ -3270,18 +4598,20 @@ fn buildVariables(a: Allocator, work: []const u8, d: Durable) [11][2][]const u8 
 }
 
 fn buildUmask(p: Place) u32 {
-    return if (p.project) 0o002 else 0o077;
+    return if (configuredInstall(p).mode == .project) 0o002 else 0o077;
 }
 
-/// The command a build runs: `build_script` in a clean bash, with the stack,
+/// The command a build runs: `buildScript` in a clean bash, with the stack,
 /// the extension, the install variable, the prefix and the mode as its first
 /// five arguments, and eb's after them.
 fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []const []const u8) []const []const u8 {
     const bash = (proc.which(a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse "/bin/bash";
+    const install = configuredInstall(p);
+    const build_script = buildScript(a, installNames(a, c));
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(a, &.{
-        bash,                 "--noprofile",         "--norc",                                                         "-c",     build_script,                         "eb-local",
-        s.stack_module.value, s.extend_module.value, if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix, if (p.project) "project" else "user",
+        bash,                 "--noprofile",         "--norc",           "-c",           build_script,           "eb-local",
+        s.stack_module.value, s.extend_module.value, install.variable(), install.prefix, @tagName(install.mode),
     }) catch oom();
     argv.appendSlice(a, args) catch oom();
     return argv.items;
@@ -3291,22 +4621,27 @@ fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []cons
 /// and a `set --` line with its arguments, and the checks eb-local makes
 /// first as comments. Nothing is created and nothing runs, so it also works
 /// outside an allocation. $W stands for the workspace a build makes in the
-/// allocation's node-local mount.
+/// selected local workspace root.
 fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     const p = place(c, s);
+    const install = configuredInstall(p);
+    const build_script = buildScript(a, installNames(a, c));
     const d = durableDirs(c, p.prefix, "a build would stop here");
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain: the script a build runs, with its environment and arguments. Nothing was created or run.\n") catch oom();
     out.print(a, "# Installs as a {s} install into {s} (prefix from {s}).\n", .{
-        if (p.project) "project" else "user", p.prefix, if (p.project) s.project.from else s.prefix.from,
+        @tagName(install.mode), install.prefix, if (install.mode == .project) s.project.from else s.prefix.from,
     }) catch oom();
-    if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
+    if (localStorage(s, c, g)) {
+        out.appendSlice(a, "# Checks first: a private workspace on this workstation's local disk,\n") catch oom();
+    } else if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         out.print(a, "# Checks first: Slurm job {s}, its own node-local {s} mount under {s},\n", .{ job, s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     } else {
         out.appendSlice(a, "# Checks first: a Slurm job (there is none here, so a build would stop now),\n") catch oom();
         if (s.allocation_hint.value.len > 0) out.print(a, "#   for example: {s}\n", .{s.allocation_hint.value}) catch oom();
-        out.print(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }) catch oom();
+        if (s.node_local_root.value.len > 0)
+            out.print(a, "#   then its own node-local {s} mount under {s},\n", .{ s.node_local_fstype.value, s.node_local_root.value }) catch oom();
     }
     out.appendSlice(a, "#   and a prefix, sources and logs that are not on shared or node-local scratch.\n") catch oom();
     const jobs = batchLines(c, s, g, p, args);
@@ -3314,7 +4649,7 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
         out.appendSlice(a, "# On each node type the site file lists in [build.node_types], the same build as a batch job:\n") catch oom();
         for (jobs) |line| out.print(a, "#   {s}\n", .{line}) catch oom();
     }
-    out.appendSlice(a, "# W is a new workspace eb-local makes in that mount; it is removed after a good build.\n") catch oom();
+    out.appendSlice(a, "# W is a new private workspace eb-local makes there; it is removed after a good build.\n") catch oom();
     for (s.secrets.items) |sec| {
         if (config.buildGets(s, sec.name)) {
             out.print(a, "# {s} reaches eb's environment from {s}; logs are cleaned of it afterwards.\n", .{ sec.name, sec.source }) catch oom();
@@ -3348,25 +4683,48 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{build_script}) catch oom();
-    cli.put(1, out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
+}
+
+/// A test capacity, `BYTES:INODES`, or `BYTES:INODES:uncounted` for a file
+/// system that reports no inode table.
+fn capacityOverride(value: []const u8) ?storage.Capacity {
+    const suffix = ":uncounted";
+    const counted = !std.mem.endsWith(u8, value, suffix);
+    const pair = if (counted) value else value[0 .. value.len - suffix.len];
+    const split = std.mem.indexOfScalar(u8, pair, ':') orelse return null;
+    return .{
+        .bytes = std.fmt.parseInt(u64, pair[0..split], 10) catch return null,
+        .inodes = std.fmt.parseInt(u64, pair[split + 1 ..], 10) catch return null,
+        .inodes_counted = counted,
+    };
 }
 
 fn prefixCapacityOverride(c: Ctx) ?storage.Capacity {
     if (comptime build_options.test_ops) {
-        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| {
-            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
-            return .{
-                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
-                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
-            };
-        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_CAPACITY"))) |value| return capacityOverride(value);
     }
     return null;
 }
 
 fn prefixCapacity(c: Ctx, path: []const u8) ?storage.Capacity {
     return prefixCapacityOverride(c) orelse (storage.capacity(path) catch null);
+}
+
+/// The durable directories of a build, refused when a link leads them, or
+/// the trees below the prefix, onto storage that does not outlive the job.
+/// It makes nothing, so it runs before the prefix exists as well as after.
+fn buildTrees(c: Ctx, refused: []const RefusedTree, prefix: []const u8) Durable {
+    const d = durableDirs(c, prefix, "nothing was built");
+    // The trees a build writes below the prefix must not lead onto refused
+    // storage either, through a symbolic link made later.
+    for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
+        const path = std.fs.path.join(c.a, &.{ prefix, sub }) catch oom();
+        const resolved = storage.canonical(c.a, path, c.cwd) catch oom();
+        for (refused) |t| if (storage.under(resolved, t.path))
+            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
+    }
+    return d;
 }
 
 fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
@@ -3376,8 +4734,20 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         return 2;
     }
     if (g.explain) return explainBuild(c, s, g, args);
-    if (nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
+    if (!localStorage(s, c, g) and nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.", .{});
+        if (s.node_local_root.value.len == 0) {
+            cli.err("  Slurm is present, but no site file sets storage.node_local_root, the directory\n", .{});
+            cli.err("  that holds each job's node-local mount. Install the site file, or explicitly\n", .{});
+            var command: std.ArrayList([]const u8) = .empty;
+            command.append(a, "eb-local") catch oom();
+            appendConfigurationOptions(c, s, g, locate(c, s), &command);
+            command.append(a, "--workstation") catch oom();
+            for (args) |arg| command.append(a, qSingleLine(a, arg)) catch oom();
+            cli.err("  opt in to this machine's local disk with: {s}", .{std.mem.join(a, " ", command.items) catch oom()});
+            cli.err("\n", .{});
+            return 2;
+        }
         cli.err("  Software is built for the CPU of the node that runs eb-local, so build\n", .{});
         cli.err("  inside an allocation on the node type that will run it{s}\n", .{if (s.allocation_hint.value.len > 0) ", for example:" else ""});
         if (s.allocation_hint.value.len > 0) cli.err("  {s}\n", .{s.allocation_hint.value});
@@ -3386,7 +4756,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         for (jobs) |line| cli.err("  {s}\n", .{line});
         return 2;
     }
-    const job_root = checkedJobRoot(c, s, "nothing was built");
+    const job_root = checkedWorkspaceRoot(c, s, g, "nothing was built");
     var p = place(c, s);
     // The process umask EESSI-extend gives the install, as `eb-local eb`
     // sets it: 002 for a project, so that every member can write the
@@ -3396,6 +4766,18 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const refused = refusedTrees(c, s, true);
     for (refused) |t| if (storage.under(p.prefix, t.path))
         die("the install prefix {s} [{s}] is under {s}, {s}; nothing was built.\n  " ++ outlive ++ "; " ++ prefix_fix ++ ".", .{ p.prefix, prefixFrom(s, p), t.path, t.what });
+    {
+        // Said before the prefix exists, so a standard output that cannot take
+        // it leaves nothing behind; the canonical form is what realpath gives
+        // once the prefix is made.
+        const shown_prefix = storage.canonical(a, p.prefix, c.cwd) catch oom();
+        _ = buildTrees(c, refused, shown_prefix);
+        var shown: std.ArrayList(u8) = .empty;
+        shown.appendSlice(a, replay(a, "--explain", s, g, shown_prefix, &.{})) catch oom();
+        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
+        say("eb-local: what this runs: eb-local {s}", .{shown.items});
+        if (stdout.failed) return unlisted("built");
+    }
     common.atomic.makedirs(p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
     {
         var zb: [sys.path_max:0]u8 = undefined;
@@ -3407,25 +4789,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         p.prefix = a.dupe(u8, fsx.realpath(fsx.cwd, p.prefix, &buf) catch |e| die("cannot resolve installation prefix {s} ({s})", .{ p.prefix, storage.describeError(e) })) catch oom();
     }
     if (prefixCapacity(c, p.prefix)) |cap| {
-        if (cap.bytes == 0 or cap.inodes == 0)
+        if (cap.exhausted())
             die("installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
     }
-    const d = durableDirs(c, p.prefix, "nothing was built");
-    // The trees a build writes below the prefix must not lead onto refused
-    // storage either, through a symbolic link made later.
-    for ([_][]const u8{ "versions", ".eb-local" }) |sub| {
-        const path = std.fs.path.join(a, &.{ p.prefix, sub }) catch oom();
-        const resolved = storage.canonical(a, path, c.cwd) catch oom();
-        for (refused) |t| if (storage.under(resolved, t.path))
-            die("{s} leads to {s}, under {s}, {s}; nothing was built.\n  " ++ outlive ++ ": replace the symbolic link in {s} with a directory, or " ++ prefix_fix ++ ".", .{ path, resolved, t.path, t.what, path });
-    }
-
-    {
-        var shown: std.ArrayList(u8) = .empty;
-        shown.appendSlice(a, replay(a, "--explain", s, g, p.prefix, &.{})) catch oom();
-        for (args) |x| shown.print(a, " {s}", .{q(a, x)}) catch oom();
-        say("eb-local: what this runs: eb-local {s}", .{shown.items});
-    }
+    const d = buildTrees(c, refused, p.prefix);
 
     // Secrets before the workspace and the build, so a missing one stops
     // the build with nothing but the installation directory made.
@@ -3444,7 +4811,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const ws_held = storage.makeLockedWorkspace(a, job_root, &.{ "build", "tmp", "cache", "cargo", "source-index" }) catch |e| workspaceFailed(a, job_root, e);
     const work = ws_held.path;
     var ws_lock: ?sys.fd_t = ws_held.lock;
-    defer storage.releaseLock(&ws_lock);
+    defer storage.releaseLockAfterError(&ws_lock);
+    const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
@@ -3528,7 +4896,11 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             },
         };
     };
-    defer storage.releaseLock(&prefix_lock);
+    defer storage.releaseLockAfterError(&prefix_lock);
+    if (localStorage(s, c, g)) if (recordWorkspaceRoot(c, p.prefix, job_root)) |why| {
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+        die("{s}", .{why});
+    };
     var env = c.env.clone(a) catch oom();
     for (install_vars) |v| _ = env.swapRemove(v);
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
@@ -3561,14 +4933,24 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         return stop(.{ .signal = sig });
     }
     // The guard stays until the logs are clean: a signal stops the build, but
-    // eb-local first waits for EasyBuild, which writes them, to exit.
-    const ran = guard.run(a, buildCommand(a, c, s, p, args), envpOf(a, &env));
+    // eb-local first waits for EasyBuild, which writes them, to exit. Logs
+    // are cleaned only after the process group is reaped. A SIGKILL timeout
+    // leaves them in place.
+    const build_argv = buildCommand(a, c, s, p, args);
+    const ran = guard.run(a, build_argv, envpOf(a, &env)) catch die("cannot start {s}", .{build_argv[0]});
     const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
+        .unreaped => 1,
     };
 
-    if (values.len > 0) {
+    // Redaction requires ECHILD. A descendant still alive after the SIGKILL
+    // deadline can write a secret into a log that was just cleaned, so a
+    // timed-out reap leaves the logs alone and the build exits 1.
+    if (ran == .unreaped) {
+        if (values.len > 0)
+            warn("build logs were not cleaned of secrets, because a descendant may still write them", .{});
+    } else if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
         secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
@@ -3583,12 +4965,16 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
 
     const keep = std.mem.eql(u8, c.env.get("EB_LOCAL_KEEP_WORK") orelse "", "1");
-    if (rc == 0 and !keep) {
-        storage.releaseLock(&ws_lock);
-        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e|
-            warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
-    } else {
-        warn("build workspace kept at {s}; it goes when the allocation ends,", .{work});
+    // The workspace goes only once what was said about the logs has reached
+    // standard output; until then it stays, as after a failed build. Its
+    // lock is released after the last line, so a failed write is reported
+    // and a failed release after it is not.
+    const remove = rc == 0 and !keep and !stdout.failed;
+    if (!remove) {
+        if (localStorage(s, c, g))
+            warn("build workspace kept at {s};", .{work})
+        else
+            warn("build workspace kept at {s}; it goes when the allocation ends,", .{work});
         cli.err("  or now with: eb-local clean --workspaces --no-logs\n", .{});
     }
     if (rc == 0) {
@@ -3596,11 +4982,31 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         say("eb-local: done. To use the modules in a new shell or job:", .{});
         say("  eval \"$(eb-local {s})\"", .{replay(a, "env", s, g, p.prefix, &.{})});
     }
+    var released: u8 = 0;
+    if (remove) {
+        const mask = blockPassedOn();
+        released = endLock(if (guard.received() != null) 1 else 0, &ws_lock, ws_lock_path);
+        restoreMask(&mask);
+        if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch |e| {
+            if (localStorage(s, c, g))
+                warn("cannot remove {s} ({s}); run eb-local clean --workspaces", .{ work, @errorName(e) })
+            else
+                warn("cannot remove {s} ({s}); it goes when the allocation ends", .{ work, @errorName(e) });
+        };
+        if (localStorage(s, c, g)) forgetWorkspaceRootIfEmpty(c, p.prefix, job_root);
+    }
+    const mask = blockPassedOn();
     const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
+    const code: u8 = switch (ended) {
+        .exit => |x| if (x != 0) x else released,
+        .signal => 1,
+        .unreaped => 1,
+    };
+    const final = endLock(endLock(code, &ws_lock, ws_lock_path), &prefix_lock, prefixLockPath(c, p.prefix));
+    restoreMask(&mask);
+    const late: Run = if (guard.received()) |sig| .{ .signal = sig } else ended;
     guard.release();
-    storage.releaseLock(&ws_lock);
-    storage.releaseLock(&prefix_lock);
-    return stop(ended);
+    return if (late == .signal) stop(late) else final;
 }
 
 // ---- list -----------------------------------------------------------------
@@ -3777,8 +5183,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
                 out.append(a, '\n') catch oom();
             }
         }
-        cli.put(1, out.items);
-        return 0;
+        return if (emit(out.items)) 0 else 1;
     }
 
     if (json) {
@@ -3825,8 +5230,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     }.f;
     if (trees.items.len == 0 or rows.items.len == 0) {
         add(a, &out, str(a, "Nothing{s} is installed in {s}.\n", .{ if (filters.len > 0) " that matches" else "", p.prefix }));
-        cli.put(1, out.items);
-        return 0;
+        return if (emit(out.items)) 0 else 1;
     }
 
     var width: usize = "MODULE".len;
@@ -3864,8 +5268,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     } else {
         add(a, &out, "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.\n");
     }
-    cli.put(1, out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
 }
 
 // ---- doctor ---------------------------------------------------------------
@@ -3942,13 +5345,7 @@ const DoctorOpts = struct {
 
 fn workspaceCapacityOverride(c: Ctx) ?storage.Capacity {
     if (comptime build_options.test_ops) {
-        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_CAPACITY"))) |value| {
-            const split = std.mem.indexOfScalar(u8, value, ':') orelse return null;
-            return .{
-                .bytes = std.fmt.parseInt(u64, value[0..split], 10) catch return null,
-                .inodes = std.fmt.parseInt(u64, value[split + 1 ..], 10) catch return null,
-            };
-        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_CAPACITY"))) |value| return capacityOverride(value);
     }
     return null;
 }
@@ -4021,10 +5418,12 @@ fn reportWorkspace(c: Ctx, s: config.Settings, raw_path: []const u8, out: *std.A
         break :blk null;
     };
     if (available) |free| {
-        if (free.bytes == 0 or free.inodes == 0) {
+        if (free.exhausted()) {
             note(a, out, json_lines, "FAIL", "workspace {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ path, free.bytes, free.inodes });
             failed = true;
-        } else note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+        } else if (free.inodes_counted) {
+            note(a, out, json_lines, "info", "workspace {s}: {d} free bytes, {d} free inodes", .{ path, free.bytes, free.inodes });
+        } else note(a, out, json_lines, "info", "workspace {s}: {d} free bytes; this file system does not count inodes", .{ path, free.bytes });
     }
     if (storage.hasMountOption(mount.options, "noexec")) {
         note(a, out, json_lines, "FAIL", "workspace {s}: mount {s} has noexec", .{ path, mount.target });
@@ -4255,11 +5654,14 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     // Configuration.
     const sources = configSources(c, g);
     for (sources) |src| note(a, &out, lines_ptr, "ok  ", "{s} file {s}", .{ @tagName(src.layer), src.path });
+    const local = localStorage(s, c, g);
     const site = s.node_local_root.value.len > 0;
-    if (site) {
+    if (local) {
+        note(a, &out, lines_ptr, "ok  ", "builds use a private workspace on this workstation's local disk", .{});
+    } else if (site) {
         note(a, &out, lines_ptr, "ok  ", "builds use the allocation's own {s} mount {s}/{s}", .{ s.node_local_fstype.value, s.node_local_root.value, s.node_local_mount.value });
     } else {
-        note(a, &out, lines_ptr, "info", "no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program", .{});
+        note(a, &out, lines_ptr, "info", "no workspace storage is configured for this Slurm job; set storage.node_local_root or storage.mode = \"local\"", .{});
     }
 
     // A build reads each secret it gets before it starts, so one of those
@@ -4318,7 +5720,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
             note(a, &out, lines_ptr, "FAIL", "you cannot write to {s} ({s})", .{ p.prefix, sys.describeErrno(ae) });
             failed = true;
         } else if (prefixCapacity(c, p.prefix)) |cap| {
-            if (cap.bytes == 0 or cap.inodes == 0) {
+            if (cap.exhausted()) {
                 note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
                 failed = true;
             }
@@ -4349,7 +5751,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
                 note(a, &out, lines_ptr, "FAIL", "installation prefix {s} cannot be created under {s} ({s})", .{ p.prefix, ancestor, sys.describeErrno(ae) });
                 failed = true;
             } else if (prefixCapacity(c, ancestor)) |cap| {
-                if (cap.bytes == 0 or cap.inodes == 0) {
+                if (cap.exhausted()) {
                     note(a, &out, lines_ptr, "FAIL", "installation prefix {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ p.prefix, cap.bytes, cap.inodes });
                     failed = true;
                 } else note(a, &out, lines_ptr, "info", "{s} does not exist yet; the first build creates it", .{p.prefix});
@@ -4394,8 +5796,29 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
             if (sel.mode == .project and !isDir(v)) {
                 note(a, &out, lines_ptr, eb_stop, "EESSI_PROJECT_INSTALL={s} is not a directory, so EESSI-extend refuses to load and `eb-local eb` stops; the project owner creates it with the project group and chmod 2770", .{q(a, v)});
                 if (!site) failed = true;
-            } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
-        } else note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a user install into the module's default, $HOME/eessi", .{});
+            } else {
+                const configured = configuredInstall(p);
+                if (matchesConfiguredInstall(c, configured, sel, v)) {
+                    note(a, &out, lines_ptr, "ok  ", "`eb-local eb` makes a {s} install: {s}={s}", .{ @tagName(sel.mode), name, q(a, v) });
+                } else {
+                    note(a, &out, lines_ptr, "warn", "`eb-local eb` keeps explicitly exported {s}={s}, a {s} install that does not match configured {s}={s}; unset {s} to use configuration", .{
+                        name,
+                        q(a, v),
+                        @tagName(sel.mode),
+                        configured.variable(),
+                        q(a, configured.prefix),
+                        name,
+                    });
+                }
+            }
+        } else {
+            const install = configuredInstall(p);
+            note(a, &out, lines_ptr, "ok  ", "`eb-local eb` exports {s}={s}, the {s} selected by configuration", .{
+                install.variable(),
+                q(a, install.prefix),
+                install.setting(),
+            });
+        }
     } else |_| {
         note(a, &out, lines_ptr, eb_stop, "more than one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL, EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL is set, so `eb-local eb` refuses to run", .{});
         if (!site) failed = true;
@@ -4409,7 +5832,26 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     reportForeign(c, s, p.prefix, &out, lines_ptr);
 
     // The allocation.
-    if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
+    if (local) {
+        const lr = checkedLocalRoot(c, s, "doctor checks no further", false);
+        if (lr.refused_reason) |why| {
+            note(a, &out, lines_ptr, "FAIL", "{s}; builds refuse it", .{why});
+            failed = true;
+        } else if (lr.refused_fstype) |fstype| {
+            note(a, &out, lines_ptr, "FAIL", "workstation workspace directory {s} is on {s}, which is memory-backed, network or shared storage; builds refuse it. Set XDG_CACHE_HOME to a directory on this workstation's local disk", .{ lr.path, fstype });
+            failed = true;
+        } else if (workspaceCapacityOverride(c) orelse storage.capacity(lr.capacity_path) catch null) |cap| {
+            if (cap.exhausted()) {
+                note(a, &out, lines_ptr, "FAIL", "workstation build space {s} has no space left on device ({d} free bytes, {d} free inodes)", .{ lr.path, cap.bytes, cap.inodes });
+                failed = true;
+            } else if (cap.inodes_counted) {
+                note(a, &out, lines_ptr, "ok  ", "workstation build space {s}: {d} free bytes, {d} free inodes", .{ lr.path, cap.bytes, cap.inodes });
+            } else note(a, &out, lines_ptr, "ok  ", "workstation build space {s}: {d} free bytes; this file system does not count inodes", .{ lr.path, cap.bytes });
+        } else {
+            note(a, &out, lines_ptr, "FAIL", "workstation build space {s}: free bytes and inodes cannot be read", .{lr.path});
+            failed = true;
+        }
+    } else if (nonEmpty(c.env.get("SLURM_JOB_ID"))) |job| {
         if (s.node_local_root.value.len > 0) {
             var r: storage.Refusal = .{};
             if (storage.jobRoot(a, nodeLocal(s), job, userName(c, s, "doctor checks no further"), mountinfoText(c), callerUid(c), &r)) |jr| {
@@ -4474,10 +5916,16 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
         }
     } else if (!onModulePath(a, c.env.get("MODULEPATH") orelse "", s.stack_module.value)) {
         // A build keeps the shell's module command, and with it MODULEPATH,
-        // and sources no init that would put EESSI's modules there.
+        // and sources no init that would put EESSI's modules there; it adds
+        // EESSI's module directory when that holds the stack.
         const repo = nonEmpty(c.env.get("EESSI_CVMFS_REPO")) orelse "/cvmfs/software.eessi.io";
-        note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
-        if (site) failed = true;
+        const eessi_dir = std.fs.path.join(a, &.{ repo, "init", "modules" }) catch oom();
+        if (onModulePath(a, eessi_dir, s.stack_module.value)) {
+            note(a, &out, lines_ptr, "info", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}]; builds, env and dev add {s}, which does", .{ s.stack_module.value, s.stack_module.from, eessi_dir });
+        } else {
+            note(a, &out, lines_ptr, if (site) "FAIL" else "warn", "no directory on MODULEPATH in this shell holds stack.module, {s} [{s}], so builds, env and dev cannot load it; module use {s}/init/modules adds EESSI's module directory", .{ s.stack_module.value, s.stack_module.from, repo });
+            if (site) failed = true;
+        }
     }
     if (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) |_| {
         note(a, &out, lines_ptr, "ok  ", "rtrash is on PATH: clean and uninstall move files to the trash", .{});
@@ -4495,11 +5943,12 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     const warned = hasDoctorWarning(out.items, json_lines.items, g.json_out);
     const strict_fail = opts.strict and warned;
     const any_failed = failed or strict_fail;
+    const managed_build = site or local;
     const summary = if (failed)
-        (if (site) "Something above says FAIL; builds stop there." else "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.")
+        (if (managed_build) "Something above says FAIL; builds stop there." else "Something above says FAIL; `eb-local eb` stops there, and `eb-local RECIPE` needs a site file.")
     else if (strict_fail)
         "Something above says warn (--strict); warnings fail under --strict."
-    else if (site)
+    else if (managed_build)
         "Nothing above stops a build."
     else
         "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file.";
@@ -4515,7 +5964,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     out.appendSlice(a, "\n") catch oom();
     out.appendSlice(a, summary) catch oom();
     out.appendSlice(a, "\n") catch oom();
-    cli.put(1, out.items);
+    if (!emit(out.items)) return 1;
     return if (any_failed) 1 else 0;
 }
 
@@ -4554,6 +6003,14 @@ fn qSingleLine(a: Allocator, s: []const u8) []const u8 {
     return out.items;
 }
 
+/// Append the global options that selected this configuration.
+fn appendConfigurationOptions(c: Ctx, s: config.Settings, g: Global, p: Place, line: *std.ArrayList([]const u8)) void {
+    const a = c.a;
+    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", qSingleLine(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
+    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
+    if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
+}
+
 /// The command a batch job runs to build: this program, the options that
 /// chose this configuration, and the recipe with its eb options as given.
 fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []const u8) []const u8 {
@@ -4562,9 +6019,7 @@ fn jobCommand(c: Ctx, s: config.Settings, g: Global, p: Place, args: []const []c
     const self = selfExe(&self_buf) orelse die("cannot find this program's own path", .{});
     var line: std.ArrayList([]const u8) = .empty;
     line.appendSlice(a, &.{ "exec", qSingleLine(a, self) }) catch oom();
-    if (g.config_file) |f| line.appendSlice(a, &.{ "--config", qSingleLine(a, storage.canonical(a, f, c.cwd) catch oom()) }) catch oom();
-    if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
-    if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
+    appendConfigurationOptions(c, s, g, p, &line);
     for (args) |x| line.append(a, qSingleLine(a, x)) catch oom();
     return std.mem.join(a, " ", line.items) catch oom();
 }
@@ -4649,20 +6104,10 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const root = std.fs.path.join(a, &.{ p.prefix, ".eb-local" }) catch oom();
     const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
     const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
-    if (!o.print) {
-        common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
-        common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
-    }
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
-    const stamp = nowSecs();
-    var failed = false;
-    const guard: ?Guard = if (o.print) null else Guard.hold();
-    defer if (guard) |*g_ref| g_ref.release();
+    const stamp = submitStamp(a, c);
+    var plan: std.ArrayList(SubmitJob) = .empty;
     for (chosen.items) |t| {
-        if (guard) |*g_ref| if (g_ref.received()) |sig| {
-            g_ref.release();
-            return stop(.{ .signal = sig });
-        };
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
         const chdir_val = sbatchValue(a, c.cwd);
         const script = str(a,
@@ -4673,59 +6118,521 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
             \\{s}
             \\
         , .{ t.name, recipe, log_out, chdir_val, command });
-        const path = std.fs.path.join(a, &.{ jobs, str(a, "{d}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
-        var argv: std.ArrayList([]const u8) = .empty;
-        argv.append(a, sbatch) catch oom();
-        var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
-        while (words.next()) |w| argv.append(a, w) catch oom();
-        argv.append(a, path) catch oom();
-        if (o.print) {
-            say("# {s}: {s}", .{ t.name, std.mem.join(a, " ", argv.items) catch oom() });
-            cli.put(1, script);
-            continue;
+        const preferred = std.fs.path.join(a, &.{ jobs, str(a, "{s}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
+        // `--print` only stats. A real submit reserves below, and the plan
+        // names that reserved path.
+        const path = if (o.print) chooseSubmitPath(a, preferred) else "";
+        const argv: []const []const u8 = if (o.print) submitArgv(a, sbatch, t.sbatch, path) else &.{};
+        plan.append(a, .{
+            .name = t.name,
+            .script = script,
+            .preferred = preferred,
+            .options = t.sbatch,
+            .path = path,
+            .argv = argv,
+        }) catch oom();
+    }
+    if (o.print) {
+        for (plan.items) |job| {
+            say("# {s}: {s}", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() });
+            if (!emit(job.script)) return 1;
         }
-        var why: common.atomic.Why = .{};
-        defer why.deinit(a);
-        common.atomic.atomicWrite(a, path, script, .{ .mode = 0o700 }, &why) catch |e|
-            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
-        if (guard.?.received()) |sig| {
-            sys.unlinkat(fsx.cwd, path, 0) catch {};
-            guard.?.release();
+        return 0;
+    }
+    // Reserve each final path before the plan is printed. The line then
+    // names the file sbatch receives, including a -2, -3, ... suffix when
+    // the preferred name is taken. The body is written after the plan.
+    const jobs_missing = firstMissingAncestor(jobs);
+    const logs_missing = firstMissingAncestor(logs);
+    common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
+    common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
+    var fault: SubmitFault = .{ .kind = .create, .path = jobs, .err = error.Unexpected };
+    if (submitReserved(c, plan.items, sbatch, jobs, logs, jobs_missing, logs_missing, &fault)) |status| {
+        return status;
+    } else |err| switch (err) {
+        error.PlanNotPrinted => return unlisted("submitted"),
+        error.OutOfMemory => oom(),
+        error.SubmitFailed => raiseSubmitFault(fault),
+    }
+}
+
+/// The stamp in a retained submit script's name. The test artifact may pin
+/// it, so a collision can be forced; a release build always uses seconds and
+/// the process id.
+fn submitStamp(a: Allocator, c: Ctx) []const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_SUBMIT_STAMP"))) |s| {
+            if (std.mem.indexOfAny(u8, s, "/\x00") == null) return s;
+        }
+    }
+    return str(a, "{d}.{d}", .{ nowSecs(), linux.getpid() });
+}
+
+/// A free path for `--print`, which must not create a file. A real submit
+/// reserves with `reserveSubmitScript` instead, so the printed name is the
+/// file that was created.
+fn chooseSubmitPath(a: Allocator, preferred: []const u8) []const u8 {
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        const path = if (n == 0) preferred else submitScriptSuffix(a, preferred, n + 1);
+        if (!exists(path)) return path;
+    }
+    die("cannot write {s}: the name and its suffixes are already taken", .{preferred});
+}
+
+/// `sbatch` plus its options and the script path, as separate words.
+fn submitArgv(a: Allocator, sbatch: []const u8, options: []const u8, path: []const u8) []const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.append(a, sbatch) catch oom();
+    var words = std.mem.tokenizeScalar(u8, options, ' ');
+    while (words.next()) |w| argv.append(a, w) catch oom();
+    argv.append(a, path) catch oom();
+    return argv.items;
+}
+
+/// `preferred` with `-N` before a trailing `.sh`, for the Nth collision.
+fn submitScriptSuffix(a: Allocator, path: []const u8, n: usize) []const u8 {
+    if (std.mem.endsWith(u8, path, ".sh"))
+        return str(a, "{s}-{d}.sh", .{ path[0 .. path.len - 3], n });
+    return str(a, "{s}-{d}", .{ path, n });
+}
+
+/// The nearest missing ancestor of `path`, including `path` when it is missing.
+fn firstMissingAncestor(path: []const u8) ?[]const u8 {
+    var probe: []const u8 = path;
+    var missing: ?[]const u8 = null;
+    while (probe.len > 1) {
+        if (exists(probe)) break;
+        missing = probe;
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+    return missing;
+}
+
+fn pathCovers(parent: []const u8, child: []const u8) bool {
+    if (std.mem.eql(u8, parent, child)) return true;
+    return child.len > parent.len and child[parent.len] == '/' and std.mem.startsWith(u8, child, parent);
+}
+
+const SubmitJob = struct {
+    name: []const u8,
+    script: []const u8,
+    preferred: []const u8,
+    options: []const u8,
+    path: []const u8,
+    argv: []const []const u8,
+};
+
+const SubmitFault = struct {
+    kind: enum { create, mode, taken, open, write, start },
+    path: []const u8,
+    err: anyerror,
+};
+
+fn raiseSubmitFault(f: SubmitFault) noreturn {
+    switch (f.kind) {
+        .create => die("cannot create {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .mode => die("cannot set the mode of {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .taken => die("cannot write {s}: the name and its suffixes are already taken", .{f.path}),
+        .open => die("cannot open {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .write => die("cannot write {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .start => die("cannot start {s}", .{f.path}),
+    }
+}
+
+const ExclusiveOpen = union(enum) {
+    fd: sys.fd_t,
+    busy,
+    fail: SubmitFault,
+};
+
+/// Reserve, write, and submit `plan`. An error removes every script this
+/// call reserved and has not handed to sbatch. `error.PlanNotPrinted` also
+/// removes directories this call created, and only those.
+fn submitReserved(
+    c: Ctx,
+    plan: []SubmitJob,
+    sbatch: []const u8,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+    fault: *SubmitFault,
+) error{ SubmitFailed, PlanNotPrinted, OutOfMemory }!u8 {
+    const a = c.a;
+    var handed: usize = 0;
+    var rollback_dirs = false;
+    var created: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        if (rollback_dirs) {
+            undoSubmitReserve(a, jobs_dir, logs_dir, jobs_missing, logs_missing, created.items);
+        } else {
+            dropUnsubmitted(plan, handed);
+            if (handed == 0) {
+                for (created.items) |p| sys.unlinkat(fsx.cwd, p, 0) catch {};
+            }
+        }
+    }
+    for (plan) |*job| {
+        if (plantSubmitRace(c, job.preferred)) |planted| created.append(a, planted) catch return error.OutOfMemory;
+        job.path = reserveSubmitScript(a, job.preferred, fault) catch return error.SubmitFailed;
+        created.append(a, job.path) catch return error.OutOfMemory;
+        job.argv = submitArgv(a, sbatch, job.options, job.path);
+    }
+    {
+        var plan_text: std.ArrayList(u8) = .empty;
+        for (plan) |job| {
+            const line = std.mem.join(a, " ", job.argv) catch return error.OutOfMemory;
+            plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, line }) catch return error.OutOfMemory;
+        }
+        if (!emit(plan_text.items)) {
+            rollback_dirs = true;
+            return error.PlanNotPrinted;
+        }
+    }
+    var failed = false;
+    const guard = Guard.hold();
+    defer guard.release();
+    for (plan, 0..) |job, index| {
+        if (guard.received()) |sig| {
+            dropUnsubmitted(plan, index);
+            guard.release();
             return stop(.{ .signal = sig });
         }
-        say("eb-local: {s}:", .{t.name});
-        const ran = guard.?.run(a, argv.items, c.envp);
+        writeReservedScript(job.path, job.script, fault) catch return error.SubmitFailed;
+        if (guard.received()) |sig| {
+            dropUnsubmitted(plan, index);
+            guard.release();
+            return stop(.{ .signal = sig });
+        }
+        const ran = guard.run(a, job.argv, c.envp) catch {
+            fault.* = .{ .kind = .start, .path = job.argv[0], .err = error.Unexpected };
+            return error.SubmitFailed;
+        };
         switch (ran) {
             .exit => |code| {
                 if (code != 0) {
-                    if (guard.?.received()) |sig| {
-                        sys.unlinkat(fsx.cwd, path, 0) catch {};
-                        guard.?.release();
+                    if (guard.received()) |sig| {
+                        dropUnsubmitted(plan, index);
+                        guard.release();
                         return stop(.{ .signal = sig });
                     }
-                    warn("sbatch refused the {s} job (exit {d})", .{ t.name, code });
+                    warn("sbatch refused the {s} job (exit {d})", .{ job.name, code });
                     failed = true;
                 }
-                if (guard.?.received()) |sig| {
-                    guard.?.release();
+                // sbatch ran. This script stays, including when sbatch refused it.
+                handed = index + 1;
+                if (guard.received()) |sig| {
+                    dropUnsubmitted(plan, index + 1);
+                    guard.release();
                     return stop(.{ .signal = sig });
                 }
             },
             .signal => |sig| {
-                sys.unlinkat(fsx.cwd, path, 0) catch {};
-                guard.?.release();
-                return stop(.{ .signal = guard.?.received() orelse sig });
+                dropUnsubmitted(plan, index);
+                guard.release();
+                return stop(.{ .signal = guard.received() orelse sig });
+            },
+            .unreaped => {
+                failed = true;
             },
         }
     }
-    if (o.print) return 0;
-    if (guard.?.received()) |sig| {
-        guard.?.release();
+    if (guard.received()) |sig| {
+        guard.release();
         return stop(.{ .signal = sig });
     }
     say("", .{});
-    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
+    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs_dir});
     return if (failed) 1 else 0;
+}
+
+/// Drop reserved scripts and directories this call created for a plan that
+/// was not printed. Only this call's files are unlinked. Directories it
+/// created are removed with `rmdir`, deepest first, and a directory that
+/// another submit has filled is left in place.
+fn undoSubmitReserve(
+    a: Allocator,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+    created: []const []const u8,
+) void {
+    for (created) |p| sys.unlinkat(fsx.cwd, p, 0) catch {};
+    removeCreatedSubmitDirs(a, jobs_dir, logs_dir, jobs_missing, logs_missing);
+}
+
+/// Directories this call created, deepest first. Each removal is `rmdir`:
+/// `ENOTEMPTY` leaves the directory and whatever another submit put in it.
+/// This never walks the directory.
+fn removeCreatedSubmitDirs(
+    a: Allocator,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+) void {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    appendCreatedChain(a, &dirs, jobs_dir, jobs_missing);
+    appendCreatedChain(a, &dirs, logs_dir, logs_missing);
+    std.mem.sort([]const u8, dirs.items, {}, deeperPath);
+    for (dirs.items) |dir| sys.unlinkat(fsx.cwd, dir, linux.AT.REMOVEDIR) catch {};
+}
+
+fn deeperPath(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return lhs.len > rhs.len;
+}
+
+fn appendCreatedChain(a: Allocator, dirs: *std.ArrayList([]const u8), target: []const u8, top: ?[]const u8) void {
+    const root = top orelse return;
+    var probe: []const u8 = target;
+    while (pathCovers(root, probe)) {
+        var seen = false;
+        for (dirs.items) |have| {
+            if (std.mem.eql(u8, have, probe)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) dirs.append(a, probe) catch oom();
+        if (std.mem.eql(u8, probe, root)) break;
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+}
+
+/// Unlink reserved scripts from `from` on. Those jobs were not submitted.
+fn dropUnsubmitted(jobs: anytype, from: usize) void {
+    if (from >= jobs.len) return;
+    for (jobs[from..]) |job| {
+        if (job.path.len == 0) continue;
+        sys.unlinkat(fsx.cwd, job.path, 0) catch {};
+    }
+}
+
+/// Create an empty `path` with mode 0700. `busy` when that final path already
+/// exists, is a directory, or is a symbolic link: the caller then tries
+/// another name. `O_EXCL` is what makes the collision visible.
+fn openExclusive(path: []const u8) ExclusiveOpen {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+    }, 0o700) catch |e| switch (e) {
+        error.Exists, error.SymLink, error.IsDir => return .busy,
+        else => return .{ .fail = .{ .kind = .create, .path = path, .err = e } },
+    };
+    sys.fchmod(fd, 0o700) catch |e| {
+        sys.close(fd);
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        return .{ .fail = .{ .kind = .mode, .path = path, .err = e } };
+    };
+    return .{ .fd = fd };
+}
+
+/// Create `path` and write `body` with mode 0700. False when that final path
+/// already exists, is a directory, or is a symbolic link.
+fn createExclusiveScript(path: []const u8, body: []const u8) bool {
+    switch (openExclusive(path)) {
+        .busy => return false,
+        .fail => |f| raiseSubmitFault(f),
+        .fd => |fd| {
+            sys.writeAll(fd, body) catch |e| {
+                sys.close(fd);
+                sys.unlinkat(fsx.cwd, path, 0) catch {};
+                die("cannot write {s} ({s})", .{ path, storage.describeError(e) });
+            };
+            sys.close(fd);
+            return true;
+        },
+    }
+}
+
+/// Reserve `preferred`, or that path with a `-2`, `-3`, ... suffix, with
+/// `O_EXCL` and mode 0700. The file is empty until `writeReservedScript`.
+/// An earlier job's script is never replaced.
+fn reserveSubmitScript(a: Allocator, preferred: []const u8, fault: *SubmitFault) error{SubmitFailed}![]const u8 {
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        const path = if (n == 0) preferred else submitScriptSuffix(a, preferred, n + 1);
+        switch (openExclusive(path)) {
+            .busy => {},
+            .fd => |fd| {
+                sys.close(fd);
+                return path;
+            },
+            .fail => |f| {
+                fault.* = f;
+                return error.SubmitFailed;
+            },
+        }
+    }
+    fault.* = .{ .kind = .taken, .path = preferred, .err = error.Unexpected };
+    return error.SubmitFailed;
+}
+
+/// Write `body` into a file `reserveSubmitScript` already created.
+fn writeReservedScript(path: []const u8, body: []const u8, fault: *SubmitFault) error{SubmitFailed}!void {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .WRONLY,
+        .TRUNC = true,
+        .NOFOLLOW = true,
+    }, 0) catch |e| {
+        fault.* = .{ .kind = .open, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+    sys.writeAll(fd, body) catch |e| {
+        sys.close(fd);
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+    sys.close(fd);
+}
+
+/// Write `script` at `preferred`, or at that path with a `-2`, `-3`, ...
+/// suffix when the final path is already taken. An earlier job's script is
+/// never replaced.
+fn retainSubmitScript(a: Allocator, preferred: []const u8, script: []const u8) []const u8 {
+    var fault: SubmitFault = undefined;
+    const path = reserveSubmitScript(a, preferred, &fault) catch raiseSubmitFault(fault);
+    writeReservedScript(path, script, &fault) catch {
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        raiseSubmitFault(fault);
+    };
+    return path;
+}
+
+/// Test builds only. Plant `preferred` before the exclusive create: another
+/// process took that name after a stat and before `O_EXCL`. Returns the
+/// planted path when this call created it.
+fn plantSubmitRace(c: Ctx, preferred: []const u8) ?[]const u8 {
+    if (comptime !build_options.test_ops) return null;
+    const flag = nonEmpty(c.env.get("EB_LOCAL_TEST_SUBMIT_RACE")) orelse return null;
+    if (std.mem.indexOfAny(u8, flag, "/\x00") != null) return null;
+    if (exists(preferred)) return null;
+    if (!createExclusiveScript(preferred, "#!/bin/bash\n# raced\n")) return null;
+    return preferred;
+}
+
+fn readRetainedScript(a: Allocator, path: []const u8) ![]const u8 {
+    const opened = try fsx.openRegular(fsx.cwd, path, true);
+    defer sys.close(opened.fd);
+    return fsx.readAll(a, opened.fd, 1 << 16);
+}
+
+test "a forced collision keeps both retained submit scripts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-collision-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const preferred = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe.sh", .{root});
+    const first = retainSubmitScript(a, preferred, "#!/bin/bash\n# first\n");
+    const second = retainSubmitScript(a, preferred, "#!/bin/bash\n# second\n");
+    try std.testing.expectEqualStrings(preferred, first);
+    const suffixed = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe-2.sh", .{root});
+    try std.testing.expectEqualStrings(suffixed, second);
+    try std.testing.expectEqualStrings("#!/bin/bash\n# first\n", try readRetainedScript(a, first));
+    try std.testing.expectEqualStrings("#!/bin/bash\n# second\n", try readRetainedScript(a, second));
+    const st = try fsx.statAt(fsx.cwd, first, false);
+    try std.testing.expectEqual(@as(u32, 0o700), st.perm());
+}
+
+test "a candidate created between the stat and the exclusive create is not submitted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-race-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const preferred = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe.sh", .{root});
+    const chosen = chooseSubmitPath(a, preferred);
+    try std.testing.expectEqualStrings(preferred, chosen);
+    try std.testing.expect(createExclusiveScript(preferred, "#!/bin/bash\n# raced\n"));
+    var fault: SubmitFault = .{ .kind = .create, .path = preferred, .err = error.Unexpected };
+    const reserved = try reserveSubmitScript(a, preferred, &fault);
+    const suffixed = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe-2.sh", .{root});
+    try std.testing.expectEqualStrings(suffixed, reserved);
+    const script = "#!/bin/bash\n# second\n";
+    try writeReservedScript(reserved, script, &fault);
+    try std.testing.expectEqualStrings(reserved, suffixed);
+    try std.testing.expectEqualStrings("#!/bin/bash\n# raced\n", try readRetainedScript(a, preferred));
+    try std.testing.expectEqualStrings(script, try readRetainedScript(a, reserved));
+    const st = try fsx.statAt(fsx.cwd, reserved, false);
+    try std.testing.expectEqual(@as(u32, 0o700), st.perm());
+}
+
+test "failure after reservation leaves no reserved files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-reserve-fail-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const keep = try std.fmt.allocPrint(a, "{s}/keep.txt", .{root});
+    try std.testing.expect(createExclusiveScript(keep, "foreign\n"));
+    const first = try std.fmt.allocPrint(a, "{s}/job.sh", .{root});
+    const second = try std.fmt.allocPrint(a, "{s}/job.sh/next.sh", .{root});
+    var jobs = [_]SubmitJob{
+        .{ .name = "cpu", .script = "#!/bin/bash\n", .preferred = first, .options = "", .path = "", .argv = &.{} },
+        .{ .name = "gpu", .script = "#!/bin/bash\n", .preferred = second, .options = "", .path = "", .argv = &.{} },
+    };
+    var map: std.process.Environ.Map = .init(a);
+    const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = root };
+    var fault: SubmitFault = .{ .kind = .create, .path = first, .err = error.Unexpected };
+    try std.testing.expectError(error.SubmitFailed, submitReserved(c, &jobs, "sbatch", root, root, null, null, &fault));
+    try std.testing.expect(!exists(first));
+    try std.testing.expect(!exists(second));
+    try std.testing.expectEqualStrings("foreign\n", try readRetainedScript(a, keep));
+    try std.testing.expect(exists(root));
+}
+
+test "rollback with a foreign file in a newly created directory keeps that file and directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-rollback-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const jobs = try std.fmt.allocPrint(a, "{s}/fresh/jobs", .{root});
+    const logs = try std.fmt.allocPrint(a, "{s}/fresh/logs", .{root});
+    const jobs_missing = firstMissingAncestor(jobs);
+    const logs_missing = firstMissingAncestor(logs);
+    try common.atomic.makedirs(jobs);
+    try common.atomic.makedirs(logs);
+    const own = try std.fmt.allocPrint(a, "{s}/own.sh", .{jobs});
+    const kept = try std.fmt.allocPrint(a, "{s}/foreign.sh", .{jobs});
+    try std.testing.expect(createExclusiveScript(kept, "theirs\n"));
+    var plan = [_]SubmitJob{
+        .{ .name = "cpu", .script = "#!/bin/bash\n", .preferred = own, .options = "", .path = "", .argv = &.{} },
+    };
+    var map: std.process.Environ.Map = .init(a);
+    const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = root };
+    const saved = stdout;
+    const full_fd = try sys.openat(linux.AT.FDCWD, "/dev/full", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    defer sys.close(full_fd);
+    const quiet = try sys.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    defer sys.close(quiet);
+    stdout = .{ .tool = tool, .fd = full_fd, .err_fd = quiet };
+    defer stdout = saved;
+    var fault: SubmitFault = .{ .kind = .create, .path = own, .err = error.Unexpected };
+    try std.testing.expectError(error.PlanNotPrinted, submitReserved(c, &plan, "/no/such/sbatch", jobs, logs, jobs_missing, logs_missing, &fault));
+    try std.testing.expect(!exists(own));
+    try std.testing.expectEqualStrings("theirs\n", try readRetainedScript(a, kept));
+    try std.testing.expect(exists(jobs));
+    try std.testing.expect(!exists(logs));
+    const fresh = try std.fmt.allocPrint(a, "{s}/fresh", .{root});
+    try std.testing.expect(exists(fresh));
 }
 
 // ---- uninstall ------------------------------------------------------------
@@ -4952,16 +6859,10 @@ fn makeReadOnly(c: Ctx, path: []const u8, depth: usize) void {
     _ = linux.fchmodat(linux.AT.FDCWD, zp.ptr, @intCast(st.mode & 0o7555));
 }
 
-fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
+/// What `uninstall` would remove, or null after it has said why it removes
+/// nothing, which is exit status 2.
+fn uninstallPlan(c: Ctx, p: Place, versions: []const u8, modules: []const []const u8, o: UninstallOpts) ?Found {
     const a = c.a;
-    if (modules.len == 0) die("uninstall needs NAME/VERSION, as module avail shows it", .{});
-    const p = place(c, s);
-    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
-        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
-    } else |_| die("nothing is installed in {s}", .{p.prefix});
-    var prefix_lock: ?sys.fd_t = if (o.dry_run) null else acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
     if (o.target) |raw_target| {
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
@@ -5001,18 +6902,44 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
     if (dependents.items.len > 0) {
         warn("these installed modules load what you named; uninstall them in the same command, or keep it:", .{});
         for (dependents.items) |f| warn("  {s}", .{f});
-        return 2;
+        return null;
     }
     // The usage log is eb-keep-logs' to read. Exit 2 from
     // `used --require-none` means the prefix is named there, or the log
     // could not be read; either way nothing is removed. Without the
     // option this is not consulted.
-    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return 2;
+    if (o.usage_log) |log| if (usageRefuses(c, p.prefix, log)) return null;
+    return found;
+}
+
+/// Whether `now` names exactly what `self` names. A module file or link added
+/// since is not listed, so removing the installation would leave it dangling.
+fn foundUnchanged(self: Found, now: Found) bool {
+    for ([_][2][]const []const u8{
+        .{ self.installs.items, now.installs.items },
+        .{ self.modules.items, now.modules.items },
+    }) |pair| {
+        for (pair[0]) |x| if (!listed(pair[1], x)) return false;
+        for (pair[1]) |y| if (!listed(pair[0], y)) return false;
+    }
+    return true;
+}
+
+fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: UninstallOpts) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("uninstall needs NAME/VERSION, as module avail shows it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; uninstall leaves it alone.", .{versions});
+    } else |_| die("nothing is installed in {s}", .{p.prefix});
+    const found = uninstallPlan(c, p, versions, modules, o) orelse return 2;
     for (found.installs.items) |d| {
         if (!storage.under(d, versions)) die("{s} is outside {s}", .{ d, versions });
         say("  {s}/", .{d});
     }
     for (found.modules.items) |f| say("  {s}", .{f});
+    if (stdout.failed) return unlisted("removed");
     if (o.dry_run) {
         say("eb-local: dry run, nothing removed", .{});
         return 0;
@@ -5028,6 +6955,16 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
         notTrashed(s);
         return 1;
     }
+    // The list is out. Only now does uninstall take the prefix lock, which
+    // makes `.eb-local/.lock`, and check under it that what it listed is
+    // still installed and still safe to remove.
+    var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLockAfterError(&prefix_lock);
+    const again = uninstallPlan(c, p, versions, modules, o) orelse return 2;
+    if (!foundUnchanged(found, again)) {
+        warn("what uninstall listed changed while it waited for the prefix lock; nothing was removed. Run it again.", .{});
+        return 1;
+    }
     for (found.installs.items) |d| makeWritable(c, d, 0);
     if (trash == .rtrash) {
         // rtrash put follows rm(1): a directory needs -r. The installations
@@ -5041,23 +6978,28 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}; nothing after it was moved", .{rc}),
                 .signal => {
-                    storage.releaseLock(&prefix_lock);
+                    storage.releaseLockAfterError(&prefix_lock);
                     return stop(run);
                 },
+                .unreaped => return 1,
             }
         }
-        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
     } else {
         for (found.installs.items) |d| fsx.deleteTree(a, fsx.cwd, d) catch |e| die("cannot remove {s} ({s})", .{ d, storage.describeError(e) });
         for (found.modules.items) |f| sys.unlinkat(fsx.cwd, f, 0) catch |e| die("cannot remove {s} ({s})", .{ f, storage.describeError(e) });
-        say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
     }
     // The NAME directories they leave empty.
     for ([_][]const []const u8{ found.installs.items, found.modules.items }) |list| for (list) |x| {
         const parent = std.fs.path.dirname(x) orelse continue;
         sys.unlinkat(fsx.cwd, parent, linux.AT.REMOVEDIR) catch {};
     };
-    return 0;
+    // Nothing is left to change, so this report cannot stop a later step.
+    if (trash == .rtrash) {
+        say("eb-local: moved {d} installation(s) and {d} module file(s) to the trash (eb-local restore brings them back)", .{ found.installs.items.len, found.modules.items.len });
+    } else {
+        say("eb-local: deleted {d} installation(s) and {d} module file(s)", .{ found.installs.items.len, found.modules.items.len });
+    }
+    return endLock(0, &prefix_lock, prefixLockPath(c, p.prefix));
 }
 
 /// Relay lines `eb-keep-logs` wrote, without interpreting them.
@@ -5116,25 +7058,13 @@ fn targetRoot(c: Ctx, path: []const u8) bool {
     return isDirAt(fd, "software") and isDirAt(fd, "modules");
 }
 
-/// Brings back from the trash what uninstall moved there, for every CPU
-/// target, and makes each installation read-only again: rtrash restore
-/// alone brings one back with the writable directories rtrash needs.
-fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+/// What `restore` would bring back, in the order it comes back: installations,
+/// module files in `modules/all`, and EasyBuild's links to them.
+const Restoring = [3]std.ArrayList(Trashed);
+
+fn restorePlan(c: Ctx, p: Place, versions: []const u8, rtrash: []const u8, modules: []const []const u8) Restoring {
     const a = c.a;
-    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
-    const p = place(c, s);
-    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
-        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
-    } else |_| die("nothing was installed in {s}", .{p.prefix});
-    var prefix_lock: ?sys.fd_t = if (dry_run) null else acquirePrefixLock(c, p.prefix);
-    defer storage.releaseLock(&prefix_lock);
-    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
-        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
     const entries = trashList(c, rtrash);
-    // Installations, the module files in modules/all, and EasyBuild's links
-    // to them from modules/<class>/, in the order they come back: nothing
-    // is back before what it needs.
     var found = [_]std.ArrayList(Trashed){ .empty, .empty, .empty };
     for (modules, 0..) |m, idx| {
         if (listed(modules[0..idx], m)) continue;
@@ -5168,10 +7098,48 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
             die("{s} exists; restore replaces nothing, so nothing was restored", .{e.original});
         } else |_| {}
     };
+    return found;
+}
+
+/// Whether everything `self` names is still in `now`.
+fn restoringHolds(self: Restoring, now: Restoring) bool {
+    for (self, 0..) |list, kind| for (list.items) |e| {
+        const there = for (now[kind].items) |f| {
+            if (std.mem.eql(u8, e.original, f.original) and std.mem.eql(u8, e.trash_dir, f.trash_dir)) break true;
+        } else false;
+        if (!there) return false;
+    };
+    return true;
+}
+
+/// Brings back from the trash what uninstall moved there, for every CPU
+/// target, and makes each installation read-only again: rtrash restore
+/// alone brings one back with the writable directories rtrash needs.
+fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: bool) u8 {
+    const a = c.a;
+    if (modules.len == 0) die("restore needs NAME/VERSION, as uninstall took it", .{});
+    const p = place(c, s);
+    const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
+    if (fsx.statAt(fsx.cwd, versions, false)) |st| {
+        if (st.isLink() or !literalPath(c, versions)) die("{s} is reached through a symbolic link; restore leaves it alone.", .{versions});
+    } else |_| die("nothing was installed in {s}", .{p.prefix});
+    const rtrash = (proc.which(a, "rtrash", c.env.get("PATH") orelse "") catch null) orelse
+        die("restore brings back what uninstall moved to the trash with rtrash, and rtrash is not on PATH.", .{});
+    const found = restorePlan(c, p, versions, rtrash, modules);
     for (found, 0..) |list, kind| for (list.items) |e| say("  {s}{s}", .{ e.original, if (kind == 0) "/" else "" });
+    if (stdout.failed) return unlisted("restored");
     if (dry_run) {
         say("eb-local: dry run, nothing restored", .{});
         return 0;
+    }
+    // The list is out. Only now does restore take the prefix lock, which makes
+    // `.eb-local/.lock`, and check under it that the trash still holds what it
+    // listed and that nothing is in the way.
+    var prefix_lock: ?sys.fd_t = acquirePrefixLock(c, p.prefix);
+    defer storage.releaseLockAfterError(&prefix_lock);
+    if (!restoringHolds(found, restorePlan(c, p, versions, rtrash, modules))) {
+        warn("what restore listed changed while it waited for the prefix lock; nothing was restored. Run it again.", .{});
+        return 1;
     }
     // rtrash restore takes no --; every path is absolute.
     for (found, 0..) |list, kind| for (list.items) |e| {
@@ -5179,14 +7147,15 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
         switch (run) {
             .exit => |rc| if (rc != 0) die("rtrash restore exited {d}; nothing after {s} was restored", .{ rc, e.original }),
             .signal => {
-                storage.releaseLock(&prefix_lock);
+                storage.releaseLockAfterError(&prefix_lock);
                 return stop(run);
             },
+            .unreaped => return 1,
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
     say("eb-local: restored {d} installation(s), read-only again, and {d} module file(s)", .{ found[0].items.len, found[1].items.len + found[2].items.len });
-    return 0;
+    return endLock(0, &prefix_lock, prefixLockPath(c, p.prefix));
 }
 
 // ---- entry ----------------------------------------------------------------
@@ -5203,12 +7172,17 @@ fn subcommand(word: []const u8) ?Command {
 /// `EB_LOCAL_EESSI_EXTEND` set, not empty and not `0`, every argument is
 /// eb's, as for `eb-local eb --`.
 pub fn main(init: std.process.Init) u8 {
+    return stdout.finish(runMain(init));
+}
+
+fn runMain(init: std.process.Init) u8 {
     const a = init.arena.allocator();
     const argv_all = init.minimal.args.toSlice(a) catch die("cannot read the arguments", .{});
     var cwd_buf: [sys.path_max]u8 = undefined;
     const cwd = a.dupe(u8, fsx.realpath(fsx.cwd, ".", &cwd_buf) catch "/") catch oom();
     const c: Ctx = .{ .a = a, .io = init.io, .env = init.environ_map, .envp = init.minimal.environ.block.slice.ptr, .cwd = cwd };
     if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_STDOUT_WRITES"))) |v| test_stdout_writes = std.fmt.parseInt(usize, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_SELF_OWNER"))) |v| test_self_owner = std.fmt.parseInt(linux.uid_t, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FLOCK_ERRNO"))) |v| {
             if (std.mem.eql(u8, v, "ENOLCK")) {
@@ -5219,13 +7193,23 @@ pub fn main(init: std.process.Init) u8 {
                 storage.test_flock_errno = .NOSYS;
             }
         }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_RELEASE_ERRNO"))) |v| {
+            if (std.mem.startsWith(u8, v, "E")) storage.test_release_errno = std.meta.stringToEnum(linux.E, v[1..]);
+        }
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_ERRNO"))) |v| storage.test_close_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_AFTER"))) |v| storage.test_close_after = std.fmt.parseInt(u32, v, 10) catch 0;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_CLOSE_COUNT"))) |v| storage.test_close_count = std.fmt.parseInt(u32, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_ERRNO"))) |v| storage.test_fsync_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_AFTER"))) |v| storage.test_fsync_after = std.fmt.parseInt(u32, v, 10) catch 0;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_COUNT"))) |v| storage.test_fsync_count = std.fmt.parseInt(u32, v, 10) catch null;
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_RECORD_OPEN_ERRNO"))) |v| test_record_open_errno = storage.testErrno(v);
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
         const raw = argv_all[1..];
         const forwarded = a.alloc([]const u8, raw.len) catch oom();
         for (raw, 0..) |arg, n| forwarded[n] = arg;
-        return cmdExtend(c, forwarded);
+        return cmdExtend(c, loadSettings(c, .{}), forwarded);
     }
 
     var args: []const [:0]const u8 = argv_all[1..];
@@ -5233,12 +7217,10 @@ pub fn main(init: std.process.Init) u8 {
     if (args.len > 0) {
         const first: []const u8 = args[0];
         if (std.mem.eql(u8, first, "help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
-            cli.put(1, usage_text);
-            return 0;
+            return if (emit(usage_text)) 0 else 1;
         }
         if (std.mem.eql(u8, first, "--version")) {
-            cli.put(1, comptime cli.versionLine(tool, version, build_options.commit));
-            return 0;
+            return if (emit(comptime cli.versionLine(tool, version, build_options.commit))) 0 else 1;
         }
         if (std.meta.stringToEnum(Command, first)) |cmd| {
             if (cmd != .build) {
@@ -5313,8 +7295,7 @@ pub fn main(init: std.process.Init) u8 {
             continue;
         }
         if (std.mem.eql(u8, x, "-h") or std.mem.eql(u8, x, "--help")) {
-            cli.put(1, usage_text);
-            return 0;
+            return if (emit(usage_text)) 0 else 1;
         } else if (std.mem.eql(u8, x, "--project")) {
             g.project = value(args, &i, "--project");
         } else if (joined(x, "--project")) |v| {
@@ -5327,6 +7308,8 @@ pub fn main(init: std.process.Init) u8 {
             g.config_file = value(args, &i, "--config");
         } else if (joined(x, "--config")) |v| {
             g.config_file = v;
+        } else if (std.mem.eql(u8, x, "--workstation")) {
+            g.workstation = true;
         } else if (std.mem.eql(u8, x, "--env") and command == .build and rest.items.len == 0) {
             command = .env;
         } else if (std.mem.eql(u8, x, "--explain") and command == .build and rest.items.len == 0) {
@@ -5694,11 +7677,11 @@ pub fn main(init: std.process.Init) u8 {
         if (check_dev) return cmdCheckTree(c, s, .dev, &.{}, "", check_quiet, g.json_out, check_recursive);
         return cmdCheckTree(c, s, .module, check_modules.items, "", check_quiet, g.json_out, check_recursive);
     }
-    // The install mode is the four EESSI variables, not the site file.
+    // Explicit install variables select the mode; without one, configuration
+    // selects the same user prefix or project as env.
     if (command == .eb) {
-        if (g.profile != null or g.project != null or g.config_file != null)
-            die("eb reads the install mode from the environment, not from --profile, --project or --config", .{});
-        return if (g.explain) explainExtend(c, rest.items) else cmdExtend(c, rest.items);
+        const s = loadSettings(c, g);
+        return if (g.explain) explainExtend(c, s, rest.items) else cmdExtend(c, s, rest.items);
     }
     if (command == .leave) return cmdLeave(c);
     const s = loadSettings(c, g);
@@ -5713,7 +7696,7 @@ pub fn main(init: std.process.Init) u8 {
         },
         .clean => blk: {
             if (!clean.logs and clean.logs_days != null) die("clean takes --no-logs or --logs-older-than, not both", .{});
-            break :blk cmdClean(c, s, clean, g.json_out);
+            break :blk cmdClean(c, s, g, clean, g.json_out);
         },
         .build => cmdBuild(c, s, g, rest.items),
         .uninstall => cmdUninstall(c, s, rest.items, uninstall),
@@ -5758,35 +7741,89 @@ test {
 }
 
 test "a build script selects no MPI transport" {
-    try std.testing.expect(std.mem.indexOf(u8, build_script, "OMPI_MCA") == null);
-    try std.testing.expect(std.mem.indexOf(u8, build_script, "FI_PROVIDER") == null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const script = buildScript(arena.allocator(), &install_vars);
+    try std.testing.expect(std.mem.indexOf(u8, script, "OMPI_MCA") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "FI_PROVIDER") == null);
 }
 
-fn cmdExtend(c: Ctx, args: []const []const u8) u8 {
+const extend_source_var = "EBLOCAL_EB_SOURCEPATH";
+const extend_toolchains_var = "EBLOCAL_EB_SITE_TOOLCHAINS";
+
+const ExtendEnv = struct {
+    env: std.process.Environ.Map,
+    exports: []const [2][]const u8,
+
+    fn deinit(self: *ExtendEnv) void {
+        self.env.deinit();
+    }
+};
+
+/// Add the configuration that `env` would select to an `eb` launch, without
+/// replacing choices the caller already exported.
+fn extendEnvironment(c: Ctx, s: config.Settings) ExtendEnv {
+    var env = c.env.clone(c.a) catch oom();
+    var exports: std.ArrayList([2][]const u8) = .empty;
+    const selected = extend.select(&env) catch return .{ .env = env, .exports = &.{} };
+    const selected_name = extend.variable(selected.mode);
+    if (env.get(selected_name) == null) {
+        const install = configuredInstall(place(c, s));
+        env.put(install.variable(), install.prefix) catch oom();
+        exports.append(c.a, .{ install.variable(), install.prefix }) catch oom();
+    }
+    for (s.eessi.items) |v| if (env.get(v.name) == null) {
+        env.put(v.name, v.value) catch oom();
+        exports.append(c.a, .{ v.name, v.value }) catch oom();
+    };
+    if (s.site_toolchains.value.len > 0) {
+        const json = config.toolchainsJson(c.a, s.site_toolchains.value) catch oom();
+        env.put(extend_toolchains_var, json) catch oom();
+        exports.append(c.a, .{ extend_toolchains_var, json }) catch oom();
+    }
+
+    if (env.get("EASYBUILD_SOURCEPATH") == null) {
+        const install_root = env.get("EESSI_USER_INSTALL") orelse env.get("EESSI_PROJECT_INSTALL");
+        if (install_root) |root| {
+            if (root.len > 0) {
+                const prefix = storage.canonical(c.a, root, c.cwd) catch oom();
+                const sources = std.fs.path.join(c.a, &.{ prefix, ".eb-local", "sources" }) catch oom();
+                env.put(extend_source_var, sources) catch oom();
+                exports.append(c.a, .{ extend_source_var, sources }) catch oom();
+            }
+        }
+    }
+    return .{ .env = env, .exports = exports.items };
+}
+
+fn cmdExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    const sel = extend.select(c.env) catch |err| switch (err) {
+    var ext = extendEnvironment(c, s);
+    defer ext.deinit();
+    const sel = extend.select(&ext.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}", .{extend.tooMany(c.a, c.env) catch oom()});
+            cli.err("{s}", .{extend.tooMany(c.a, &ext.env) catch oom()});
             return 3;
         },
     };
-    var env = c.env.clone(c.a) catch oom();
-    defer env.deinit();
-    extend.apply(&env);
-    for (shell_startup) |name| _ = env.swapRemove(name);
+    extend.apply(&ext.env);
+    for (shell_startup) |name| _ = ext.env.swapRemove(name);
     const argv = extend.commandLine(c.a, sel, eb_args) catch oom();
-    return stop(runAttached(c.a, argv, envpOf(c.a, &env)));
+    return stop(runAttached(c.a, argv, envpOf(c.a, &ext.env)));
 }
 
-/// What eb-local eb would run: the launcher's own script after a `set --`
-/// line with the arguments it would get, so the text runs as the launcher
-/// does. Nothing runs and nothing is created.
-fn explainExtend(c: Ctx, args: []const []const u8) u8 {
+/// What eb-local eb would run: the configured environment exports and the
+/// launcher's own script after a `set --` line with the arguments it would
+/// get, so the text runs as the launcher does. Nothing runs and nothing is
+/// created.
+fn explainExtend(c: Ctx, s: config.Settings, args: []const []const u8) u8 {
     const a = c.a;
     const eb_args = if (args.len > 0 and std.mem.eql(u8, args[0], "--")) args[1..] else args;
-    const sel = extend.select(c.env) catch |err| switch (err) {
+    var ext = extendEnvironment(c, s);
+    defer ext.deinit();
+    const sel = extend.select(&ext.env) catch |err| switch (err) {
         error.TooMany => {
-            cli.err("{s}", .{extend.tooMany(a, c.env) catch oom()});
+            cli.err("{s}", .{extend.tooMany(a, &ext.env) catch oom()});
             return 3;
         },
     };
@@ -5794,10 +7831,11 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(a, "# eb-local --explain eb: the script eb-local eb runs, with its arguments. Nothing was run.\n") catch oom();
     const name = extend.variable(sel.mode);
-    if (c.env.get(name)) |v| {
-        out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, q(a, v), @tagName(sel.mode), sel.umask }) catch oom();
-    } else {
-        out.print(a, "# No install variable is set: a user install into the module's default, $HOME/eessi; the process umask is {s}.\n", .{sel.umask}) catch oom();
+    const val = ext.env.get(name).?;
+    out.print(a, "# {s}={s} selects a {s} install; the process umask is {s}.\n", .{ name, qSingleLine(a, val), @tagName(sel.mode), sel.umask }) catch oom();
+    if (ext.exports.len > 0) {
+        out.appendSlice(a, "# The script gets these environment variables:\n") catch oom();
+        for (ext.exports) |kv| out.print(a, "export {s}={s}\n", .{ kv[0], q(a, kv[1]) }) catch oom();
     }
     out.appendSlice(a, "# It runs in a clean bash (no profile, no rc file):\n#  ") catch oom();
     for (argv[0..4]) |x| out.print(a, " {s}", .{x}) catch oom();
@@ -5806,15 +7844,82 @@ fn explainExtend(c: Ctx, args: []const []const u8) u8 {
     out.appendSlice(a, "\n# where SCRIPT is everything after the next line.\nset --") catch oom();
     for (argv[6..]) |x| out.print(a, " {s}", .{qSingleLine(a, x)}) catch oom();
     out.print(a, "\n{s}\n", .{extend.script}) catch oom();
-    cli.put(1, out.items);
-    return 0;
+    return if (emit(out.items)) 0 else 1;
+}
+
+test "extendEnvironment always populates the selected install variable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // No install variable in caller env -> configured user prefix is added.
+    {
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
+        var s: config.Settings = .{};
+        s.prefix = .{ .value = "/srv/user-prefix", .from = "test" };
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
+        try std.testing.expectEqual(extend.Mode.user, sel.mode);
+        try std.testing.expectEqualStrings("/srv/user-prefix", ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 2), ext.exports.len);
+        try std.testing.expectEqualStrings("EESSI_USER_INSTALL", ext.exports[0][0]);
+        try std.testing.expectEqualStrings("/srv/user-prefix", ext.exports[0][1]);
+        try std.testing.expectEqualStrings(extend_source_var, ext.exports[1][0]);
+        try std.testing.expectEqualStrings("/srv/user-prefix/.eb-local/sources", ext.exports[1][1]);
+    }
+
+    // Configured project -> EESSI_PROJECT_INSTALL is added.
+    {
+        var cwd_buf: [sys.path_max]u8 = undefined;
+        const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+        const proj = try std.fmt.allocPrint(a, "{s}/.zig-cache/extend-env-project-{d}", .{ cwd, linux.getpid() });
+        try common.atomic.makedirs(proj);
+        defer storage.removeTree(a, proj) catch {};
+        var zb: [sys.path_max:0]u8 = undefined;
+        const zp = try sys.z(&zb, proj);
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.fchmodat(linux.AT.FDCWD, zp.ptr, 0o2770)));
+
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = cwd };
+        var s: config.Settings = .{};
+        s.project = .{ .value = proj, .from = "test" };
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
+        try std.testing.expectEqual(extend.Mode.project, sel.mode);
+        try std.testing.expectEqualStrings(proj, ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 2), ext.exports.len);
+        try std.testing.expectEqualStrings("EESSI_PROJECT_INSTALL", ext.exports[0][0]);
+        try std.testing.expectEqualStrings(proj, ext.exports[0][1]);
+        try std.testing.expectEqualStrings(extend_source_var, ext.exports[1][0]);
+    }
+
+    // Explicit install variable (even empty) -> preserved as the selected variable without re-exporting.
+    {
+        var map: std.process.Environ.Map = .init(a);
+        try map.put("HOME", "/home/alice");
+        try map.put("EESSI_SITE_INSTALL", "");
+        const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = "/" };
+        const s: config.Settings = .{};
+        var ext = extendEnvironment(c, s);
+        defer ext.deinit();
+        const sel = try extend.select(&ext.env);
+        try std.testing.expectEqual(extend.Mode.site, sel.mode);
+        try std.testing.expectEqualStrings("", ext.env.get(extend.variable(sel.mode)).?);
+        try std.testing.expectEqual(@as(usize, 0), ext.exports.len);
+    }
 }
 
 test "a build has the process umask eb-local eb has for the same install" {
     for ([_]Place{ .{ .prefix = "/x", .project = false }, .{ .prefix = "/x", .project = true } }) |p| {
         var env = std.process.Environ.Map.init(std.testing.allocator);
         defer env.deinit();
-        try env.put(if (p.project) "EESSI_PROJECT_INSTALL" else "EESSI_USER_INSTALL", p.prefix);
+        const install = configuredInstall(p);
+        try env.put(install.variable(), install.prefix);
         const sel = try extend.select(&env);
         try std.testing.expectEqual(try std.fmt.parseInt(u32, sel.umask, 8), buildUmask(p));
     }
@@ -5897,12 +8002,422 @@ test "Guard.run does not launch child when a guarded signal already arrived" {
         _ = linux.kill(linux.getpid(), sig);
         const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
         const cmd = try std.fmt.allocPrint(a, "echo ran > '{s}'", .{marker});
-        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env);
+        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env) catch return error.TestUnexpectedResult;
         switch (ran) {
             .signal => |got| try std.testing.expectEqual(sig, got),
-            .exit => return error.TestUnexpectedResult,
+            .exit, .unreaped => return error.TestUnexpectedResult,
         }
         try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, marker, false));
+    }
+}
+
+test "settleGroup wakes on SIGCHLD without leaking descriptors" {
+    const fds_before = try testSelfFdCount();
+    var prev_subreaper: c_int = 0;
+    try std.testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.prctl(@backingInt(linux.PR.GET_CHILD_SUBREAPER), @intFromPtr(&prev_subreaper), 0, 0, 0)),
+    );
+    if (prev_subreaper == 0) {
+        try std.testing.expectEqual(
+            linux.E.SUCCESS,
+            linux.errno(linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 1, 0, 0, 0)),
+        );
+    }
+    defer if (prev_subreaper == 0) {
+        _ = linux.prctl(@backingInt(linux.PR.SET_CHILD_SUBREAPER), 0, 0, 0, 0);
+    };
+
+    var sync_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&sync_fds, .{ .CLOEXEC = true })));
+    var gate_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&gate_fds, .{ .CLOEXEC = true })));
+    const pid: isize = @bitCast(linux.fork());
+    if (pid < 0) return error.TestUnexpectedResult;
+    if (pid == 0) {
+        _ = linux.setpgid(0, 0);
+        const grand: isize = @bitCast(linux.fork());
+        if (grand == 0) {
+            sys.close(sync_fds[0]);
+            sys.close(sync_fds[1]);
+            sys.close(gate_fds[1]);
+            var pfd = [1]linux.pollfd{.{ .fd = gate_fds[0], .events = linux.POLL.IN, .revents = 0 }};
+            _ = linux.poll(&pfd, 1, 2000);
+            sys.close(gate_fds[0]);
+            linux.exit_group(0);
+        }
+        sys.close(gate_fds[0]);
+        sys.close(gate_fds[1]);
+        sys.close(sync_fds[0]);
+        _ = linux.write(sync_fds[1], "1", 1);
+        sys.close(sync_fds[1]);
+        linux.exit_group(15);
+    }
+    _ = linux.setpgid(@intCast(pid), @intCast(pid));
+    sys.close(gate_fds[0]);
+    sys.close(sync_fds[1]);
+    var one: [1]u8 = undefined;
+    _ = linux.read(sync_fds[0], &one, 1);
+    sys.close(sync_fds[0]);
+
+    var raw: i32 = 0;
+    while (linux.errno(linux.wait4(@intCast(pid), &raw, 0, null)) == .INTR) {}
+
+    const ReleaseCtx = struct {
+        gate_w: sys.fd_t,
+        baseline_fds: usize,
+        fn run(ctx: @This()) void {
+            const deadline = monotonicMs() + 250;
+            while (monotonicMs() < deadline) {
+                if ((testSelfFdCount() catch 0) > ctx.baseline_fds + 1) break;
+                var empty: [1]linux.pollfd = undefined;
+                _ = linux.poll(&empty, 0, 1);
+            }
+            sys.close(ctx.gate_w);
+        }
+    };
+    const releaser = try std.Thread.spawn(.{}, ReleaseCtx.run, .{ReleaseCtx{
+        .gate_w = gate_fds[1],
+        .baseline_fds = fds_before,
+    }});
+
+    const t0 = monotonicMs();
+    try std.testing.expectEqual(GroupEnd.drained, settleGroup(@intCast(pid)));
+    const elapsed = monotonicMs() - t0;
+    releaser.join();
+    try std.testing.expect(!proc.groupAlive(@intCast(pid)));
+    try std.testing.expect(elapsed < 350);
+    try std.testing.expectEqual(fds_before, try testSelfFdCount());
+}
+
+test "settleGroup waits while wait4 reports a child the scan missed" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    const Runner = struct {
+        done_fd: i32,
+        fn run(ctx: @This()) void {
+            const end = settleGroup(2147483646);
+            _ = linux.write(ctx.done_fd, if (end == .drained) "d" else "x", 1);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{Runner{ .done_fd = done[1] }});
+    defer {
+        // A failed assertion must still release the wait, or join blocks.
+        phase.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    var pfds = [2]linux.pollfd{
+        .{ .fd = entered[0], .events = linux.POLL.IN, .revents = 0 },
+        .{ .fd = done[0], .events = linux.POLL.IN, .revents = 0 },
+    };
+    while (true) {
+        const rc = linux.poll(&pfds, 2, -1);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        break;
+    }
+    const entered_ready = pfds[0].revents & linux.POLL.IN != 0;
+    const done_ready = pfds[1].revents & linux.POLL.IN != 0;
+    try std.testing.expect(entered_ready);
+    try std.testing.expect(!done_ready);
+
+    phase.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const n = linux.read(done[0], &byte, 1);
+        if (linux.errno(n) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(n));
+        try std.testing.expectEqual(@as(usize, 1), n);
+        try std.testing.expectEqual(@as(u8, 'd'), byte[0]);
+        break;
+    }
+}
+
+fn waitErrno(e: linux.E) usize {
+    return @bitCast(-@as(isize, @backingInt(e)));
+}
+
+test "only ECHILD means a process group has no child" {
+    switch (readWait(waitErrno(.CHILD))) {
+        .reap => |r| try std.testing.expect(r == .empty),
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(waitErrno(.INTR))) {
+        .retry => {},
+        .reap => return error.TestUnexpectedResult,
+    }
+    switch (readWait(waitErrno(.IO))) {
+        .reap => |r| switch (r) {
+            .unknown => |err| try std.testing.expectEqual(linux.E.IO, err),
+            else => return error.TestUnexpectedResult,
+        },
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(0)) {
+        .reap => |r| try std.testing.expect(r == .live),
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(42)) {
+        .retry => {},
+        .reap => return error.TestUnexpectedResult,
+    }
+}
+
+const ScriptedEnd = struct {
+    done_fd: i32,
+    end: *std.atomic.Value(u8),
+    fn run(ctx: @This()) void {
+        const got = settleGroup(2147483646);
+        ctx.end.store(if (got == .drained) 0 else 1, .release);
+        _ = linux.write(ctx.done_fd, "d", 1);
+    }
+};
+
+fn readReady(fd: i32, timeout_ms: i32) !usize {
+    var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+    while (true) {
+        const rc = linux.poll(&pfd, 1, timeout_ms);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        return rc;
+    }
+}
+
+test "settleGroup keeps killing until the scripted reap is empty" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    // Post-kill wait4 stays live twice, then ECHILD. The first live result
+    // blocks in the probe so the test can see that settleGroup has not
+    // returned and has not stopped signalling.
+    const script = [_]ProbeStep{ .live, .live, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var end = std.atomic.Value(u8).init(255);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+        .barrier_at = 1,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+    const thread = try std.Thread.spawn(.{}, ScriptedEnd.run, .{ScriptedEnd{ .done_fd = done[1], .end = &end }});
+    defer {
+        probe.release.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), try readReady(entered[0], 5000));
+    try std.testing.expectEqual(@as(usize, 0), try readReady(done[0], 0));
+    try std.testing.expectEqual(@as(u32, 1), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), probe.script_i.load(.acquire));
+
+    probe.release.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    try std.testing.expectEqual(@as(usize, 1), try readReady(done[0], 5000));
+    try std.testing.expectEqual(@as(u8, 0), end.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.script_i.load(.acquire));
+}
+
+test "settleGroup signals a member forked after SIGKILL" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    // The script would go live, then empty. At the barrier the test arms a
+    // late fork, which turns that empty into one more live result. The group
+    // must be signalled again after that result and only then reach ECHILD.
+    const script = [_]ProbeStep{ .live, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var end = std.atomic.Value(u8).init(255);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+        .barrier_at = 1,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+    const thread = try std.Thread.spawn(.{}, ScriptedEnd.run, .{ScriptedEnd{ .done_fd = done[1], .end = &end }});
+    defer {
+        probe.release.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), try readReady(entered[0], 5000));
+    try std.testing.expectEqual(@as(usize, 0), try readReady(done[0], 0));
+    const kills_before = probe.kills.load(.acquire);
+    try std.testing.expectEqual(@as(u32, 1), kills_before);
+    probe.late.store(1, .release);
+
+    probe.release.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    try std.testing.expectEqual(@as(usize, 1), try readReady(done[0], 5000));
+    try std.testing.expectEqual(@as(u8, 0), end.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 2), probe.late.load(.acquire));
+    const at_fork = probe.kills_at_fork.load(.acquire);
+    const kills = probe.kills.load(.acquire);
+    try std.testing.expect(at_fork > kills_before);
+    try std.testing.expect(kills > at_fork);
+    try std.testing.expectEqual(@as(u32, 3), kills);
+}
+
+test "settleGroup retries an unexpected reap error until ECHILD" {
+    if (comptime !build_options.test_ops) return;
+
+    const script = [_]ProbeStep{ .unknown, .unknown, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = -1,
+        .wake = -1,
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    try std.testing.expectEqual(GroupEnd.drained, settleGroup(2147483646));
+    try std.testing.expectEqual(@as(u32, 3), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.script_i.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), probe.reported.load(.acquire));
+}
+
+test "settleGroup returns at the kill deadline while a member stays unreaped" {
+    if (comptime !build_options.test_ops) return;
+
+    // phase stays 0, so wait4 keeps reporting a live member. SIGKILL
+    // does not clear that answer. The call must return timed_out at the
+    // deadline, which is not a drained group, and must not block in wait4.
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = -1,
+        .wake = -1,
+        .hold = false,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    const fds_before = try testSelfFdCount();
+    const t0 = monotonicMs();
+    const end = settleGroup(2147483646);
+    const elapsed = monotonicMs() - t0;
+
+    const lower = group_settle_grace_ms + group_kill_reap_ms;
+    try std.testing.expectEqual(GroupEnd.timed_out, end);
+    try std.testing.expectEqual(@as(u32, 1), probe.timeouts.load(.acquire));
+    try std.testing.expect(elapsed + 30 >= lower);
+    try std.testing.expect(elapsed < lower + 2000);
+    try std.testing.expectEqual(fds_before, try testSelfFdCount());
+}
+
+test "settleGroup bounds an EINTR storm and a reaped-pid storm" {
+    if (comptime !build_options.test_ops) return;
+
+    // Each step repeats. The injected clock stands still during a pass
+    // and jumps forward in `pauseUntil`, so a pass runs to the cap and
+    // the deadline is what ends the call.
+    const steps = [_]ProbeStep{ .eintr, .reaped };
+    for (steps) |step| {
+        var clock = std.atomic.Value(i64).init(0);
+        const script = [_]ProbeStep{step};
+        var phase = std.atomic.Value(u8).init(0);
+        var probe = SettleProbe{
+            .phase = &phase,
+            .entered = -1,
+            .wake = -1,
+            .hold = false,
+            .grace_ms = 30,
+            .kill_ms = 30,
+            .script = &script,
+            .script_from_start = true,
+            .clock = &clock,
+        };
+        settle_probe = &probe;
+        defer settle_probe = null;
+
+        const end = settleGroup(2147483646);
+
+        try std.testing.expectEqual(GroupEnd.timed_out, end);
+        const waits = probe.wait_calls.load(.acquire);
+        const passes = probe.passes.load(.acquire);
+        const most = probe.max_pass_waits.load(.acquire);
+        try std.testing.expect(passes > 1);
+        try std.testing.expect(most <= reap_pass_cap);
+        try std.testing.expectEqual(reap_pass_cap, most);
+        // The deadline is already due on the last pass, so that pass
+        // stops after one `EINTR` or reaped pid instead of filling the cap.
+        try std.testing.expectEqual(@as(u32, 1), probe.last_pass_waits.load(.acquire));
+        try std.testing.expect(waits <= passes * reap_pass_cap);
+        try std.testing.expect(waits > reap_pass_cap);
+        try std.testing.expect(clock.load(.acquire) >= probe.grace_ms + probe.kill_ms);
+        try std.testing.expectEqual(@as(u32, 1), probe.timeouts.load(.acquire));
+        try std.testing.expectEqual(@as(u32, 0), probe.reported.load(.acquire));
     }
 }
 

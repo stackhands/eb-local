@@ -20,7 +20,7 @@ def stop_proc(proc):
         proc.stderr.close()
 
 
-@unittest.skipUnless(binary.BIN, "workspace staging lock targets the Zig build")
+@unittest.skipUnless(binary.ZIG, "workspace staging lock targets the Zig build")
 class WorkspaceStagingLock(StorageFixture):
     def setUp(self):
         super().setUp()

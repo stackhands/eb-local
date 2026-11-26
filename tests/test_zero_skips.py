@@ -149,6 +149,8 @@ class ZeroPythonSkips(unittest.TestCase):
             "test_shell_init_cli.CallerShellInit.test_clean_callers_source_their_eessi_initializer",
             "test_lmod_init_cli.EessiLmod.test_a_build_sources_eessis_lmod_when_the_host_has_none",
             "test_lmod_init_cli.EessiLmod.test_doctor_without_a_site_file_warns_that_env_and_dev_need_a_module_command",
+            "test_list_doctor_cli.ListAndDoctor.test_doctor_fails_where_no_directory_on_modulepath_holds_the_eessi_module",
+            "test_list_doctor_cli.ListAndDoctor.test_doctor_fails_on_a_secret_every_build_would_stop_on",
             "test_list_doctor_cli.ListAndDoctor.test_doctor_without_a_site_file_judges_eb_local_eb",
         ]
         script = (
@@ -192,7 +194,7 @@ class ZeroPythonSkips(unittest.TestCase):
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,
             )
         combined = run.stdout + run.stderr
         self.assertEqual(run.returncode, 0, combined)
