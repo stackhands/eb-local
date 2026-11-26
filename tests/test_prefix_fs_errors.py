@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Prefix behavior on read-only or full filesystems (EROFS and ENOSPC)."""
 
+import os
 from pathlib import Path
+import pwd
 import subprocess
 import unittest
 
@@ -61,8 +63,12 @@ class PrefixFilesystemErrors(StorageFixture):
     @unittest.skipUnless(_can_mount_tmpfs(), "user-namespace tmpfs mounts unavailable in this environment")
     def test_tmpfs_ro_and_full_prefix_stop_build_before_workspace(self):
         self.prefix.mkdir(parents=True, exist_ok=True)
+        user = pwd.getpwuid(os.getuid()).pw_name
         site = self.root / "site-ro.toml"
-        site.write_text(f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "ubuntu.%j"\n')
+        site.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\n'
+            f'node_local_mount = "{user}.%j"\n'
+        )
         site.chmod(0o600)
         argv, env = binary.command(self.script, ["--config", str(site), "recipe.eb"], dict(self.env))
 

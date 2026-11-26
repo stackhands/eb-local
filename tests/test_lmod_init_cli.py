@@ -12,6 +12,7 @@ import subprocess
 import unittest
 
 import binary
+import hostile_fs
 from test_storage import StorageFixture
 
 EB = '#!/bin/bash\ndeclare -F eb >/dev/null || { echo "no eb double" >&2; exit 127; }\neb "$@"\n'
@@ -19,10 +20,10 @@ EB = '#!/bin/bash\ndeclare -F eb >/dev/null || { echo "no eb double" >&2; exit 1
 
 @unittest.skipUnless(binary.ZIG, "the EESSI Lmod fallback is a feature of the Zig build")
 class EessiLmod(StorageFixture):
+    HOST_PATHS = ("/etc/profile.d/lmod.sh",)
+
     def setUp(self):
         super().setUp()
-        if Path("/etc/profile.d/lmod.sh").exists():
-            self.skipTest("/etc/profile.d/lmod.sh is this host's Lmod init, which comes before EESSI's")
         self.init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
@@ -41,6 +42,8 @@ class EessiLmod(StorageFixture):
         self.init.write_text(f"source {shlex.quote(str(self.root / 'doubles.sh'))}\necho 'EESSI init'\n")
 
     def test_a_build_sources_eessis_lmod_when_the_host_has_none(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         run = self.run_wrapper()
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn(f"eb-local: no module command found; none of {self.tried} defined one\n", run.stderr)
@@ -53,6 +56,8 @@ class EessiLmod(StorageFixture):
         self.assertNotIn("EESSI init", run.stdout)
 
     def test_env_in_a_shell_without_a_module_command_loads_eessi(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         self.eessi_init()
         run = self.run_wrapper(["env"], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -63,6 +68,8 @@ class EessiLmod(StorageFixture):
         self.assertEqual(shell.stdout, "x86_64/amd/zen4")
 
     def test_init_that_defines_no_module_falls_through_to_eessi(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         self.eessi_init()
         host_init = self.root / "no-lmod" / "init" / "bash"
         host_init.parent.mkdir(parents=True)
@@ -85,6 +92,8 @@ class EessiLmod(StorageFixture):
         self.assertEqual(shell.stdout, "x86_64/amd/zen4")
 
     def test_doctor_fails_when_a_readable_init_defines_no_module(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         host_init = self.root / "no-lmod" / "init" / "bash"
         host_init.parent.mkdir(parents=True)
         host_init.write_text("true\n")
@@ -103,6 +112,8 @@ class EessiLmod(StorageFixture):
         self.assertIn(f"eb-local: no module command found; none of {self.tried} defined one\n", build.stderr)
 
     def test_doctor_names_the_init_that_defines_module(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         self.eessi_init()
         host_init = self.root / "no-lmod" / "init" / "bash"
         host_init.parent.mkdir(parents=True)
@@ -114,6 +125,8 @@ class EessiLmod(StorageFixture):
         self.assertNotIn(f"builds source {host_init}", run.stdout)
 
     def test_doctor_names_the_init_a_build_sources_and_fails_without_one(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         run = self.run_wrapper(["doctor"])
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn(f"FAIL no module command in this shell, and none of {self.tried} can be read; builds stop there",
@@ -127,13 +140,17 @@ class EessiLmod(StorageFixture):
         self.assertNotIn("FAIL", run.stdout)
 
     def test_doctor_without_a_site_file_warns_that_env_and_dev_need_a_module_command(self):
-        for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):
-            if Path(installed).exists():
-                self.skipTest(f"{installed} is this host's site file")
+        if not hostile_fs.enter_without_host_paths(
+            self,
+            ("/etc/profile.d/lmod.sh", "/etc/eb-local/config.toml", "/etc/eb-local.conf"),
+        ):
+            return
         run = self.run_wrapper(["doctor"], EB_LOCAL_CONFIG="", XDG_CONFIG_HOME=str(self.root / "xdg"), SLURM_JOB_ID="")
         self.assertIn(f"warn no module command in this shell, and none of {self.tried} can be read", run.stdout)
 
     def test_directory_at_earlier_lmod_init_falls_through_to_eessi_init(self):
+        if not hostile_fs.enter_without_host_paths(self, self.HOST_PATHS):
+            return
         self.eessi_init()
         dir_init = self.root / "no-lmod" / "init" / "bash"
         dir_init.mkdir(parents=True)
