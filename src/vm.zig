@@ -1006,8 +1006,10 @@ test "the QEMU command line names the model with enforce, shares and the three s
     try testing.expectEqual(@as(usize, 2), vfs);
     try testing.expect(std.mem.indexOf(u8, argv[argv.len - 1], "root=hostroot ro init=/var/tmp/j/init") != null);
     try testing.expectEqualStrings("kvm", argv[1]);
-    try testing.expectEqualStrings("-m", argv[cpu_at.? + 3]);
-    try testing.expectEqualStrings("2048M", argv[cpu_at.? + 4]);
+    try testing.expectEqualStrings("-smp", argv[cpu_at.? + 2]);
+    try testing.expectEqualStrings("4", argv[cpu_at.? + 3]);
+    try testing.expectEqualStrings("-m", argv[cpu_at.? + 4]);
+    try testing.expectEqualStrings("2048M", argv[cpu_at.? + 5]);
 }
 
 test "virtiofsd shares the host read-only without a sandbox" {
