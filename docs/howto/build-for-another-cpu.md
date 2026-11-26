@@ -3,7 +3,7 @@
 # Build for another CPU target
 
 A build on a Zen 5 machine installs for `x86_64/amd/zen5`.
-These steps build the same recipe for `x86_64/amd/zen4`, `x86_64/amd/zen3`, or an Intel target such as `x86_64/intel/icelake`, on that machine, so the tree lands in the subdirectory the target's nodes read.
+These steps build the same recipe for `x86_64/amd/zen4`, `x86_64/amd/zen3`, or an Intel target such as `x86_64/intel/icelake`, on that machine, so the tree is installed in the subdirectory the nodes of that target read.
 
 ## Before you start
 
@@ -26,7 +26,7 @@ A target with no mask profile, or a host that cannot present it, shows as a `war
 eb-local --workstation --cpu-target zen4 zlib-2.3.2-GCCcore-15.2.0.eb --robot
 ```
 
-`zen4` stands for `x86_64/amd/zen4`; the full subdirectory works too, and a short name that two architectures share, such as `generic`, needs the architecture.
+`zen4` means `x86_64/amd/zen4`; the full subdirectory works too, and a short name that two architectures share, such as `generic`, needs the architecture.
 Before `eb` starts, the build prints one line per check, all inside the mask:
 
 ```text
