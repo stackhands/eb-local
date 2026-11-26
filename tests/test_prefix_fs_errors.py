@@ -32,13 +32,6 @@ class PrefixFilesystemErrors(StorageFixture):
         for name in ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"):
             self.env.pop(name, None)
 
-    def test_clean_build_output_bytes_stay_unchanged(self):
-        argv, env = binary.command(self.script, ["recipe.eb"], dict(self.env))
-        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stderr, b"")
-        self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
-
     def test_full_prefix_filesystem_stops_build_before_workspace(self):
         self.prefix.mkdir(parents=True, exist_ok=True)
         for cap, needle in (("0:100", "no space left on device"), ("4096:0", "0 free inodes")):

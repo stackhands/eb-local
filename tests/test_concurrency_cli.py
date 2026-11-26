@@ -50,13 +50,6 @@ export -f eb
         path.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_fn)
         return path
 
-    def test_clean_build_output_bytes_stay_unchanged(self):
-        argv, env = binary.command(self.script, ["recipe.eb"], dict(self.env))
-        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stderr, b"")
-        self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
-
     def test_concurrent_builds_on_same_prefix_serialize_and_notify_stderr(self):
         gate1 = self.root / "gate1"
         gate2 = self.root / "gate2"

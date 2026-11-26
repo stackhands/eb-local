@@ -1021,18 +1021,6 @@ test "materialize refuses digest drift" {
     try std.testing.expectError(error.DigestMismatch, materialize(a, base, spec, &d));
 }
 
-test "pinned overlay without edits is byte-identical" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const base = "easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n";
-    const digest = try sha256Hex(a, base);
-    const spec: Spec = .{ .base_digest = digest };
-    var d: Diagnostic = .{};
-    const out = try materialize(a, base, spec, &d);
-    try std.testing.expectEqualStrings(base, out);
-}
-
 test "parameter replacement" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

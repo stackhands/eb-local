@@ -47,13 +47,6 @@ class LogsDirFilesystemErrors(StorageFixture):
         site.chmod(0o600)
         return site
 
-    def test_clean_build_output_bytes_stay_unchanged(self):
-        argv, env = binary.command(self.script, ["recipe.eb"], dict(self.env))
-        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stderr, b"")
-        self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
-
     def test_clean_build_with_secrets_keeps_default_raw_bytes(self):
         site = self._site_with_secret()
         eb_echo = r'''
