@@ -30,6 +30,25 @@ def dangling_symlink(link_path, target_path):
     return link, target
 
 
+def oversized_file(path, size_bytes, *, fill=None, mode=0o600):
+    """Create a file of SIZE_BYTES at PATH (sparse when FILL is None) with MODE."""
+    target = Path(path)
+    with open(target, "wb") as handle:
+        if fill is None:
+            handle.truncate(size_bytes)
+        else:
+            if not fill:
+                raise ValueError("fill must be non-empty bytes")
+            block = (fill * ((4096 // len(fill)) + 1))[:4096]
+            remaining = size_bytes
+            while remaining > 0:
+                piece = block[:remaining]
+                handle.write(piece)
+                remaining -= len(piece)
+    target.chmod(mode)
+    return target
+
+
 def _mount_cmd():
     return shutil.which("mount") or "/bin/mount"
 

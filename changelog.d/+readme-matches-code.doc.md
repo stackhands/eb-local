@@ -1,0 +1,1 @@
+The README lists the check, rpath-wrappers, lmod-cache, modulerc, overlay and site commands and doctor --cvmfs and --mpi, says clean refuses without rtrash unless --delete is given, and says eb-local builds on a workstation as well as in a Slurm job.

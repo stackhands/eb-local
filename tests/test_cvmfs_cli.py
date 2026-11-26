@@ -11,7 +11,7 @@ def script(path, text):
     path.chmod(0o755)
 
 
-@unittest.skipUnless(binary.BIN, "CernVM-FS checks are part of the Zig build")
+@unittest.skipUnless(binary.ZIG, "CernVM-FS checks are part of the Zig build")
 class CvmfsDoctor(StorageFixture):
     def setUp(self):
         super().setUp()

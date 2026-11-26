@@ -8,11 +8,13 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import subprocess
 import unittest
 
 import binary
 import hostile_fs
+import support
 from test_storage import StorageFixture
 
 SITE_DEFAULTS = Path(__file__).resolve().parents[1] / "docs" / "orgmode" / "howto" / "set-site-defaults.org"
@@ -40,10 +42,11 @@ esac
 '''
 
 
-@unittest.skipUnless(binary.BIN, "list and doctor are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "list and doctor are features of the Zig build")
 class ListAndDoctor(StorageFixture):
     def setUp(self):
         super().setUp()
+        self.env = support.isolated_env(self.env)
         # The module double stands in for Lmod's, whose init sets LMOD_CMD,
         # and EESSI's init puts the directory of the EESSI module on MODULEPATH.
         self.env["LMOD_CMD"] = "/usr/share/lmod/lmod/libexec/lmod"
@@ -236,6 +239,7 @@ class ListAndDoctor(StorageFixture):
             root=self.root,
             user=pwd.getpwuid(os.getuid()).pw_name,
             timezone=os.path.realpath("/etc/localtime"),
+            eessi_repo=support.MISSING_EESSI_REPO,
         )
         self.assertEqual((run.returncode, run.stdout.encode(), run.stderr.encode()),
                          (0, expected.encode(), b""))
@@ -317,6 +321,20 @@ class ListAndDoctor(StorageFixture):
                 )
                 self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
                 self.assertIn(f"FAIL workspace {workspace} has no space left on device", run.stdout)
+
+    def test_doctor_workspace_accepts_a_file_system_that_does_not_count_inodes(self):
+        workspace = self.job / "btrfs-candidate"
+        workspace.mkdir(parents=True)
+        run = self.run_tool(
+            ["doctor", "--workspace", str(workspace)],
+            EB_LOCAL_TEST_WORKSPACE_CAPACITY="100:0:uncounted",
+            EB_LOCAL_TEST_WORKSPACE_EXEC="ok",
+        )
+        self.assertNotIn("no space left on device", run.stdout)
+        self.assertIn(
+            f"info workspace {workspace}: 100 free bytes; this file system does not count inodes\n",
+            run.stdout,
+        )
 
     def test_doctor_workspace_reports_real_noexec_mount_execution_failure(self):
         import shlex
@@ -545,12 +563,18 @@ class ListAndDoctor(StorageFixture):
 
     def test_doctor_outside_an_allocation_and_with_modules_off_modulepath(self):
         self.install("x86_64/amd/zen2", "GSL/2.8-GCC-15.2.0")
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}")
+        run = self.run_tool(
+            ["doctor"], SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+            MODULEPATH=f"/somewhere/else:{self.eessi_modules}",
+        )
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertIn("info not in a Slurm job", run.stdout)
         self.assertIn("warn your modules are not on MODULEPATH", run.stdout)
         inside = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen2" / "modules" / "all"
-        run = self.run_tool(["doctor"], SLURM_JOB_ID="", MODULEPATH=f"/somewhere/else:{self.eessi_modules}:{inside}")
+        run = self.run_tool(
+            ["doctor"], SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+            MODULEPATH=f"/somewhere/else:{self.eessi_modules}:{inside}",
+        )
         self.assertIn("ok   your modules are on MODULEPATH", run.stdout)
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
 
@@ -645,8 +669,7 @@ class ListAndDoctor(StorageFixture):
         init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
         run = self.without_a_site_file()
         self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertIn("info no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; "
-                      "`eb-local eb` does not.", run.stdout)
+        self.assertIn("ok   builds use a private workspace on this workstation's local disk", run.stdout)
         self.assertIn(f"FAIL {init} is missing, so `eb-local eb` stops", run.stdout)
         self.assertEqual(run.stdout.count("FAIL"), 2, run.stdout)
 
@@ -656,9 +679,13 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertNotIn("FAIL", run.stdout)
         self.assertIn(f"ok   `eb-local eb` sources {init}", run.stdout)
-        self.assertIn("ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi", run.stdout)
+        self.assertIn(
+            f"ok   `eb-local eb` exports EESSI_USER_INSTALL={shlex.quote(str(self.prefix))}, "
+            "the prefix selected by configuration",
+            run.stdout,
+        )
         self.assertTrue(run.stdout.rstrip().endswith(
-            "Nothing above stops `eb-local eb`; `eb-local RECIPE` needs a site file."), run.stdout)
+            "Nothing above stops a build."), run.stdout)
 
         # EESSI-extend refuses to load for a project directory that is not there.
         project = self.root / "project"
@@ -667,7 +694,7 @@ class ListAndDoctor(StorageFixture):
         self.assertIn(f"FAIL EESSI_PROJECT_INSTALL={project} is not a directory, so EESSI-extend refuses to load "
                       "and `eb-local eb` stops", run.stdout)
         project.mkdir()
-        run = self.without_a_site_file(EESSI_PROJECT_INSTALL=str(project))
+        run = self.without_a_site_file(EB_LOCAL_PROJECT=str(project), EESSI_PROJECT_INSTALL=str(project))
         self.assertEqual(run.returncode, 0, run.stdout)
         self.assertIn(f"ok   `eb-local eb` makes a project install: EESSI_PROJECT_INSTALL={project}", run.stdout)
 
@@ -675,6 +702,36 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("FAIL more than one of EESSI_USER_INSTALL", run.stdout)
         self.assertIn("so `eb-local eb` refuses to run", run.stdout)
+
+    def test_doctor_warns_only_for_an_explicit_install_that_mismatches_configuration(self):
+        init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        init.parent.mkdir(parents=True)
+        init.write_text("")
+        project = self.root / "project"
+        project.mkdir()
+
+        for matching in (
+            {},
+            dict(EESSI_USER_INSTALL=str(self.prefix)),
+            dict(EB_LOCAL_PROJECT=str(project), EESSI_PROJECT_INSTALL=str(project)),
+        ):
+            with self.subTest(matching=matching):
+                run = self.without_a_site_file(**matching)
+                self.assertEqual(run.returncode, 0, run.stdout)
+                self.assertNotIn("does not match configured", run.stdout)
+
+        for explicit, mode in (
+            (dict(EESSI_USER_INSTALL=str(self.root / "other")), "user"),
+            (dict(EESSI_PROJECT_INSTALL=str(project)), "project"),
+            (dict(EESSI_SITE_INSTALL=""), "site"),
+            (dict(EESSI_CVMFS_INSTALL=""), "cvmfs"),
+        ):
+            with self.subTest(explicit=explicit):
+                run = self.without_a_site_file(**explicit)
+                self.assertEqual(run.returncode, 0, run.stdout)
+                self.assertIn(f", a {mode} install that does not match configured "
+                              f"EESSI_USER_INSTALL={shlex.quote(str(self.prefix))};", run.stdout)
+                self.assertIn("warn `eb-local eb` keeps explicitly exported ", run.stdout)
 
     def test_doctor_with_a_site_file_judges_builds_and_warns_for_eb_local_eb(self):
         run = self.run_tool(["doctor"], EESSI_CVMFS_REPO=str(self.root / "repo"),

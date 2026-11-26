@@ -23,7 +23,7 @@ echo "hello rank=1 size=2 cpu=0 cpus=2"
 """
 
 
-@unittest.skipUnless(binary.BIN, "MPI checks are part of the Zig build")
+@unittest.skipUnless(binary.ZIG, "MPI checks are part of the Zig build")
 class MpiDoctor(StorageFixture):
     def setUp(self):
         super().setUp()

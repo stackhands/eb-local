@@ -10,7 +10,7 @@ import binary
 import hostile_fs
 
 
-@unittest.skipUnless(binary.BIN, "rpath-wrappers is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "rpath-wrappers is a feature of the Zig build")
 class RpathWrappersCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-rpath-")
@@ -46,7 +46,7 @@ class RpathWrappersCli(unittest.TestCase):
         }
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, "rpath-wrappers", *args],
+            [binary.ZIG, "rpath-wrappers", *args],
             env=env,
             cwd=self.root,
             capture_output=True,
@@ -237,6 +237,50 @@ class RpathWrappersCli(unittest.TestCase):
                 "ld:-i a.o -o b.o",
                 "clang:--library-path=/opt/x/lib --library-path /opt/y/lib a.o -o prog"
                 " -Wl,-rpath,/opt/x/lib -Wl,-rpath,/opt/y/lib -Wl,--disable-new-dtags",
+            ],
+        )
+
+    def test_response_files_and_libraries_named_by_path_get_run_paths(self):
+        got = self.run_cmd(["--for", "gcc"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        libs = self.root / "libs"
+        (libs / "a").mkdir(parents=True)
+        (libs / "b").mkdir()
+        (libs / "c").mkdir()
+        (libs / "b" / "libfoo.so.3").write_text("", encoding="utf-8")
+        (libs / "c" / "libbar.so").write_text("", encoding="utf-8")
+        # Meson and CMake put a long link line in a response file, quoted
+        # as a shell would quote it.
+        (self.root / "link.rsp").write_text(
+            f'-L{libs}/a main.o {libs}/b/libfoo.so.3 -o "prog one"\n',
+            encoding="utf-8",
+        )
+        (self.root / "compile.rsp").write_text("-c foo.c -o foo.o\n", encoding="utf-8")
+        script = (
+            got.stdout
+            + "gcc @link.rsp\n"
+            + "gcc @compile.rsp\n"
+            + f"gcc main.o {libs}/c/libbar.so -o two\n"
+            + f"gcc main.o {libs}/c/libnone.so -o three\n"
+        )
+        run = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", script],
+            env={"PATH": f"{self.bin}:/usr/bin:/bin"},
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            lines,
+            [
+                f"gcc:@link.rsp -Wl,-rpath,{libs}/a -Wl,-rpath,{libs}/b -Wl,--disable-new-dtags",
+                # A compile in a response file is not a link.
+                "gcc:@compile.rsp",
+                f"gcc:main.o {libs}/c/libbar.so -o two -Wl,-rpath,{libs}/c -Wl,--disable-new-dtags",
+                # A path that names no file adds nothing.
+                f"gcc:main.o {libs}/c/libnone.so -o three -Wl,--disable-new-dtags",
             ],
         )
 

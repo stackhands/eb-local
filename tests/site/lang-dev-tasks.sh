@@ -67,7 +67,7 @@ t_julia() {
     if [ -z "${JULIA_DEPOT_PATH:-}" ]; then
         export JULIA_DEPOT_PATH="$EB_LOCAL_DEV_PREFIX/julia"
     fi
-    mkdir -p "$JULIA_DEPOT_PATH"
+    mkdir -p "${JULIA_DEPOT_PATH%%:}"
     printf '%s\n' 'int answer(void) { return 42; }' > "$W/answer.c"
     gcc -shared -fPIC -o "$W/libanswer.so" "$W/answer.c"
     eessi_runpath "$W/libanswer.so" GCCcore

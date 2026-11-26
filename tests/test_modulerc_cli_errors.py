@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "modulerc is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "modulerc is a feature of the Zig build")
 class ModulercCliErrors(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-modulerc-err-")
@@ -18,7 +18,7 @@ class ModulercCliErrors(unittest.TestCase):
 
     def run_mrc(self, args):
         return subprocess.run(
-            [binary.BIN, "modulerc", *args],
+            [binary.ZIG, "modulerc", *args],
             env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
             cwd=self.root,
             capture_output=True,
@@ -82,7 +82,7 @@ class ModulercCliErrors(unittest.TestCase):
         for extra in ([], ["--check"], ["--dry-run"]):
             with self.subTest(extra=extra):
                 got = subprocess.run(
-                    [binary.BIN, "modulerc", "--module-tree", str(tree), "--default", "Example/2.0", *extra],
+                    [binary.ZIG, "modulerc", "--module-tree", str(tree), "--default", "Example/2.0", *extra],
                     env={"PATH": "/usr/bin:/bin", "HOME": str(self.root)},
                     cwd=self.root,
                     capture_output=True,

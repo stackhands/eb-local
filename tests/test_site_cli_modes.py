@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Black-box CLI behavior tests for `eb-local site` subactions, template rendering, and refusals."""
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -8,9 +9,10 @@ import tempfile
 import unittest
 
 import binary
+import hostile_fs
 
 
-@unittest.skipUnless(binary.BIN, "site is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "site is a feature of the Zig build")
 class SiteCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-site-modes-")
@@ -24,7 +26,7 @@ class SiteCliModes(unittest.TestCase):
             "EB_LOCAL_CONFIG": "",
         }
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,
@@ -112,6 +114,53 @@ class SiteCliModes(unittest.TestCase):
         err = self.run_site(["site", "check", str(bad)])
         self.assertEqual(err.returncode, 2, err.stdout + err.stderr)
         self.assertEqual(err.stdout, "")
+
+    def test_site_commands_refuse_hostile_input_files(self):
+        inputs_dir = self.root / "inputs"
+        inputs_dir.mkdir()
+
+        d = inputs_dir / "dir.toml"
+        d.mkdir()
+        pipe = inputs_dir / "pipe.toml"
+        os.mkfifo(pipe, 0o600)
+        link, _ = hostile_fs.dangling_symlink(inputs_dir / "dangling.toml", inputs_dir / "absent.toml")
+
+        nonutf = inputs_dir / "nonutf.toml"
+        nonutf.write_bytes(b'[storage]\nnode_local_root = "\xff\xfe"\n')
+        nonutf.chmod(0o600)
+
+        bom = inputs_dir / "bom.toml"
+        bom.write_bytes(b'\xef\xbb\xbf[storage]\nnode_local_root = "/local"\n')
+        bom.chmod(0o600)
+
+        big = hostile_fs.oversized_file(inputs_dir / "big.toml", 2 * 1024 * 1024)
+
+        cases = (
+            ("dir", d, str(d).encode()),
+            ("fifo", pipe, str(pipe).encode()),
+            ("dangling", link, b"symbolic link"),
+            ("nonutf", nonutf, b"the file is not UTF-8"),
+            ("bom", bom, b""),
+            ("oversized", big, b"StreamTooLong"),
+        )
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.root), "EB_LOCAL_CONFIG": ""}
+
+        for kind, path, needle in cases:
+            out = self.root / f"installed-{kind}.toml"
+            for action, argv in (
+                ("check", [binary.ZIG, "site", "check", str(path)]),
+                ("show", [binary.ZIG, "site", "show", str(path)]),
+                ("install", [binary.ZIG, "site", "install", str(path), "--to", str(out)]),
+            ):
+                with self.subTest(action=action, kind=kind):
+                    got = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False, timeout=2, check=False)
+                    self.assertEqual(got.returncode, 2, got.stderr)
+                    self.assertEqual(got.stdout, b"")
+                    self.assertTrue(len(got.stderr.strip()) > 0)
+                    self.assertIn(str(path).encode(), got.stderr)
+                    if needle:
+                        self.assertIn(needle, got.stderr)
+                    self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":

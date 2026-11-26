@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Site file templates, configuration carried in EB_LOCAL_* variables, and
-how nimvault is run, through the command line of the Zig build
-(EB_LOCAL_BIN).
+how nimvault is run, through the command line of the Zig build, which
+is the one EB_LOCAL_BIN names, or the one the shell shim runs.
 """
 import os
 from pathlib import Path
@@ -50,7 +50,7 @@ def exported(text):
     return carried
 
 
-@unittest.skipUnless(binary.BIN, "site templates and EB_LOCAL_SECRET_* are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "site templates and EB_LOCAL_SECRET_* are features of the Zig build")
 class SitesCli(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -71,8 +71,20 @@ class SitesCli(StorageFixture):
     def test_list_names_each_built_in_template_and_its_placeholders(self):
         run = self.run_tool(["site", "list"])
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual([line.split()[0] for line in run.stdout.splitlines()], ["slurm"])
+        self.assertEqual([line.split()[0] for line in run.stdout.splitlines()], ["slurm", "workstation"])
         self.assertRegex(run.stdout, r"slurm\s+placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition")
+        self.assertRegex(run.stdout, r"workstation\s+placeholders: prefix")
+
+    def test_workstation_template_installs_local_mode_without_slurm_storage(self):
+        target = self.root / "workstation.toml"
+        run = self.run_tool(["site", "install", "workstation", "--to", str(target)])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        text = target.read_text()
+        self.assertIn('mode = "local"', text)
+        self.assertNotIn("node_local_root", text)
+        shown = self.run_tool(["config", "--config", str(target)])
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertRegex(shown.stdout, r"storage\.mode\s+local\s+\[site ")
 
     def test_show_fills_defaults_and_set_values(self):
         run = self.run_tool(["site", "show", "slurm"] + PATHS)
@@ -341,7 +353,10 @@ class SitesCli(StorageFixture):
             return subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
 
         listed = run_raw(["site", "list"])
-        expected_list = b"slurm        placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition\n"
+        expected_list = (
+            b"slurm        placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition\n"
+            b"workstation  placeholders: prefix\n"
+        )
         self.assertEqual((listed.returncode, listed.stdout, listed.stderr), (0, expected_list, b""))
 
         shown = run_raw(["site", "show", "slurm"] + PATHS)

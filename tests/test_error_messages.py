@@ -9,7 +9,7 @@ import binary
 from test_storage import StorageFixture
 
 
-@unittest.skipUnless(binary.BIN, "diagnostic path and errno checks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "diagnostic path and errno checks target the Zig build")
 class ErrorPathAndErrno(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -24,12 +24,15 @@ class ErrorPathAndErrno(StorageFixture):
         self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
 
     def test_prefix_failures_name_path_and_errno(self):
+        # The line saying what the build runs comes before the prefix is made,
+        # so a prefix that cannot be made or written leaves it on standard output.
+        banner = "eb-local: what this runs: eb-local --explain recipe.eb\n"
         not_dir_parent = self.root / "regular-file"
         not_dir_parent.write_text("x\n")
         bad_child = not_dir_parent / "eessi"
         not_dir = self.run_wrapper(EB_LOCAL_PREFIX=str(bad_child))
         self.assertEqual(not_dir.returncode, 2, not_dir.stdout + not_dir.stderr)
-        self.assertEqual(not_dir.stdout, "")
+        self.assertEqual(not_dir.stdout, banner)
         self.assertIn(str(bad_child), not_dir.stderr)
         self.assertIn("[Errno 20] Not a directory", not_dir.stderr)
 
@@ -39,7 +42,7 @@ class ErrorPathAndErrno(StorageFixture):
         try:
             ro = self.run_wrapper(EB_LOCAL_PREFIX=str(ro_prefix))
             self.assertEqual(ro.returncode, 2, ro.stdout + ro.stderr)
-            self.assertEqual(ro.stdout, "")
+            self.assertEqual(ro.stdout, banner)
             self.assertIn(str(ro_prefix), ro.stderr)
             self.assertIn("[Errno 13] Permission denied", ro.stderr)
         finally:

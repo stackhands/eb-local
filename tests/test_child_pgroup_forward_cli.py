@@ -77,7 +77,7 @@ def wait_file(path: Path, timeout: float = 10.0) -> str:
     return path.read_text(encoding="utf-8")
 
 
-@unittest.skipUnless(binary.BIN, "process-group signal forwarding belongs to the Zig binary")
+@unittest.skipUnless(binary.ZIG, "process-group signal forwarding belongs to the Zig binary")
 class ChildPgroupForwardCli(StorageFixture):
     def setUp(self):
         super().setUp()
