@@ -27,7 +27,7 @@ def settings_table(page):
     return rows
 
 
-@unittest.skipUnless(binary.BIN, "eb-local config is a command of the Zig build")
+@unittest.skipUnless(binary.ZIG, "eb-local config is a command of the Zig build")
 class ConfigurationReference(unittest.TestCase):
     def test_each_setting_config_shows_has_its_row_and_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -38,7 +38,7 @@ class ConfigurationReference(unittest.TestCase):
             site.chmod(0o644)
             home = Path(tmp) / "home"
             home.mkdir()
-            run = subprocess.run([binary.BIN, "--config", str(site), "config"], capture_output=True, text=True,
+            run = subprocess.run([binary.ZIG, "--config", str(site), "config"], capture_output=True, text=True,
                                  env={"HOME": str(home), "PATH": os.environ["PATH"]})
         self.assertEqual(run.returncode, 0, run.stderr)
         rows = settings_table(PAGE.read_text())

@@ -20,7 +20,7 @@ These steps run them and read what they say.
     ```
 
     ```text
-    ok   eb-local 3.3.0
+    ok   eb-local 3.5.0
     ok   site file /usr/local/bin/config.toml
     ok   builds use the allocation's own xfs mount /local/%u.%j
     ok   installs go to /home/alice/eessi: a user install, prefix from default
@@ -93,7 +93,7 @@ These steps run them and read what they say.
 
     Here `EB_LOCAL_STACK_MODULE` named an EESSI version this host does not have; `eb-local config` shows each setting and where it was set.
 
-    Where the shell has Lmod's `module` command but no directory on `MODULEPATH` holds the EESSI module, a build cannot load `EESSI/2026.06` either; with nothing on `MODULEPATH`, Lmod's reason starts `Lmod Warning: MODULEPATH is undefined.`
+    Where the shell has Lmod's `module` command and no directory on `MODULEPATH` holds the EESSI module, a build adds `init/modules` under `EESSI_CVMFS_REPO`; where that does not hold it either, a build cannot load `EESSI/2026.06`; with nothing on `MODULEPATH`, Lmod's reason starts `Lmod Warning: MODULEPATH is undefined.`
     `eb-local doctor` names the directory to add:
 
     ```bash

@@ -7,7 +7,7 @@ eb-local reads its settings from up to two TOML files, from =EB_LOCAL_*= variabl
 
 | File                                                                                                                                                       | Layer |
 |------------------------------------------------------------------------------------------------------------------------------------------------------------+-------|
-| The site file: the first that exists of =config.toml= beside the program, =/etc/eb-local/config.toml=, =eb-local.conf= beside the program and =/etc/eb-local.conf= | site  |
+| The site file: the first that exists of =config.toml= beside the program (or at the checkout root when running from =zig-out/bin=), =/etc/eb-local/config.toml=, =eb-local.conf= beside the program (or at the checkout root) and =/etc/eb-local.conf= | site  |
 | =$XDG_CONFIG_HOME/eb-local/config.toml=, or =$HOME/.config/eb-local/config.toml= when =XDG_CONFIG_HOME= is unset or empty                                    | user  |
 
 =--config FILE=, or =EB_LOCAL_CONFIG=FILE= without it, names a file to read in place of one of the two: in place of the site file when root or the owner of the program owns FILE, and in place of the user file when you do.
@@ -119,6 +119,7 @@ The site settings, =storage.*=, =build.site_toolchains= and =build.node_types=, 
 | =clean.logs_older_than_days= | an integer from 0 to 99999                            | =30=                                       | The age, in whole days, past which =clean= removes a log.                                                                              |
 | =nimvault.program=           | an absolute path                                      | =(nimvault on PATH)=                       | The nimvault program that reads =nimvault:= secrets.                                                                                    |
 | =nimvault.vault=             | an absolute path, or one starting =~/=                | =(nimvault finds it)=                      | The vault nimvault reads, passed as =--vault=.                                                                                          |
+| =storage.mode=               | =auto= or =local=                                     | =auto=                                     | Select =local= workstation workspaces explicitly; =auto= selects them only when =sbatch= and a nonempty =SLURM_*= context are both absent. Site setting. |
 | =storage.node_local_root=    | an absolute path                                      | =(not set)=                                | The directory that holds the allocations' node-local mounts. Site setting.                                                              |
 | =storage.node_local_mount=   | a file name, with =%j=                                | =%u.%j=                                    | The name of each allocation's mount below the root: =%u= is the user and =%j= the job id. Site setting.                                 |
 | =storage.node_local_fstype=  | a file system type                                    | =xfs=                                      | The type each allocation's mount must have. Site setting.                                                                               |

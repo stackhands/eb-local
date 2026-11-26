@@ -155,7 +155,10 @@ pub fn runHello(
     if (compiled.timed_out) return .{ .compile_timeout = true, .compile_code = compiled.code, .override_text = text };
     if (compiled.code != 0) return .{ .compile_code = compiled.code, .override_text = text };
     const launcher = mpirun orelse return .{ .missing_launcher = true, .override_text = text };
-    const envp = try envpWith(a, base, pair(transport));
+    const envp = envpWith(a, base, pair(transport)) catch |e| switch (e) {
+        error.InvalidArgument => unreachable,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     const ran = run(a, launcher, &.{ launcher, "-np", "2", bin }, envp);
     return .{
         .ran = true,
@@ -166,18 +169,13 @@ pub fn runHello(
     };
 }
 
-fn envpWith(a: Allocator, base: *const std.process.Environ.Map, values: Pair) Allocator.Error!proc.Envp {
-    var env = try base.clone(a);
-    try env.put("OMPI_MCA_pml", values.pml);
-    try env.put("OMPI_MCA_mtl", values.mtl);
-    var list: std.ArrayList(?[*:0]const u8) = .empty;
-    var it = env.iterator();
-    while (it.next()) |kv| {
-        const line = try std.fmt.allocPrintSentinel(a, "{s}={s}", .{ kv.key_ptr.*, kv.value_ptr.* }, 0);
-        try list.append(a, line.ptr);
-    }
-    try list.append(a, null);
-    return @ptrCast(list.items.ptr);
+fn envpWith(a: Allocator, base: *const std.process.Environ.Map, values: Pair) (Allocator.Error || error{InvalidArgument})!proc.Envp {
+    var b: common.env.Builder = .init(a);
+    var it = base.iterator();
+    while (it.next()) |kv| try b.set(kv.key_ptr.*, kv.value_ptr.*);
+    try b.set("OMPI_MCA_pml", values.pml);
+    try b.set("OMPI_MCA_mtl", values.mtl);
+    return b.envp();
 }
 
 /// Ranks from lines `hello rank=R size=S cpu=C cpus=N`.

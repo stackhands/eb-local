@@ -1,8 +1,8 @@
 #+title: Run EasyBuild through EESSI-extend without a site file
 
-=eb-local eb= runs EasyBuild with EESSI-extend loaded where there is no site file and no Slurm job: on a login node, inside =eessi_container.sh=, or on a machine with the CernVM File System (CVMFS) mount of EESSI.
+=eb-local eb= runs EasyBuild with EESSI-extend loaded without a Slurm job: on a login node, inside =eessi_container.sh=, or on a machine with the CernVM File System (CVMFS) mount of EESSI.
 It sources the EESSI init, loads =EESSI-extend=, and runs =eb= with the arguments after =--=.
-EESSI-extend keeps EESSI's hooks, RPATH and compatibility layer, and installs where its install variables say; with none set, into =$HOME/eessi=, the prefix eb-local builds use too.
+EESSI-extend keeps EESSI's hooks, RPATH and compatibility layer, and installs where its install variables say; with none set, eb-local exports the configured prefix or project, the same one =env= uses.
 
 * Before you start
 
@@ -19,12 +19,12 @@ EESSI-extend keeps EESSI's hooks, RPATH and compatibility layer, and installs wh
    #+end_src
 
    #+begin_example
-   ok   eb-local 3.3.0
+   ok   eb-local 3.5.0
    info no site file sets storage.node_local_root: `eb-local RECIPE` needs a site file; `eb-local eb` does not. `eb-local site install` writes one beside the program
    ok   installs go to /home/alice/eessi: a user install, prefix from default
    ok   no other EESSI or EasyBuild install variable is set in this shell
    ok   `eb-local eb` sources /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash
-   ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi
+   ok   `eb-local eb` exports EESSI_USER_INSTALL=/home/alice/eessi, the prefix selected by configuration
    info not in a Slurm job; builds need one on the node type that will run the software
    info EESSI is not loaded in this shell; eval "$(eb-local env)" loads it with your modules
    info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects
@@ -58,7 +58,7 @@ EESSI-extend keeps EESSI's hooks, RPATH and compatibility layer, and installs wh
    #+end_example
 
    It builds on the machine you run it on, for the CPU target EESSI selects there, here =x86_64/intel/sapphirerapids=; a login node's target can differ from the compute nodes', as [[file:../explanation/run-paths.org][Run paths, and one build per CPU target]] explains.
-   EasyBuild builds under =$WORKING_DIR/easybuild=; EESSI-extend sets =WORKING_DIR= to =/tmp/$USER= when you have not set it, and =eb-local eb= leaves it as you set it.
+   EasyBuild builds under =$WORKING_DIR/easybuild=; EESSI-extend sets =WORKING_DIR= to =/tmp/$USER= when you have not set it, and =eb-local eb= leaves it as you set it. Downloaded sources remain in =$HOME/eessi/.eb-local/sources= (or the configured install prefix), not under that temporary directory.
 
 3. Load the module, in this shell or in a job:
 

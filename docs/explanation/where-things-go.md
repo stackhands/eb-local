@@ -2,7 +2,7 @@
 
 # Where a build puts things, and why
 
-A build writes to two places: a workspace on the allocation's node-local disk, which goes when the build or the job ends, and the install prefix, which outlives both.
+A build writes to two places: a private workspace on local disk, which goes after a successful build, and the install prefix, which outlives it.
 This page says what goes where, why eb-local refuses other places before it makes anything, and why the default prefix is `$HOME/eessi`.
 [Refusals](../reference/refusals.md) lists each check, and [Where EESSI-extend installs](install-variables.md) says how EESSI-extend picks the tree inside the prefix.
 
@@ -11,7 +11,7 @@ This page says what goes where, why eb-local refuses other places before it make
 | What | Where |
 |---|---|
 | Installations and their module files | the prefix: `$HOME/eessi`, the `prefix` setting, or `--project DIR` |
-| Build, temporary and cache directories | a new workspace in the allocation's node-local mount, such as `/local/alice.34/eb-local.cWtPMNFE` |
+| Build, temporary and cache directories | a new workspace in the allocation's node-local mount, or `$XDG_CACHE_HOME/eb-local/work` on a workstation |
 | Downloaded source archives | `PREFIX/.eb-local/sources` |
 | EasyBuild's log while it runs, and a failed build's | `PREFIX/.eb-local/logs` |
 | A successful build's log | the installation's `easybuild` directory, compressed |
@@ -19,7 +19,19 @@ This page says what goes where, why eb-local refuses other places before it make
 Inside the prefix, each EESSI version and CPU target has a tree of its own.
 With the prefix `/home/alice/eessi` on a Sapphire Rapids node, jq 1.8.1 is in `/home/alice/eessi/versions/2026.06/software/linux/x86_64/intel/sapphirerapids/software/jq/1.8.1-GCCcore-15.2.0`, and its module file in `modules/all/jq/` of the same tree.
 The workspace holds `build`, `cache`, `cargo`, `source-index` and `tmp`.
-A build that succeeds removes it; one that fails keeps it, for you to look into, until the job ends or `eb-local clean --workspaces` removes it.
+A build that succeeds removes it; one that fails keeps it for you to inspect until `eb-local clean --workspaces` removes it.
+
+When `sbatch` is not on `PATH` and no nonempty `SLURM_*` variable marks a
+Slurm context, eb-local automatically uses workstation mode.
+`--workstation` or `storage.mode = "local"` selects it explicitly, including
+on a machine where Slurm is installed.  A safe `$TMPDIR` may be used only when it is on local,
+non-memory-backed storage; otherwise the workspace is below the XDG cache.
+The `eb-local-UID` and `work` parents below `$TMPDIR`, and the corresponding
+XDG parents, are opened without following links, owned by the user, and
+private.  Foreign-owned, group/world-writable and symbolic-link parents are
+refused. Network, shared and tmpfs workspace file systems are refused.
+The durable `PREFIX/.eb-local` state records each local root, so
+`clean --workspaces` still finds a failed build after `$TMPDIR` changes.
 
 ## Why the work happens on node-local disk
 

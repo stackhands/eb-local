@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -80,7 +81,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(len(self.workspaces()), 1)
 
-    @unittest.skipUnless(binary.BIN, "re-raising the child's signal is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "re-raising the child's signal is a feature of the Zig build")
     def test_a_killed_build_is_that_signal_after_the_workspace_is_reported(self):
         killer = self.root / "doubles-kill.sh"
         killer.write_text((self.root / "doubles.sh").read_text() + "\neb() { kill -TERM $$; }\n")
@@ -109,7 +110,7 @@ class Commands(StorageFixture):
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
 
-    @unittest.skipUnless(binary.BIN, "the install prefix is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the install prefix is a feature of the Zig build")
     def test_dev_names_an_install_prefix_for_the_target(self):
         self.prefix.mkdir(parents=True)
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
@@ -127,6 +128,159 @@ class Commands(StorageFixture):
                                             "load GSL/2.8-GCC-15.2.0 FFTW/3.3.10-GCC-15.2.0",
                                             "load buildenv/default-foss-2026.1"])
         self.assertFalse(self.prefix.exists())
+
+    @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
+    def test_dev_and_env_leave_the_shell_unchanged_without_a_module_command(self):
+        # Every initializer is unusable. The evaluating shell has no module
+        # function of its own, so the lines have nothing to load with.
+        if Path("/etc/profile.d/lmod.sh").exists():
+            self.skipTest("/etc/profile.d/lmod.sh is this host's Lmod init")
+        host = self.root / "lmod" / "init" / "bash"
+        host.mkdir(parents=True)
+        eessi = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        eessi.mkdir(parents=True)
+        shells = ["bash"]
+        if shutil.which("zsh"):
+            shells.append("zsh")
+        saved = (
+            "eb-local-dev-v1\n"
+            "prior:Base/1\n"
+            "PATH:u\n"
+            "EB_LOCAL_DEV_PREFIX:u\n"
+            "EB_LOCAL_RPATH_WRAPPERS:u\n"
+            "LD_LIBRARY_PATH:u\n"
+            "LD_PRELOAD:u\n"
+            "LD_AUDIT:u\n"
+            "active:Old/1"
+        )
+        clean = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(self.root),
+            "LMOD_PKG": str(self.root / "lmod"),
+            "EESSI_CVMFS_REPO": str(self.root / "repo"),
+            "EESSI_VERSION": "2026.06",
+            "LOADEDMODULES": "Base/1:Old/1",
+            "EB_LOCAL_DEV_SAVED": saved,
+            "EXPECTED_DEV_SAVED": saved,
+        }
+        for command, argv in (("dev", ["dev"]), ("dev --replace", ["dev", "--replace"]), ("env", ["env"])):
+            run = self.run_wrapper(argv, SLURM_JOB_ID="", **{
+                name: clean[name] for name in (
+                    "LMOD_PKG", "EESSI_CVMFS_REPO", "EESSI_VERSION",
+                    "LOADEDMODULES", "EB_LOCAL_DEV_SAVED",
+                )
+            })
+            self.assertEqual(run.returncode, 0, run.stderr)
+            for shell in shells:
+                with self.subTest(command=command, shell=shell):
+                    flags = ["-f"] if shell == "zsh" else ["--noprofile", "--norc"]
+                    script = (run.stdout
+                              + 'eb_local_eval_status=$?\n'
+                              + '[ "${EB_LOCAL_DEV_SAVED-unset}" = "$EXPECTED_DEV_SAVED" ] && saved=unchanged || saved=changed\n'
+                              + 'printf "%s|%s|%s" "${EESSI_USER_INSTALL-unset}" "${EB_LOCAL_DEV_PREFIX-unset}" "$saved"\n'
+                              + 'exit "$eb_local_eval_status"\n')
+                    replay = subprocess.run([shell, *flags, "-c", script], env=clean,
+                                            capture_output=True, text=True)
+                    self.assertEqual((replay.returncode, replay.stdout),
+                                     (1, "unset|unset|unchanged"), replay.stderr)
+                    self.assertIn("no module command found", replay.stderr)
+                    stopped = subprocess.run(
+                        [shell, *flags, "-c", "set -e\n" + run.stdout + "echo survived\n"],
+                        env=clean, capture_output=True, text=True,
+                    )
+                    self.assertEqual(stopped.returncode, 1, stopped.stderr)
+                    self.assertNotIn("survived", stopped.stdout)
+            # A shell that already has a module command still receives the install variable.
+            ready = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-c",
+                 'module() { return 0; }\n' + run.stdout
+                 + 'eb_local_eval_status=$?\nprintf "%s" "${EESSI_USER_INSTALL-unset}"\nexit "$eb_local_eval_status"\n'],
+                env=clean, capture_output=True, text=True,
+            )
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+            self.assertEqual(ready.stdout, str(self.prefix))
+
+        for init_kind in ("lmod", "eessi"):
+            with self.subTest(init=init_kind):
+                init_root = self.root / init_kind
+                lmod = init_root / "lmod"
+                repo = init_root / "repo"
+                if init_kind == "lmod":
+                    init = lmod / "init" / "bash"
+                else:
+                    init = repo / "versions" / "2026.06" / "init" / "lmod" / "bash"
+                init.parent.mkdir(parents=True)
+                init.write_text("module() { return 0; }\n")
+                init_env = {
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(self.root),
+                    "LMOD_PKG": str(lmod),
+                    "EESSI_CVMFS_REPO": str(repo),
+                    "EESSI_VERSION": "2026.06",
+                }
+                run = self.run_wrapper(["env"], SLURM_JOB_ID="", **init_env)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                replay = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c",
+                     run.stdout + "type module >/dev/null 2>&1 && printf module-visible\n"],
+                    env=init_env, capture_output=True, text=True,
+                )
+                self.assertEqual((replay.returncode, replay.stdout),
+                                 (0, "module-visible"), replay.stderr)
+
+    @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
+    def test_replace_failure_keeps_saved_state_complete(self):
+        self.prefix.mkdir(parents=True)
+        script = self.root / "replace-failure.sh"
+        script.write_text(
+            "set -eu\n"
+            "module() { [ \"${1-}\" = is-avail ] && return 1; return 0; }\n"
+            f"eb_local={shlex.quote(binary.ZIG)}\n"
+            'eval "$($eb_local dev --replace)"\n'
+            'saved=$EB_LOCAL_DEV_SAVED\n'
+            "export EBROOTNVHPC=1 XDG_CACHE_HOME=/dev/null\n"
+            'if eval "$($eb_local dev --replace)"; then exit 1; fi\n'
+            'test "$EB_LOCAL_DEV_SAVED" = "$saved"\n'
+            "unset EBROOTNVHPC XDG_CACHE_HOME\n"
+            'eval "$($eb_local leave)"\n'
+            'test "${EB_LOCAL_DEV_SAVED+x}" != x\n'
+            'eval "$($eb_local dev --replace)"\n'
+            'test -n "$EB_LOCAL_DEV_SAVED"\n',
+            encoding="utf-8",
+        )
+        env = dict(self.env, SLURM_JOB_ID="", EESSI_VERSION="2026.06",
+                   EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        run = subprocess.run(["bash", str(script)], env=env, cwd=self.root,
+                             capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    @unittest.skipUnless(binary.ZIG, "requires the Zig front end")
+    @unittest.skipIf(os.geteuid() == 0, "root can read mode-000 files")
+    def test_a_mode_000_lmod_initializer_is_not_sourced(self):
+        if Path("/etc/profile.d/lmod.sh").exists():
+            self.skipTest("/etc/profile.d/lmod.sh is this host's Lmod init")
+        host = self.root / "lmod" / "init" / "bash"
+        host.parent.mkdir(parents=True)
+        host.write_text("echo sourced-unreadable\n")
+        host.chmod(0)
+        self.addCleanup(host.chmod, 0o644)
+        eessi = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
+        eessi.mkdir(parents=True)
+        clean = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(self.root),
+            "LMOD_PKG": str(self.root / "lmod"),
+            "EESSI_CVMFS_REPO": str(self.root / "repo"),
+            "EESSI_VERSION": "2026.06",
+        }
+        run = self.run_wrapper(["env"], SLURM_JOB_ID="", **clean)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        replay = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", run.stdout],
+            env=clean, capture_output=True, text=True,
+        )
+        self.assertEqual(replay.returncode, 1, replay.stderr)
+        self.assertNotIn("sourced-unreadable", replay.stdout + replay.stderr)
 
     def test_dev_loads_a_module_once_and_the_build_environment_only_last(self):
         # With the default, dev picks the build environment for the compilers
@@ -160,9 +314,12 @@ class Commands(StorageFixture):
                     ),
                 )
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_explain_prints_the_build_and_creates_nothing(self):
-        run = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"], SLURM_JOB_ID="")
+        run = self.run_wrapper(
+            ["--explain", "recipe with space.eb", "--robot"],
+            SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+        )
         self.assertEqual(run.returncode, 0, run.stderr)
         out = run.stdout
         self.assertIn("there is none here, so a build would stop now", out)
@@ -176,7 +333,7 @@ class Commands(StorageFixture):
         self.assertEqual(list(self.job.iterdir()), [])
         self.assertFalse((self.root / "eb.json").exists())
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_the_printed_script_runs_as_a_build_runs_it(self):
         explained = self.run_wrapper(["--explain", "recipe with space.eb", "--robot"])
         self.assertEqual(explained.returncode, 0, explained.stderr)
@@ -193,7 +350,7 @@ class Commands(StorageFixture):
         self.assertEqual(json.loads((self.root / "eb.json").read_text()), real)
         self.assertEqual(real["argv"], ["recipe with space.eb", "--robot"])
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_a_build_starts_with_the_command_that_prints_its_script(self):
         run = self.run_wrapper(["recipe with space.eb", "--robot"])
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -207,7 +364,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.stdout.splitlines()[0],
                          f"eb-local: what this runs: eb-local --project {shlex.quote(str(self.prefix))} --explain recipe.eb")
 
-    @unittest.skipUnless(binary.BIN, "--explain is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "--explain is a feature of the Zig build")
     def test_explain_a_project_build_keeps_the_project_umask(self):
         self.prefix.mkdir(parents=True)
         self.prefix.chmod(0o2770)
@@ -219,7 +376,7 @@ class Commands(StorageFixture):
                       f" {shlex.quote(str(self.prefix))} project recipe.eb\n", run.stdout)
         self.assertEqual(list(self.job.iterdir()), [])
 
-    @unittest.skipUnless(binary.BIN, "the shared default prefix is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the shared default prefix is a feature of the Zig build")
     def test_the_default_prefix_is_eessi_extends_and_an_older_install_stays_in_use(self):
         home = self.root / "home"
         home.mkdir()
@@ -270,10 +427,17 @@ class Commands(StorageFixture):
         self.prefix.mkdir(parents=True)
         self.config.write_text(self.config.read_text() + "dev_buildenv = buildenv/mine\nstack_module = stack/mine\n")
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
-        self.assertIn("module load stack/mine\n"
-                      'if command -v eessi-arch-guard >/dev/null 2>&1; then eval "$(eessi-arch-guard --shell)"; fi\n'
-                      "module load EESSI-extend/2026.06-easybuild\n", run.stdout)
+        self.assertEqual(run.stdout.count("if ! type module >/dev/null 2>&1; then\n"), 1)
+        self.assertIn("eb_local_apply() {\n", run.stdout)
+        self.assertIn("module load stack/mine\n", run.stdout)
+        self.assertIn("if command -v eessi-arch-guard >/dev/null 2>&1; then\n", run.stdout)
+        self.assertIn("module load EESSI-extend/2026.06-easybuild\n", run.stdout)
         self.assertEqual(last_load(run.stdout), "module load buildenv/mine", run.stdout)
+        replace = self.run_wrapper(["dev", "--replace"], SLURM_JOB_ID="")
+        self.assertEqual(
+            replace.stdout.count("if ! type module >/dev/null 2>&1; then\n"),
+            1,
+        )
 
     def test_legacy_config_checks_all_lines_before_value_validation(self):
         cases = (
@@ -369,7 +533,10 @@ class Commands(StorageFixture):
             )
         )
 
-        rec = self.run_wrapper(["recipe.eb", "--version"], SLURM_JOB_ID="")
+        rec = self.run_wrapper(
+            ["recipe.eb", "--version"],
+            SLURM_JOB_ID="", SLURM_CLUSTER_NAME="cluster",
+        )
         self.assertEqual((rec.returncode, rec.stdout), (2, ""), rec.stdout + rec.stderr)
         self.assertIn("not inside a Slurm job", rec.stderr)
 
@@ -383,7 +550,7 @@ class Commands(StorageFixture):
             )
         )
 
-    @unittest.skipUnless(binary.BIN, "the lfoss warning is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the lfoss warning is a feature of the Zig build")
     def test_dev_warns_when_an_lfoss_module_meets_the_foss_build_environment(self):
         # With the default, dev picks the build environment for the compilers
         # (test_dev_buildenv); a chosen GCC one is loaded as it is, with a warning.
@@ -459,7 +626,7 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertFalse(old.exists())
 
-    @unittest.skipUnless(binary.BIN, "clean.trash is a setting of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "clean.trash is a setting of the Zig build")
     def test_clean_says_clean_trash_none_keeps_the_logs_with_rtrash_there(self):
         self.with_rtrash()
         old, = self.logs(40)
@@ -571,9 +738,10 @@ class Commands(StorageFixture):
         self.assertTrue(other.is_dir())
         self.assertTrue(lookalike.is_symlink())
 
-    def test_clean_workspaces_needs_the_allocation(self):
+    def test_clean_workspaces_without_an_allocation_checks_recorded_local_roots(self):
         run = self.run_wrapper(["clean", "--workspaces"], SLURM_JOB_ID="")
-        self.assertEqual(run.returncode, 2)
+        self.assertEqual(run.returncode, 0)
+        self.assertIn("nothing to clean", run.stdout)
 
     def test_empty_equals_value_options_are_refused(self):
         for args in (["--project=", "env"], ["dev", "--buildenv="]):

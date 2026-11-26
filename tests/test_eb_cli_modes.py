@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "eb and EB_LOCAL_EESSI_EXTEND are features of the Zig build")
+@unittest.skipUnless(binary.ZIG, "eb and EB_LOCAL_EESSI_EXTEND are features of the Zig build")
 class EbCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-eb-modes-")
@@ -31,24 +31,12 @@ class EbCliModes(unittest.TestCase):
             env.pop(name, None)
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, *args],
+            [binary.ZIG, *args],
             env=env,
             cwd=self.root,
             capture_output=True,
             text=True,
         )
-
-    def test_eb_rejects_profile_project_and_config_flags_with_exit_two(self):
-        for args in (
-            ["--profile", "gpu", "eb", "x.eb"],
-            ["--project", str(self.root), "eb", "x.eb"],
-            ["--config", str(self.root / "site.toml"), "eb", "x.eb"],
-        ):
-            with self.subTest(args=args):
-                got = self.run_bin(args)
-                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
-                self.assertEqual(got.stdout, "")
-                self.assertIn("eb reads the install mode from the environment", got.stderr)
 
     def test_multiple_install_variables_exit_three_for_eb_and_explain_eb(self):
         for sub in (["eb", "x.eb"], ["--explain", "eb", "x.eb"]):

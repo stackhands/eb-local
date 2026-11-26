@@ -22,7 +22,7 @@ def _wait_for(path: Path, timeout: float = 5.0):
     return False
 
 
-@unittest.skipUnless(binary.BIN, "prefix concurrency locks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "prefix concurrency locks target the Zig build")
 class PrefixConcurrency(StorageFixture):
     def setUp(self):
         super().setUp()

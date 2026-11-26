@@ -25,7 +25,7 @@ def _can_mount_tmpfs():
     return probe.returncode == 0
 
 
-@unittest.skipUnless(binary.BIN, "prefix filesystem checks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "prefix filesystem checks target the Zig build")
 class PrefixFilesystemErrors(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -50,6 +50,13 @@ class PrefixFilesystemErrors(StorageFixture):
                 self.assertIn(str(self.prefix), run.stderr)
                 self.assertIn(needle, run.stderr)
                 self.assertEqual(list(self.job.iterdir()), [])
+
+    def test_prefix_on_a_file_system_without_an_inode_count_builds(self):
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        run = self.run_wrapper(EB_LOCAL_TEST_PREFIX_CAPACITY="4096:0:uncounted")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("no space left on device", run.stderr)
+        self.assertIn("eb-local: done.", run.stdout)
 
     @unittest.skipUnless(_can_mount_tmpfs(), "user-namespace tmpfs mounts unavailable in this environment")
     def test_tmpfs_ro_and_full_prefix_stop_build_before_workspace(self):
@@ -131,6 +138,15 @@ class PrefixFilesystemErrors(StorageFixture):
         self.assertEqual(inodes.returncode, 1, inodes.stdout + inodes.stderr)
         self.assertIn("FAIL installation prefix", inodes.stdout)
         self.assertIn("0 free inodes", inodes.stdout)
+
+        # btrfs reports zero total and zero free inodes; that is not a full
+        # file system, and a prefix there with free bytes is accepted.
+        uncounted = self.run_tool_doctor(EB_LOCAL_TEST_PREFIX_CAPACITY="4096:0:uncounted")
+        self.assertNotIn("no space left on device", uncounted.stdout)
+        self.assertNotIn("FAIL installation prefix", uncounted.stdout)
+        empty = self.run_tool_doctor(EB_LOCAL_TEST_PREFIX_CAPACITY="0:0:uncounted")
+        self.assertEqual(empty.returncode, 1, empty.stdout + empty.stderr)
+        self.assertIn("no space left on device", empty.stdout)
 
         missing_prefix = self.prefix / "child" / "eessi"
         full_missing = self.run_tool_doctor(

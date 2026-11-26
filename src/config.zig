@@ -14,6 +14,10 @@ const Allocator = std.mem.Allocator;
 /// else `none`.
 pub const Trash = enum { auto, rtrash, none };
 
+/// Where managed builds put their workspace. `auto` uses a Slurm
+/// allocation when one is configured, and a workstation otherwise.
+pub const StorageMode = enum { auto, local };
+
 /// A value and where it came from, as `eb-local config` shows it: `default`,
 /// a file and line with its layer and profile, a variable or an option.
 pub fn Setting(comptime T: type) type {
@@ -104,6 +108,7 @@ pub const Settings = struct {
     node_types_old_key: ?[]const u8 = null,
     trash: Setting(Trash) = .{ .value = .auto },
     logs_older_than_days: Setting(u32) = .{ .value = 30 },
+    storage_mode: Setting(StorageMode) = .{ .value = .auto },
     node_local_root: Setting([]const u8) = .{ .value = "" },
     /// Each allocation's mount below node_local_root: %u the user, %j the job id.
     node_local_mount: Setting([]const u8) = .{ .value = storage.default_mount },
@@ -638,7 +643,14 @@ const Loader = struct {
                 const sub = try l.table(src, e, "storage");
                 for (sub.entries.items) |*f| {
                     const ff = try l.where(src, f.line, null);
-                    if (std.mem.eql(u8, f.key, "node_local_root")) {
+                    if (std.mem.eql(u8, f.key, "mode")) {
+                        const v = try l.string(src, f, "storage.mode");
+                        l.s.storage_mode = .{
+                            .value = std.meta.stringToEnum(StorageMode, v) orelse
+                                return l.fail("{s}:{d}: storage.mode is \"auto\" or \"local\"", .{ src.path, f.line }),
+                            .from = ff,
+                        };
+                    } else if (std.mem.eql(u8, f.key, "node_local_root")) {
                         const v = try l.string(src, f, "storage.node_local_root");
                         if (!validAbsolute(v)) return l.fail("{s}:{d}: storage.node_local_root must be one absolute path without a trailing slash", .{ src.path, f.line });
                         l.s.node_local_root = .{ .value = v, .from = ff };

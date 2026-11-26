@@ -18,10 +18,10 @@ def parsed_options():
     return list(dict.fromkeys(names))
 
 
-@unittest.skipUnless(binary.BIN, "usage checks need a directly named Zig test build")
+@unittest.skipUnless(binary.ZIG, "usage checks need a directly named Zig test build")
 class Usage(unittest.TestCase):
     def test_the_usage_names_every_option_the_parser_takes(self):
-        run = subprocess.run([binary.BIN, "--help"], capture_output=True, text=True)
+        run = subprocess.run([binary.ZIG, "--help"], capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         options = parsed_options()
         self.assertIn("--logs-older-than", options)
@@ -30,12 +30,9 @@ class Usage(unittest.TestCase):
                    and not re.search(rf"(?<![\w-]){re.escape(o)}(?![\w-])", run.stdout)]
         self.assertEqual(missing, [])
 
-    def test_the_usage_says_eb_takes_none_of_the_global_options(self):
-        usage = subprocess.run([binary.BIN, "--help"], capture_output=True, text=True).stdout
-        self.assertIn("Every command but eb takes --profile NAME, --project DIR", usage)
-        run = subprocess.run([binary.BIN, "eb", "--profile", "x"], capture_output=True, text=True)
-        self.assertEqual(run.returncode, 2)
-        self.assertIn("not from --profile, --project or --config", run.stderr)
+    def test_the_usage_says_eb_takes_the_global_options(self):
+        usage = subprocess.run([binary.ZIG, "--help"], capture_output=True, text=True).stdout
+        self.assertIn("Every configured command, including eb, takes --profile NAME, --project DIR", usage)
 
 
 if __name__ == "__main__":

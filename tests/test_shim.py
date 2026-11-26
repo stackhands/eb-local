@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """The repository command delegates to the Zig implementation unchanged."""
 
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
+
+import binary
 
 
 SHIM = Path(__file__).resolve().parents[1] / "eb-local"
@@ -123,12 +127,12 @@ exec eb-local nested
         self.assertEqual(run.stdout, "nested call\n")
         self.assertEqual(run.stderr, "")
 
-    def test_checkout_site_file_is_passed_to_zig(self):
+    def test_shim_does_not_set_or_mutate_eb_local_config(self):
         config = self.root / "eb-local.conf"
-        config.write_text("node_local_root = /local\n")
+        config.write_text("node_local_root = /local\n", encoding="utf-8")
         zig = self.root / "zig-out" / "bin" / "eb-local"
         zig.parent.mkdir(parents=True)
-        zig.write_text("#!/bin/sh\nprintf '%s\\n' \"${EB_LOCAL_CONFIG-unset}\"\n")
+        zig.write_text("#!/bin/sh\nprintf '%s\\n' \"${EB_LOCAL_CONFIG-unset}\"\n", encoding="utf-8")
         zig.chmod(0o755)
         env = dict(os.environ, PATH="")
         env.pop("EB_LOCAL_CONFIG", None)
@@ -140,8 +144,64 @@ exec eb-local nested
             text=True,
         )
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        self.assertEqual(run.stdout, f"{config}\n")
+        self.assertEqual(run.stdout, "unset\n")
         self.assertEqual(run.stderr, "")
+
+        for given in ("", "/custom/site.toml"):
+            run_given = subprocess.run(
+                [self.shim, "config"],
+                env=dict(env, EB_LOCAL_CONFIG=given),
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(run_given.returncode, 0, run_given.stdout + run_given.stderr)
+            self.assertEqual(run_given.stdout, f"{given}\n")
+
+    @unittest.skipUnless(binary.ZIG, "checkout delegation end-to-end uses the Zig binary")
+    def test_shim_delegates_to_zig_without_exporting_eb_local_config(self):
+        config = self.root / "eb-local.conf"
+        config.write_text("node_local_root = /local/via-zig\n", encoding="utf-8")
+        config.chmod(0o600)
+        zig = self.root / "zig-out" / "bin" / "eb-local"
+        zig.parent.mkdir(parents=True)
+        shutil.copy2(binary.ZIG, zig)
+        zig.chmod(0o755)
+
+        guard_bin = self.root / "guard-bin"
+        guard_bin.mkdir()
+        seen = self.root / "guard-env.txt"
+        guard = guard_bin / "eessi-arch-guard"
+        guard.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"${{EB_LOCAL_CONFIG-unset}}\" > '{seen}'\n"
+            "printf 'export EESSI_SOFTWARE_SUBDIR=x86_64/generic\\n'\n",
+            encoding="utf-8",
+        )
+        guard.chmod(0o755)
+
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("EB_LOCAL_")
+        }
+        env.update(
+            HOME=str(self.root / "home"),
+            XDG_CONFIG_HOME=str(self.root / "xdg"),
+            SLURM_JOB_ID="1",
+            EESSI_SOFTWARE_SUBDIR="x86_64/generic",
+            PATH=f"{guard_bin}:/usr/bin:/bin",
+        )
+        (self.root / "home").mkdir()
+
+        cfg = subprocess.run([self.shim, "config", "--json"], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(cfg.returncode, 0, cfg.stdout + cfg.stderr)
+        rows = {row["key"]: row for row in json.loads(cfg.stdout)["settings"]}
+        self.assertEqual(rows["storage.node_local_root"]["value"], "/local/via-zig")
+        self.assertEqual(rows["storage.node_local_root"]["from"], f"site {config}:1")
+
+        subprocess.run([self.shim, "doctor"], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(seen.read_text(encoding="utf-8"), "unset\n")
 
     def test_path_symlink_to_the_same_shim_is_skipped(self):
         path_bin = self.root / "path-bin"
