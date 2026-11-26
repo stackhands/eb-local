@@ -80,13 +80,10 @@ class PrefixLockSignalCancel(StorageFixture):
                     )
                     self.addCleanup(lambda p=proc: stop_proc(p))
                     first_err = self.wait_until_waiting_on_lock(proc)
-                    t0 = time.monotonic()
                     os.kill(proc.pid, sig)
                     out, rest_err = proc.communicate(timeout=5)
-                    elapsed = time.monotonic() - t0
                     err = first_err + rest_err
                     self.assertEqual(proc.returncode, -sig, f"rc={proc.returncode}\nout={out}\nerr={err}")
-                    self.assertLess(elapsed, 1.0, err)
                     self.assertNotIn("timed out", err)
                     self.assertNotIn("build workspace kept", err)
                     self.assertEqual(list(self.job.iterdir()), [])

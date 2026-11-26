@@ -13,6 +13,7 @@ const fsx = common.fsx;
 const proc = common.proc;
 const config = @import("config.zig");
 const storage = @import("storage.zig");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 
 /// Largest secret accepted from any source.
@@ -394,6 +395,9 @@ fn replace(a: Allocator, dir: sys.fd_t, name: []const u8, bytes: []const u8) (fs
     var prev: linux.Sigaction = undefined;
     _ = linux.sigaction(.XFSZ, &ign, &prev);
     defer _ = linux.sigaction(.XFSZ, &prev, null);
+    if (comptime build_options.test_ops) {
+        if (storage.test_redact_errno) |e| return storage.injectedSysError(e);
+    }
     try fsx.replaceContents(a, dir, name, bytes);
 }
 

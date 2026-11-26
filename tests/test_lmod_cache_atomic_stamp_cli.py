@@ -72,12 +72,15 @@ class LmodCacheAtomicStamp(unittest.TestCase):
             while not stop_reader.is_set():
                 sp = current_stamp[0]
                 try:
+                    before = cache_file.stat()
                     st_stamp = sp.stat()
-                    st_cache = cache_file.stat()
+                    after = cache_file.stat()
                 except FileNotFoundError:
                     continue
-                if st_stamp.st_mtime_ns >= st_cache.st_mtime_ns:
-                    stale_observations.append((sp.name, st_stamp.st_mtime_ns, st_cache.st_mtime_ns))
+                if before.st_ino != after.st_ino or before.st_mtime_ns != after.st_mtime_ns:
+                    continue
+                if st_stamp.st_mtime_ns >= after.st_mtime_ns:
+                    stale_observations.append((sp.name, st_stamp.st_mtime_ns, after.st_mtime_ns))
 
         threads = [threading.Thread(target=reader, daemon=True) for _ in range(2)]
         for thread in threads:

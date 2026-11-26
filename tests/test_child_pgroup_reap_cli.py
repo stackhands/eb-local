@@ -382,6 +382,7 @@ class ChildPgroupReapCli(StorageFixture):
                         p.unlink()
                 argv, env = binary.command(self.script, args, case_env)
                 env["PATH"] = f"{strag_bin}:{env['PATH']}"
+                env["EB_LOCAL_TEST_GROUP_GRACE_MS"] = "20"
                 proc = subprocess.Popen(
                     argv,
                     env=env,
