@@ -504,6 +504,16 @@ class Commands(StorageFixture):
         self.assertEqual(run.returncode, 2)
         self.assertEqual(run.stdout, "")
 
+    def test_dev_prints_the_shared_cargo_linker_lines(self):
+        run = self.run_wrapper(["dev"], SLURM_JOB_ID="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        needle = 'eval "export CARGO_TARGET_${_triple_env}_LINKER=\\${CC:-gcc}"'
+        self.assertIn(needle, run.stdout)
+        root = Path(__file__).resolve().parents[1]
+        snippet = (root / "src" / "cargo-linker.sh").read_text(encoding="utf-8")
+        self.assertIn(snippet, run.stdout)
+        self.assertEqual(snippet.count(needle), 1)
+
     def test_dev_warns_about_ld_library_path(self):
         run = self.run_wrapper(["dev"], SLURM_JOB_ID="", LD_LIBRARY_PATH="/somewhere")
         self.assertEqual(run.returncode, 0)

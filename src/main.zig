@@ -1415,6 +1415,7 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, extend.cargo_linker) catch oom();
     out.appendSlice(a, dev_lang_dirs) catch oom();
     out.appendSlice(a, "fi\n") catch oom();
     const lines = emittedLines(a, envStrict(c, g), out.items);
@@ -1497,6 +1498,8 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    // Same bytes as eb: src/cargo-linker.sh, embedded as extend.cargo_linker.
+    out.appendSlice(a, extend.cargo_linker) catch oom();
     out.appendSlice(a, dev_lang_dirs) catch oom();
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     const lines = emittedLines(a, envStrict(c, g), out.items);
