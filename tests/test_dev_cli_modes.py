@@ -203,7 +203,7 @@ class DevCliModes(unittest.TestCase):
         self.assertEqual(self.run_dev(["--lock"], **self.RESOLVED).returncode, 0)
         got = self.run_dev(["--locked"])
         self.assertEqual(got.returncode, 0, got.stderr)
-        load = "module load " + " ".join(self.LOADED.split(":")) + "\n"
+        load = "module load " + " ".join(m for m in self.LOADED.split(":") if m != "EESSI/2026.06") + "\n"
         self.assertEqual(got.stdout.count(load), 1)
         self.assertEqual(got.stdout.count("module load"), 2)  # the stack, then the lock
         self.assertIn("unset EB_LOCAL_RPATH_WRAPPERS", got.stdout)
@@ -216,14 +216,22 @@ class DevCliModes(unittest.TestCase):
 
         # A lock with no buildenv module emits only `rpath-wrappers --for`.
         # `--unwrapped` would run before that result is on PATH and wrap the
-        # same self-linking compilers a second time.
-        no_be = "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
+        # same self-linking compilers a second time. The recorded extension
+        # is left out of the prelude and loaded once inside the target guard.
+        no_be = "EESSI/2026.06:EESSI-extend/2026.06-easybuild:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
         self.assertEqual(self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=no_be)).returncode, 0)
+        self.prefix.mkdir(parents=True, exist_ok=True)
         got_no_be = self.run_dev(["--locked"])
         self.assertEqual(got_no_be.returncode, 0, got_no_be.stderr)
         self.assertIn('rpath-wrappers --for "$eb_local_family"', got_no_be.stdout)
         self.assertNotIn("rpath-wrappers --unwrapped", got_no_be.stdout)
         self.assertIn('eval "$_eb_local_wrap"', got_no_be.stdout)
+        self.assertEqual(got_no_be.stdout.count("module load"), 3)
+        target_guard = got_no_be.stdout.index('if [ "${EESSI_SOFTWARE_SUBDIR-}" != x86_64/amd/zen4 ]; then')
+        self.assertNotIn("module load EESSI-extend/2026.06-easybuild", got_no_be.stdout[:target_guard])
+        self.assertIn("module load EESSI-extend/2026.06-easybuild", got_no_be.stdout[target_guard:])
+        locked_load = "module load llvm-compilers/21.1.8 FFTW/3.3.10-llvm-compilers-21.1.8\n"
+        self.assertEqual(got_no_be.stdout.count(locked_load), 1)
 
         # Restore lock for subsequent checks in this test.
         self.assertEqual(self.run_dev(["--lock"], **self.RESOLVED).returncode, 0)
@@ -309,6 +317,78 @@ class DevCliModes(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertTrue(loaded.stdout.endswith("/dev/2026.06/x86_64/amd/zen4"), loaded.stdout + loaded.stderr)
+
+    def test_locked_loads_extend_when_prefix_appears_after_lock(self):
+        self.assertFalse(self.prefix.exists())
+        loaded = "EESSI/2026.06:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
+        lock_run = self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=loaded))
+        self.assertEqual(lock_run.returncode, 0, lock_run.stderr)
+        record = json.loads((self.root / "eb-local.lock").read_text())
+        self.assertNotIn("EESSI-extend/2026.06-easybuild", record["modules"])
+
+        self.prefix.mkdir()
+        got = self.run_dev(["--locked"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        target_guard = got.stdout.index('if [ "${EESSI_SOFTWARE_SUBDIR-}" != x86_64/amd/zen4 ]; then')
+        self.assertIn("module load EESSI-extend/2026.06-easybuild", got.stdout[:target_guard])
+        self.assertNotIn("EESSI-extend/2026.06-easybuild", got.stdout[target_guard:])
+
+    def test_locked_refusal_or_skipped_reload_returns_to_the_caller(self):
+        # A locked shell that refuses another CPU target, or that skips a
+        # second load of the stack and the extension, returns from its
+        # function. The caller's shell keeps running and can read the status.
+        self.prefix.mkdir()
+        loaded = "EESSI/2026.06:EESSI-extend/2026.06-easybuild:llvm-compilers/21.1.8:FFTW/3.3.10-llvm-compilers-21.1.8"
+        lock_run = self.run_dev(["--lock"], **dict(self.RESOLVED, LOADEDMODULES=loaded))
+        self.assertEqual(lock_run.returncode, 0, lock_run.stderr)
+        got = self.run_dev(["--locked"])
+        self.assertEqual(got.returncode, 0, got.stderr)
+        self.assertIn("eb_local_apply()", got.stdout)
+        self.assertNotIn("\nexit ", got.stdout)
+        empty = self.root / "empty-bin"
+        empty.mkdir()
+
+        def run(subdir):
+            loads = self.root / ("loads-" + subdir.replace("/", "-"))
+            script = (
+                'module() { printf "%s\\n" "$*" >> "$LOADS"; return 0; }\n'
+                + got.stdout
+                + 'status=$?\n'
+                + 'printf "alive:%s\\n" "$status"\n'
+            )
+            proc = subprocess.run(
+                ["/bin/bash", "--noprofile", "--norc", "-c", script],
+                env=support.isolated_env({
+                    "PATH": str(empty),
+                    "HOME": str(self.root),
+                    "LOADS": str(loads),
+                    "EESSI_SOFTWARE_SUBDIR": subdir,
+                    "EESSI_VERSION": "2026.06",
+                }),
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+            )
+            recorded = []
+            if loads.exists():
+                recorded = [line for line in loads.read_text().splitlines() if line.startswith("load ")]
+            return proc, recorded
+
+        refused, refused_loads = run("x86_64/intel/icelake")
+        self.assertEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertEqual(refused.stdout, "alive:0\n")
+        self.assertIn("was written for the CPU target", refused.stderr)
+        self.assertEqual(refused_loads, ["load EESSI/2026.06"])
+
+        skipped, skipped_loads = run("x86_64/amd/zen4")
+        self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertEqual(skipped.stdout, "alive:1\n")
+        self.assertIn("no compiler or linker on PATH to wrap", skipped.stderr)
+        self.assertEqual(skipped_loads, [
+            "load EESSI/2026.06",
+            "load EESSI-extend/2026.06-easybuild",
+            "load llvm-compilers/21.1.8 FFTW/3.3.10-llvm-compilers-21.1.8",
+        ])
 
     def test_names_the_host_ca_bundle_without_replacing_one_the_shell_set(self):
         got = self.run_dev([])
