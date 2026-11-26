@@ -157,11 +157,11 @@ pub const Db = struct {
     }
 
     /// The id a feature name has, if the tables mention it.
-    pub fn id(db: *const Db, name: []const u8) ?u8 {
-        return db.ids.get(name);
+    pub fn idOf(db: *const Db, feature_name: []const u8) ?u8 {
+        return db.ids.get(feature_name);
     }
 
-    pub fn name(db: *const Db, feature: u8) []const u8 {
+    pub fn nameOf(db: *const Db, feature: u8) []const u8 {
         return db.names.items[feature];
     }
 
@@ -230,7 +230,7 @@ pub fn parseLine(line: []const u8) ?Line {
         address |= std.fmt.charToDigit(line[i], 16) catch return null;
     }
     if (i == digits or i >= line.len or line[i] != ':') return null;
-    const rest = line[i + 1 ..];
+    const rest = std.mem.trimStart(u8, line[i + 1 ..], " \t");
     const tab = std.mem.findScalar(u8, rest, '\t') orelse return null;
     const bytes = trimSpace(rest[0..tab]);
     if (bytes.len == 0 or !isHex(bytes[0])) return null;
@@ -298,10 +298,10 @@ fn inList(word: []const u8, list: []const []const u8) bool {
 }
 
 const cmp_predicates = [_][]const u8{
-    "eq",     "lt",     "le",     "unord",   "neq",    "nlt",    "nle",     "ord",
-    "eq_uq",  "nge",    "ngt",    "false",   "neq_oq", "ge",     "gt",      "true",
-    "eq_os",  "lt_oq",  "le_oq",  "unord_s", "neq_us", "nlt_uq", "nle_uq",  "ord_s",
-    "eq_us",  "nge_uq", "ngt_uq", "false_os", "neq_os", "ge_oq",  "gt_oq",   "true_us",
+    "eq",    "lt",     "le",     "unord",    "neq",    "nlt",    "nle",    "ord",
+    "eq_uq", "nge",    "ngt",    "false",    "neq_oq", "ge",     "gt",     "true",
+    "eq_os", "lt_oq",  "le_oq",  "unord_s",  "neq_us", "nlt_uq", "nle_uq", "ord_s",
+    "eq_us", "nge_uq", "ngt_uq", "false_os", "neq_os", "ge_oq",  "gt_oq",  "true_us",
 };
 const int_predicates = [_][]const u8{ "eq", "lt", "le", "ne", "neq", "nlt", "nle", "ge", "gt", "false", "true" };
 const int_types = [_][]const u8{ "ub", "uw", "ud", "uq", "b", "w", "d", "q" };
@@ -309,9 +309,9 @@ const int_types = [_][]const u8{ "ub", "uw", "ud", "uq", "b", "w", "d", "q" };
 /// The mnemonic of the instruction an assembler alias stands for
 /// (vcmpltps, vpcmpnleub, vpcomltb, pclmullqlqdq), written into `buf`.
 pub fn aliasOf(mn: []const u8, buf: *[32]u8) ?[]const u8 {
-    if (std.mem.endsWith(u8, mn, "qdq") and (std.mem.startsWith(u8, mn, "pclmul") or std.mem.startsWith(u8, mn, "vpclmul"))) {
+    if (std.mem.endsWith(u8, mn, "dq") and (std.mem.startsWith(u8, mn, "pclmul") or std.mem.startsWith(u8, mn, "vpclmul"))) {
         const v = mn[0] == 'v';
-        const mid = mn[if (v) 7 else 6 .. mn.len - 3];
+        const mid = mn[if (v) 7 else 6 .. mn.len - 2];
         if (mid.len == 4 and (mid[0] == 'l' or mid[0] == 'h') and mid[1] == 'q' and (mid[2] == 'l' or mid[2] == 'h') and mid[3] == 'q')
             return std.fmt.bufPrint(buf, "{s}pclmulqdq", .{if (v) "v" else ""}) catch null;
         return null;
@@ -441,7 +441,7 @@ pub fn parseAllow(a: Allocator, db: *const Db, text: []const u8) Allocator.Error
         const feats = words.next() orelse continue;
         var mask: Mask = 0;
         var it = std.mem.splitScalar(u8, feats, ',');
-        while (it.next()) |f| if (db.id(f)) |fid| {
+        while (it.next()) |f| if (db.idOf(f)) |fid| {
             mask |= bit(fid);
         };
         try out.append(a, .{ .needle = try std.fmt.allocPrint(a, "/software/{s}/", .{pkg}), .mask = mask });
@@ -640,9 +640,9 @@ fn disassemble(a: Allocator, tool: Tool, arch: Arch, file: []const u8, out_path:
 }
 
 const FileStats = struct {
-    counts: [256]u64 = [_]u64{0} ** 256,
-    first_address: [256]u64 = [_]u64{0} ** 256,
-    first_text: [256][]const u8 = [_][]const u8{""} ** 256,
+    counts: [256]u64 = @splat(0),
+    first_address: [256]u64 = @splat(0),
+    first_text: [256][]const u8 = @splat(""),
     instructions: u64 = 0,
     zmm: u64 = 0,
 };
@@ -758,7 +758,7 @@ pub fn run(a: Allocator, o: Options, path_env: []const u8, tmpdir: []const u8, e
     var tool: ?Tool = null;
     var tool_missing = false;
     const stats = a.create(FileStats) catch oom();
-    var unclassified_features: [256]u64 = [_]u64{0} ** 256;
+    var unclassified_features: [256]u64 = @splat(0);
     var unclassified_mnemonics: std.StringHashMapUnmanaged(u64) = .empty;
     var reports: std.ArrayList(FileReport) = .empty;
     var audited: u64 = 0;
@@ -801,7 +801,7 @@ pub fn run(a: Allocator, o: Options, path_env: []const u8, tmpdir: []const u8, e
             const is_dispatch = allowed(allow, path, @intCast(f));
             if (is_dispatch) dispatch += count else violations += count;
             findings.append(a, .{
-                .feature = db.name(@intCast(f)),
+                .feature = db.nameOf(@intCast(f)),
                 .count = count,
                 .address = std.fmt.allocPrint(a, "0x{x}", .{stats.first_address[f]}) catch oom(),
                 .instruction = stats.first_text[f],
@@ -815,7 +815,7 @@ pub fn run(a: Allocator, o: Options, path_env: []const u8, tmpdir: []const u8, e
 
     var unclassified: std.ArrayList(Unclassified) = .empty;
     for (unclassified_features, 0..) |count, f| {
-        if (count > 0) unclassified.append(a, .{ .name = db.name(@intCast(f)), .kind = "feature", .count = count }) catch oom();
+        if (count > 0) unclassified.append(a, .{ .name = db.nameOf(@intCast(f)), .kind = "feature", .count = count }) catch oom();
     }
     var mit = unclassified_mnemonics.iterator();
     while (mit.next()) |e| unclassified.append(a, .{ .name = e.key_ptr.*, .kind = "mnemonic", .count = e.value_ptr.* }) catch oom();
@@ -864,7 +864,7 @@ fn needs(db: *const Db, line_text: []const u8, comptime arch: Arch) !Verdict {
 }
 
 fn hasFeature(db: *const Db, v: Verdict, name: []const u8) bool {
-    return v.need & bit(db.id(name).?) != 0;
+    return v.need & bit(db.idOf(name).?) != 0;
 }
 
 test "x86 mnemonics map to the features their encoding needs" {
@@ -931,7 +931,7 @@ test "target feature sets" {
     const generic = db.target("x86_64/generic").?;
     const has = struct {
         fn f(d: *const Db, t: Target, n: []const u8) bool {
-            return t.has & bit(d.id(n).?) != 0;
+            return t.has & bit(d.idOf(n).?) != 0;
         }
     }.f;
     try std.testing.expect(has(db, zen3, "avx2"));
@@ -962,8 +962,8 @@ test "an instruction beyond the target is the features the target lacks" {
     const zen3 = db.target("x86_64/amd/zen3").?;
     const zen4 = db.target("x86_64/amd/zen4").?;
     const lacks3 = v.need & ~zen3.has;
-    try std.testing.expect(lacks3 & bit(db.id("avx512f").?) != 0);
-    try std.testing.expect(lacks3 & bit(db.id("avx512vl").?) != 0);
+    try std.testing.expect(lacks3 & bit(db.idOf("avx512f").?) != 0);
+    try std.testing.expect(lacks3 & bit(db.idOf("avx512vl").?) != 0);
     try std.testing.expectEqual(@as(Mask, 0), v.need & ~zen4.has);
 }
 
@@ -1036,7 +1036,7 @@ test "aarch64 mnemonics map to the features they need" {
         const v = try needs(db, c.text, .aarch64);
         if (c.feature) |f| {
             try std.testing.expect(hasFeature(db, v, f));
-            try std.testing.expectEqual(@as(Mask, bit(db.id(f).?)), v.need);
+            try std.testing.expectEqual(@as(Mask, bit(db.idOf(f).?)), v.need);
         } else try std.testing.expectEqual(@as(Mask, 0), v.need);
     }
 }
@@ -1049,17 +1049,17 @@ test "aarch64 targets: SVE needs neoverse_v1, SVE2 needs neoverse_v2" {
     const v1 = db.target("aarch64/neoverse_v1").?;
     const v2 = db.target("aarch64/neoverse_v2").?;
     const generic = db.target("aarch64/generic").?;
-    const sve = bit(db.id("sve").?);
-    const sve2 = bit(db.id("sve2").?);
+    const sve = bit(db.idOf("sve").?);
+    const sve2 = bit(db.idOf("sve2").?);
     try std.testing.expect(n1.has & sve == 0);
     try std.testing.expect(v1.has & sve != 0);
     try std.testing.expect(v1.has & sve2 == 0);
     try std.testing.expect(v2.has & sve2 != 0);
-    try std.testing.expect(generic.has & bit(db.id("lse").?) == 0);
-    try std.testing.expect(n1.has & bit(db.id("dotprod").?) != 0);
-    try std.testing.expect(n1.has & bit(db.id("i8mm").?) == 0);
-    try std.testing.expect(v1.has & bit(db.id("i8mm").?) != 0);
-    try std.testing.expect(v1.has & bit(db.id("bf16").?) != 0);
+    try std.testing.expect(generic.has & bit(db.idOf("lse").?) == 0);
+    try std.testing.expect(n1.has & bit(db.idOf("dotprod").?) != 0);
+    try std.testing.expect(n1.has & bit(db.idOf("i8mm").?) == 0);
+    try std.testing.expect(v1.has & bit(db.idOf("i8mm").?) != 0);
+    try std.testing.expect(v1.has & bit(db.idOf("bf16").?) != 0);
     try std.testing.expect(db.target("a64fx").?.has & sve != 0);
 }
 
@@ -1069,13 +1069,13 @@ test "the allow list names packages and features" {
     const a = arena.allocator();
     const db = try load(&arena);
     const entries = try parseAllow(a, db, default_allow);
-    const rtm = db.id("rtm").?;
-    const xop = db.id("xop").?;
+    const rtm = db.idOf("rtm").?;
+    const xop = db.idOf("xop").?;
     try std.testing.expect(allowed(entries, "/cvmfs/x/software/OpenSSL/3.0/lib/libcrypto.so", rtm));
-    try std.testing.expect(!allowed(entries, "/cvmfs/x/software/OpenSSL/3.0/lib/libcrypto.so", db.id("avx512f").?));
+    try std.testing.expect(!allowed(entries, "/cvmfs/x/software/OpenSSL/3.0/lib/libcrypto.so", db.idOf("avx512f").?));
     try std.testing.expect(!allowed(entries, "/cvmfs/x/software/Other/1.0/lib/libx.so", rtm));
     try std.testing.expect(allowed(entries, "/p/software/x264/1/bin/x264", xop));
     const custom = try parseAllow(a, db, "Foo avx512f,nosuchfeature  # reason\n# comment\n\n");
     try std.testing.expectEqual(@as(usize, 1), custom.len);
-    try std.testing.expect(allowed(custom, "/a/software/Foo/1/lib/x.so", db.id("avx512f").?));
+    try std.testing.expect(allowed(custom, "/a/software/Foo/1/lib/x.so", db.idOf("avx512f").?));
 }
