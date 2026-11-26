@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+import pwd
 import resource
 import shutil
 import subprocess
@@ -28,7 +29,7 @@ def _can_mount_tmpfs():
     return probe.returncode == 0
 
 
-@unittest.skipUnless(binary.BIN, "logs directory filesystem checks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "logs directory filesystem checks target the Zig build")
 class LogsDirFilesystemErrors(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -102,12 +103,17 @@ export -f eb
         token = self.root / "token"
         token.write_text("tok-3141-secret\n")
         token.chmod(0o600)
+        user = pwd.getpwuid(os.getuid()).pw_name
         site_nosec = self.root / "site-nosec.toml"
-        site_nosec.write_text(f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "ubuntu.%j"\n')
+        site_nosec.write_text(
+            f'[storage]\nnode_local_root = "{self.nodes}"\n'
+            f'node_local_mount = "{user}.%j"\n'
+        )
         site_nosec.chmod(0o600)
         site_sec = self.root / "site-sec.toml"
         site_sec.write_text(
-            f'[storage]\nnode_local_root = "{self.nodes}"\nnode_local_mount = "ubuntu.%j"\n'
+            f'[storage]\nnode_local_root = "{self.nodes}"\n'
+            f'node_local_mount = "{user}.%j"\n'
             f'[secrets]\nSOURCE_TOKEN = "file:{token}"\n'
         )
         site_sec.chmod(0o600)
@@ -258,7 +264,8 @@ export -f eb
     def test_tmpfs_enospc_on_logs_dir(self):
         logs = self.prefix / ".eb-local" / "logs"
         logs.mkdir(parents=True, exist_ok=True)
-        site = self._site_with_secret('node_local_mount = "ubuntu.%j"\n')
+        user = pwd.getpwuid(os.getuid()).pw_name
+        site = self._site_with_secret(f'node_local_mount = "{user}.%j"\n')
 
         # 1. Small tmpfs filled so eb hits ENOSPC writing its log: build fails truthfully.
         eb_fail = r'''

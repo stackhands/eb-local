@@ -18,7 +18,7 @@ from test_storage import StorageFixture
 EB = '#!/bin/bash\ndeclare -F eb >/dev/null || { echo "no eb double" >&2; exit 127; }\neb "$@"\n'
 
 
-@unittest.skipUnless(binary.BIN, "the EESSI Lmod fallback is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "the EESSI Lmod fallback is a feature of the Zig build")
 class EessiLmod(StorageFixture):
     HOST_PATHS = ("/etc/profile.d/lmod.sh",)
 

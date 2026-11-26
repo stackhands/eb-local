@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "restore is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "restore is a feature of the Zig build")
 class RestoreCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-restore-")
@@ -22,7 +22,7 @@ class RestoreCli(unittest.TestCase):
 
     def run_restore(self, args, path=None):
         return subprocess.run(
-            [binary.BIN, "restore", *args],
+            [binary.ZIG, "restore", *args],
             env={
                 "PATH": path or f"{self.bin}:/usr/bin:/bin",
                 "HOME": str(self.root),

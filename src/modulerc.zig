@@ -37,6 +37,14 @@ fn fail(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("eb-local: " ++ fmt ++ "\n", args);
 }
 
+fn writeStdout(bytes: []const u8) bool {
+    common.sys.writeAll(1, bytes) catch |err| {
+        fail("cannot write the result: {s}", .{common.sys.describe(err)});
+        return false;
+    };
+    return true;
+}
+
 fn quoted(a: std.mem.Allocator, value: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.append(a, '"');
@@ -143,12 +151,8 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
                 .hidden = opts.hidden,
             });
         } else {
-            var stdout = std.Io.File.stdout();
             const message = std.fmt.allocPrint(a, "{s} {s}\n", .{ if (changed) "would update" else "up to date", path }) catch return 1;
-            stdout.writeStreamingAll(io, message) catch {
-                fail("cannot print {s}", .{path});
-                return 1;
-            };
+            if (!writeStdout(message)) return 1;
         }
         return if (changed) 1 else 0;
     }
@@ -165,11 +169,7 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
                 .content = text,
             });
         } else {
-            var stdout = std.Io.File.stdout();
-            stdout.writeStreamingAll(io, text) catch {
-                fail("cannot print {s}", .{path});
-                return 1;
-            };
+            if (!writeStdout(text)) return 1;
         }
         return 0;
     }
@@ -177,16 +177,14 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     {
         var probe: []const u8 = opts.tree;
         while (probe.len > 1) {
-            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
-                if (st.isDir()) break;
-                break;
-            } else |_| {}
+            if (common.fsx.statAt(common.fsx.cwd, probe, false)) |_| break else |_| {}
             first_missing = probe;
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
     common.atomic.makedirs(opts.tree) catch |err| {
         fail("cannot create {s}: {s}", .{ opts.tree, @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     var why: common.atomic.Why = .{};
@@ -207,9 +205,8 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
             .hidden = opts.hidden,
         });
     } else {
-        var stdout = std.Io.File.stdout();
         const message = std.fmt.allocPrint(a, "wrote {s}\n", .{path}) catch return 1;
-        stdout.writeStreamingAll(io, message) catch return 1;
+        if (!writeStdout(message)) return 1;
     }
     return 0;
 }

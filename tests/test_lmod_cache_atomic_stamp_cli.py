@@ -11,7 +11,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "lmod-cache is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "lmod-cache is a feature of the Zig build")
 class LmodCacheAtomicStamp(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-lmod-stamp-")
@@ -38,7 +38,7 @@ class LmodCacheAtomicStamp(unittest.TestCase):
         seed_stamp = self.root / "seed.txt"
         seed = subprocess.run(
             [
-                binary.BIN,
+                binary.ZIG,
                 "lmod-cache",
                 "--modulepath",
                 str(self.modules),
@@ -88,7 +88,7 @@ class LmodCacheAtomicStamp(unittest.TestCase):
                 current_stamp[0] = sp
                 got = subprocess.run(
                     [
-                        binary.BIN,
+                        binary.ZIG,
                         "lmod-cache",
                         "--modulepath",
                         str(self.modules),

@@ -14,6 +14,10 @@ const Allocator = std.mem.Allocator;
 /// else `none`.
 pub const Trash = enum { auto, rtrash, none };
 
+/// Where managed builds put their workspace. `auto` uses a Slurm
+/// allocation when one is configured, and a workstation otherwise.
+pub const StorageMode = enum { auto, local };
+
 /// A value and where it came from, as `eb-local config` shows it: `default`,
 /// a file and line with its layer and profile, a variable or an option.
 pub fn Setting(comptime T: type) type {
@@ -104,6 +108,7 @@ pub const Settings = struct {
     node_types_old_key: ?[]const u8 = null,
     trash: Setting(Trash) = .{ .value = .auto },
     logs_older_than_days: Setting(u32) = .{ .value = 30 },
+    storage_mode: Setting(StorageMode) = .{ .value = .auto },
     node_local_root: Setting([]const u8) = .{ .value = "" },
     /// Each allocation's mount below node_local_root: %u the user, %j the job id.
     node_local_mount: Setting([]const u8) = .{ .value = storage.default_mount },
@@ -374,6 +379,25 @@ fn validAbsolute(path: []const u8) bool {
     return std.mem.indexOfAny(u8, path, " \t\n\r\x00") == null;
 }
 
+/// `..` as its own path component. `foreign` drops such a prefix rather than
+/// resolving it, so a site file that spells one does not approve the directory.
+fn hasParentComponent(path: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| if (std.mem.eql(u8, part, "..")) return true;
+    return false;
+}
+
+/// True when removing empty and `.` components leaves `/`. `foreign` drops
+/// such a prefix, so `/.` and `/./.` would approve nothing while naming the root.
+fn isRootEquivalent(path: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".")) continue;
+        return false;
+    }
+    return true;
+}
+
 const Loader = struct {
     a: Allocator,
     s: *Settings,
@@ -525,8 +549,14 @@ const Loader = struct {
                         if (src.layer != .site or profile != null)
                             return l.fail("{s}:{d}: doctor.approved_prefixes is a site setting; a user file or a profile cannot change it", .{ src.path, f.line });
                         const v = try l.stringList(src, f, "doctor.approved_prefixes");
-                        for (v) |p| if (!validAbsolute(p))
-                            return l.fail("{s}:{d}: doctor.approved_prefixes takes absolute paths without a trailing slash", .{ src.path, f.line });
+                        for (v) |p| {
+                            if (!validAbsolute(p))
+                                return l.fail("{s}:{d}: doctor.approved_prefixes takes absolute paths without a trailing slash", .{ src.path, f.line });
+                            if (hasParentComponent(p))
+                                return l.fail("{s}:{d}: doctor.approved_prefixes path '{s}' has a '..' component", .{ src.path, f.line, p });
+                            if (isRootEquivalent(p))
+                                return l.fail("{s}:{d}: doctor.approved_prefixes path '{s}' is the root directory", .{ src.path, f.line, p });
+                        }
                         l.s.approved_prefixes = .{ .value = v, .from = try l.where(src, f.line, null) };
                     } else if (std.mem.eql(u8, f.key, "cvmfs_parallel")) {
                         const v = switch (f.value) {
@@ -613,7 +643,14 @@ const Loader = struct {
                 const sub = try l.table(src, e, "storage");
                 for (sub.entries.items) |*f| {
                     const ff = try l.where(src, f.line, null);
-                    if (std.mem.eql(u8, f.key, "node_local_root")) {
+                    if (std.mem.eql(u8, f.key, "mode")) {
+                        const v = try l.string(src, f, "storage.mode");
+                        l.s.storage_mode = .{
+                            .value = std.meta.stringToEnum(StorageMode, v) orelse
+                                return l.fail("{s}:{d}: storage.mode is \"auto\" or \"local\"", .{ src.path, f.line }),
+                            .from = ff,
+                        };
+                    } else if (std.mem.eql(u8, f.key, "node_local_root")) {
                         const v = try l.string(src, f, "storage.node_local_root");
                         if (!validAbsolute(v)) return l.fail("{s}:{d}: storage.node_local_root must be one absolute path without a trailing slash", .{ src.path, f.line });
                         l.s.node_local_root = .{ .value = v, .from = ff };
@@ -1335,8 +1372,84 @@ test "clear_foreign_prefixes is off unless set, and approved prefixes are site-o
 
     try t.refuse(&.{.{ .path = "user.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host\"]\n", .layer = .user }}, "site setting");
     try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/\"]\n", .layer = .site }}, "trailing slash");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/opt/host/../etc\"]\n", .layer = .site }}, "'..' component");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/..\"]\n", .layer = .site }}, "'..' component");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/.\"]\n", .layer = .site }}, "root directory");
+    try t.refuse(&.{.{ .path = "site.toml", .text = "[doctor]\napproved_prefixes = [\"/./.\"]\n", .layer = .site }}, "root directory");
     try t.env.put("EB_LOCAL_BUILD_CLEAR_FOREIGN_PREFIXES", "maybe");
     try t.refuse(&none, "true or false");
+}
+
+test "a dot segment or a doubled slash stays approved, and trailing root spellings match /" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const Row = struct {
+        path: []const u8,
+        kept: bool,
+    };
+    // `/opt/host` is approved. A dot segment or a doubled slash is still
+    // stored. `/./` and `//` take the same refusal as `/`.
+    const rows = [_]Row{
+        .{ .path = "/opt/host", .kept = true },
+        .{ .path = "/opt/./host", .kept = true },
+        .{ .path = "/opt//host", .kept = true },
+        .{ .path = "/", .kept = false },
+        .{ .path = "/./", .kept = false },
+        .{ .path = "//", .kept = false },
+    };
+    const Probe = struct {
+        const Outcome = union(enum) { kept: []const u8, refused: []const u8 };
+
+        fn one(tt: *Fixture, path: []const u8) !Outcome {
+            const text = try std.fmt.allocPrint(tt.arena.allocator(), "[doctor]\napproved_prefixes = [\"{s}\"]\n", .{path});
+            const sources = [_]Source{.{ .path = "site.toml", .text = text, .layer = .site }};
+            var d: Diagnostic = .{};
+            if (config_load(tt.arena.allocator(), &sources, &tt.env, .{}, &d)) |s| {
+                try std.testing.expectEqual(@as(usize, 1), s.approved_prefixes.value.len);
+                try std.testing.expectEqualStrings("site site.toml:2", s.approved_prefixes.from);
+                return .{ .kept = s.approved_prefixes.value[0] };
+            } else |err| switch (err) {
+                error.Invalid => return .{ .refused = d.message },
+                else => return err,
+            }
+        }
+    };
+    var outcomes: std.ArrayList(Probe.Outcome) = .empty;
+    for (rows) |row| try outcomes.append(t.arena.allocator(), try Probe.one(&t, row.path));
+
+    var root_message: []const u8 = undefined;
+    var saw_root = false;
+    for (rows, outcomes.items) |row, got| {
+        if (!std.mem.eql(u8, row.path, "/")) continue;
+        switch (got) {
+            .refused => |message| {
+                root_message = message;
+                saw_root = true;
+            },
+            .kept => |stored| {
+                std.debug.print("/ stored {s}\n", .{stored});
+                return error.TestUnexpectedResult;
+            },
+        }
+    }
+    try std.testing.expect(saw_root);
+    for (rows, outcomes.items) |row, got| {
+        if (row.kept) {
+            switch (got) {
+                .kept => |stored| try std.testing.expectEqualStrings(row.path, stored),
+                .refused => |message| {
+                    std.debug.print("{s} refused: {s}\n", .{ row.path, message });
+                    return error.TestUnexpectedResult;
+                },
+            }
+        } else switch (got) {
+            .refused => |message| try std.testing.expectEqualStrings(root_message, message),
+            .kept => |stored| {
+                std.debug.print("{s} stored {s}\n", .{ row.path, stored });
+                return error.TestUnexpectedResult;
+            },
+        }
+    }
 }
 
 test "doctor.cvmfs_parallel is 0 unless set, and stays between 0 and 8" {

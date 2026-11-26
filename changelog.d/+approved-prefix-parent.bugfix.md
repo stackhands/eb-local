@@ -1,0 +1,1 @@
+`doctor.approved_prefixes` refuses a path with a parent component or a spelling of the root directory, so `eb-local doctor` and a build with `build.clear_foreign_prefixes` do not treat that spelling as an approved prefix.

@@ -208,6 +208,8 @@ The modules on the `dev` line choose the build environment:
 | `intel-compilers` | `buildenv/default-intel-2026.1` |
 | NVHPC | none |
 
+EESSI 2026.06 ships `buildenv/default-foss-2026.1` and has no `default-lfoss` or `default-intel` build environment yet.
+
 When Lmod has no such module, `dev` looks for one at the compiler's own toolchain level: `buildenv/default-llvm-compilers-VERSION`, `buildenv/default-intel-compilers-VERSION` or `buildenv/default-NVHPC-VERSION`, with the version of the compiler module that is loaded.
 A site that builds `buildenv-default-NVHPC-26.9.eb` therefore gives its NVHPC users EasyBuild's own wrappers with no setting anywhere.
 
@@ -239,7 +241,7 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin "$EB_LOCAL_DEV_PREFIX/bin/prog"
 
 | Message | Cause | What to do |
 |---|---|---|
-| `problem: libfftw3.so.3 is not found` from `eb-local check`, and `error while loading shared libraries` when the program starts | The program was linked without the build environment, as after `module load` by hand. | Load the modules with `eval "$(eb-local dev MODULE...)"`, and link again. |
+| `problem: NEEDED library libfftw3.so.3 cannot be resolved for PROGRAM` from `eb-local check`, and `error while loading shared libraries` when the program starts | The program was linked without the build environment, as after `module load` by hand. | Load the modules with `eval "$(eb-local dev MODULE...)"`, and link again. |
 | `.../init/lmod/bash: line 89: EESSI_NO_MODULE_PURGE_ON_INIT: unbound variable` | The script runs with `set -u`, and the shell has no module command, so the lines source EESSI's Lmod init, which reads unset variables. | Put `set -u` after the `eval` line. |
 | `Illegal instruction` on another node type | The program was built for another CPU target. | Build it on that node type too, and run the build for `$EESSI_SOFTWARE_SUBDIR`. |
 | `problem: RUNPATH, which LD_LIBRARY_PATH overrides and the libraries' own dependencies ignore; link with --disable-new-dtags for RPATH` | A compiler and a linker that no wrapper covers linked the program with `--enable-new-dtags`. | Link again after `eval "$(eb-local dev MODULE...)"`, whose wrappers record `RPATH`. |

@@ -74,11 +74,20 @@ jobs:
         run: |
           zig build --release=safe --prefix out
           ! grep -aq EB_LOCAL_TEST_MOUNTINFO out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_INSTALL_VARS out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_UID out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_SELF_OWNER out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_PRELUDE out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_CVMFS_ERRNO out/bin/eb-local
           ! grep -aq EB_LOCAL_TEST_CVMFS_CONFIG out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_STDOUT_WRITES out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_CLOSE_ERRNO out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_CLOSE_AFTER out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_CLOSE_COUNT out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_FSYNC_ERRNO out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_FSYNC_AFTER out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_FSYNC_COUNT out/bin/eb-local
+          ! grep -aq EB_LOCAL_TEST_RECORD_OPEN_ERRNO out/bin/eb-local
           out/bin/eb-local --version
       - name: overlay bump and plan run the real eb-stack on the release build
         run: EB_LOCAL_BIN="$PWD/out/bin/eb-local" python3 -m unittest discover -s tests -p 'test_overlay_real_eb_stack.py' -v

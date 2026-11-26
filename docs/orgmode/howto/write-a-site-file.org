@@ -21,6 +21,7 @@ These steps write the site file from a template, install it beside the program, 
 
    #+begin_example
    slurm        placeholders: node_local_root, node_local_mount, node_local_fstype, shared_scratch, partition
+   workstation  placeholders: prefix
    #+end_example
 
    =slurm= is for any Slurm cluster whose jobs get a node-local disk.
@@ -116,13 +117,13 @@ salloc -p cpu -n 1 -t 00:05:00 srun eb-local doctor
 #+end_src
 
 #+begin_example
-ok   eb-local 3.3.0
+ok   eb-local 3.5.0
 ok   site file /usr/local/bin/config.toml
 ok   builds use the allocation's own xfs mount /local/%u.%j
 ok   installs go to /home/alice/eessi: a user install, prefix from default
 ok   no other EESSI or EasyBuild install variable is set in this shell
 ok   `eb-local eb` sources /cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash
-ok   `eb-local eb` makes a user install into the module's default, $HOME/eessi
+ok   `eb-local eb` exports EESSI_USER_INSTALL=/home/alice/eessi, the prefix selected by configuration
 ok   Slurm job 6: build space /local/alice.6
 info EESSI is not loaded in this shell; eval "$(eb-local env)" loads it with your modules
 info eessi-arch-guard is not on PATH; builds, env and dev load EESSI for the target EESSI detects
