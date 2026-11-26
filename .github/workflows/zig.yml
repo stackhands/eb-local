@@ -63,6 +63,9 @@ jobs:
       - run: zig fmt --check src build.zig
       - run: zig build unit --summary all
       - run: zig build -Dtest-ops=true
+      # tests/site is not a package, so this discover leaves out
+      # tests/site/test_dev_locked_eessi.py. The live-eessi job runs
+      # that file. A missing mount fails the file.
       - name: Run full Python suite with zero skips
         run: |
           set -euo pipefail
@@ -97,3 +100,33 @@ jobs:
         run: |
           python3 tools/cli_assets.py --out out/share --tool "eb-local::./out/bin/eb-local"
           test -s out/share/man/eb-local.1
+  live-eessi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Build eb-local
+        run: zig build
+      - name: Mount EESSI 2026.06
+        uses: EESSI/github-action-eessi@834df09f7d60de47f10a7cbf59b470d69b9e2852 # v3.4.0
+        with:
+          eessi_stack_version: "2026.06"
+          # lmod init, the path the live file defaults to. direnv stays off.
+          use_eessi_module: "true"
+          init_direnv: "false"
+      - name: Run the live file on the init path the action records
+        run: |
+          set -euo pipefail
+          init=$(sed -n 's/^source //p' "$HOME/env_config.export")
+          test -f "$init"
+          EB_LOCAL_BIN="$PWD/zig-out/bin/eb-local" \
+            EB_LOCAL_LIVE_EESSI_INIT="$init" \
+            python3 -m unittest tests/site/test_dev_locked_eessi.py -v

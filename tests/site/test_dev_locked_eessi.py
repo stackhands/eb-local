@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
-"""Live EESSI 2026.06 verification for `eb-local dev --locked` with llvm-compilers."""
+"""Live EESSI 2026.06 checks for `eb-local dev --locked` with llvm-compilers.
+
+`tests/site` is not a package, so `python3 -m unittest discover -s tests`
+leaves this module out of the zero-skip `zig` job. Run this file where
+the EESSI init file is present. A missing Zig build or init file fails
+the run.
+`EB_LOCAL_LIVE_EESSI_INIT`, when set, is that init file. The default is
+`/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash`.
+"""
+
+import os
+import sys
 from pathlib import Path
+
+# Discovery never imports this module. Loading it by path still needs
+# `tests/binary.py`.
+_TESTS_DIR = Path(__file__).resolve().parents[1]
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import shlex
 import subprocess
 import tempfile
@@ -8,14 +26,27 @@ import unittest
 
 import binary
 
-EESSI_INIT = Path("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash")
+DEFAULT_EESSI_INIT = Path("/cvmfs/software.eessi.io/versions/2026.06/init/lmod/bash")
 
 
-@unittest.skipUnless(
-    binary.ZIG and EESSI_INIT.is_file(),
-    "requires Zig build and live EESSI 2026.06 on CVMFS",
-)
+def live_eessi_init():
+    override = os.environ.get("EB_LOCAL_LIVE_EESSI_INIT")
+    if override:
+        return Path(override)
+    return DEFAULT_EESSI_INIT
+
+
 class DevLockedLiveEessiTests(unittest.TestCase):
+    def setUp(self):
+        init = live_eessi_init()
+        missing = []
+        if not binary.ZIG:
+            missing.append("Zig build (EB_LOCAL_BIN or zig-out/bin/eb-local)")
+        if not init.is_file():
+            missing.append(f"live EESSI 2026.06 on CVMFS ({init})")
+        if missing:
+            self.fail("requires " + " and ".join(missing))
+
     def _setup_workspace(self, td):
         root = Path(td)
         prefix = root / "eessi"
