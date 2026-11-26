@@ -36,6 +36,7 @@ class SuiteStep(unittest.TestCase):
         for name in ("build.zig", "build.zig.zon", "LICENSE", "README.md"):
             shutil.copy(ROOT / name, cls.root / name)
         shutil.copytree(ROOT / "src", cls.root / "src")
+        shutil.copytree(ROOT / "share", cls.root / "share")
         if (ROOT / "zig-pkg").is_dir():
             shutil.copytree(ROOT / "zig-pkg", cls.root / "zig-pkg", symlinks=True)
         (cls.root / "tests").mkdir()

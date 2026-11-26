@@ -4398,7 +4398,9 @@ fn cmdMaskPreflight(c: Ctx, args: []const []const u8) u8 {
         if (std.mem.eql(u8, tok[0..eq], "faulting")) obs.faulting = std.mem.eql(u8, tok[eq + 1 ..], "on");
     }
     const findings = cpumask.preflight(a, profile, route, obs);
-    for (findings) |f| say("eb-local: preflight {s}: {s}", .{ if (f.ok) "ok" else "FAILED", f.text });
+    for (findings) |f| {
+        if (f.ok) say("eb-local: preflight ok: {s}", .{f.text}) else say("eb-local: preflight FAILED: {s}", .{f.text});
+    }
     if (cpumask.refused(findings)) {
         cli.err("eb-local: the build does not see {s}; nothing was built.\n", .{target});
         return 1;
@@ -6792,7 +6794,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit, @"__mask-run", @"__mask-preflight" };
+const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -6846,7 +6848,16 @@ fn runMain(init: std.process.Init) u8 {
 
     var args: []const [:0]const u8 = argv_all[1..];
     var command: Command = .build;
+    // The helpers a build calls on this program itself; they are not part of its interface.
+    var hidden: enum { none, mask_run, mask_preflight } = .none;
     if (args.len > 0) {
+        const first: []const u8 = args[0];
+        if (std.mem.eql(u8, first, "__mask-run") or std.mem.eql(u8, first, "__mask-preflight")) {
+            hidden = if (first[7] == 'r') .mask_run else .mask_preflight;
+            args = args[1..];
+        }
+    }
+    if (args.len > 0 and hidden == .none) {
         const first: []const u8 = args[0];
         if (std.mem.eql(u8, first, "help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
             return if (emit(usage_text)) 0 else 1;
@@ -6919,7 +6930,7 @@ fn runMain(init: std.process.Init) u8 {
     }.get;
     while (i < args.len) : (i += 1) {
         const x: []const u8 = args[i];
-        if (command == .@"__mask-run" and std.mem.eql(u8, x, "--")) {
+        if (hidden == .mask_run and std.mem.eql(u8, x, "--")) {
             for (args[i + 1 ..]) |arg| rest.append(a, arg) catch oom();
             break;
         }
@@ -6956,9 +6967,9 @@ fn runMain(init: std.process.Init) u8 {
             const v = if (joined(x, "--variant")) |j| j else value(args, &i, "--variant");
             if (variantBlock(v) == null) die("--variant takes perf or debug", .{});
             g.variant = v;
-        } else if ((std.mem.eql(u8, x, "--cpu-target") or joined(x, "--cpu-target") != null) and (command == .build or command == .@"__mask-run") and rest.items.len == 0) {
+        } else if ((std.mem.eql(u8, x, "--cpu-target") or joined(x, "--cpu-target") != null) and command == .build and rest.items.len == 0) {
             g.cpu_target = if (joined(x, "--cpu-target")) |j| j else value(args, &i, "--cpu-target");
-        } else if ((std.mem.eql(u8, x, "--mask") or joined(x, "--mask") != null) and (command == .build or command == .@"__mask-run") and rest.items.len == 0) {
+        } else if ((std.mem.eql(u8, x, "--mask") or joined(x, "--mask") != null) and command == .build and rest.items.len == 0) {
             const v = if (joined(x, "--mask")) |j| j else value(args, &i, "--mask");
             g.mask = std.meta.stringToEnum(cpumask.Mode, v) orelse die("--mask takes auto, cpuid, kvm or tcg", .{});
         } else if (std.mem.eql(u8, x, "--no-audit") and command == .build and rest.items.len == 0) {
@@ -6967,7 +6978,7 @@ fn runMain(init: std.process.Init) u8 {
             // Global options may come first: eb-local --profile gpu dev.
             command = subcommand(x).?;
         } else switch (command) {
-            .build, .eb, .@"__mask-run", .@"__mask-preflight" => rest.append(a, x) catch oom(),
+            .build, .eb => rest.append(a, x) catch oom(),
             .@"rpath-wrappers" => {
                 if (std.mem.eql(u8, x, "--for") or joined(x, "--for") != null) {
                     family = if (joined(x, "--for")) |v| v else value(args, &i, "--for");
@@ -7339,8 +7350,8 @@ fn runMain(init: std.process.Init) u8 {
         return if (g.explain) explainExtend(c, s, rest.items) else cmdExtend(c, s, rest.items);
     }
     if (command == .leave) return cmdLeave(c);
-    if (command == .@"__mask-preflight") return cmdMaskPreflight(c, rest.items);
-    if (command == .@"__mask-run") return cmdMaskRun(c, g, rest.items);
+    if (hidden == .mask_preflight) return cmdMaskPreflight(c, rest.items);
+    if (hidden == .mask_run) return cmdMaskRun(c, g, rest.items);
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s, g),
@@ -7364,7 +7375,7 @@ fn runMain(init: std.process.Init) u8 {
         },
         .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .profiling = doctor_profiling, .cpu_target = doctor_cpu_target, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay, .@"__mask-run", .@"__mask-preflight" => unreachable,
+        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
     };
 }
 

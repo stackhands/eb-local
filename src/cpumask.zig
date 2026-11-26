@@ -30,10 +30,12 @@ pub const hooks_py = @embedFile("mask_hooks_py");
 /// no CPUID faulting and CPUIDMASK_STRICT is set.
 pub const strict_exit: u8 = 97;
 
+/// The architectures a CPU target can have.
 pub const Arch = enum {
     x86_64,
     aarch64,
 
+    /// The architecture this program runs on, null when it has no profile.
     pub fn host() ?Arch {
         return switch (builtin.cpu.arch) {
             .x86_64 => .x86_64,
@@ -67,6 +69,7 @@ pub const known_subdirs = [_][]const u8{
     "aarch64/a64fx",
 };
 
+/// What a `--cpu-target` word names.
 pub const Resolved = union(enum) {
     subdir: []const u8,
     /// A message for the user.
@@ -105,6 +108,7 @@ pub fn archOf(subdir: []const u8) ?Arch {
 
 // ---- profiles -------------------------------------------------------------
 
+/// One target's identity, as `profiles.conf` records it.
 pub const Profile = struct {
     subdir: []const u8,
     arch: Arch,
@@ -300,6 +304,7 @@ pub const Host = struct {
     vm_helper: bool = false,
 };
 
+/// The outcome of the route choice.
 pub const Choice = union(enum) {
     route: Route,
     /// The message for the user.
@@ -389,6 +394,7 @@ pub const Observed = struct {
     faulting: ?bool = null,
 };
 
+/// One preflight check and what it found.
 pub const Finding = struct { ok: bool, text: []const u8 };
 
 /// The names archspec gives the targets whose archspec name differs from the
@@ -482,6 +488,7 @@ pub fn kvmUsable() bool {
     return linux.errno(linux.faccessat(linux.AT.FDCWD, "/dev/kvm", linux.R_OK | linux.W_OK, 0)) == .SUCCESS;
 }
 
+/// The first `limit` bytes of the regular file `path`, or null.
 pub fn readFile(a: Allocator, path: []const u8, limit: usize) ?[]const u8 {
     const f = fsx.openRegular(fsx.cwd, path, true) catch return null;
     defer sys.close(f.fd);
@@ -521,6 +528,7 @@ pub fn kernelRelease(a: Allocator) []const u8 {
 
 // ---- the compiled preload libraries --------------------------------------
 
+/// The compiled preload library and probe.
 pub const Libs = struct {
     /// The preload library for the host architecture.
     preload: []const u8,
@@ -695,6 +703,7 @@ fn jsonString(a: Allocator, out: *std.ArrayList(u8), s: []const u8) void {
     out.append(a, '"') catch @panic("out of memory");
 }
 
+/// What `easybuild/eb-local-build-mode.json` records.
 pub const Provenance = struct {
     target: []const u8,
     route: Route,
