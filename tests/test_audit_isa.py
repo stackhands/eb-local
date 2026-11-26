@@ -159,7 +159,7 @@ class AuditIsaCli(unittest.TestCase):
         fake_objdump(self.bin, X86_LISTING)
         got = run_audit([str(prefix), "--target", "amd/zen4", "--objdump", str(self.bin / "objdump")], self.root)
         self.assertEqual(got.returncode, 1, got.stdout + got.stderr)
-        self.assertNotIn("avx512f", got.stdout)
+        self.assertNotRegex(got.stdout, r"violation: avx512f x")
         self.assertIn("violation: avx512fp16 x1", got.stdout)
         self.assertIn("violation: rtm x1", got.stdout)
 
@@ -229,7 +229,7 @@ class AuditIsaCli(unittest.TestCase):
         self.assertIn("first at 0x4: ptrue p0.s", n1.stdout)
         v1 = run_audit([str(prefix), "--target", "aarch64/neoverse_v1", "--objdump", objdump], self.root)
         self.assertEqual(v1.returncode, 1, v1.stdout + v1.stderr)
-        self.assertEqual(sorted(line.split()[1] for line in v1.stdout.splitlines() if line.startswith("violation")), ["sve2-bitperm:"])
+        self.assertEqual(sorted(line.split()[1] for line in v1.stdout.splitlines() if line.startswith("violation")), ["sve2-bitperm"])
         v2 = run_audit([str(prefix), "--target", "aarch64/neoverse_v2", "--objdump", objdump], self.root)
         self.assertEqual(v2.returncode, 1, v2.stdout + v2.stderr)
         self.assertIn("violation: sve2-bitperm", v2.stdout)
