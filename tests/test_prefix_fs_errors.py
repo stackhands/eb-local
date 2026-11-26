@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prefix behavior on read-only or full filesystems (EROFS and ENOSPC)."""
 
+import os
 from pathlib import Path
 import pwd
 import subprocess
