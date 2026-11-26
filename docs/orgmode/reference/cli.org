@@ -9,6 +9,7 @@ The repository's shell shim delegates every command to this Zig program.
 #+begin_example
 eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
+eb-local [OPTION]... --variant perf|debug <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
@@ -19,7 +20,7 @@ eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
-eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
@@ -51,6 +52,10 @@ directory you own.
   eb-local --explain <easyconfig> [eb options]
                                        the commands that build runs, as shell lines,
                                        its checks as comments; creates and runs nothing
+  eb-local --variant perf|debug <easyconfig> [eb options]
+                                       build that easyconfig with debug symbols and frame
+                                       pointers (perf) or unoptimised (debug), as a module
+                                       whose version ends in -perf or -debug
   eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
                                        At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
                                        EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
@@ -103,7 +108,7 @@ directory you own.
                                        what this node's target lacks; --json prints one
                                        line of JSON with schema_version 1; --missing
                                        lists only modules missing on this node's target
-  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing;
                                        --json prints one line of JSON with schema_version 1.
@@ -114,6 +119,8 @@ directory you own.
                                        metadata from N tasks inside an allocation.
                                        --mpi reports libfabric and UCX, and inside an
                                        allocation runs a two-rank hello per approved transport
+                                       --profiling reports whether perf may sample and
+                                       debuggers attach, and finds perf, valgrind and gdb
   eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
                       --timestamp FILE [--spider CMD] [--verify]
                                        write Lmod's spiderT.lua for those module
@@ -221,6 +228,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 | =--workstation=        | Force managed recipe builds to use private local workspace storage on this machine, even when Slurm is present.                                                                |
 | =--config FILE=        | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of =~/.config/eb-local/config.toml=, when you own it. The other file is still read. |
 | =--explain=            | Before an easyconfig, or before =eb=: print what would run, and create and run nothing.                                                                                        |
+| =--variant NAME=       | Before an easyconfig: build it as the =perf= or =debug= variant, described under [[*=--variant=][=--variant=]]. |
 | =-h=, =--help=, =help= | Print the usage on stdout and exit 0.                                                                                                                                          |
 | =--version=            | Print the version line on stdout and exit 0.                                                                                                                                   |
 | =--json=                | On =list=, =check=, =doctor=, =modulerc=, =clean=, =config=, =profiles=, and =site list=: print one line of JSON with =schema_version= 1 on stdout instead of the text report. Not with =config --env= or =config --get=. |
@@ -272,6 +280,22 @@ With =build.node_types= in the site file, the comments also hold an =sbatch= lin
 
 The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of =EESSI_USER_INSTALL= or =EESSI_PROJECT_INSTALL=, load =EESSI/2026.06=, then =EESSI-extend=, which reads that variable as it loads, check that the install path EESSI-extend set is in =<prefix>/versions=, and run =eb=.
 With =W= set to a workspace a build made, which holds =build=, =cache=, =cargo=, =source-index= and =tmp=, such as one a failed build kept or one kept with =EB_LOCAL_KEEP_WORK=1=, =bash= runs the printed text as a build runs its script; the checks before it and the cleaning of logs after it are eb-local's own.
+
+** =--variant=
+
+=--variant perf= and =--variant debug= build the easyconfig named first, and only that one, with other compiler flags, and install it as its own module beside the optimised one.
+eb-local copies the easyconfig into the workspace, with =eb --copy-ec= when it is given by name, appends a few lines to the copy, and builds the copy.
+
+| Variant | Toolchain options added                                                                                             | Module version ends in |
+|---------+---------------------------------------------------------------------------------------------------------------------+------------------------|
+| =perf=  | =debug= (=-g=), and =-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer= in the C, C++ and Fortran flags; the optimisation stays | =-perf=                |
+| =debug= | =debug= (=-g=) and =noopt= (=-O0=)                                                                                   | =-debug=               |
+
+The flags reach the C, C++ and Fortran compilers through EasyBuild's toolchain; Rust, Go and other compilers do not get them.
+An easyconfig with the =SYSTEM= toolchain keeps its options and gets only the suffix.
+Dependencies build as usual.
+=--explain= shows the variant as =EB_LOCAL_VARIANT= and =EB_LOCAL_VARIANT_BLOCK=, the lines appended.
+[[file:../howto/build-for-profiling.org][Build software to profile or debug]] uses both.
 
 ** eb
 
@@ -483,6 +507,10 @@ The hello for =ofi= is run with =OMPI_MCA_pml= set to cm and =OMPI_MCA_mtl= set 
 The hello for =ucx= is run with =OMPI_MCA_pml= set to ucx and =OMPI_MCA_mtl= set to ^ofi.
 Those variables are set only on that hello. A build does not set them, and it does not set =FI_PROVIDER=.
 Outside an allocation the hello is not compiled.
+With =--profiling=, it reports whether =perf= can sample your own processes: =kernel.perf_event_paranoid= of 2 or less is =ok=, more is =warn=.
+It reports =kernel.yama.ptrace_scope=: 0 is =ok=, 1, where a debugger can start a program but not attach to one already running, is =info=, and 2 or 3 is =warn=.
+It names =perf=, =valgrind= and =gdb= where they are on =PATH=, and says =module spider NAME= for each one that is not.
+None of these lines is a =FAIL=, since a build needs none of them.
 Where the shell has a module command, a build keeps it and its =MODULEPATH=, and adds EESSI's =init/modules= when no directory there holds =stack.module=, so doctor checks that one of them does.
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on =PATH=, as a build asks it, and shows the target it selects; a guard that cannot select one is a =warn=, since a build's own run of it decides.
 With a site file, what stops a build is a =FAIL=, and what stops only =eb-local eb= is a =warn=; without one, builds cannot run, so what stops =eb-local eb= is the =FAIL=.
@@ -496,6 +524,7 @@ It changes nothing, and exits 1 when a line says =FAIL=.
 | =--cvmfs= | Check the CernVM-FS client. Off unless this flag, or =--cvmfs-parallel=, is given. |
 | =--cvmfs-parallel N= | Also read repository metadata from N tasks, 1 to 8, inside an allocation. Implies =--cvmfs=. |
 | =--mpi= | Report libfabric, UCX and Slurm binding, and run a two-rank hello per site-approved transport inside an allocation. Off unless this flag is given. |
+| =--profiling= | Report =kernel.perf_event_paranoid= and =kernel.yama.ptrace_scope=, and where =perf=, =valgrind= and =gdb= are on =PATH=. Off unless this flag is given. |
 
 =--json= prints one line of JSON with =schema_version= 1, =kind= =doctor=, =site_file=, =failed=, =lines= (=level= and =text=), and =summary=.
 The shape is in [[file:json/doctor.schema.json][doctor.schema.json]].
