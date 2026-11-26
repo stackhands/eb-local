@@ -12,6 +12,7 @@ The repository's shell shim delegates every command to this Zig program.
 eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local [OPTION]... --variant perf|debug <easyconfig> [eb options]
+eb-local [OPTION]... --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
@@ -22,7 +23,7 @@ eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
-eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
+eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling] [--cpu-target TARGET]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
@@ -58,6 +59,14 @@ directory you own.
                                        build that easyconfig with debug symbols and frame
                                        pointers (perf) or unoptimised (debug), as a module
                                        whose version ends in -perf or -debug
+  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+                                       build for another CPU target on this machine: TARGET is
+                                       an EESSI subdirectory (x86_64/amd/zen4) or its last
+                                       component (zen4). The build sees that CPU through the
+                                       route --mask picks, refuses to go on when the EESSI
+                                       detection, archspec, gcc and CPUID do not all name the
+                                       target, and audits the installed binaries for
+                                       instructions the target lacks
   eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
                                        At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
                                        EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
@@ -110,7 +119,7 @@ directory you own.
                                        what this node's target lacks; --json prints one
                                        line of JSON with schema_version 1; --missing
                                        lists only modules missing on this node's target
-  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
+  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling] [--cpu-target TARGET]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing;
                                        --json prints one line of JSON with schema_version 1.
@@ -123,6 +132,8 @@ directory you own.
                                        allocation runs a two-rank hello per approved transport
                                        --profiling reports whether perf may sample and
                                        debuggers attach, and finds perf, valgrind and gdb
+                                       --cpu-target TARGET reports whether this machine can
+                                       present TARGET, and by which route
   eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
                       --timestamp FILE [--spider CMD] [--verify]
                                        write Lmod's spiderT.lua for those module
@@ -231,6 +242,9 @@ After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, eve
 | `--config FILE` | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of `~/.config/eb-local/config.toml`, when you own it. The other file is still read. |
 | `--explain` | Before an easyconfig, or before `eb`: print what would run, and create and run nothing. |
 | `--variant NAME` | Before an easyconfig: build it as the `perf` or `debug` variant, described in the `--variant` section below. |
+| `--cpu-target TARGET` | Before an easyconfig: build for the CPU target TARGET on this machine, described in the `--cpu-target` section below. |
+| `--mask ROUTE` | With `--cpu-target`: `auto`, `cpuid`, `kvm` or `tcg`. |
+| `--no-audit` | With `--cpu-target`: skip the instruction audit after the build. |
 | `-h`, `--help`, `help` | Print the usage on stdout and exit 0. |
 | `--version` | Print the version line on stdout and exit 0. |
 | `--json` | On `list`, `check`, `doctor`, `modulerc`, `clean`, `config`, `profiles`, and `site list`: print one line of JSON with `schema_version` 1 on stdout instead of the text report. Not with `config --env` or `config --get`. |
@@ -298,6 +312,52 @@ An easyconfig with the `SYSTEM` toolchain keeps its options and gets only the su
 Dependencies build as usual.
 `--explain` shows the variant as `EB_LOCAL_VARIANT` and `EB_LOCAL_VARIANT_BLOCK`, the lines appended.
 [Build software to profile or debug](../howto/build-for-profiling.md) uses both.
+
+### `--cpu-target`
+
+`--cpu-target TARGET` builds the easyconfig for another CPU target than this machine's, and installs it where EESSI-extend puts software for that target.
+TARGET is an EESSI software subdirectory such as `x86_64/amd/zen4`, `x86_64/intel/icelake` or `aarch64/neoverse_n1`, or its last component when only one subdirectory ends in it (`zen4`; `generic` needs the architecture too).
+[Build for another CPU target](../howto/build-for-another-cpu.md) walks through a build.
+
+`--mask` picks how the build sees the target CPU.
+
+| `--mask` | Route | Reaches |
+|---|---|---|
+| `auto` | `cpuid` when this host can present TARGET that way, else `kvm` for the same architecture, else `tcg`; the host's own target needs no mask |  |
+| `cpuid` | CPUID faulting (x86\_64) or a masked `getauxval` (aarch64), and a `/proc/cpuinfo` of the target bound in a user and mount namespace | x86\_64 targets with a profile, on a host that traps CPUID (Intel since Linux 4.12, AMD since 6.17); aarch64 targets with a profile on an aarch64 host |
+| `kvm` | `eb-local __vm-run --mode kvm`, a virtual machine with the target's CPU model | the host's architecture |
+| `tcg` | `eb-local __vm-run --mode tcg`, an emulated CPU | any architecture, slowly |
+
+The `kvm` and `tcg` routes refuse, naming `__vm-run`, in an eb-local that does not have the helper.
+
+The profiles for the `cpuid` route are in `share/eb-local/mask/profiles.conf`, which `tools/mask/gen_profiles.py` writes from `tools/mask/targets.toml` and the CPUID rule files in `tools/mask/rules`.
+They cover `x86_64/amd/zen2`, `zen3`, `zen4`, `x86_64/intel/skylake_avx512`, `cascadelake`, `icelake`, `sapphirerapids`, `aarch64/neoverse_n1` and `aarch64/generic`.
+A mask only removes what the host has: `sapphirerapids` needs a host with AVX512-FP16 and AMX, so an AMD host refuses it.
+
+The `cpuid` route runs the whole build in an unprivileged user and mount namespace that keeps your user id, with the target's `/proc/cpuinfo` bound over the real one, and a library in `LD_PRELOAD` that answers every CPUID as the target.
+The library is compiled with the host's `cc` on first use into `$XDG_CACHE_HOME/eb-local/mask-KEY` (`~/.cache/eb-local/mask-KEY`), where KEY is a hash of its source, the compiler's target triple and the C library's version.
+A host without CPUID faulting is refused; the build never falls back to a native one.
+`--cpu-target` with the target this host already is needs no mask.
+
+All routes set `EESSI_SOFTWARE_SUBDIR_OVERRIDE` to TARGET for the build, and run EasyBuild with the hooks of the EESSI stack plus one rule: GROMACS gets `-DGMX_SIMD` from TARGET (`AVX_512` for the AVX-512 targets, `AVX2_256` for zen2 and zen3), unless its configure options set it.
+GROMACS chooses the SIMD level of a CPU with an Intel brand string by timing AVX-512 FMA loops, and a Zen 5 host measures one unit and picks `AVX2_256`, so without the rule the Ice Lake tree on such a host holds an AVX2 build.
+
+Before `eb` starts, in the mask, the build checks and refuses to go on unless each of these names TARGET:
+
+| Check | Source |
+|---|---|
+| `/dev/fd` exists | without it EESSI's `eessi_archdetect.sh` fails and EESSI picks the generic target |
+| EESSI archdetect | `eessi_archdetect.sh cpupath`, first entry |
+| archspec | `archspec.cpu.host()`, when the EESSI Python imports it |
+| gcc | the `-march` (x86\_64) or `-mcpu` (aarch64) of `gcc -march=native` |
+| CPUID vendor, faulting | a probe run in the mask |
+
+After a successful build, `eb-local audit-isa DIR --target TARGET` runs on each directory the build installed, and a non-zero result fails the run; `--no-audit` skips it, and is required in an eb-local that has no `audit-isa`.
+Each installed directory gets `easybuild/eb-local-build-mode.json`, with `cpu_target`, `route`, `profile`, `host_cpu`, `kernel`, `eb_local_version` and `isa_audit` (`pass`, `fail` or `skipped`).
+
+`--explain` shows the route and the variables it sets, `EB_LOCAL_CPU_TARGET` and `EESSI_SOFTWARE_SUBDIR_OVERRIDE`.
+The `sbatch` lines of `submit`, and the replay hints, carry `--cpu-target`, `--mask` and `--no-audit`.
+`eb-local doctor --cpu-target TARGET` reports whether CPUID faulting works here, whether `/dev/kvm` and the QEMU binaries exist, and which route `auto` would take.
 
 ### eb
 
