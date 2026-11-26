@@ -1380,6 +1380,49 @@ test "clear_foreign_prefixes is off unless set, and approved prefixes are site-o
     try t.refuse(&none, "true or false");
 }
 
+test "a dot segment or a doubled slash stays approved, and each refusal names its check" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const Row = struct {
+        path: []const u8,
+        // `validAbsolute` or `isRootEquivalent` when that check refuses the
+        // path. Null when the path is stored as written.
+        refused_by: ?[]const u8,
+    };
+    // `validAbsolute` refuses a path shorter than two characters or ending
+    // in a slash, so `/`, `/./`, and `//` never reach `isRootEquivalent`.
+    // `/.//.` and `//.` do not end in a slash, and only empty and `.`
+    // components remain, so the root check refuses them.
+    const rows = [_]Row{
+        .{ .path = "/opt/host", .refused_by = null },
+        .{ .path = "/opt/./host", .refused_by = null },
+        .{ .path = "/opt//host", .refused_by = null },
+        .{ .path = "/", .refused_by = "validAbsolute" },
+        .{ .path = "/./", .refused_by = "validAbsolute" },
+        .{ .path = "//", .refused_by = "validAbsolute" },
+        .{ .path = "/.//.", .refused_by = "isRootEquivalent" },
+        .{ .path = "//.", .refused_by = "isRootEquivalent" },
+    };
+    for (rows) |row| {
+        const text = try std.fmt.allocPrint(t.arena.allocator(), "[doctor]\napproved_prefixes = [\"{s}\"]\n", .{row.path});
+        const sources = [_]Source{.{ .path = "site.toml", .text = text, .layer = .site }};
+        if (row.refused_by) |check| {
+            const needle = if (std.mem.eql(u8, check, "validAbsolute"))
+                "without a trailing slash"
+            else if (std.mem.eql(u8, check, "isRootEquivalent"))
+                "is the root directory"
+            else
+                unreachable;
+            try t.refuse(&sources, needle);
+        } else {
+            const s = try t.load(&sources, .{});
+            try std.testing.expectEqual(@as(usize, 1), s.approved_prefixes.value.len);
+            try std.testing.expectEqualStrings(row.path, s.approved_prefixes.value[0]);
+            try std.testing.expectEqualStrings("site site.toml:2", s.approved_prefixes.from);
+        }
+    }
+}
+
 test "doctor.cvmfs_parallel is 0 unless set, and stays between 0 and 8" {
     var t = Fixture.init();
     defer t.deinit();
