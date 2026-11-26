@@ -79,14 +79,25 @@ Each CPU target has its own tree, so a module built on one node type is not ther
 
 ```sh
 eb-local clean --dry-run                        # what would go
-eb-local clean                                  # logs older than 30 days, to the trash with rtrash
+eb-local clean                                  # logs older than 30 days, to the trash with rtrash (needs --delete without it)
 eb-local clean --sources                        # downloaded archives too
 eb-local clean --workspaces --no-logs           # inside an allocation: its leftover workspaces
 eb-local uninstall pigz/2.8-GCCcore-15.2.0      # for every CPU target, to the trash with rtrash
 eb-local restore pigz/2.8-GCCcore-15.2.0        # back from the trash, read-only again
 ```
 
+Without `rtrash` on `PATH`, `clean` and `uninstall` refuse and remove nothing unless you pass `--delete`, which deletes for good.
 [Clean up after builds, and remove what you installed](docs/howto/clean-up.md) has the steps, and [The eb-local command](docs/reference/cli.md) the options.
+
+## Other commands
+
+- `eb-local check FILE...` prints a binary's loader, `RPATH` or `RUNPATH`, and where each library it needs resolves, ignoring `LD_LIBRARY_PATH`.
+- `eb-local rpath-wrappers` writes RPATH wrappers for the compilers and linkers on `PATH` and prints the lines that put them first.
+- `eb-local lmod-cache` writes Lmod's spider cache and a timestamp one second older, so new modules show in `module avail`: [Refresh the Lmod spider cache](docs/howto/refresh-the-module-cache.md).
+- `eb-local modulerc` writes the defaults, aliases and hidden versions you name to a module tree's `.modulerc.lua`: [Set module defaults and aliases](docs/howto/set-module-defaults-and-aliases.md).
+- `eb-local overlay` applies a digest-pinned overlay of site changes to an upstream easyconfig: [Overlay a recipe](docs/howto/overlay-a-recipe.md).
+- `eb-local site` lists, shows, installs and checks site-file templates: [Write the site file for a cluster](docs/howto/write-a-site-file.md).
+- `eb-local doctor --cvmfs` also checks the CernVM-FS client, and `--mpi` reports libfabric and UCX and, inside an allocation, runs a small MPI test; [The eb-local command](docs/reference/cli.md) has both.
 
 ## Configuration
 
@@ -96,7 +107,7 @@ Settings come from, lowest first: built-in defaults, the site file, a site profi
 
 ## Secrets
 
-A build that needs a credential, such as a licence server or a token for a private source mirror, names in `[secrets]` where its value comes from, `env:VARIABLE` or `file:PATH` (`nimvault:ENTRY` is deprecated and is removed in 4.0.0), and never the value.
+A build that needs a credential, such as a licence server or a token for a private source mirror, names in `[secrets]` where its value comes from, `env:VARIABLE` or `file:PATH` (the third, deprecated prefix that [the configuration reference](docs/reference/configuration.md) names is removed in 4.0.0), and never the value.
 A build gets every secret unless `build.secrets` names the ones it gets, and the logs written during it are cleaned of each value it gets.
 [Give a secret only to the builds that need it](docs/howto/scope-secrets.md) has the steps, and [What happens to a secret](docs/explanation/secrets.md) says when a value is read, where it goes and what is cleaned.
 
@@ -125,7 +136,7 @@ eb-local is one of the [stackhands](https://github.com/stackhands) tools for bui
 | [eb-stack](https://github.com/stackhands/eb-stack) | Turn conda-forge, Spack, PyPI, CRAN and Cargo recipes into easyconfigs; solve, shard and plan an EasyBuild build list | [docs](https://eb-stack.rgoswami.me/) |
 | [eb-staged-rebuild](https://github.com/stackhands/eb-staged-rebuild) | Rebuild an installation beside the live one and swap it in, for a stack outside CernVM-FS that jobs read during the rebuild | [docs](https://stackhands.github.io/eb-staged-rebuild/) |
 | [eessi-arch-guard](https://github.com/stackhands/eessi-arch-guard) | Reload EESSI in a Slurm task that inherited a stack loaded for another CPU or GPU, as srun from a login shell does | [docs](https://stackhands.github.io/eessi-arch-guard/) |
-| **eb-local** | Build on EESSI-extend inside a Slurm job's node-local disk, compile your own code with RPATH, list and uninstall per CPU target | [docs](https://stackhands.github.io/eb-local/) |
+| **eb-local** | Build on EESSI-extend on a local disk, a Slurm job's node-local disk or a workstation's own, compile your own code with RPATH, list and uninstall per CPU target | [docs](https://stackhands.github.io/eb-local/) |
 | [eb-keep-logs](https://github.com/stackhands/eb-keep-logs) | Keep a failed EasyBuild command's own output, which --tmp-logdir does not; rotate a pipeline's log tree | [docs](https://stackhands.github.io/eb-keep-logs/) |
 | [eb-pipeline](https://github.com/stackhands/eb-pipeline) | Drive a site's EasyBuild builds from one site file, through eb-stack, eb-staged-rebuild and eb-keep-logs | [docs](https://stackhands.github.io/eb-pipeline/) |
 | [rfc9162](https://github.com/stackhands/rfc9162) | Append-only Merkle logs hashed as RFC 9162, with tiled storage and signed checkpoints | [docs](https://stackhands.github.io/rfc9162/) |
