@@ -26,7 +26,7 @@ echo "Submitted batch job 4242"
 '''
 
 
-@unittest.skipUnless(binary.BIN, "submit is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "submit is a feature of the Zig build")
 class Submit(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -122,7 +122,7 @@ class Submit(StorageFixture):
                               if c.startswith("eb-local --explain "))
         run = self.run_tool(shlex.split(command)[1:], SLURM_JOB_ID="")
         self.assertEqual(run.returncode, 0, run.stderr)
-        printed = (run.stdout.replace(str(Path(binary.BIN).resolve()), "/usr/local/bin/eb-local")
+        printed = (run.stdout.replace(str(Path(binary.ZIG).resolve()), "/usr/local/bin/eb-local")
                    .replace(f"--chdir={self.root} ", "--chdir=/home/alice "))
         for line in shown.splitlines():
             self.assertIn(line + "\n", printed)
@@ -314,7 +314,7 @@ class Submit(StorageFixture):
         spaced_cwd = self.root / "work dir"
         spaced_cwd.mkdir()
         run = subprocess.run(
-            [binary.BIN, "submit", "--on", "cpu", "--print", "recipe.eb"],
+            [binary.ZIG, "submit", "--on", "cpu", "--print", "recipe.eb"],
             cwd=spaced_cwd,
             env=dict(self.env, SLURM_JOB_ID=""),
             text=True,

@@ -25,7 +25,7 @@ printf 'BASH_ENV=%s\nENV=%s\nSHELLOPTS=%s\nBASHOPTS=%s\n' \
 '''
 
 
-@unittest.skipUnless(binary.BIN, "eb is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "eb is a feature of the Zig build")
 class ExtendCleanShellEnv(unittest.TestCase):
     def test_eb_drops_bash_env_and_shellopts(self):
         with tempfile.TemporaryDirectory(prefix="eb-local-extend-clean-") as tmp:
@@ -59,7 +59,7 @@ class ExtendCleanShellEnv(unittest.TestCase):
             env["BASH_ENV"] = str(evil)
 
             run = subprocess.run(
-                [binary.BIN, "eb", "x.eb"],
+                [binary.ZIG, "eb", "x.eb"],
                 env=env,
                 cwd=root,
                 capture_output=True,

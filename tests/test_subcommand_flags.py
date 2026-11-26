@@ -13,7 +13,7 @@ import binary
 from test_storage import StorageFixture
 
 
-@unittest.skipUnless(binary.BIN, "subcommand flag audit tests run against the Zig binary")
+@unittest.skipUnless(binary.ZIG, "subcommand flag audit tests run against the Zig binary")
 class SubcommandFlags(StorageFixture):
     def run_bin(self, args, *, cwd=None, text=True, **extra):
         argv, env = binary.command(self.script, args, dict(self.env, **extra))

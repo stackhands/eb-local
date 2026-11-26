@@ -1,0 +1,45 @@
+name: workstation
+# The path a user without a cluster takes: a GitHub-hosted runner with the
+# EESSI mount and no Slurm builds a recipe with the release build of
+# eb-local, then lists what it installed.
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build-a-recipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: release build
+        run: zig build --release=safe --prefix "$RUNNER_TEMP/eb-local"
+      - name: EESSI mount, without initialising EESSI
+        uses: EESSI/github-action-eessi@834df09f7d60de47f10a7cbf59b470d69b9e2852 # v3.4.0
+        with:
+          eessi_stack_version: "2026.06"
+          mount_cvmfs_only: "true"
+      - name: no Slurm on this runner
+        run: |
+          ! command -v sbatch
+          ! env | grep -q '^SLURM_'
+      - name: build pigz on the runner
+        run: |
+          export PATH="$RUNNER_TEMP/eb-local/bin:$PATH"
+          eb-local pigz-2.8-GCCcore-15.2.0.eb --robot
+      - name: the install is listed for this runner's CPU target
+        run: |
+          export PATH="$RUNNER_TEMP/eb-local/bin:$PATH"
+          eb-local list | tee list.txt
+          grep -q 'pigz/2.8-GCCcore-15.2.0' list.txt

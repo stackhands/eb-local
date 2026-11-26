@@ -5,8 +5,9 @@ const common = @import("zig_common");
 const toml = @import("toml.zig");
 const Allocator = std.mem.Allocator;
 
-/// One parameter assignment to replace in the upstream easyconfig.
+/// One parameter assignment to add to or replace in the upstream easyconfig.
 pub const Parameter = struct {
+    action: []const u8 = "replace",
     name: []const u8,
     value: []const u8,
 };
@@ -64,10 +65,91 @@ fn tableString(a: Allocator, t: *const toml.Table, key: []const u8, d: *Diagnost
     return try expectString(a, e, d);
 }
 
-fn walkTable(a: Allocator, t: *const toml.Table, d: *Diagnostic, out: *std.ArrayList(Parameter)) Error!void {
+fn pythonKeyword(name: []const u8) bool {
+    const keywords = [_][]const u8{
+        "False",  "None",   "True",    "and",      "as",       "assert", "async",
+        "await",  "break",  "class",   "continue", "def",      "del",    "elif",
+        "else",   "except", "finally", "for",      "from",     "global", "if",
+        "import", "in",     "is",      "lambda",   "nonlocal", "not",    "or",
+        "pass",   "raise",  "return",  "try",      "while",    "with",   "yield",
+    };
+    for (keywords) |keyword| {
+        if (std.mem.eql(u8, name, keyword)) return true;
+    }
+    return false;
+}
+
+fn validateParameterName(a: Allocator, e: *const toml.Entry, d: *Diagnostic) Error!void {
+    d.line = e.line;
+    if (e.key.len == 0 or !(std.ascii.isAlphabetic(e.key[0]) or e.key[0] == '_')) {
+        return fail(a, d, "parameter name is an invalid Python identifier", .{});
+    }
+    for (e.key[1..]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) {
+            return fail(a, d, "parameter name is an invalid Python identifier", .{});
+        }
+    }
+    if (pythonKeyword(e.key)) {
+        return fail(a, d, "parameter name '{s}' is a Python keyword", .{e.key});
+    }
+}
+
+fn appendPythonString(a: Allocator, out: *std.ArrayList(u8), value: []const u8, d: *Diagnostic) Error!void {
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) {
+        return fail(a, d, "new [add] string values must not contain a newline", .{});
+    }
+    try out.append(a, '\'');
+    for (value) |ch| switch (ch) {
+        '\'' => try out.appendSlice(a, "\\'"),
+        '\\' => try out.appendSlice(a, "\\\\"),
+        '\t' => try out.appendSlice(a, "\\t"),
+        0...8, 11...31, 127 => try out.print(a, "\\x{x:0>2}", .{ch}),
+        else => try out.append(a, ch),
+    };
+    try out.append(a, '\'');
+}
+
+fn appendPythonValue(a: Allocator, out: *std.ArrayList(u8), value: toml.Value, d: *Diagnostic) Error!void {
+    switch (value) {
+        .string => |s| try appendPythonString(a, out, s, d),
+        .int => |n| try out.print(a, "{d}", .{n}),
+        .boolean => |b| try out.appendSlice(a, if (b) "True" else "False"),
+        .array => |values| {
+            try out.append(a, '[');
+            for (values, 0..) |item, index| {
+                if (index > 0) try out.appendSlice(a, ", ");
+                try appendPythonValue(a, out, item, d);
+            }
+            try out.append(a, ']');
+        },
+        .table => |table| {
+            try out.append(a, '{');
+            for (table.entries.items, 0..) |entry, index| {
+                if (index > 0) try out.appendSlice(a, ", ");
+                try appendPythonString(a, out, entry.key, d);
+                try out.appendSlice(a, ": ");
+                try appendPythonValue(a, out, entry.value, d);
+            }
+            try out.append(a, '}');
+        },
+    }
+}
+
+fn pythonValue(a: Allocator, e: *const toml.Entry, d: *Diagnostic) Error![]const u8 {
+    d.line = e.line;
+    var out: std.ArrayList(u8) = .empty;
+    try appendPythonValue(a, &out, e.value, d);
+    return out.toOwnedSlice(a);
+}
+
+fn walkParameterTable(a: Allocator, t: *const toml.Table, action: []const u8, d: *Diagnostic, out: *std.ArrayList(Parameter)) Error!void {
     for (t.entries.items) |*e| {
-        const value = try expectString(a, e, d);
-        try out.append(a, .{ .name = e.key, .value = value });
+        try validateParameterName(a, e, d);
+        const value = if (std.mem.eql(u8, action, "add"))
+            try pythonValue(a, e, d)
+        else
+            try expectString(a, e, d);
+        try out.append(a, .{ .action = action, .name = e.key, .value = value });
     }
 }
 
@@ -85,7 +167,7 @@ fn walkDependencies(a: Allocator, t: *const toml.Table, action: []const u8, d: *
     }
 }
 
-/// Read overlay TOML from `text`. Tables `[replace]`, `[patches]`,
+/// Read overlay TOML from `text`. Tables `[add]`, `[replace]`, `[patches]`,
 /// `[dependencies.add]` and `[dependencies.replace]` hold the edits.
 pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     var td: toml.Diagnostic = .{};
@@ -99,6 +181,7 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
             !std.mem.eql(u8, e.key, "base_easyconfig") and
             !std.mem.eql(u8, e.key, "base_digest") and
             !std.mem.eql(u8, e.key, "rationale") and
+            !std.mem.eql(u8, e.key, "add") and
             !std.mem.eql(u8, e.key, "replace") and
             !std.mem.eql(u8, e.key, "patches") and
             !std.mem.eql(u8, e.key, "dependencies"))
@@ -141,8 +224,15 @@ pub fn parseSpec(a: Allocator, text: []const u8, d: *Diagnostic) Error!Spec {
     var parameters: std.ArrayList(Parameter) = .empty;
     var patches: std.ArrayList(Patch) = .empty;
     var dependencies: std.ArrayList(Dependency) = .empty;
+    if (root.get("add")) |e| switch (e.value) {
+        .table => |t| try walkParameterTable(a, t, "add", d, &parameters),
+        else => {
+            d.line = e.line;
+            return fail(a, d, "[add] must be a table", .{});
+        },
+    };
     if (root.get("replace")) |e| switch (e.value) {
-        .table => |t| try walkTable(a, t, d, &parameters),
+        .table => |t| try walkParameterTable(a, t, "replace", d, &parameters),
         else => {
             d.line = e.line;
             return fail(a, d, "[replace] must be a table", .{});
@@ -301,6 +391,23 @@ fn replaceParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagno
         if (lines.peek() != null) try out.append(a, '\n');
     }
     if (!replaced) return fail(a, d, "easyconfig has no parameter '{s}' to replace", .{param.name});
+    return out.toOwnedSlice(a);
+}
+
+fn addParameter(a: Allocator, text: []const u8, param: Parameter, d: *Diagnostic) Error![]u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var state: PyLineState = .{};
+    while (lines.next()) |line| {
+        if (state.isTopLevel() and lineSetsParameter(line, param.name)) {
+            return fail(a, d, "easyconfig already has parameter '{s}'; use [replace]", .{param.name});
+        }
+        state.advanceLine(line);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, text);
+    if (text.len > 0 and text[text.len - 1] != '\n') try out.append(a, '\n');
+    try out.print(a, "{s} = {s}\n", .{ param.name, param.value });
     return out.toOwnedSlice(a);
 }
 
@@ -596,7 +703,10 @@ pub fn materialize(a: Allocator, base_text: []const u8, spec: Spec, d: *Diagnost
     var text = try a.dupe(u8, base_text);
     if (spec.parameters.len == 0 and spec.patches.len == 0 and spec.dependencies.len == 0) return text;
     for (spec.parameters) |p| {
-        const next = try replaceParameter(a, text, p, d);
+        const next = if (std.mem.eql(u8, p.action, "add"))
+            try addParameter(a, text, p, d)
+        else
+            try replaceParameter(a, text, p, d);
         a.free(text);
         text = next;
     }
@@ -685,6 +795,71 @@ fn writeStdout(io: std.Io, stdout: *std.Io.File, message: []const u8) bool {
     return true;
 }
 
+fn readErrorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.NotFound => "FileNotFound",
+        error.SymLink => "symlink is not followed",
+        else => @errorName(err),
+    };
+}
+
+fn readRegularFile(a: Allocator, path: []const u8, follow: bool, max_bytes: usize) ![]u8 {
+    const opened = try common.fsx.openRegular(common.fsx.cwd, path, follow);
+    defer common.sys.close(opened.fd);
+    return try common.fsx.readAll(a, opened.fd, max_bytes);
+}
+
+fn readOptionalRegular(a: Allocator, path: []const u8, max_bytes: usize) error{Refused}!?[]u8 {
+    if (common.fsx.statAt(common.fsx.cwd, path, false)) |st| {
+        if (st.isLink()) {
+            failMsg("cannot read {s}: symlink is not followed", .{path});
+            return error.Refused;
+        }
+    } else |_| {}
+    const opened = common.fsx.openRegular(common.fsx.cwd, path, false) catch |err| switch (err) {
+        error.NotFound => return null,
+        else => {
+            failMsg("cannot read {s}: {s}", .{ path, readErrorText(err) });
+            return error.Refused;
+        },
+    };
+    defer common.sys.close(opened.fd);
+    return common.fsx.readAll(a, opened.fd, max_bytes) catch |err| {
+        failMsg("cannot read {s}: {s}", .{ path, readErrorText(err) });
+        return error.Refused;
+    };
+}
+
+fn checkDryRunOutputs(out_dir: []const u8, recipe_path: []const u8, provenance_path: []const u8) bool {
+    var probe: []const u8 = out_dir;
+    while (probe.len > 0 and !std.mem.eql(u8, probe, ".") and !std.mem.eql(u8, probe, "/")) {
+        if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
+            if (!st.isDir()) {
+                failMsg("cannot write {s}: NotDir", .{recipe_path});
+                return false;
+            }
+            break;
+        } else |_| {}
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+    for ([_][]const u8{ recipe_path, provenance_path }) |p| {
+        if (common.fsx.statAt(common.fsx.cwd, p, false)) |st| {
+            if (st.isLink()) {
+                failMsg("cannot read {s}: symlink is not followed", .{p});
+                return false;
+            }
+            if (!st.isReg()) {
+                failMsg("cannot read {s}: {s}", .{ p, if (st.isDir()) "IsDir" else "NotRegularFile" });
+                return false;
+            }
+        } else |err| if (err != error.NotFound and err != error.NotDir) {
+            failMsg("cannot read {s}: {s}", .{ p, readErrorText(err) });
+            return false;
+        }
+    }
+    return true;
+}
+
 /// Read overlay and base files, verify the digest, and write, preview, or check the outputs.
 pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     if (opts.dry_run and opts.check) {
@@ -699,10 +874,9 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         failMsg("overlay materialize needs --base PATH", .{});
         return 2;
     }
-    const cwd = std.Io.Dir.cwd();
     var od: Diagnostic = .{};
-    const overlay_text = cwd.readFileAlloc(io, opts.overlay_path, a, .limited(4 * 1024 * 1024)) catch |err| {
-        failMsg("cannot read {s}: {s}", .{ opts.overlay_path, @errorName(err) });
+    const overlay_text = readRegularFile(a, opts.overlay_path, true, 4 * 1024 * 1024) catch |err| {
+        failMsg("cannot read {s}: {s}", .{ opts.overlay_path, readErrorText(err) });
         return 2;
     };
     const spec = parseSpec(a, overlay_text, &od) catch |e| switch (e) {
@@ -717,8 +891,8 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         error.OutOfMemory => return 1,
         else => return 1,
     };
-    const base_text = cwd.readFileAlloc(io, opts.base_path, a, .limited(16 * 1024 * 1024)) catch |err| {
-        failMsg("cannot read {s}: {s}", .{ opts.base_path, @errorName(err) });
+    const base_text = readRegularFile(a, opts.base_path, true, 16 * 1024 * 1024) catch |err| {
+        failMsg("cannot read {s}: {s}", .{ opts.base_path, readErrorText(err) });
         return 2;
     };
     const recipe = materialize(a, base_text, spec, &od) catch |e| switch (e) {
@@ -740,29 +914,9 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     defer a.free(provenance);
     var stdout = std.Io.File.stdout();
     if (opts.check) {
-        for ([_][]const u8{ recipe_path, provenance_path }) |p| {
-            if (common.fsx.statAt(common.fsx.cwd, p, false)) |st| {
-                if (st.isLink()) {
-                    failMsg("cannot read {s}: symlink is not followed", .{p});
-                    return 2;
-                }
-            } else |_| {}
-        }
-        const existing_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => {
-                failMsg("cannot read {s}: {s}", .{ recipe_path, @errorName(err) });
-                return 2;
-            },
-        };
+        const existing_recipe = readOptionalRegular(a, recipe_path, 16 * 1024 * 1024) catch return 2;
         defer if (existing_recipe) |buf| a.free(buf);
-        const existing_prov = cwd.readFileAlloc(io, provenance_path, a, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => null,
-            else => {
-                failMsg("cannot read {s}: {s}", .{ provenance_path, @errorName(err) });
-                return 2;
-            },
-        };
+        const existing_prov = readOptionalRegular(a, provenance_path, 4 * 1024 * 1024) catch return 2;
         defer if (existing_prov) |buf| a.free(buf);
         const up_to_date = if (existing_recipe) |er|
             if (existing_prov) |ep|
@@ -780,26 +934,25 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
         return if (up_to_date) 0 else 1;
     }
     if (opts.dry_run) {
+        if (!checkDryRunOutputs(out_dir, recipe_path, provenance_path)) return 2;
         const message = std.fmt.allocPrint(a, "would write {s} and {s}\n", .{ recipe_path, provenance_path }) catch return 1;
         if (!writeStdout(io, &stdout, message)) return 1;
         return 0;
     }
-    const prev_recipe = cwd.readFileAlloc(io, recipe_path, a, .limited(16 * 1024 * 1024)) catch null;
+    const prev_recipe = readRegularFile(a, recipe_path, false, 16 * 1024 * 1024) catch null;
     defer if (prev_recipe) |buf| a.free(buf);
     var first_missing: ?[]const u8 = null;
     {
         var probe: []const u8 = out_dir;
         while (probe.len > 0 and !std.mem.eql(u8, probe, ".") and !std.mem.eql(u8, probe, "/")) {
-            if (common.fsx.statAt(common.fsx.cwd, probe, true)) |st| {
-                if (st.isDir()) break;
-                break;
-            } else |_| {}
+            if (common.fsx.statAt(common.fsx.cwd, probe, false)) |_| break else |_| {}
             first_missing = probe;
             probe = std.fs.path.dirname(probe) orelse break;
         }
     }
     common.atomic.makedirs(out_dir) catch |err| {
         failMsg("cannot create {s}: {s}", .{ out_dir, @errorName(err) });
+        if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
         return 1;
     };
     var why: common.atomic.Why = .{};

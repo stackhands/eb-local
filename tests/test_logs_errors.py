@@ -28,7 +28,7 @@ def _can_mount_tmpfs():
     return probe.returncode == 0
 
 
-@unittest.skipUnless(binary.BIN, "logs directory filesystem checks target the Zig build")
+@unittest.skipUnless(binary.ZIG, "logs directory filesystem checks target the Zig build")
 class LogsDirFilesystemErrors(StorageFixture):
     def setUp(self):
         super().setUp()

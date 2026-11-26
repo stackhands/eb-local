@@ -101,7 +101,7 @@ sys.exit(rc)
 '''
 
 
-@unittest.skipUnless(binary.BIN, "uninstall is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "uninstall is a feature of the Zig build")
 class Uninstall(StorageFixture):
     def setUp(self):
         super().setUp()
@@ -594,6 +594,103 @@ sys.exit(int(os.environ["CONTROL_USED_STATUS"]))
         finally:
             mod_parent.chmod(0o755)
 
+    def prefix_lock_message(self):
+        lock = self.prefix / ".eb-local" / ".lock"
+        return f"eb-local: cannot release the lock on {lock}: [Errno 5] Input/output error\n"
+
+    def writes_of(self, args, **env):
+        """The writes `args` makes to standard output, counted from its
+        --dry-run, which prints as many lines."""
+        dry = self.run_tool([*args, "--dry-run"], **env)
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        return len(dry.stdout.splitlines())
+
+    def assert_release_dropped_after_unwritable_last_line(self, args, prepare, done):
+        """With release `EIO`, `args` reports the release when every line is
+        written, and only the failed write when its last line is not. Each
+        run starts from a fresh fixture that `prepare` sets up."""
+        for last_line_written in (True, False):
+            with self.subTest(last_line_written=last_line_written):
+                self.setUp()
+                env = prepare()
+                writes = self.writes_of(args, **env) - (0 if last_line_written else 1)
+                run = self.run_tool(args, EB_LOCAL_TEST_RELEASE_ERRNO="EIO",
+                                    EB_LOCAL_TEST_STDOUT_WRITES=str(writes), **env)
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                done()
+                if last_line_written:
+                    self.assertIn(self.prefix_lock_message(), run.stderr)
+                    self.assertNotIn("cannot write output", run.stderr)
+                else:
+                    self.assertIn("eb-local: cannot write output", run.stderr)
+                    self.assertNotIn("cannot release", run.stderr)
+
+    def test_failed_prefix_lock_release_after_uninstall_reports_errno_and_exits_one(self):
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"],
+                            EB_LOCAL_TEST_RELEASE_ERRNO="EIO")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertFalse(any(p.exists() for p in self.installs + self.modules))
+        self.assertIn("deleted 2 installation(s)", run.stdout)
+        self.assertIn(self.prefix_lock_message(), run.stderr)
+        self.assertEqual(run.stderr.count("cannot release"), 1, run.stderr)
+
+    def test_failed_prefix_lock_release_after_a_failed_uninstall_keeps_the_first_errno(self):
+        mod_parent = self.modules[0].parent
+        mod_parent.chmod(0o555)
+        self.addCleanup(lambda: mod_parent.chmod(0o755))
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"],
+                            EB_LOCAL_TEST_RELEASE_ERRNO="EIO")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn(str(self.modules[0]), run.stderr)
+        self.assertIn("[Errno 13] Permission denied", run.stderr)
+        self.assertNotIn("cannot release", run.stderr)
+        self.assertNotIn("[Errno 5]", run.stderr)
+
+    def test_failed_prefix_lock_release_after_unwritable_uninstall_output_is_dropped(self):
+        self.assert_release_dropped_after_unwritable_last_line(
+            ["uninstall", "pigz/2.8-GCCcore-15.2.0", "--delete"],
+            prepare=dict,
+            done=lambda: self.assertFalse(any(p.exists() for p in self.installs + self.modules)))
+
+    def test_failed_prefix_lock_release_after_restore_reports_errno_and_exits_one(self):
+        env = self.trash()
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"], **env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        run = self.run_tool(["restore", "pigz/2.8-GCCcore-15.2.0"], EB_LOCAL_TEST_RELEASE_ERRNO="EIO", **env)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertTrue(all(p.exists() for p in self.installs + self.modules))
+        self.assertIn("eb-local: restored 2 installation(s)", run.stdout)
+        self.assertIn(self.prefix_lock_message(), run.stderr)
+        self.assertEqual(run.stderr.count("cannot release"), 1, run.stderr)
+
+    def test_failed_prefix_lock_release_after_a_failed_restore_keeps_its_error(self):
+        env = self.trash()
+        run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"], **env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # The trash lists the entries but refuses to bring them back.
+        real = self.bin / "rtrash.real"
+        (self.bin / "rtrash").rename(real)
+        (self.bin / "rtrash").write_text(
+            '#!/bin/sh\nif [ "$1" = restore ]; then echo "rtrash: refused" >&2; exit 1; fi\n'
+            f'exec {shlex.quote(str(real))} "$@"\n')
+        (self.bin / "rtrash").chmod(0o755)
+        run = self.run_tool(["restore", "pigz/2.8-GCCcore-15.2.0"], EB_LOCAL_TEST_RELEASE_ERRNO="EIO", **env)
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("rtrash restore exited 1", run.stderr)
+        self.assertNotIn("cannot release", run.stderr)
+        self.assertNotIn("[Errno 5]", run.stderr)
+
+    def test_failed_prefix_lock_release_after_unwritable_restore_output_is_dropped(self):
+        def trashed():
+            env = self.trash()
+            run = self.run_tool(["uninstall", "pigz/2.8-GCCcore-15.2.0"], **env)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            return env
+
+        self.assert_release_dropped_after_unwritable_last_line(
+            ["restore", "pigz/2.8-GCCcore-15.2.0"],
+            prepare=trashed,
+            done=lambda: self.assertTrue(all(p.exists() for p in self.installs + self.modules)))
 
 if __name__ == "__main__":
     unittest.main()

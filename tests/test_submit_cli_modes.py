@@ -8,7 +8,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "submit is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "submit is a feature of the Zig build")
 class SubmitCliModes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-submit-modes-")
@@ -28,7 +28,7 @@ class SubmitCliModes(unittest.TestCase):
 
     def run_submit(self, args, site_path=None, path="/usr/bin:/bin"):
         return subprocess.run(
-            [binary.BIN, "submit", *args],
+            [binary.ZIG, "submit", *args],
             env={
                 "PATH": path,
                 "HOME": str(self.root),
@@ -87,6 +87,57 @@ class SubmitCliModes(unittest.TestCase):
         self.assertEqual(len(recorded), 2)
         self.assertIn("-p cpu", recorded[0])
         self.assertIn("-p gpu", recorded[1])
+
+    def test_refuses_newlines_in_prefix_or_working_directory(self):
+        nl_prefix = self.root / "prefix\nwith_cmd"
+        for extra_args in (["--print"], []):
+            with self.subTest(case="prefix", extra_args=extra_args):
+                got = subprocess.run(
+                    [binary.ZIG, "submit", "--on=cpu", *extra_args, "recipe.eb"],
+                    env={
+                        "PATH": "/usr/bin:/bin",
+                        "HOME": str(self.root),
+                        "EB_LOCAL_CONFIG": str(self.site),
+                        "EB_LOCAL_PREFIX": str(nl_prefix),
+                    },
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn("installation prefix", got.stderr)
+                self.assertIn("#SBATCH directives are single lines", got.stderr)
+                self.assertFalse(nl_prefix.exists())
+
+        nl_cwd = self.root / "dir\nwith_cmd"
+        nl_cwd.mkdir()
+        for extra_args in (["--print"], []):
+            with self.subTest(case="cwd", extra_args=extra_args):
+                got = subprocess.run(
+                    [binary.ZIG, "submit", "--on=cpu", *extra_args, "recipe.eb"],
+                    env={
+                        "PATH": "/usr/bin:/bin",
+                        "HOME": str(self.root),
+                        "EB_LOCAL_CONFIG": str(self.site),
+                        "EB_LOCAL_PREFIX": str(self.prefix),
+                    },
+                    cwd=nl_cwd,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn("working directory", got.stderr)
+                self.assertIn("#SBATCH directives are single lines", got.stderr)
+                self.assertFalse(self.prefix.exists())
+
+        ok_recipe = self.run_submit(["--print", "--on=cpu", "my\nrecipe.eb", "--robot"])
+        self.assertEqual(ok_recipe.returncode, 0, ok_recipe.stdout + ok_recipe.stderr)
+        self.assertIn("#SBATCH --job-name=eb-local-cpu-my_recipe.eb\n", ok_recipe.stdout)
+        script = ok_recipe.stdout[ok_recipe.stdout.index("#!/bin/bash"):]
+        syntax = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
 
 if __name__ == "__main__":

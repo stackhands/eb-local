@@ -28,7 +28,7 @@ export -f module double_module
 '''
 
 
-@unittest.skipUnless(binary.BIN, "showing why a load failed is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "showing why a load failed is a feature of the Zig build")
 class ModuleLoad(StorageFixture):
     def setUp(self):
         super().setUp()

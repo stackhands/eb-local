@@ -196,7 +196,7 @@ class EnvironmentControls(unittest.TestCase):
     def test_project_mode_clears_inherited_and_unload_restored_values(self):
         self.check_build("EESSI_PROJECT_INSTALL")
 
-    @unittest.skipUnless(binary.BIN, "EESSI-extend's umask for a user build is a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "EESSI-extend's umask for a user build is a feature of the Zig build")
     def test_a_user_build_keeps_eessi_extends_umask_as_eb_local_eb_does(self):
         run = self.run_wrapper(["recipe.eb"], umask=0o022)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -299,7 +299,7 @@ class EnvironmentControls(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stderr)
         self.assertFalse((self.root / "load.json").exists())
 
-    @unittest.skipUnless(binary.BIN, "the project directory mode checks are a feature of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the project directory mode checks are a feature of the Zig build")
     def test_project_directory_mode(self):
         self.prefix.chmod(0o2770)
         run = self.run_wrapper(["env", "--project", str(self.prefix)], CONTROL_MODE="EESSI_PROJECT_INSTALL")
@@ -320,6 +320,7 @@ class EnvironmentControls(unittest.TestCase):
     def test_allocation_is_required(self):
         env = dict(self.env)
         env.pop("SLURM_JOB_ID")
+        env["SLURM_CLUSTER_NAME"] = "cluster"
         argv, env = binary.command(SCRIPT, ["recipe.eb"], env)
         run = subprocess.run(argv, env=env, cwd=self.root, text=True, capture_output=True)
         self.assertEqual(run.returncode, 2, run.stderr)

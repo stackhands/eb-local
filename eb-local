@@ -20,12 +20,6 @@ real_shim=$("$readlink_cmd" -f -- "$shim" 2>/dev/null) || {
 real_dir=${real_shim%/*}
 zig_bin=$real_dir/zig-out/bin/eb-local
 
-if [ -z "${EB_LOCAL_CONFIG-}" ] &&
-    { [ -f "$real_dir/eb-local.conf" ] || [ -L "$real_dir/eb-local.conf" ]; }; then
-    EB_LOCAL_CONFIG=$real_dir/eb-local.conf
-    export EB_LOCAL_CONFIG
-fi
-
 if [ -x "$zig_bin" ] && [ ! -d "$zig_bin" ]; then
     exec "$zig_bin" "$@"
 fi

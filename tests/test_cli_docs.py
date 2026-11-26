@@ -32,9 +32,9 @@ def commands():
 
 
 class CliReference(unittest.TestCase):
-    @unittest.skipUnless(binary.BIN, "the help of the Zig build")
+    @unittest.skipUnless(binary.ZIG, "the help of the Zig build")
     def test_the_help_block_is_what_the_program_prints(self):
-        run = subprocess.run([binary.BIN, "--help"], capture_output=True, text=True)
+        run = subprocess.run([binary.ZIG, "--help"], capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(help_block(PAGE.read_text()), run.stdout, f"{PAGE}: the `eb-local --help` block")
 

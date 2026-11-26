@@ -9,7 +9,7 @@ import unittest
 import binary
 
 
-@unittest.skipUnless(binary.BIN, "check is a feature of the Zig build")
+@unittest.skipUnless(binary.ZIG, "check is a feature of the Zig build")
 class CheckCliFlags(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="eb-local-check-flags-")
@@ -25,7 +25,7 @@ class CheckCliFlags(unittest.TestCase):
         }
         env.update(env_overrides)
         return subprocess.run(
-            [binary.BIN, "check", *args],
+            [binary.ZIG, "check", *args],
             env=env,
             cwd=self.root,
             capture_output=True,
