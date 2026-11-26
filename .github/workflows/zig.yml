@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           log="$(mktemp)"
           trap 'rm -f "$log"' EXIT
-          EB_LOCAL_BIN="$PWD/zig-out/bin/eb-local" python3 -m unittest discover -s tests -v 2>&1 | tee "$log"
+          EB_LOCAL_REQUIRE_TOOLS=1 EB_LOCAL_BIN="$PWD/zig-out/bin/eb-local" python3 -m unittest discover -s tests -v 2>&1 | tee "$log"
           ! grep -Eq '\.\.\. skipped |skipped=[0-9]+' "$log"
       - name: a release build carries no test seam
         run: |
