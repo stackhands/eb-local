@@ -4178,7 +4178,7 @@ const build_script_tail =
     \\                aarch64/*) pf_flag=-mcpu pf_key=-mcpu= ;;
     \\                *) pf_flag=-march pf_key=-march= ;;
     \\            esac
-    \\            pf_gcc=$(gcc "$pf_flag=native" -Q --help=target 2>/dev/null | awk -v k="$pf_key" '$1 == k { print $2; exit }') || pf_gcc=
+    \\            pf_gcc=$(gcc "$pf_flag=native" -Q --help=target 2>/dev/null | awk -v k="$pf_key" '$1 == k { v = $2 } END { print v }') || pf_gcc=
     \\            pf_probe=$("${EB_LOCAL_PROBE:-/nonexistent}" 2>/dev/null) || pf_probe=
     \\            "$EB_LOCAL_SELF" __mask-preflight "$EB_LOCAL_CPU_TARGET" "$EB_LOCAL_MASK_ROUTE" "$pf_fd" "$pf_ad" "$pf_sp" "$pf_gcc" "$pf_probe" || exit 1
     \\            ;;
