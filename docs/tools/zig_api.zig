@@ -98,6 +98,23 @@ fn nonEmpty(v: ?[]const u8) ?[]const u8 {
     return if (s.len > 0) s else null;
 }
 
+fn sourceRef(docs_ref: ?[]const u8, github_sha: ?[]const u8) []const u8 {
+    return nonEmpty(docs_ref) orelse nonEmpty(github_sha) orelse "main";
+}
+
+test "an empty source ref falls back to main" {
+    const ref = sourceRef("", "");
+    const url = try std.mem.replaceOwned(
+        u8,
+        std.testing.allocator,
+        "https://github.com/stackhands/eb-local/blob/{ref}/src/main.zig",
+        "{ref}",
+        ref,
+    );
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://github.com/stackhands/eb-local/blob/main/src/main.zig", url);
+}
+
 /// Read the options, empty the --out directory, and write there one page
 /// per file reached from --root, and the index.
 pub fn main(init: std.process.Init) !void {
@@ -133,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (opts.module.len == 0 or opts.root.len == 0 or opts.out.len == 0) fail("{s}", .{usage});
-    const ref = nonEmpty(init.environ_map.get("DOCS_SOURCE_REF")) orelse nonEmpty(init.environ_map.get("GITHUB_SHA")) orelse "main";
+    const ref = sourceRef(init.environ_map.get("DOCS_SOURCE_REF"), init.environ_map.get("GITHUB_SHA"));
     opts.source_url = try std.mem.replaceOwned(u8, arena, opts.source_url, "{ref}", ref);
 
     var ctx: Ctx = .{ .gpa = arena, .io = init.io, .opts = opts };

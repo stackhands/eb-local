@@ -1380,74 +1380,46 @@ test "clear_foreign_prefixes is off unless set, and approved prefixes are site-o
     try t.refuse(&none, "true or false");
 }
 
-test "a dot segment or a doubled slash stays approved, and trailing root spellings match /" {
+test "a dot segment or a doubled slash stays approved, and each refusal names its check" {
     var t = Fixture.init();
     defer t.deinit();
     const Row = struct {
         path: []const u8,
-        kept: bool,
+        // `validAbsolute` or `isRootEquivalent` when that check refuses the
+        // path. Null when the path is stored as written.
+        refused_by: ?[]const u8,
     };
-    // `/opt/host` is approved. A dot segment or a doubled slash is still
-    // stored. `/./` and `//` take the same refusal as `/`.
+    // `validAbsolute` refuses a path shorter than two characters or ending
+    // in a slash, so `/`, `/./`, and `//` never reach `isRootEquivalent`.
+    // `/.` passes that check. Only an empty component and `.` remain, so
+    // `isRootEquivalent` is the refusal. `/.//.` and `//.` are the same case.
     const rows = [_]Row{
-        .{ .path = "/opt/host", .kept = true },
-        .{ .path = "/opt/./host", .kept = true },
-        .{ .path = "/opt//host", .kept = true },
-        .{ .path = "/", .kept = false },
-        .{ .path = "/./", .kept = false },
-        .{ .path = "//", .kept = false },
+        .{ .path = "/opt/host", .refused_by = null },
+        .{ .path = "/opt/./host", .refused_by = null },
+        .{ .path = "/opt//host", .refused_by = null },
+        .{ .path = "/", .refused_by = "validAbsolute" },
+        .{ .path = "/./", .refused_by = "validAbsolute" },
+        .{ .path = "//", .refused_by = "validAbsolute" },
+        .{ .path = "/.", .refused_by = "isRootEquivalent" },
+        .{ .path = "/.//.", .refused_by = "isRootEquivalent" },
+        .{ .path = "//.", .refused_by = "isRootEquivalent" },
     };
-    const Probe = struct {
-        const Outcome = union(enum) { kept: []const u8, refused: []const u8 };
-
-        fn one(tt: *Fixture, path: []const u8) !Outcome {
-            const text = try std.fmt.allocPrint(tt.arena.allocator(), "[doctor]\napproved_prefixes = [\"{s}\"]\n", .{path});
-            const sources = [_]Source{.{ .path = "site.toml", .text = text, .layer = .site }};
-            var d: Diagnostic = .{};
-            if (config_load(tt.arena.allocator(), &sources, &tt.env, .{}, &d)) |s| {
-                try std.testing.expectEqual(@as(usize, 1), s.approved_prefixes.value.len);
-                try std.testing.expectEqualStrings("site site.toml:2", s.approved_prefixes.from);
-                return .{ .kept = s.approved_prefixes.value[0] };
-            } else |err| switch (err) {
-                error.Invalid => return .{ .refused = d.message },
-                else => return err,
-            }
-        }
-    };
-    var outcomes: std.ArrayList(Probe.Outcome) = .empty;
-    for (rows) |row| try outcomes.append(t.arena.allocator(), try Probe.one(&t, row.path));
-
-    var root_message: []const u8 = undefined;
-    var saw_root = false;
-    for (rows, outcomes.items) |row, got| {
-        if (!std.mem.eql(u8, row.path, "/")) continue;
-        switch (got) {
-            .refused => |message| {
-                root_message = message;
-                saw_root = true;
-            },
-            .kept => |stored| {
-                std.debug.print("/ stored {s}\n", .{stored});
-                return error.TestUnexpectedResult;
-            },
-        }
-    }
-    try std.testing.expect(saw_root);
-    for (rows, outcomes.items) |row, got| {
-        if (row.kept) {
-            switch (got) {
-                .kept => |stored| try std.testing.expectEqualStrings(row.path, stored),
-                .refused => |message| {
-                    std.debug.print("{s} refused: {s}\n", .{ row.path, message });
-                    return error.TestUnexpectedResult;
-                },
-            }
-        } else switch (got) {
-            .refused => |message| try std.testing.expectEqualStrings(root_message, message),
-            .kept => |stored| {
-                std.debug.print("{s} stored {s}\n", .{ row.path, stored });
-                return error.TestUnexpectedResult;
-            },
+    for (rows) |row| {
+        const text = try std.fmt.allocPrint(t.arena.allocator(), "[doctor]\napproved_prefixes = [\"{s}\"]\n", .{row.path});
+        const sources = [_]Source{.{ .path = "site.toml", .text = text, .layer = .site }};
+        if (row.refused_by) |check| {
+            const needle = if (std.mem.eql(u8, check, "validAbsolute"))
+                "without a trailing slash"
+            else if (std.mem.eql(u8, check, "isRootEquivalent"))
+                "is the root directory"
+            else
+                unreachable;
+            try t.refuse(&sources, needle);
+        } else {
+            const s = try t.load(&sources, .{});
+            try std.testing.expectEqual(@as(usize, 1), s.approved_prefixes.value.len);
+            try std.testing.expectEqualStrings(row.path, s.approved_prefixes.value[0]);
+            try std.testing.expectEqualStrings("site site.toml:2", s.approved_prefixes.from);
         }
     }
 }
