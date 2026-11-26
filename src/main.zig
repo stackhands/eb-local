@@ -37,6 +37,8 @@ pub const cvmfs = @import("cvmfs.zig");
 pub const mpi = @import("mpi.zig");
 /// `eb-local overlay`: declarative site overlays for upstream easyconfigs.
 pub const recipe_overlay = @import("recipe_overlay.zig");
+/// `eb-local __vm-run`: a command under a virtual CPU that presents a target.
+pub const vm = @import("vm.zig");
 /// `--json` for scriptable commands.
 const jsonout = @import("jsonout.zig");
 const Allocator = std.mem.Allocator;
@@ -7415,6 +7417,14 @@ fn runMain(init: std.process.Init) u8 {
         const forwarded = a.alloc([]const u8, raw.len) catch oom();
         for (raw, 0..) |arg, n| forwarded[n] = arg;
         return cmdExtend(c, loadSettings(c, .{}), forwarded);
+    }
+
+    // The internal helper `__vm-run` is not a documented command: it has no
+    // place in the help, and its options are its own.
+    if (argv_all.len > 1 and std.mem.eql(u8, argv_all[1], "__vm-run")) {
+        const rest = a.alloc([]const u8, argv_all.len - 2) catch oom();
+        for (argv_all[2..], 0..) |arg, n| rest[n] = arg;
+        return vm.run(a, c.env, cwd, rest);
     }
 
     var args: []const [:0]const u8 = argv_all[1..];
