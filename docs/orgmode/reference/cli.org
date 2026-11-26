@@ -228,7 +228,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 | =--workstation=        | Force managed recipe builds to use private local workspace storage on this machine, even when Slurm is present.                                                                |
 | =--config FILE=        | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of =~/.config/eb-local/config.toml=, when you own it. The other file is still read. |
 | =--explain=            | Before an easyconfig, or before =eb=: print what would run, and create and run nothing.                                                                                        |
-| =--variant NAME=       | Before an easyconfig: build it as the =perf= or =debug= variant, described under [[*=--variant=][=--variant=]]. |
+| =--variant NAME=       | Before an easyconfig: build it as the =perf= or =debug= variant, described in the =--variant= section below. |
 | =-h=, =--help=, =help= | Print the usage on stdout and exit 0.                                                                                                                                          |
 | =--version=            | Print the version line on stdout and exit 0.                                                                                                                                   |
 | =--json=                | On =list=, =check=, =doctor=, =modulerc=, =clean=, =config=, =profiles=, and =site list=: print one line of JSON with =schema_version= 1 on stdout instead of the text report. Not with =config --env= or =config --get=. |
