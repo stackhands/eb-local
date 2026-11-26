@@ -37,7 +37,12 @@ while not got and time.monotonic() < deadline:
     time.sleep(0.05)
 if not got:
     sys.exit(0)
-time.sleep(0.5)
+gate = os.environ.get("EB_SIGNAL_GATE")
+if gate:
+    with open(gate, "rb") as gate_file:
+        gate_file.read(1)
+else:
+    time.sleep(0.5)
 with open(log, "a") as f:
     f.write("stopping with " + os.environ["LICENCE_KEY"] + "\n")
 open(os.path.join(root, "eb.signals"), "w").write(" ".join(got))
@@ -88,19 +93,39 @@ class Signals(StorageFixture):
         self.assertIn("stopping with <secret LICENCE_KEY removed by eb-local>", text)
         self.assertNotIn(KEY, text)
 
-    def signalled(self, send, **popen):
+    def open_gate(self, fifo):
+        deadline = time.monotonic() + 5
+        fd = None
+        while fd is None:
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                self.assertLess(time.monotonic(), deadline, "eb did not reach the signal gate")
+                time.sleep(0.01)
+        os.write(fd, b"x")
+        os.close(fd)
+
+    def signalled(self, send, *, gate=False, **popen):
+        if gate:
+            fifo = self.root / "signal-gate"
+            if fifo.exists():
+                fifo.unlink()
+            os.mkfifo(fifo)
+            self.build_env["EB_SIGNAL_GATE"] = str(fifo)
         build = subprocess.Popen(self.argv, env=self.build_env, cwd=self.root, start_new_session=True,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen)
         self.addCleanup(lambda: build.poll() is None and os.killpg(build.pid, signal.SIGKILL))
         eb = self.eb_pid()
         sent = time.monotonic()
         send(build.pid)
+        if gate:
+            self.open_gate(fifo)
         out, err = build.communicate(timeout=30)
         self.assertLess(time.monotonic() - sent, 8, out + err)
         return build.returncode, out, err, eb
 
     def test_a_sigterm_to_eb_local_alone_reaches_easybuild(self):
-        rc, out, err, eb = self.signalled(lambda pid: os.kill(pid, signal.SIGTERM))
+        rc, out, err, eb = self.signalled(lambda pid: os.kill(pid, signal.SIGTERM), gate=True)
         self.assertEqual(rc, -signal.SIGTERM, out + err)
         self.assertEqual((self.root / "eb.signals").read_text(), "SIGTERM")
         self.assert_stopped_and_clean(eb)
@@ -108,7 +133,7 @@ class Signals(StorageFixture):
         self.assertIn("build workspace kept", err)
 
     def test_a_sigterm_to_the_process_group_waits_for_easybuild_before_the_logs_are_cleaned(self):
-        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGTERM))
+        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGTERM), gate=True)
         self.assertEqual(rc, -signal.SIGTERM, out + err)
         self.assertTrue((self.root / "eb.signals").read_text().startswith("SIGTERM"))
         self.assert_stopped_and_clean(eb)
@@ -121,6 +146,9 @@ class Signals(StorageFixture):
         self.assertFalse((self.root / "eb.signals").exists())
 
     def test_ctrl_c_on_the_terminal_reaches_easybuild_once(self):
+        fifo = self.root / "signal-gate"
+        os.mkfifo(fifo)
+        self.build_env["EB_SIGNAL_GATE"] = str(fifo)
         pid, master = pty.fork()
         if pid == 0:
             os.chdir(self.root)
@@ -129,6 +157,7 @@ class Signals(StorageFixture):
         output = b""
         eb = self.eb_pid()
         os.write(master, b"\x03")
+        self.open_gate(fifo)
         deadline = time.monotonic() + 30
         while True:
             self.assertLess(time.monotonic(), deadline, output)

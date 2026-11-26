@@ -25,6 +25,9 @@ class Tool:
 
 
 def run_help(argv: list[str]) -> str:
+    cached = os.environ.get("EB_LOCAL_TEST_CLI_HELP_FILE")
+    if cached:
+        return pathlib.Path(cached).read_text()
     cp = subprocess.run(argv + ["--help"], check=False, capture_output=True, text=True)
     if cp.returncode != 0:
         raise RuntimeError(f"{' '.join(shlex.quote(x) for x in argv + ['--help'])} failed: {cp.stderr.strip()}")

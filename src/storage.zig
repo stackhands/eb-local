@@ -1075,8 +1075,8 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
     defer releaseLock(&holder) catch unreachable;
 
     var msg2: []const u8 = "";
-    try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 40, false, &msg2));
-    try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 40 ms") != null);
+    try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 5, false, &msg2));
+    try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 5 ms") != null);
 
     try releaseLock(&holder);
     var again: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg2)) {

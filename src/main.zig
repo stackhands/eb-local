@@ -2832,6 +2832,7 @@ var first_signal = std.atomic.Value(u32).init(0);
 /// interactive cancellation past sub-second responsiveness when a descendant
 /// ignores `SIGINT`, `SIGTERM`, or `SIGHUP`.
 const group_settle_grace_ms: i64 = 500;
+var test_group_grace_ms: i64 = 0;
 
 /// How long to keep sending SIGKILL and reaping after the grace period.
 /// This is the bound `proc.stopGroup` uses. A child in uninterruptible
@@ -3220,11 +3221,13 @@ fn noteLiveTimeout(pgid: linux.pid_t) void {
 }
 
 fn graceBudgetMs() i64 {
+    const override = test_group_grace_ms;
     if (comptime build_options.test_ops) {
         if (settle_probe) |probe| {
             if (probe.force_kill) return 0;
             if (probe.grace_ms >= 0) return probe.grace_ms;
         }
+        if (override > 0) return override;
     }
     return group_settle_grace_ms;
 }
@@ -7191,6 +7194,7 @@ fn runMain(init: std.process.Init) u8 {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_REDACT_ERRNO"))) |v| storage.test_redact_errno = storage.testErrno(v);
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_ERRNO"))) |v| storage.test_workspace_errno = storage.testErrno(v);
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_WRITE_ERRNO"))) |v| storage.test_write_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_GROUP_GRACE_MS"))) |v| test_group_grace_ms = std.fmt.parseInt(i64, v, 10) catch 0;
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
