@@ -4412,7 +4412,7 @@ fn cmdMaskRun(c: Ctx, g: Global, args: []const []const u8) u8 {
     const a = c.a;
     const plan = maskDecide(c, g, false);
     const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
-    const dir = fsx.mkdtemp(a, tmp, "eb-local-mask-") catch |e| die("cannot make a directory in {s} ({s})", .{ tmp, sys.describe(e) });
+    const dir = fsx.mkdtemp(a, tmp, "eb-local-mask-") catch |e| die("cannot make a directory in {s} ({s})", .{ tmp, @errorName(e) });
     defer fsx.deleteTree(a, fsx.cwd, dir) catch {};
     const masked = switch (maskMaterialize(c, plan, dir)) {
         .ok => |m| m,

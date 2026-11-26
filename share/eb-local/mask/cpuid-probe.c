@@ -26,9 +26,9 @@ int main(void)
     memcpy(vendor + 8, &c, 4);
     vendor[12] = 0;
     __cpuid(1, a, b, c, d);
-    unsigned family = (a >> 8) & 0xf, model = (a >> 4) & 0xf;
-    if (family == 0xf) family += (a >> 20) & 0xff;
-    if (family == 0xf || family == 0x6) model += ((a >> 16) & 0xf) << 4;
+    unsigned base = (a >> 8) & 0xf, family = base, model = (a >> 4) & 0xf;
+    if (base == 0xf) family += (a >> 20) & 0xff;
+    if (base == 0xf || base == 0x6) model += ((a >> 16) & 0xf) << 4;
     /* ARCH_GET_CPUID gives 0 while CPUID faults. */
     long mode = syscall(SYS_arch_prctl, ARCH_GET_CPUID, 0);
     printf("vendor=%s family=%u model=%u faulting=%s\n", vendor, family, model, mode == 0 ? "on" : "off");
