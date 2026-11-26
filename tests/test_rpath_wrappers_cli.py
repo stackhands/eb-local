@@ -345,15 +345,11 @@ class RpathWrappersCli(unittest.TestCase):
         self.assertEqual(middle.stderr, "")
         self.assertEqual(self.log.read_text(encoding="utf-8"), "")
 
-    def test_tmpfs_enospc_exits_two_and_cleans_wrapper_tree(self):
-        mnt = hostile_fs.enter_full_tmpfs(self)
-        if mnt is None:
-            return
-        got = self.run_cmd(["--for", "gcc"], XDG_CACHE_HOME=str(mnt))
+    def test_enospc_on_the_wrapper_write_exits_two_and_cleans_the_tree(self):
+        got = self.run_cmd(["--for", "gcc"], EB_LOCAL_TEST_WRITE_ERRNO="ENOSPC")
         self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
         self.assertEqual(got.stdout, "")
         self.assertIn("cannot write RPATH wrappers", got.stderr)
-
 
 if __name__ == "__main__":
     unittest.main()

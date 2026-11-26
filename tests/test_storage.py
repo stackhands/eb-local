@@ -261,16 +261,29 @@ class StorageControls(StorageFixture):
             )
         )
 
-    def test_tmpdir_world_writable_workspace_parent_is_refused(self):
-        tmpdir = self.root / "tmp"
-        parent = tmpdir / f"eb-local-{os.getuid()}"
-        parent.mkdir(parents=True)
-        parent.chmod(0o777)
-        self.config.write_text("# workstation\n")
-        run = self.run_wrapper(SLURM_JOB_ID="", TMPDIR=str(tmpdir))
-        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
-        self.assertIn("must not be writable by group or others", run.stderr)
-        self.assertFalse((self.root / "eb.json").exists())
+    def test_world_writable_workspace_parent_is_refused(self):
+        uid = os.getuid()
+        rows = [
+            (
+                "tmpdir",
+                self.root / "tmp" / f"eb-local-{uid}",
+                {"SLURM_JOB_ID": "", "TMPDIR": str(self.root / "tmp")},
+            ),
+            (
+                "xdg",
+                self.root / "cache" / "eb-local",
+                {"SLURM_JOB_ID": "", "TMPDIR": "", "XDG_CACHE_HOME": str(self.root / "cache")},
+            ),
+        ]
+        for name, parent, extra in rows:
+            with self.subTest(parent=name):
+                parent.mkdir(parents=True)
+                parent.chmod(0o777)
+                self.config.write_text("# workstation\n")
+                run = self.run_wrapper(**extra)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertIn("must not be writable by group or others", run.stderr)
+                self.assertFalse((self.root / "eb.json").exists())
 
     def test_tmpdir_symlinked_workspace_parent_is_refused(self):
         tmpdir = self.root / "tmp"
@@ -284,19 +297,6 @@ class StorageControls(StorageFixture):
         run = self.run_wrapper(SLURM_JOB_ID="", TMPDIR=str(tmpdir))
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn("symbolic link", run.stderr)
-        self.assertFalse((self.root / "eb.json").exists())
-
-    def test_xdg_world_writable_workspace_parent_is_refused(self):
-        cache = self.root / "cache"
-        parent = cache / "eb-local"
-        parent.mkdir(parents=True)
-        parent.chmod(0o777)
-        self.config.write_text("# workstation\n")
-        run = self.run_wrapper(
-            SLURM_JOB_ID="", TMPDIR="", XDG_CACHE_HOME=str(cache),
-        )
-        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
-        self.assertIn("must not be writable by group or others", run.stderr)
         self.assertFalse((self.root / "eb.json").exists())
 
     def test_workstation_ignores_tmpdir_on_tmpfs(self):
