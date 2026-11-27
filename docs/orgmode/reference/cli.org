@@ -295,6 +295,7 @@ The flags reach the C, C++ and Fortran compilers through EasyBuild's toolchain; 
 An easyconfig with the =SYSTEM= toolchain keeps its options and gets only the suffix.
 Dependencies build as usual.
 =--explain= shows the variant as =EB_LOCAL_VARIANT= and =EB_LOCAL_VARIANT_BLOCK=, the lines appended.
+With another command, including =eb=, =env=, =config=, =profiles= and =dev=, it is refused: those would otherwise run as if it were not there, and =eb= would install the optimised module. =submit= keeps it and puts it on the batch command.
 [[file:../howto/build-for-profiling.org][Build software to profile or debug]] uses both.
 
 ** eb
