@@ -8378,8 +8378,10 @@ fn runMain(init: std.process.Init) u8 {
                 } else if (std.mem.eql(u8, x, "--replace")) {
                     g.replace = true;
                 } else if (std.mem.eql(u8, x, "--lock")) {
+                    if (g.locked) die("dev takes --lock or --locked, not both", .{});
                     g.lock = true;
                 } else if (std.mem.eql(u8, x, "--locked")) {
+                    if (g.lock) die("dev takes --lock or --locked, not both", .{});
                     g.locked = true;
                 } else if (std.mem.eql(u8, x, "--buildenv")) {
                     g.buildenv = value(args, &i, "--buildenv");
