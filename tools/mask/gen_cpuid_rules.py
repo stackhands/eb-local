@@ -1,0 +1,143 @@
+"""Generate a cpuidmask rules file for an x86 CPU target.
+
+The target is described by a reference, the -m options GCC resolved
+-march=native into on that hardware (one per line or whitespace separated), or
+by a GCC -march name, whose disabled -m options `gcc -march=NAME -Q
+--help=target` lists. Every -mno-X becomes a CPUID bit to clear. The bit is
+found through GCC's own tables, nothing written by hand:
+
+  i386-isas.h   option "-mX"     -> FEATURE_X
+  cpuinfo.h     FEATURE_X        -> register and bit_ name, under the CPUID
+                                    leaf and subleaf last queried above it
+  cpuid.h       bit_ name        -> bit mask
+
+    python gen_cpuid_rules.py GCC_SRC_DIR (REFERENCE | --march NAME)
+                              [--signature LEAF1_EAX]
+                              [--vendor GenuineIntel|AuthenticAMD] > rules
+
+GCC_SRC_DIR holds cpuid.h, i386-isas.h and cpuinfo.h of the GCC version the
+reference was recorded with. Output lines:
+  clear LEAF SUB REG MASK     # -mno-X
+  replace LEAF SUB REG VALUE  # signature, vendor
+and a trailer listing -mno- options with no CPUID bit (XCR0-gated, or not a
+CPUID feature), which a mask cannot express.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+REGS = {"eax": 0, "ebx": 1, "ecx": 2, "edx": 3}
+
+# -mabm and -mlzcnt read one CPUID bit, and every target here has LZCNT, so a
+# target whose -march leaves -mabm out must not lose the bit.
+KEEP = {"-mno-abm"}
+
+
+def bit_masks(cpuid_h):
+    masks = {}
+    for m in re.finditer(r"#define\s+(bit_\w+)\s+\(\s*(\d+)u?\s*<<\s*(\d+)\s*\)", open(cpuid_h).read()):
+        masks[m.group(1)] = int(m.group(2)) << int(m.group(3))
+    return masks
+
+
+def option_features(isas_h):
+    opts = {}
+    for m in re.finditer(r'ISA_NAMES_TABLE_ENTRY\s*\(\s*"[^"]*"\s*,\s*(FEATURE_\w+)\s*,\s*\w+\s*,\s*"(-m[\w.-]+)"',
+                         open(isas_h).read()):
+        opts[m.group(2)] = m.group(1)
+    return opts
+
+
+def feature_bits(cpuinfo_h):
+    """FEATURE_X -> list of (leaf, sub, reg, bit_name), from get_available_features."""
+    text = open(cpuinfo_h).read()
+    # the definition starts at the beginning of a line (GNU style)
+    start = re.search(r"^get_available_features\b", text, re.M).start()
+    leaf, sub = 1, 0
+    found, pending = {}, None
+    for line in text[start:].splitlines():
+        call = re.search(r"__cpuid_count\s*\(\s*(0x[0-9a-fA-F]+|\d+)\s*,\s*(0x[0-9a-fA-F]+|\d+)", line)
+        call1 = re.search(r"__cpuid\s*\(\s*(0x[0-9a-fA-F]+|\d+)\s*,", line)
+        if call:
+            leaf, sub = int(call.group(1), 0), int(call.group(2), 0)
+        elif call1:
+            leaf, sub = int(call1.group(1), 0), 0
+        test = re.search(r"\bif\s*\(\s*(eax|ebx|ecx|edx)\s*&\s*(bit_\w+)\s*\)", line)
+        if test:
+            pending = (leaf, sub, test.group(1), test.group(2))
+        setf = re.search(r"set_feature\s*\(\s*(FEATURE_\w+)", line)
+        if setf and pending:
+            found.setdefault(setf.group(1), []).append(pending)
+            pending = None
+        elif not test and line.strip() and not setf:
+            pending = None
+        if line.startswith("}"):
+            break
+    return found
+
+
+def reference_tokens(a):
+    """The -m options of the reference, as -mno-X for each feature it lacks."""
+    if a.march:
+        out = subprocess.run(["gcc", "-march=" + a.march, "-Q", "--help=target"], check=True,
+                             capture_output=True, text=True).stdout
+        for m in re.finditer(r"^\s+(-m[\w.-]+)\s+\[disabled\]", out, re.M):
+            yield "-mno-" + m.group(1)[2:]
+        return
+    if not a.reference:
+        sys.exit("give a REFERENCE file or --march NAME")
+    for line in open(a.reference):
+        yield from line.split()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("gcc_src")
+    ap.add_argument("reference", nargs="?")
+    ap.add_argument("--march", help="a GCC -march name; its disabled -m options are the reference")
+    ap.add_argument("--signature", help="leaf 1 and 0x80000001 EAX, e.g. 0x00A10F11")
+    ap.add_argument("--vendor", choices=["GenuineIntel", "AuthenticAMD"])
+    a = ap.parse_args()
+    masks = bit_masks(os.path.join(a.gcc_src, "cpuid.h"))
+    opts = option_features(os.path.join(a.gcc_src, "i386-isas.h"))
+    bits = feature_bits(os.path.join(a.gcc_src, "cpuinfo.h"))
+    clear, unmapped = {}, []
+    for tok in reference_tokens(a):
+        if not tok.startswith("-mno-") or tok in KEEP:
+            continue
+        feat = opts.get("-m" + tok[5:])
+        if not feat:
+            continue  # not an ISA feature: a tuning or ABI option
+        where = bits.get(feat, [])
+        if not where:
+            unmapped.append(tok)
+            continue
+        for leaf, sub, reg, bname in where:
+            key = (leaf, sub, REGS[reg])
+            clear.setdefault(key, [0, []])
+            clear[key][0] |= masks[bname]
+            clear[key][1].append(tok[5:])
+    print(f"# generated by gen_cpuid_rules.py from {a.march and 'gcc -march=' + a.march or os.path.basename(a.reference)}")
+    if a.vendor:
+        v = a.vendor.encode()
+        for reg, chunk in ((1, v[0:4]), (3, v[4:8]), (2, v[8:12])):
+            print(f"replace 0x0 0 {reg} {int.from_bytes(chunk, 'little'):#010x}")
+    intel = a.vendor == "GenuineIntel"
+    if intel:
+        # Intel leaves the extended vendor string and signature empty
+        for reg in (1, 2, 3):
+            print(f"replace 0x80000000 0 {reg} 0x00000000")
+        print("replace 0x80000001 0 0 0x00000000")
+    if a.signature:
+        print(f"replace 0x1 0 0 {a.signature}")
+        if not intel:
+            print(f"replace 0x80000001 0 0 {a.signature}")
+    for (leaf, sub, reg), (mask, names) in sorted(clear.items()):
+        print(f"clear {leaf:#x} {sub} {reg} {mask:#010x}  # {' '.join(sorted(set(names)))}")
+    print(f"# no CPUID bit for: {' '.join(unmapped) if unmapped else '(none)'}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

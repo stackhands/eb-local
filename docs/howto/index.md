@@ -20,6 +20,7 @@ eb-without-a-site-file
 build-for-every-node-type
 build-against-a-site-gpu-module
 build-for-profiling
+build-for-another-cpu
 install-what-eessi-lacks
 find-what-is-wrong
 refresh-the-module-cache

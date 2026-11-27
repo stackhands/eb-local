@@ -1,0 +1,111 @@
+# The CPU targets `eb-local --cpu-target` can present on a host that has
+# another one, by the cpuid route. gen_profiles.py turns this file and
+# rules/NAME.rules into share/eb-local/mask/profiles.conf.
+#
+# x86_64 targets: `family`, `model` and `model_name` are the /proc/cpuinfo
+# fields; `rules` names the CPUID rule file (gen_cpuid_rules.py); `drop_flags`
+# are the /proc/cpuinfo flags that go with the cleared CPUID bits;
+# `host_vendors` are the CPU vendors whose hosts the rules can present the
+# target on (a rule file that sets the vendor string reaches the other
+# vendor); `needs` are flags the host must have and a mask cannot add.
+# aarch64 targets: `cpu_part` and `features` are the /proc/cpuinfo fields,
+# `gcc_cpu` is the -mcpu value GCC resolves from them, and the hardware
+# capability words come from `features`.
+
+[zen2]
+subdir = "x86_64/amd/zen2"
+arch = "x86_64"
+vendor = "AuthenticAMD"
+family = 23
+model = 49
+model_name = "AMD EPYC-Rome (eb-local mask)"
+gcc_march = "znver2"
+host_vendors = ["AuthenticAMD"]
+drop_flags = ["avx512_vp2intersect", "avx_vnni", "movdiri", "movdir64b", "avx512f", "avx512dq", "avx512ifma", "avx512cd", "avx512bw", "avx512vl", "avx512_bf16", "avx512vbmi", "avx512_vbmi2", "gfni", "avx512_vnni", "avx512_bitalg", "avx512_vpopcntdq", "pku", "ospke", "vaes", "vpclmulqdq"]
+
+[zen3]
+subdir = "x86_64/amd/zen3"
+arch = "x86_64"
+vendor = "AuthenticAMD"
+family = 25
+model = 1
+model_name = "AMD EPYC-Milan (eb-local mask)"
+gcc_march = "znver3"
+host_vendors = ["AuthenticAMD"]
+drop_flags = ["avx512_vp2intersect", "avx_vnni", "movdiri", "movdir64b", "avx512f", "avx512dq", "avx512ifma", "avx512cd", "avx512bw", "avx512vl", "avx512_bf16", "avx512vbmi", "avx512_vbmi2", "gfni", "avx512_vnni", "avx512_bitalg", "avx512_vpopcntdq"]
+
+[zen4]
+subdir = "x86_64/amd/zen4"
+arch = "x86_64"
+vendor = "AuthenticAMD"
+family = 25
+model = 17
+model_name = "AMD EPYC-Genoa (eb-local mask)"
+gcc_march = "znver4"
+host_vendors = ["AuthenticAMD"]
+needs = ["avx512f", "avx512_bf16"]
+drop_flags = ["avx512_vp2intersect", "avx_vnni", "movdiri", "movdir64b"]
+
+[skylake_avx512]
+subdir = "x86_64/intel/skylake_avx512"
+arch = "x86_64"
+vendor = "GenuineIntel"
+family = 6
+model = 85
+model_name = "Intel Xeon Skylake-SP (eb-local mask)"
+gcc_march = "skylake-avx512"
+host_vendors = ["AuthenticAMD", "GenuineIntel"]
+needs = ["avx512f"]
+drop_flags = ["avx512_vp2intersect", "avx_vnni", "movdiri", "movdir64b", "avx512_bf16", "sse4a", "misalignsse", "clzero", "mwaitx", "rdpru", "avx512ifma", "avx512vbmi", "avx512_vbmi2", "avx512_vnni", "avx512_bitalg", "avx512_vpopcntdq", "gfni", "vaes", "vpclmulqdq", "sha_ni", "wbnoinvd", "rdpid"]
+
+[cascadelake]
+subdir = "x86_64/intel/cascadelake"
+arch = "x86_64"
+vendor = "GenuineIntel"
+family = 6
+model = 85
+model_name = "Intel Xeon Cascade Lake-SP (eb-local mask)"
+gcc_march = "cascadelake"
+host_vendors = ["AuthenticAMD", "GenuineIntel"]
+needs = ["avx512_vnni"]
+drop_flags = ["avx512_vp2intersect", "avx_vnni", "movdiri", "movdir64b", "avx512_bf16", "sse4a", "misalignsse", "clzero", "mwaitx", "rdpru", "avx512ifma", "avx512vbmi", "avx512_vbmi2", "avx512_bitalg", "avx512_vpopcntdq", "gfni", "vaes", "vpclmulqdq", "sha_ni", "wbnoinvd", "rdpid"]
+
+[icelake]
+subdir = "x86_64/intel/icelake"
+arch = "x86_64"
+vendor = "GenuineIntel"
+family = 6
+model = 106
+model_name = "Intel Xeon Ice Lake-SP (eb-local mask)"
+gcc_march = "icelake-server"
+host_vendors = ["AuthenticAMD", "GenuineIntel"]
+needs = ["avx512_vbmi2"]
+drop_flags = ["avx512_vp2intersect", "avx_vnni", "movdiri", "movdir64b", "avx512_bf16", "sse4a", "misalignsse", "clzero", "mwaitx", "rdpru"]
+
+[sapphirerapids]
+subdir = "x86_64/intel/sapphirerapids"
+arch = "x86_64"
+vendor = "GenuineIntel"
+family = 6
+model = 143
+model_name = "Intel Xeon Sapphire Rapids (eb-local mask)"
+gcc_march = "sapphirerapids"
+host_vendors = ["AuthenticAMD", "GenuineIntel"]
+needs = ["avx512_fp16", "amx_tile", "amx_int8", "amx_bf16"]
+drop_flags = ["avx512_vp2intersect", "sse4a", "misalignsse", "clzero", "mwaitx", "rdpru"]
+
+[neoverse_n1]
+subdir = "aarch64/neoverse_n1"
+arch = "aarch64"
+cpu_part = "0xd0c"
+gcc_cpu = "neoverse-n1"
+features = ["fp", "asimd", "evtstrm", "aes", "pmull", "sha1", "sha2", "crc32", "atomics", "fphp", "asimdhp", "cpuid", "asimdrdm", "lrcpc", "dcpop", "asimddp", "ssbs"]
+
+[aarch64_generic]
+subdir = "aarch64/generic"
+arch = "aarch64"
+# An Armv8.0 core (Cortex-A57): GCC builds -mcpu=native from the part and
+# keeps every extension its cpuinfo strings name, so a newer part would keep SVE.
+cpu_part = "0xd07"
+gcc_cpu = "cortex-a57"
+features = ["fp", "asimd", "evtstrm", "cpuid"]
