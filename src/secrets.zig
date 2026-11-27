@@ -246,10 +246,83 @@ fn containsAny(hay: []const u8, forms: []const Form) bool {
 /// redacted, and a build that has one is told so.
 pub const min_redacted_len = 4;
 
+const Hit = struct {
+    at: usize,
+    len: usize,
+    name: []const u8,
+};
+
+fn formFind(text: []const u8, f: Form) ?usize {
+    if (f.bytes) |b| return std.mem.indexOf(u8, text, b);
+    return findPercent(text, f.value);
+}
+
+/// The leftmost match in `window`, and the longest one when several start
+/// at that byte.
+fn leftmostLongest(window: []const u8, forms: []const Form) ?Hit {
+    var best_at: usize = window.len;
+    var best_len: usize = 0;
+    var best_name: []const u8 = "";
+    for (forms) |f| {
+        const at = formFind(window, f) orelse continue;
+        const n = formLen(window[at..], f) orelse continue;
+        if (n < min_redacted_len) continue;
+        if (at < best_at or (at == best_at and n > best_len)) {
+            best_at = at;
+            best_len = n;
+            best_name = f.name;
+        }
+    }
+    if (best_len == 0) return null;
+    return .{ .at = best_at, .len = best_len, .name = best_name };
+}
+
+/// `early` extended through every match that overlaps the growing span.
+/// The cut starts at `early` and ends at the furthest end. A match of any
+/// length counts, including one of the same length. The name is the longest
+/// match, and the earlier one when the lengths are equal.
+fn mergedSpan(window: []const u8, early: Hit, forms: []const Form) Hit {
+    var end = early.at + early.len;
+    var name = early.name;
+    var best_len = early.len;
+    var best_at = early.at;
+    var grew = true;
+    while (grew) {
+        const before = end;
+        for (forms) |f| {
+            var from: usize = early.at;
+            while (from < end) {
+                const rel = formFind(window[from..], f) orelse break;
+                const hit = from + rel;
+                if (hit >= end) break;
+                const n = formLen(window[hit..], f) orelse {
+                    from = hit + 1;
+                    continue;
+                };
+                if (n < min_redacted_len) {
+                    from = hit + 1;
+                    continue;
+                }
+                if (n > best_len or (n == best_len and hit < best_at)) {
+                    best_len = n;
+                    best_at = hit;
+                    name = f.name;
+                }
+                const hit_end = hit + n;
+                if (hit_end > end) end = hit_end;
+                from = hit + 1;
+            }
+        }
+        grew = end > before;
+    }
+    return .{ .at = early.at, .len = end - early.at, .name = name };
+}
+
 /// Replace every value, in each of its forms, in `bytes`; null when none occurs.
-/// The longest form wins where several start at the same byte, so a shorter
-/// secret that is a prefix of a longer one does not leave the rest behind.
-/// Percent-encoding matches either hex case.
+/// Where matches overlap, the cut starts at the earliest start and runs
+/// through the furthest end, so the overlap is removed whole. The longest
+/// form wins where several start at the same byte. Percent-encoding matches
+/// either hex case.
 pub fn redactText(a: Allocator, bytes: []const u8, values: []const Resolved) Allocator.Error!?[]u8 {
     var forms: std.ArrayList(Form) = .empty;
     for (values) |v| {
@@ -271,27 +344,16 @@ pub fn redactText(a: Allocator, bytes: []const u8, values: []const Resolved) All
     var i: usize = 0;
     var changed = false;
     while (i < bytes.len) {
-        var best_at: usize = bytes.len;
-        var best_len: usize = 0;
-        var best_name: []const u8 = "";
-        for (forms.items) |f| {
-            const from = if (f.bytes) |b| std.mem.indexOf(u8, bytes[i..], b) else findPercent(bytes[i..], f.value);
-            const at = from orelse continue;
-            const n = formLen(bytes[i + at ..], f).?;
-            if (n < min_redacted_len) continue;
-            if (at < best_at or (at == best_at and n > best_len)) {
-                best_at = at;
-                best_len = n;
-                best_name = f.name;
-            }
-        }
-        if (best_len == 0) {
-            try out.appendSlice(a, bytes[i..]);
+        const window = bytes[i..];
+        const early = leftmostLongest(window, forms.items) orelse {
+            try out.appendSlice(a, window);
             break;
-        }
-        try out.appendSlice(a, bytes[i .. i + best_at]);
-        try out.appendSlice(a, markers.get(best_name).?);
-        i += best_at + best_len;
+        };
+        // Bytes before the span hold no match. The span itself is one cut.
+        const span = mergedSpan(window, early, forms.items);
+        try out.appendSlice(a, window[0..span.at]);
+        try out.appendSlice(a, markers.get(span.name).?);
+        i += span.at + span.len;
         changed = true;
     }
     if (!changed) {
@@ -726,6 +788,101 @@ test "a shorter secret does not leave the tail of a longer one" {
     try testing.expect(std.mem.indexOf(u8, clean, "s3cret") == null);
     try testing.expect(std.mem.indexOf(u8, clean, "-value") == null);
     try testing.expect(std.mem.indexOf(u8, clean, "<secret LONG removed by eb-local>") != null);
+}
+
+test "a shorter match that starts earlier does not leave the tail of a longer secret" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prefixed = [_]Resolved{
+        .{ .name = "SHORT", .value = "aaaa" },
+        .{ .name = "LONG", .value = "aaaa-token-99" },
+    };
+    const overlap = (try redactText(a, "aaaaa-token-99", &prefixed)).?;
+    try testing.expect(std.mem.indexOf(u8, overlap, "aaaa") == null);
+    try testing.expect(std.mem.indexOf(u8, overlap, "-token-99") == null);
+    try testing.expect(std.mem.indexOf(u8, overlap, "<secret LONG removed by eb-local>") != null);
+    try testing.expectEqualStrings("<secret LONG removed by eb-local>", overlap);
+
+    const crossed = [_]Resolved{
+        .{ .name = "SHORT", .value = "xxab" },
+        .{ .name = "LONG", .value = "abcdefg-secret" },
+    };
+    const split = (try redactText(a, "xxabcdefg-secret", &crossed)).?;
+    try testing.expect(std.mem.indexOf(u8, split, "xxab") == null);
+    try testing.expect(std.mem.indexOf(u8, split, "cdefg-secret") == null);
+    try testing.expect(std.mem.indexOf(u8, split, "<secret LONG removed by eb-local>") != null);
+    try testing.expectEqualStrings("<secret LONG removed by eb-local>", split);
+}
+
+test "a chain of overlapping secrets is removed whole" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]Resolved{
+        .{ .name = "A", .value = "aaaa" },
+        .{ .name = "B", .value = "aaBBBBBB" },
+        .{ .name = "C", .value = "BBBBBBSECRET" },
+    };
+    const clean = (try redactText(a, "aaaaBBBBBBSECRET", &values)).?;
+    try testing.expectEqualStrings("<secret C removed by eb-local>", clean);
+    try testing.expect(std.mem.indexOf(u8, clean, "aaaa") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "BBBBBB") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "SECRET") == null);
+}
+
+test "a secret that starts where an overlap ends is removed whole" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]Resolved{
+        .{ .name = "S1", .value = "s3cr" },
+        .{ .name = "S2", .value = "3cr-TOKEN" },
+        .{ .name = "S3", .value = "-TOKEN-AND-MORE-SECRET" },
+    };
+    const clean = (try redactText(a, "s3cr-TOKEN-AND-MORE-SECRET", &values)).?;
+    try testing.expectEqualStrings("<secret S3 removed by eb-local>", clean);
+    try testing.expect(std.mem.indexOf(u8, clean, "s3cr") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "TOKEN") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "SECRET") == null);
+}
+
+test "equal length overlapping secrets are removed whole" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]Resolved{
+        .{ .name = "LEFT", .value = "0123456789" },
+        .{ .name = "RIGHT", .value = "56789ABCDE" },
+    };
+    const clean = (try redactText(a, "0123456789ABCDE", &values)).?;
+    try testing.expectEqualStrings("<secret LEFT removed by eb-local>", clean);
+    try testing.expect(std.mem.indexOf(u8, clean, "0123456789") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "ABCDE") == null);
+}
+
+test "a secret covering password and SECRET-VALUE is removed whole" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const head = [_]Resolved{
+        .{ .name = "BOTH", .value = "password-SE" },
+        .{ .name = "LONG", .value = "SECRET-VALUE" },
+    };
+    const leaked = (try redactText(a, "password-SECRET-VALUE", &head)).?;
+    try testing.expectEqualStrings("<secret LONG removed by eb-local>", leaked);
+    try testing.expect(std.mem.indexOf(u8, leaked, "password-") == null);
+
+    const values = [_]Resolved{
+        .{ .name = "PW", .value = "password" },
+        .{ .name = "SEC", .value = "SECRET-VALUE" },
+        .{ .name = "LONG", .value = "password-SE" },
+    };
+    const clean = (try redactText(a, "password-SECRET-VALUE", &values)).?;
+    try testing.expectEqualStrings("<secret SEC removed by eb-local>", clean);
+    try testing.expect(std.mem.indexOf(u8, clean, "password") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "SECRET-VALUE") == null);
+    try testing.expect(std.mem.indexOf(u8, clean, "password-") == null);
 }
 
 test "the replacement does not contain the value it stands in for" {
