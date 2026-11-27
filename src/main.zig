@@ -2826,7 +2826,7 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
     const sources = configSources(c, g);
     // Loading checks every profile in every file.
     var d: config.Diagnostic = .{};
-    _ = config.load(a, sources, c.env, .{}, &d) catch |e| switch (e) {
+    _ = config.load(a, sources, c.env, .{ .profile = g.profile, .project = g.project, .buildenv = g.buildenv }, &d) catch |e| switch (e) {
         error.Invalid => die("{s}", .{d.message}),
         error.OutOfMemory => oom(),
     };
