@@ -49,7 +49,7 @@ const Allocator = std.mem.Allocator;
 
 const tool = "eb-local";
 /// The version `eb-local --version` prints, and the release it is.
-pub const version = "3.5.0";
+pub const version = "3.6.0";
 
 const usage_text =
     \\eb-local: install and build software on top of EESSI 2026.06, into a

@@ -1,1 +1,0 @@
-`audit-isa` stops with `cannot resolve PATH` when the working directory is gone and PATH is relative, and `__vm-run` reports `cannot resolve the read-only share PATH` and exits 125 in that case, where each reported out of memory or gave no reason.

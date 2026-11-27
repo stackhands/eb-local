@@ -2,6 +2,61 @@
 
 <!-- towncrier release notes start -->
 
+## 3.6.0 (2026-11-27)
+
+### Features
+
+- The internal helper `eb-local __vm-run --mode kvm|tcg --cpu-target TARGET -- COMMAND` runs COMMAND inside a QEMU virtual CPU that presents an EESSI target, as the caller, in the caller's working directory, and refuses, before COMMAND starts, when EESSI archdetect, archspec, `gcc -march=native`, the CPU vendor or `/dev/fd` do not name the target.
+- `--cpu-target TARGET` builds an easyconfig for another CPU target than the build host's, with `--mask auto|cpuid|kvm|tcg` choosing the route. The `cpuid` route runs the build with CPUID faulting and a target `/proc/cpuinfo` in an unprivileged namespace, refuses to build unless EESSI archdetect, archspec, gcc and the CPUID vendor name the target, pins the GROMACS SIMD level to the target, audits the installed tree and records the route in `easybuild/eb-local-build-mode.json`; `doctor --cpu-target` reports what the host can present.
+- `--mask kvm` and `--mask tcg` run the build through `eb-local __vm-run`, and report its statuses 2, 125 and 126 as a refused request, a virtual machine that did not run and a guest CPU that did not read as the target. `--mask-allow-archspec-mismatch` passes `--allow-archspec-mismatch` to the helper and lets the build's preflight accept an archspec name other than the target's, which an aarch64 `--mask tcg` build needs because archspec reads `aarch64` under qemu-user.
+- `--variant perf` and `--variant debug` build the named easyconfig with debug symbols and frame pointers, or unoptimised with debug symbols, as a module whose version ends in `-perf` or `-debug`; `doctor --profiling` reports whether perf may sample and debuggers attach, and finds perf, valgrind and gdb.
+- `eb-local audit-isa PATH --target TARGET` runs `objdump` on the ELF files under PATH. It reports each instruction that needs a CPU feature the EESSI target lacks, per file with counts. It covers x86-64 (AVX-512, AMX) and aarch64 (SVE, SVE2, BF16, I8MM). Packages that choose their instruction set at run time print as dispatch and do not fail the audit; `--allow FILE` replaces that list. Exit 0 means clean, 1 means an instruction exceeds the target, and 2 means a usage or tool error.
+- `eb-local dev` prints the Cargo linker lines that `eb-local eb` already runs. They live in `src/cargo-linker.sh`: a host `CARGO_TARGET_*_LINKER`, `RUSTFLAGS` and the rustc wrappers are dropped, and when `rustc -vV` prints a host, `CARGO_TARGET_<target>_LINKER` is `${CC:-gcc}`. The Zig program embeds that file.
+
+### Fixes
+
+- A failed sync or close while writing `eb-local.lock` leaves the previous lock in place. A new lock is published only after its bytes are durable, and a failed write removes its temporary file.
+- A failed sync or close while writing a submit script is an error, and that script is not handed to sbatch.
+- A signalled build keeps killing and reaping descendants until none remain or ten seconds pass, and if one remains it reports that, exits 1, and does not clean the logs.
+- Avoid reloading the EESSI stack and extension modules when applying a development lock while preserving extension loading for locks written before the install prefix exists.
+- Emit `drop_rpath_wrappers` and `rpath-wrappers` after loading locked modules in `eb-local dev --locked`, covering compiler families without a `buildenv` module such as `llvm-compilers` on EESSI 2026.06. Each `rpath-wrappers` command is checked, and `EB_LOCAL_DEV_PREFIX` is exported only after those commands succeed.
+- The scheduler read an apostrophe in a `#SBATCH` `--output` or
+  `--chdir` path as an opening quote, stopped on the unmatched quote
+  and never submitted the job. `eb-local submit` now double-quotes
+  such a path.
+- `--profile` now selects the profile for `eb-local profiles`. It wins
+  over `EB_LOCAL_PROFILE` and `default_profile`, and an unknown name is
+  refused.
+- `--variant` now works only with a recipe build or `submit`. Other commands refuse it instead of running as if it were absent.
+- `audit-isa` stops with `cannot resolve PATH` when the working directory is gone and PATH is relative, and `__vm-run` reports `cannot resolve the read-only share PATH` and exits 125 in that case, where each reported out of memory or gave no reason.
+- `doctor.approved_prefixes` refuses a path with a parent component or a spelling of the root directory, so `eb-local doctor` and a build with `build.clear_foreign_prefixes` do not treat that spelling as an approved prefix.
+- `eb-local submit` keeps every job script, prints the path it submits, and writes the new script beside one whose path is already taken.
+
+### Documentation
+
+- Document in `docs/howto/compile.md` that the European Environment for Scientific Software Installations (EESSI) 2026.06 includes `buildenv/default-foss-2026.1` and has no `default-lfoss` or `default-intel` build environment.
+- Document in the command reference that `--variant` is accepted before an easyconfig and before `submit`. `submit` keeps the option and puts it on the batch command. Another command refuses it.
+- The README lists the check, rpath-wrappers, lmod-cache, modulerc, overlay and site commands and doctor --cvmfs and --mpi, says clean refuses without rtrash unless --delete is given, and says eb-local builds on a workstation as well as in a Slurm job.
+
+### Miscellaneous
+
+- CI builds a recipe on a GitHub-hosted runner with the EESSI mount and no Slurm, the path a user without a cluster takes.
+- Discover `eb-stack` 0.8.0 or newer from `PATH` when `EB_STACK_BIN` is
+  unset, isolate host `/etc/profile.d/lmod.sh` and `/etc/eb-local` site
+  files in a mount namespace with a user-namespace probe and bounded
+  timeouts, and run the full Python suite with zero skips in the `zig` CI
+  job.
+- Extract the compiler family detection snippet used by `buildenvLines` into a shared helper with no behavior change.
+- Guard the remaining doctor tests that require no site file from host
+  configuration, and cover them in the zero-skip isolation check.
+- Require `zsh`, `eb-stack`, and `unshare` in `ZeroPythonSkips` when `EB_LOCAL_REQUIRE_TOOLS` is set, and skip with a reason otherwise.
+- Run the live EESSI 2026.06 checks in `tests/site/test_dev_locked_eessi.py`
+  outside `python3 -m unittest discover -s tests`. `tests/site` is not a
+  package, so the zero-skip `zig` job does not collect them. Running the
+  file fails when the Zig build or the EESSI init file is absent.
+- The `live-eessi` job in the `zig` workflow runs `tests/site/test_dev_locked_eessi.py` on an EESSI 2026.06 mount.
+
+
 ## 3.5.0 (2026-11-26)
 
 ### Features
