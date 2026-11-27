@@ -4819,8 +4819,14 @@ test "vmStatusMessage maps the helper's own statuses and passes others" {
 }
 
 /// Whether this binary has the `__vm-run` helper the kvm and tcg routes call.
+/// The helper is dispatched before argument parsing and is not a `Command`, so
+/// it is present whenever `vm.zig` is part of this program.
 fn vmHelperKnown() bool {
-    return subcommand("__vm-run") != null;
+    return @hasDecl(vm, "run");
+}
+
+test "the build that includes vm.zig offers the kvm and tcg routes" {
+    try std.testing.expect(vmHelperKnown());
 }
 
 /// Whether this binary has the `audit-isa` command the audit step calls.
