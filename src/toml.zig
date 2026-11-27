@@ -102,19 +102,28 @@ const Parser = struct {
         }
     }
 
-    fn skipComment(p: *Parser) void {
-        if (p.peek() == '#') {
-            while (p.peek()) |c| {
-                if (c == '\n') break;
-                p.pos += 1;
-            }
+    /// A control byte TOML refuses in a string or a comment. Tab is allowed.
+    fn controlChar(c: u8) bool {
+        return std.ascii.isControl(c) and c != '\t';
+    }
+
+    /// A `#` comment runs to the end of the line. Tab is allowed. A bare
+    /// carriage return, the delete character, or any other control byte is
+    /// refused. A carriage return followed by a line feed stays for the caller.
+    fn skipComment(p: *Parser) Error!void {
+        if (p.peek() != '#') return;
+        while (p.peek()) |c| {
+            if (c == '\n') return;
+            if (c == '\r' and p.pos + 1 < p.src.len and p.src[p.pos + 1] == '\n') return;
+            if (controlChar(c)) return p.fail("a control character is in a comment", .{});
+            p.pos += 1;
         }
     }
 
     /// The rest of the line holds nothing but blanks and a comment.
     fn endOfLine(p: *Parser) Error!void {
         p.skipSpace();
-        p.skipComment();
+        try p.skipComment();
         if (p.peek()) |c| {
             if (c == '\r' and p.pos + 1 < p.src.len and p.src[p.pos + 1] == '\n') {
                 p.pos += 2;
@@ -128,7 +137,7 @@ const Parser = struct {
     }
 
     /// Blanks, comments and newlines, inside an array.
-    fn skipWhitespaceAndNewlines(p: *Parser) void {
+    fn skipWhitespaceAndNewlines(p: *Parser) Error!void {
         while (p.peek()) |c| {
             switch (c) {
                 ' ', '\t', '\r' => p.pos += 1,
@@ -136,7 +145,7 @@ const Parser = struct {
                     p.pos += 1;
                     p.line += 1;
                 },
-                '#' => p.skipComment(),
+                '#' => try p.skipComment(),
                 else => return,
             }
         }
@@ -287,7 +296,7 @@ const Parser = struct {
                     }
                 },
                 else => {
-                    if ((c < 0x20 and c != '\t') or c == 0x7f) return p.fail("a control character is in a string", .{});
+                    if (controlChar(c)) return p.fail("a control character is in a string", .{});
                     try out.append(p.a, c);
                 },
             }
@@ -307,7 +316,7 @@ const Parser = struct {
             }
             if (c == '\n') return p.fail("a string is not closed on its line", .{});
             if (c == '\r' and p.pos + 1 < p.src.len and p.src[p.pos + 1] == '\n') return p.fail("a string is not closed on its line", .{});
-            if ((c < 0x20 and c != '\t') or c == 0x7f) return p.fail("a control character is in a string", .{});
+            if (controlChar(c)) return p.fail("a control character is in a string", .{});
             p.pos += 1;
         }
     }
@@ -372,14 +381,14 @@ const Parser = struct {
         if (p.depth > max_depth) return p.fail("arrays are nested more than {d} deep", .{max_depth});
         var items: std.ArrayList(Value) = .empty;
         while (true) {
-            p.skipWhitespaceAndNewlines();
+            try p.skipWhitespaceAndNewlines();
             if (p.peek() == ']') {
                 p.pos += 1;
                 return .{ .array = items.items };
             }
             try items.append(p.a, try p.value());
             try p.count();
-            p.skipWhitespaceAndNewlines();
+            try p.skipWhitespaceAndNewlines();
             const c = p.peek() orelse return p.fail("an array is not closed", .{});
             if (c == ',') {
                 p.pos += 1;
@@ -652,6 +661,25 @@ test "multi-line basic strings follow TOML 1.0 newline and backslash rules" {
     try expectInvalid("x = \"\"\"unclosed\n", 2, "not closed");
     try expectInvalid("x = \"\"\"bad\rline\"\"\"\n", 1, "control character");
     try expectInvalid("\"\"\"k\"\"\" = 1\n", 1, "multi-line");
+}
+
+test "a control character in a comment is refused on its line" {
+    // A bare carriage return is not a newline. It must not hide the next key.
+    try expectInvalid("# note\rprefix = \"/tmp\"\n", 1, "control character");
+    try expectInvalid("prefix = \"/tmp\" # note\rscratch = \"/work\"\n", 1, "control character");
+    try expectInvalid("prefix = \"/tmp\" # note\x7f\n", 1, "control character");
+    try expectInvalid("prefix = \"/tmp\"\n#\x01\n", 2, "control character");
+    try expectInvalid("a = [\n1, # \x1f\n2,\n]\n", 2, "control character");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const crlf = try parseOk(a, "prefix = \"/tmp\" # note\r\nscratch = \"/work\"\n");
+    try std.testing.expectEqualStrings("/tmp", crlf.get("prefix").?.value.string);
+    try std.testing.expectEqualStrings("/work", crlf.get("scratch").?.value.string);
+    const tab = try parseOk(a, "a = 1 #\tstill a comment\nb = 2\n");
+    try std.testing.expectEqual(@as(i64, 1), tab.get("a").?.value.int);
+    try std.testing.expectEqual(@as(i64, 2), tab.get("b").?.value.int);
 }
 
 test "malformed BOM, CRLF unclosed strings, and later-line NUL or non-UTF-8 report exact lines" {
