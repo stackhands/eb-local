@@ -55,7 +55,7 @@ Each directory the build installed has `easybuild/eb-local-build-mode.json`:
   "profile": "x86_64/amd/zen4",
   "host_cpu": "AMD Ryzen 9 9950X 16-Core Processor",
   "kernel": "7.0.13-arch1-1-rg",
-  "eb_local_version": "3.5.0",
+  "eb_local_version": "3.6.0",
   "isa_audit": "pass"
 }
 ```

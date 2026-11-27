@@ -18,7 +18,7 @@ import sys
 import uuid
 
 REPO = "stackhands/eb-local"
-GITHUB = re.compile(r'^git\+https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?#(.+)$')
+GITHUB = re.compile(r'^git\+https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?(?:\?ref=([^#]+))?#(.+)$')
 DEP_HEAD = re.compile(r'\.(\w+)\s*=\s*\.\{')
 URL_RE = re.compile(r'\.url\s*=\s*"([^"]+)"')
 HASH_RE = re.compile(r'\.hash\s*=\s*"([^"]+)"')
@@ -115,7 +115,8 @@ def dependencies(text):
         gm = GITHUB.match(url)
         if not gm:
             raise SystemExit(f"dependency {name}: cannot name {url} as a package URL")
-        repo, ref = gm.groups()
+        repo, tag, commit = gm.groups()
+        ref = tag or commit
         version = ref[1:] if re.fullmatch(r'v\d.*', ref) else ref
         deps.append({
             "type": "library",

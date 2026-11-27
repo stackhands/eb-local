@@ -94,6 +94,31 @@ if binary.ZIG and RUN_VMS:
             self.assertIn("archspec=icelake", run.stderr)
 
         @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
+        def test_kvm_zen2_and_zen3_report_their_compiler_names(self):
+            for target, gcc, archspec in [("x86_64/amd/zen2", "znver2", "zen2"), ("x86_64/amd/zen3", "znver3", "zen3")]:
+                run = self.timed("--mode", "kvm", "--cpu-target", target, "--",
+                                 "bash", "-c", "gcc -march=native -Q --help=target | grep -- '-march='; grep -m1 vendor_id /proc/cpuinfo")
+                self.assertEqual(run.returncode, 0, (target, run.stderr))
+                self.assertIn(gcc, run.stdout)
+                self.assertIn("AuthenticAMD", run.stdout)
+                self.assertIn(f"archdetect={target}", run.stderr)
+                self.assertIn(f"archspec={archspec}", run.stderr)
+
+        @unittest.skipUnless(HOST == "x86_64", "the aarch64 emulation runs on an x86_64 host here")
+        def test_tcg_sve_vector_length_follows_the_core(self):
+            probe = ("printf '%s\\n' '#include <stdio.h>' '#include <sys/prctl.h>' "
+                     "'int main(void){printf(\"vl_bytes=%d\\n\", prctl(51) & 0xffff);return 0;}' > /tmp/vl.c; "
+                     "gcc -mcpu=native -### -c /tmp/vl.c 2>&1 | grep -o -- '-mcpu=[^ ]*' | head -n 1; "
+                     "gcc -o /tmp/vl /tmp/vl.c && /tmp/vl")
+            for target, cpu, vl in [("aarch64/neoverse_v1", "neoverse-v1", 32), ("aarch64/a64fx", "a64fx", 64)]:
+                run = self.timed("--mode", "tcg", "--cpu-target", target, "--allow-archspec-mismatch", "--",
+                                 "bash", "-c", probe)
+                self.assertEqual(run.returncode, 0, (target, run.stderr))
+                self.assertIn(cpu, run.stdout)
+                self.assertIn(f"vl_bytes={vl}", run.stdout)
+                self.assertIn(f"archdetect={target}", run.stderr)
+
+        @unittest.skipUnless(HOST == "x86_64", "KVM targets are of the host architecture")
         def test_a_cpu_view_that_does_not_name_the_target_is_refused_before_the_command(self):
             marker = f"/tmp/eb-local-vm-test-{os.getpid()}"
             run = self.timed("--mode", "kvm", "--cpu-target", "x86_64/amd/zen4", "--",

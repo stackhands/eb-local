@@ -266,10 +266,10 @@ The version line names the program, its version, the target and optimize mode of
 Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 
 ```text
-eb-local 3.5.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
+eb-local 3.6.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
 
-Between `v3.4.0` and `v3.5.0` the command line adds `--workstation`; no flag was removed or renamed.
+Between `v3.5.0` and `v3.6.0` the command line adds `--variant`, `--cpu-target`, `--mask`, `--mask-allow-archspec-mismatch`, `--no-audit`, `doctor --profiling` and the `audit-isa` command; no flag was removed or renamed.
 
 ## Commands
 

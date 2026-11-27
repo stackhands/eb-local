@@ -1,0 +1,89 @@
+name: arm-mask
+# The cpuid route's aarch64 mask on real Arm silicon. ubuntu-24.04-arm runs on
+# Neoverse cores, so getauxval, /proc/cpuinfo and gcc -mcpu=native here are the
+# real readings the mask rewrites.
+on: [push, pull_request]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  arm-mask:
+    name: arm-mask
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Allow the user and mount namespaces the mask runs in
+        run: |
+          set -euo pipefail
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Which Arm core this runner is
+        run: |
+          set -euo pipefail
+          uname -m
+          grep -m1 'CPU implementer' /proc/cpuinfo
+          grep -m1 'CPU part' /proc/cpuinfo
+          grep -m1 '^Features' /proc/cpuinfo
+          lscpu | sed -n 's/^Model name: */model name: /p'
+      - name: release build
+        run: zig build --release=safe --prefix "$RUNNER_TEMP/eb-local"
+      - name: doctor reports the cpuid route for aarch64
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/eb-local/bin/eb-local" doctor --cpu-target aarch64/neoverse_n1 || true
+      - name: getauxval, /proc/cpuinfo and gcc -mcpu=native name the target under the mask
+        run: tools/mask/check_arm_mask.sh "$RUNNER_TEMP/eb-local/bin/eb-local" aarch64/neoverse_n1 aarch64/generic
+  # The whole path with EESSI mounted: preflight against EESSI archdetect,
+  # archspec and gcc, a build of a recipe, the ISA audit and the provenance record.
+  arm-mask-build:
+    name: arm-mask-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Allow the user and mount namespaces the mask runs in
+        run: |
+          set -euo pipefail
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: release build
+        run: zig build --release=safe --prefix "$RUNNER_TEMP/eb-local"
+      - name: EESSI mount, without initialising EESSI
+        uses: EESSI/github-action-eessi@834df09f7d60de47f10a7cbf59b470d69b9e2852 # v3.4.0
+        with:
+          eessi_stack_version: "2026.06"
+          mount_cvmfs_only: "true"
+      - name: build pigz as a Neoverse N1 on a Neoverse N2
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/eb-local/bin:$PATH"
+          eb-local --workstation --cpu-target aarch64/neoverse_n1 pigz-2.8-GCCcore-15.2.0.eb --robot 2>&1 | tee build.log
+          grep -F 'eb-local: --cpu-target aarch64/neoverse_n1, cpuid route' build.log
+          grep -F 'preflight ok: EESSI archdetect names aarch64/neoverse_n1' build.log
+          grep -F 'preflight ok: archspec names neoverse_n1' build.log
+          grep -F 'preflight ok: gcc -mcpu=native is neoverse-n1' build.log
+          ! grep -F 'preflight FAILED' build.log
+      - name: the install is labelled for the target and the audit passed
+        run: |
+          set -euo pipefail
+          record=$(find "$HOME/eessi/versions" -path '*/aarch64/neoverse_n1/software/pigz/*/easybuild/eb-local-build-mode.json' | head -n 1)
+          test -n "$record"
+          cat "$record"
+          grep -F '"cpu_target": "aarch64/neoverse_n1"' "$record"
+          grep -F '"route": "cpuid"' "$record"
+          grep -F '"isa_audit": "pass"' "$record"
