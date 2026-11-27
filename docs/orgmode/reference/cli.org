@@ -10,7 +10,7 @@ The repository's shell shim delegates every command to this Zig program.
 eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local [OPTION]... --variant perf|debug <easyconfig> [eb options]
-eb-local [OPTION]... --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+eb-local [OPTION]... --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
@@ -58,7 +58,7 @@ directory you own.
                                        build that easyconfig with debug symbols and frame
                                        pointers (perf) or unoptimised (debug), as a module
                                        whose version ends in -perf or -debug
-  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
                                        build for another CPU target on this machine: TARGET is
                                        an EESSI subdirectory (x86_64/amd/zen4) or its last
                                        component (zen4). The build sees that CPU through the
@@ -250,6 +250,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 | =--variant NAME=       | Before an easyconfig: build it as the =perf= or =debug= variant, described in the =--variant= section below. |
 | =--cpu-target TARGET= | Before an easyconfig: build for the CPU target TARGET on this machine, described in the =--cpu-target= section below. |
 | =--mask ROUTE=         | With =--cpu-target=: =auto=, =cpuid=, =kvm= or =tcg=. |
+| =--mask-allow-archspec-mismatch= | With =--cpu-target= on the kvm or tcg route: accept an archspec name that differs from the target. archspec reports =aarch64= under qemu-user for lack of =evtstrm=, so an aarch64 =--mask tcg= build needs it. |
 | =--no-audit=           | With =--cpu-target=: skip the instruction audit after the build. |
 | =-h=, =--help=, =help= | Print the usage on stdout and exit 0.                                                                                                                                          |
 | =--version=            | Print the version line on stdout and exit 0.                                                                                                                                   |
@@ -362,7 +363,7 @@ After a successful build, =eb-local audit-isa DIR --target TARGET= runs on each 
 Each installed directory gets =easybuild/eb-local-build-mode.json=, with =cpu_target=, =route=, =profile=, =host_cpu=, =kernel=, =eb_local_version= and =isa_audit= (=pass=, =fail= or =skipped=).
 
 =--explain= shows the route and the variables it sets, =EB_LOCAL_CPU_TARGET= and =EESSI_SOFTWARE_SUBDIR_OVERRIDE=.
-The =sbatch= lines of =submit=, and the replay hints, carry =--cpu-target=, =--mask= and =--no-audit=.
+The =sbatch= lines of =submit=, and the replay hints, carry =--cpu-target=, =--mask=, =--mask-allow-archspec-mismatch= and =--no-audit=.
 =eb-local doctor --cpu-target TARGET= reports whether CPUID faulting works here, whether =/dev/kvm= and the QEMU binaries exist, and which route =auto= would take.
 
 ** eb

@@ -392,6 +392,8 @@ pub const Observed = struct {
     vendor: ?[]const u8 = null,
     /// Whether CPUID faulting is active in the probe.
     faulting: ?bool = null,
+    /// `--mask-allow-archspec-mismatch`: an archspec name other than the target's is noted, not refused.
+    archspec_allowed: bool = false,
 };
 
 /// One preflight check and what it found.
@@ -429,6 +431,8 @@ pub fn preflight(a: Allocator, p: Profile, route: Route, obs: Observed) []const 
         const want = archspecName(p.subdir);
         if (std.mem.eql(u8, sp, want)) {
             add(&out, a, true, "archspec names {s}", .{want});
+        } else if (obs.archspec_allowed) {
+            add(&out, a, true, "archspec names '{s}', not {s}; accepted by --mask-allow-archspec-mismatch", .{ sp, want });
         } else add(&out, a, false, "archspec names '{s}', not {s}; an easyblock that asks archspec would build for another CPU than the tree is labelled for", .{ sp, want });
     } else add(&out, a, true, "archspec is not importable here; not checked", .{});
     const want_gcc = if (p.arch == .x86_64) p.gcc_march else p.gcc_cpu;
@@ -663,7 +667,7 @@ pub fn namespaceWords(a: Allocator, unshare: []const u8, setpriv: ?[]const u8, f
 }
 
 /// The variables the masked command gets.
-pub fn maskVariables(a: Allocator, p: Profile, libs: Libs, rules_path: []const u8, hooks_path: []const u8, self_exe: []const u8, route: Route) []const [2][]const u8 {
+pub fn maskVariables(a: Allocator, p: Profile, libs: Libs, rules_path: []const u8, hooks_path: []const u8, self_exe: []const u8, route: Route, allow_archspec: bool) []const [2][]const u8 {
     var out: std.ArrayList([2][]const u8) = .empty;
     const add = struct {
         fn f(list: *std.ArrayList([2][]const u8), al: Allocator, k: []const u8, v: []const u8) void {
@@ -672,6 +676,7 @@ pub fn maskVariables(a: Allocator, p: Profile, libs: Libs, rules_path: []const u
     }.f;
     add(&out, a, "EB_LOCAL_CPU_TARGET", p.subdir);
     add(&out, a, "EB_LOCAL_MASK_ROUTE", @tagName(route));
+    if (allow_archspec) add(&out, a, "EB_LOCAL_ALLOW_ARCHSPEC", "1");
     add(&out, a, "EB_LOCAL_PROBE", libs.probe);
     add(&out, a, "EB_LOCAL_SELF", self_exe);
     add(&out, a, "EB_LOCAL_HOOKS_FILE", hooks_path);
@@ -1055,12 +1060,33 @@ test "mask variables set the preload only for the cpuid route" {
             return false;
         }
     }.f;
-    const cp = maskVariables(a, z4, libs, "/w/rules", "/w/hooks.py", "/bin/eb-local", .cpuid);
+    const cp = maskVariables(a, z4, libs, "/w/rules", "/w/hooks.py", "/bin/eb-local", .cpuid, false);
     try testing.expect(has(cp, "LD_PRELOAD"));
     try testing.expect(has(cp, "CPUIDMASK_RULES"));
     try testing.expect(has(cp, "CPUIDMASK_STRICT"));
     try testing.expect(has(cp, "EESSI_SOFTWARE_SUBDIR_OVERRIDE"));
-    const kv = maskVariables(a, z4, libs, "/w/rules", "/w/hooks.py", "/bin/eb-local", .kvm);
+    const kv = maskVariables(a, z4, libs, "/w/rules", "/w/hooks.py", "/bin/eb-local", .kvm, false);
     try testing.expect(!has(kv, "LD_PRELOAD"));
     try testing.expect(has(kv, "EB_LOCAL_CPU_TARGET"));
+}
+
+test "the archspec opt-in reaches the guest variables and relaxes only the archspec check" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n1 = findProfile(testProfiles(a), "aarch64/neoverse_n1").?;
+    const libs: Libs = .{ .preload = "", .probe = "", .dir = "" };
+    const vars = maskVariables(a, n1, libs, "", "/w/hooks.py", "/bin/eb-local", .tcg, true);
+    var found = false;
+    for (vars) |v| if (std.mem.eql(u8, v[0], "EB_LOCAL_ALLOW_ARCHSPEC") and std.mem.eql(u8, v[1], "1")) {
+        found = true;
+    };
+    try testing.expect(found);
+    const seen: Observed = .{ .devfd = true, .archdetect = "aarch64/neoverse_n1:aarch64/generic", .archspec = "aarch64", .gcc = "neoverse-n1" };
+    try testing.expect(refused(preflight(a, n1, .tcg, seen)));
+    var allowed = seen;
+    allowed.archspec_allowed = true;
+    try testing.expect(!refused(preflight(a, n1, .tcg, allowed)));
+    allowed.gcc = "neoverse-v1";
+    try testing.expect(refused(preflight(a, n1, .tcg, allowed)));
 }
