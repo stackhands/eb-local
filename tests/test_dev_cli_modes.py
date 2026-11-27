@@ -165,6 +165,30 @@ class DevCliModes(unittest.TestCase):
     LOADED = "EESSI/2026.06:GCCcore/15.2.0:FFTW/3.3.10-GCC-15.2.0:buildenv/default-GCC-15.2.0"
     RESOLVED = {"LOADEDMODULES": LOADED, "EESSI_SOFTWARE_SUBDIR": "x86_64/amd/zen4", "EESSI_VERSION": "2026.06"}
 
+    def test_lock_and_locked_together_exit_two(self):
+        # The synopsis lists `--lock | --locked`. Both flags used to follow
+        # the locked path, leave the lock file alone, and exit 0.
+        lock = self.root / "eb-local.lock"
+        lock.write_text(
+            '{"schema_version":1,"kind":"dev-lock","stack":"EESSI/2026.06",'
+            '"eessi_version":"2026.06","cpu_target":"x86_64/amd/zen4",'
+            '"accelerator_target":"","modules":["EESSI/2026.06"]}\n',
+            encoding="utf-8",
+        )
+        before = lock.read_text(encoding="utf-8")
+        for args in (
+            ["--lock", "--locked"],
+            ["--locked", "--lock"],
+            ["--lock", "--locked", "FFTW/3.3.10-GCC-15.2.0"],
+        ):
+            with self.subTest(args=args):
+                got = self.run_dev(args)
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertEqual(got.stdout, "")
+                self.assertIn("dev takes --lock or --locked, not both", got.stderr)
+                self.assertNotIn("wrote eb-local.lock", got.stderr)
+                self.assertEqual(lock.read_text(encoding="utf-8"), before)
+
     def test_lock_records_what_the_dev_lines_loaded(self):
         lock = self.root / "eb-local.lock"
         got = self.run_dev(["--lock", "FFTW/3.3.10-GCC-15.2.0"], **self.RESOLVED)
