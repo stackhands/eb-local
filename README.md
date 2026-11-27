@@ -92,6 +92,7 @@ Without `rtrash` on `PATH`, `clean` and `uninstall` refuse and remove nothing un
 ## Other commands
 
 - `eb-local check FILE...` prints a binary's loader, `RPATH` or `RUNPATH`, and where each library it needs resolves, ignoring `LD_LIBRARY_PATH`.
+- `eb-local audit-isa PATH --target TARGET` disassembles the ELF files under PATH and reports every instruction that needs a CPU feature the EESSI target lacks, per file with counts.
 - `eb-local rpath-wrappers` writes RPATH wrappers for the compilers and linkers on `PATH` and prints the lines that put them first.
 - `eb-local lmod-cache` writes Lmod's spider cache and a timestamp one second older, so new modules show in `module avail`: [Refresh the Lmod spider cache](docs/howto/refresh-the-module-cache.md).
 - `eb-local modulerc` writes the defaults, aliases and hidden versions you name to a module tree's `.modulerc.lua`: [Set module defaults and aliases](docs/howto/set-module-defaults-and-aliases.md).

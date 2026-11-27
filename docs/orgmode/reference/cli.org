@@ -18,6 +18,7 @@ eb-local [OPTION]... leave
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
+eb-local audit-isa PATH --target TARGET [--json] [--allow FILE] [--objdump PATH]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
 eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
@@ -97,6 +98,13 @@ directory you own.
                                        the same for every ELF file in those installations,
                                        the dev tree, or DIR; a file that is not ELF is skipped.
                                        --quiet prints a file only when it has a problem
+  eb-local audit-isa PATH --target TARGET [--json] [--allow FILE] [--objdump PATH]
+                                       every instruction under PATH that needs a CPU feature
+                                       TARGET, an EESSI subdirectory such as x86_64/amd/zen3
+                                       or aarch64/neoverse_n1, lacks, per ELF file, with counts;
+                                       exit 1 when there is one. --allow FILE replaces the list
+                                       of packages with run-time dispatch; --objdump names the
+                                       disassembler
   eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
                                        one batch job per node type the site file lists
                                        in build.node_types, each building the recipe for
@@ -458,6 +466,46 @@ It exits 0 when there are no problems, 1 when there are, and 2 when a named file
 A file that is not ELF is not a failure of a tree audit.
 With =--json=, these codes are unchanged; only the summary on stdout is JSON.
 
+** audit-isa
+
+For each ELF file under =PATH=, an installed software prefix or one file, run =objdump= on it and print every instruction that needs a CPU feature the =TARGET= does not have, per file and feature, with a count, the address of the first one and its text.
+=TARGET= is an EESSI software subdirectory: =x86_64/generic=, =x86_64/amd/zen2= to =zen5=, =x86_64/intel/haswell=, =skylake_avx512=, =cascadelake=, =icelake=, =sapphirerapids=, =aarch64/generic=, =neoverse_n1=, =neoverse_v1=, =neoverse_v2=, =a64fx=, =nvidia/grace=, =google/axion= and =aws/graviton2= to =graviton4=.
+A trailing part of a subdirectory that only one ends with, such as =zen3= or =intel/icelake=, names it too.
+
+#+begin_example
+$ eb-local audit-isa /apps/software/GROMACS/2025.4 --target x86_64/amd/zen3
+eb-local audit-isa: target x86_64/amd/zen3, 14 ELF files, 3790170 instructions
+violation: avx512f x139682 in /apps/software/GROMACS/2025.4/lib64/libgromacs.so, first at 0x1a2b40: vaddps zmm0,zmm1,zmm2
+eb-local audit-isa: 139682 zmm instructions
+eb-local audit-isa: 139682 instruction(s) beyond x86_64/amd/zen3 in 1 file(s)
+#+end_example
+
+| Option           | Meaning                                                                                                                           |
+|------------------+-----------------------------------------------------------------------------------------------------------------------------------|
+| =--target=       | The CPU target to audit against. Required.                                                                                        |
+| =--json=         | One line of JSON with =schema_version= 1 and =kind= =audit-isa=. The shape is in [[file:json/audit-isa.schema.json][audit-isa.schema.json]]. |
+| =--allow FILE=   | Replace the list of packages with run-time dispatch. One =PACKAGE feature[,feature...]= per line; =#= starts a comment.          |
+| =--objdump PATH= | The disassembler, a name on =PATH= or a path. Without it, the first candidate for the file's architecture that reads it.          |
+
+Each instruction's mnemonic, encoding (legacy, VEX, EVEX or XOP) and the widest vector register it names select the CPU features it needs from a table generated from the iced-x86 instruction database.
+On aarch64 the table is a list of mnemonic and operand rules for SVE, SVE2, BF16, I8MM, dot product, atomics, crypto, half-precision and pointer authentication outside the hint space.
+The features of each target come from archspec's =microarchitectures.json= and, for x86-64, from the features GCC's =-march= option enables for the same CPU.
+The sources and their versions are in the header of =src/isa/targets.tsv=; =tools/isa_tables/gen.py= writes the tables.
+The shadow-stack instructions =RDSSP= and =INCSSP=, which run as no-operations without a shadow stack, are not violations.
+A feature the tables cannot judge, and a vector mnemonic they do not list, are printed as =unclassified= and never fail the audit.
+
+Code that selects its instruction set at run time holds wider instructions behind a CPU check.
+A violation on a listed feature in a file under =/software/PACKAGE/= is printed as =dispatch=, counted apart, and does not fail the audit.
+The default list, from audits of EESSI trees, names TBB and libomp (RTM, WAITPKG), FFmpeg and x264 (FMA4, XOP), zlib's zlib-ng kernels (AVX-512), OpenSSL, libfabric's DSA provider, NumPy's dispatch kernels and others; =--allow= replaces it.
+
+The audit reads which instructions the file holds, not the vector length an SVE program runs with.
+It decodes executable sections linearly, so data inside one can show as an instruction.
+It needs an =objdump= that reads the file's architecture: binutils' =objdump= (=objdump -i= lists =elf64-x86-64= or =elf64-littleaarch64=), =aarch64-linux-gnu-objdump=, or =llvm-objdump=.
+Files of the other architecture, files that are not ELF, and symbolic links are skipped.
+
+It exits 0 when no instruction exceeds the target, 1 when one does, and 2 when the command line is wrong, no disassembler reads the architecture, or =objdump= fails on a file.
+With =--json= the codes are the same.
+
 ** submit
 
 Send one batch job for each node type in =build.node_types=, each running this eb-local with the same easyconfig, options and configuration.
@@ -701,8 +749,8 @@ A value with a quote, a backslash or a control character is refused.
 | Status  | Meaning                                                                                                                                         |
 |---------+-------------------------------------------------------------------------------------------------------------------------------------------------|
 | 0       | Done, or nothing to do.                                                                                                                         |
-| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =lmod-cache --verify= failed or =lmod-cache --prefix= found no target; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to, or =clean= failed to remove some items or build workspaces; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
-| 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file. |
+| 1       | =check= found a problem; =doctor= printed a =FAIL=; =config --check= could not read a secret or use the project directory; =lmod-cache --verify= failed or =lmod-cache --prefix= found no target; =modulerc --check= would update the file; =overlay materialize --check= would update the outputs; =clean= or =uninstall= had something to remove and no way to, or =clean= failed to remove some items or build workspaces; =audit-isa= found an instruction beyond the target; =rpath-wrappers= found nothing to wrap; =submit=: =sbatch= refused a job. |
+| 2       | Refused, with the reason on stderr after =eb-local:=, or the command line was wrong; a build outside a Slurm job; =check= could not read a file; =audit-isa= found no disassembler for the architecture or =objdump= failed. |
 | 3       | =eb= or =--explain eb=: more than one install variable is set.                                                                                  |
 | N       | A build or =eb=: =eb= exited N.                                                                                                                 |
 
