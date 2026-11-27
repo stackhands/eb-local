@@ -878,6 +878,16 @@ pub fn load(
         if (n > 8) return l.fail("EB_LOCAL_DOCTOR_CVMFS_PARALLEL is an integer from 0 to 8", .{});
         s.cvmfs_parallel = .{ .value = n, .from = "environment EB_LOCAL_DOCTOR_CVMFS_PARALLEL" };
     };
+    // A present empty value clears an [eessi] setting. config --env exports
+    // that empty value so a profile's clear survives where the files are
+    // still read and no profile is selected. Unset leaves the file value.
+    // A non-empty value does too: env and dev print the file value over it.
+    for (s.eessi.items) |*item| {
+        const v = env.get(item.name) orelse continue;
+        if (v.len != 0) continue;
+        item.value = v;
+        item.from = try std.fmt.allocPrint(a, "environment {s}", .{item.name});
+    }
     if (s.build_secrets.value) |names| for (names) |name| {
         for (s.secrets.items) |sec| {
             if (std.mem.eql(u8, sec.name, name)) break;
@@ -1344,6 +1354,35 @@ test "[eessi] settings layer like secrets and refuse the ones eb-local owns" {
     try r.one(&t, "[eessi]\nEESSI_ = \"x\"\n", "install and target");
     try r.one(&t, "[eessi]\nEESSI_X = 1\n", "must be a string");
     try r.one(&t, "[eessi]\nEESSI_X = \"a\\nb\"\n", "one line");
+}
+
+test "a present empty [eessi] variable clears the file and an unset one does not" {
+    var t = Fixture.init();
+    defer t.deinit();
+    const sources = [_]Source{
+        .{ .path = "site.toml", .text = "[eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"1\"\n", .layer = .site },
+        .{ .path = "user.toml", .text = "[profile.cleared.eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"\"\n[profile.keep.eessi]\nEESSI_OVERRIDE_TOOLCHAIN_CHECK = \"9\"\n", .layer = .user },
+    };
+    // config --env selects no profile and exports the clear as an empty variable.
+    try t.env.put("EB_LOCAL_PROFILE", "");
+    const kept = try t.load(&sources, .{});
+    try std.testing.expect(kept.profile == null);
+    try std.testing.expectEqualStrings("1", kept.eessi.items[0].value);
+    try std.testing.expectEqualStrings("site site.toml:2", kept.eessi.items[0].from);
+
+    try t.env.put("EESSI_OVERRIDE_TOOLCHAIN_CHECK", "from-env");
+    const nonempty = try t.load(&sources, .{});
+    try std.testing.expectEqualStrings("1", nonempty.eessi.items[0].value);
+    try std.testing.expectEqualStrings("site site.toml:2", nonempty.eessi.items[0].from);
+
+    try t.env.put("EESSI_OVERRIDE_TOOLCHAIN_CHECK", "");
+    const cleared = try t.load(&sources, .{});
+    try std.testing.expectEqualStrings("", cleared.eessi.items[0].value);
+    try std.testing.expectEqualStrings("environment EESSI_OVERRIDE_TOOLCHAIN_CHECK", cleared.eessi.items[0].from);
+
+    const over_profile = try t.load(&sources, .{ .profile = "keep" });
+    try std.testing.expectEqualStrings("", over_profile.eessi.items[0].value);
+    try std.testing.expectEqualStrings("environment EESSI_OVERRIDE_TOOLCHAIN_CHECK", over_profile.eessi.items[0].from);
 }
 
 test "clear_foreign_prefixes is off unless set, and approved prefixes are site-only" {
