@@ -35,7 +35,7 @@ grep -m1 '^Features' /proc/cpuinfo
 gcc -mcpu=native -Q --help=target -x c /dev/null -c -o /dev/null |
     awk '$1 == "-mcpu=" { print "gcc_q " $2 }'
 gcc -mcpu=native -### -c "$1/x.c" -o /dev/null 2>&1 |
-    grep -o -- '-mcpu=[^ "]*' | head -n 1 | sed 's/^/gcc_cc1 /'
+    grep -o -- "-mcpu=[^ \"']*" | head -n 1 | sed 's/^/gcc_cc1 /'
 SH
 cc -O1 -o "$work/hwcap" "$work/hwcap.c"
 
