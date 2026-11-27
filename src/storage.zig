@@ -542,6 +542,52 @@ const StatFs = extern struct {
     spare: [4]i64,
 };
 
+/// Free bytes and inodes from one `statfs` result.
+/// Available blocks are a signed long. A used-up quota is negative, and
+/// those blocks count as no free bytes. An unsigned read would report a
+/// huge amount of free space, and the build would start.
+fn capacityOf(stat: StatFs) Capacity {
+    const avail: i64 = @bitCast(stat.blocks_available);
+    const bytes: u64 = if (avail < 0) 0 else blk: {
+        const size: u64 = @intCast(if (stat.fragment_size > 0) stat.fragment_size else stat.block_size);
+        break :blk std.math.mul(u64, stat.blocks_available, size) catch std.math.maxInt(u64);
+    };
+    return .{
+        .bytes = bytes,
+        .inodes = stat.files_free,
+        .inodes_counted = stat.files != 0,
+    };
+}
+
+test "a negative available-block count is no free space" {
+    var stat = StatFs{
+        .fs_type = 0,
+        .block_size = 4096,
+        .blocks = 100,
+        .blocks_free = 10,
+        .blocks_available = 0,
+        .files = 8,
+        .files_free = 3,
+        .fsid = .{ 1, 2 },
+        .name_max = 255,
+        .fragment_size = 4096,
+        .flags = 0,
+        .spare = .{ 0, 0, 0, 0 },
+    };
+    stat.blocks_available = @bitCast(@as(i64, -1));
+    const full = capacityOf(stat);
+    try testing.expectEqual(@as(u64, 0), full.bytes);
+    try testing.expect(full.exhausted());
+    stat.blocks_available = @bitCast(@as(i64, -100));
+    const quota = capacityOf(stat);
+    try testing.expectEqual(@as(u64, 0), quota.bytes);
+    try testing.expect(quota.exhausted());
+    stat.blocks_available = 4;
+    const open = capacityOf(stat);
+    try testing.expectEqual(@as(u64, 4 * 4096), open.bytes);
+    try testing.expect(!open.exhausted());
+}
+
 /// Free bytes and inodes on the file system containing `path`.
 pub fn capacity(path: []const u8) sys.Error!Capacity {
     var path_buf: [sys.path_max:0]u8 = undefined;
@@ -549,12 +595,7 @@ pub fn capacity(path: []const u8) sys.Error!Capacity {
     var stat: StatFs = undefined;
     const rc = linux.syscall2(.statfs, @intFromPtr(zpath.ptr), @intFromPtr(&stat));
     _ = try sys.result(rc);
-    const size: u64 = @intCast(if (stat.fragment_size > 0) stat.fragment_size else stat.block_size);
-    return .{
-        .bytes = std.math.mul(u64, stat.blocks_available, size) catch std.math.maxInt(u64),
-        .inodes = stat.files_free,
-        .inodes_counted = stat.files != 0,
-    };
+    return capacityOf(stat);
 }
 
 /// Whether a mount option is present as one whole comma-separated word.
