@@ -4646,7 +4646,13 @@ const build_script_tail =
     \\                *) pf_flag=-march pf_key=-march= ;;
     \\            esac
     \\            pf_gcc=$(gcc "$pf_flag=native" -Q --help=target 2>/dev/null | awk -v k="$pf_key" '$1 == k { v = $2 } END { print v }') || pf_gcc=
-    \\            pf_probe=$("${EB_LOCAL_PROBE:-/nonexistent}" 2>/dev/null) || pf_probe=
+    \\            # The cpuid route compiles a probe; a virtual machine's CPUID is the
+    \\            # guest's own, so its vendor is what /proc/cpuinfo reports there.
+    \\            if [ "$EB_LOCAL_MASK_ROUTE" = cpuid ]; then
+    \\                pf_probe=$("${EB_LOCAL_PROBE:-/nonexistent}" 2>/dev/null) || pf_probe=
+    \\            else
+    \\                pf_probe=vendor=$(sed -n 's/^vendor_id[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -n 1)
+    \\            fi
     \\            pf_allow=
     \\            [ "${EB_LOCAL_ALLOW_ARCHSPEC:-}" = 1 ] && pf_allow=allow-archspec
     \\            "$EB_LOCAL_SELF" __mask-preflight "$EB_LOCAL_CPU_TARGET" "$EB_LOCAL_MASK_ROUTE" "$pf_fd" "$pf_ad" "$pf_sp" "$pf_gcc" "$pf_probe" ${pf_allow:+"$pf_allow"} || exit 1
