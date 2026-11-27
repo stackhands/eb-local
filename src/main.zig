@@ -4982,6 +4982,44 @@ fn maskMaterialize(c: Ctx, plan: MaskPlan, dir: []const u8) union(enum) { ok: Ma
     return .{ .ok = .{ .vars = vars, .prefix = prefix } };
 }
 
+/// The profile a preflight in a virtual machine uses for a target that has no
+/// cpuid profile (neoverse_v1, a64fx): the names the guest checks come from the
+/// `__vm-run` target table. `gcc_seen` is what `gcc -mcpu=native` printed; the
+/// table lists alternatives for a CPU GCC names more than one way, and the one
+/// seen is the one compared.
+fn vmOnlyProfile(subdir: []const u8, route: cpumask.Route, gcc_seen: []const u8) ?cpumask.Profile {
+    if (route != .kvm and route != .tcg) return null;
+    const t = vm.find(subdir) orelse return null;
+    const seen = std.mem.trim(u8, gcc_seen, " \t\r\n");
+    const seen_cpu = seen[0 .. std.mem.indexOfScalar(u8, seen, '+') orelse seen.len];
+    var pick: []const u8 = t.gcc[0 .. std.mem.indexOfScalar(u8, t.gcc, ' ') orelse t.gcc.len];
+    var alts = std.mem.tokenizeScalar(u8, t.gcc, ' ');
+    while (alts.next()) |alt| if (std.mem.eql(u8, alt, seen_cpu) or std.mem.eql(u8, alt, seen)) {
+        pick = alt;
+    };
+    return .{
+        .subdir = t.name,
+        .arch = switch (t.arch) {
+            .x86_64 => .x86_64,
+            .aarch64 => .aarch64,
+        },
+        .vendor = t.vendor,
+        .gcc_march = pick,
+        .gcc_cpu = pick,
+    };
+}
+
+test "a virtual machine preflight has a profile for a target that has no cpuid profile" {
+    const v1 = vmOnlyProfile("aarch64/neoverse_v1", .tcg, "neoverse-v1+sm4+crc") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("neoverse-v1", v1.gcc_cpu);
+    try std.testing.expect(v1.arch == .aarch64);
+    const fx = vmOnlyProfile("aarch64/a64fx", .tcg, "a64fx+crc+crypto") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a64fx", fx.gcc_cpu);
+    try std.testing.expectEqualStrings("0x46", fx.vendor);
+    try std.testing.expect(vmOnlyProfile("aarch64/a64fx", .cpuid, "a64fx") == null);
+    try std.testing.expect(vmOnlyProfile("x86_64/amd/zen9", .kvm, "") == null);
+}
+
 /// `__mask-preflight TARGET ROUTE DEVFD ARCHDETECT ARCHSPEC GCC PROBE`: what the
 /// build script saw inside the mask, checked against the target. Prints one
 /// line per check and exits 1 when any fails.
@@ -4990,7 +5028,8 @@ fn cmdMaskPreflight(c: Ctx, args: []const []const u8) u8 {
     const a = c.a;
     const target = args[0];
     const route = std.meta.stringToEnum(cpumask.Route, args[1]) orelse die("__mask-preflight: unknown route {s}", .{args[1]});
-    const profile = cpumask.findProfile(cpumask.builtinProfiles(a), target) orelse die("no mask profile for {s}", .{target});
+    const profile = cpumask.findProfile(cpumask.builtinProfiles(a), target) orelse
+        vmOnlyProfile(target, route, args[5]) orelse die("no mask profile for {s}", .{target});
     var obs: cpumask.Observed = .{ .devfd = std.mem.eql(u8, args[2], "yes"), .archspec_allowed = args.len == 8 and std.mem.eql(u8, args[7], "allow-archspec") };
     if (args[3].len > 0) obs.archdetect = args[3];
     if (args[4].len > 0) obs.archspec = std.mem.trim(u8, args[4], " \t\r\n");

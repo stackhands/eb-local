@@ -72,6 +72,24 @@ class CpuTargetCli(unittest.TestCase):
         self.assertIn("archdetect gave no answer", r.stdout)
         self.assertIn("gcc gave no -march=native value", r.stdout)
 
+    def test_preflight_names_a_target_only_the_virtual_machine_routes_present(self):
+        for target, cpu, part in [("aarch64/neoverse_v1", "neoverse-v1", "0x41"), ("aarch64/a64fx", "a64fx", "0x46")]:
+            with self.subTest(target=target):
+                words = [target, "tcg", "yes", target, "aarch64", f"{cpu}+crc+crypto", f"vendor={part}", "allow-archspec"]
+                r = self.run_cli("__mask-preflight", *words)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn(f"preflight ok: gcc -mcpu=native is {cpu}", r.stdout)
+                self.assertIn(f"preflight ok: EESSI archdetect names {target}", r.stdout)
+                words[5] = "neoverse-n1+crc"
+                r = self.run_cli("__mask-preflight", *words)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("gcc -mcpu=native is 'neoverse-n1'", r.stdout)
+
+    def test_a_cpuid_route_preflight_still_needs_a_profile(self):
+        r = self.run_cli("__mask-preflight", "aarch64/a64fx", "cpuid", "yes", "aarch64/a64fx", "a64fx", "a64fx", "vendor=0x46")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no mask profile for aarch64/a64fx", r.stderr)
+
     def test_preflight_notes_an_archspec_that_cannot_be_imported(self):
         r = self.preflight(spec="")
         self.assertEqual(r.returncode, 0, r.stdout)

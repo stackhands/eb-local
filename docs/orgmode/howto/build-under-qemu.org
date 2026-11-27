@@ -97,7 +97,24 @@ Wall times on a Ryzen 9 9950X (Zen 5) host under load, from the helper's start t
 |--------------------------------------+------+--------------+-----------------------------------------------------------------------|
 | =x86_64/amd/zen4=                    | kvm  | 9 to 15 s    | boot, the five checks, =gcc -march=native=                              |
 | =x86_64/intel/icelake=               | kvm  | 10 to 13 s   | the same                                                              |
-| =aarch64/neoverse_n1=                | tcg  | 16 to 21 s   | the checks, =uname -m=, a one-line C compile and run under emulation   |
+| =x86_64/amd/zen2=                    | kvm  | 11 to 17 s   | the same                                                              |
+| =x86_64/amd/zen3=                    | kvm  | 12 to 13 s   | the same                                                              |
+| =aarch64/neoverse_n1=                | tcg  | 15 to 21 s   | the checks, =uname -m=, a one-line C compile and run under emulation   |
+| =aarch64/neoverse_v1=                | tcg  | 18 to 25 s   | the same, and the SVE vector length                                    |
+| =aarch64/a64fx=                      | tcg  | 19 s         | the same                                                              |
+
+A guest of an SVE core reports the vector length the core has: 32 bytes (256 bits) for =aarch64/neoverse_v1=, 64 bytes (512 bits) for =aarch64/a64fx=, and none for =aarch64/neoverse_n1=.
 
 Most of the time goes to the checks, which load EESSI, GCC and EasyBuild modules.
 A build is another matter: a guest on 4 KiB host pages and a virtiofs root costs a compile about 1.45 to 2.3 times its native time, and emulation costs 16 to 28 times.
+
+A whole build, =bzip2-1.0.8-GCCcore-15.2.0= with the audit on, through =eb-local --cpu-target TARGET --mask ROUTE=, on the same host while other jobs loaded it to 35 to 55 on 32 threads:
+
+| Target                               | Mode | Wall time    | Audit                                         |
+|--------------------------------------+------+--------------+-----------------------------------------------|
+| =x86_64/amd/zen2=                    | kvm  | 71 s         | no instruction beyond =x86_64/amd/zen2=         |
+| =x86_64/amd/zen3=                    | kvm  | 66 s         | no instruction beyond =x86_64/amd/zen3=         |
+| =aarch64/neoverse_v1=                | tcg  | 191 s        | no instruction beyond =aarch64/neoverse_v1=     |
+| =aarch64/a64fx=                      | tcg  | 283 s        | no instruction beyond =aarch64/a64fx=           |
+
+The two Arm targets have no =cpuid= profile, so the build runs only under =--mask tcg --mask-allow-archspec-mismatch=.

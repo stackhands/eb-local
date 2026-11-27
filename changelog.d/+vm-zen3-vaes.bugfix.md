@@ -1,0 +1,1 @@
+`eb-local __vm-run --mode kvm --cpu-target x86_64/amd/zen3` refused with status 126 because the guest read as `x86_64/amd/zen2`: QEMU's EPYC-Milan model has no `vaes`, which EESSI archdetect requires. The zen3 guest now adds `vaes` and `vpclmulqdq`.

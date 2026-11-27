@@ -1095,6 +1095,11 @@ test "the allow list names packages and features" {
     try std.testing.expect(allowed(entries, "/p/software/zlib/2.3.2/lib/libz.so.1.3.1.zlib-ng", avx512bw));
     try std.testing.expect(allowed(entries, "/p/software/zlib/2.3.2/lib/libz.so.1.3.1.zlib-ng", db.idOf("avx512vnni").?));
     try std.testing.expect(!allowed(entries, "/p/software/zlib/2.3.2/lib/libz.so.1.3.1.zlib-ng", db.idOf("avx512fp16").?));
+    // GROMACS: the AVX-512 FMA unit timing loops of an AVX2_256 build.
+    try std.testing.expect(allowed(entries, "/p/software/GROMACS/2025.4-foss-2026.1/lib/libgromacs.so.10.0.0", db.idOf("avx512f").?));
+    try std.testing.expect(allowed(entries, "/p/software/GROMACS/2025.4-foss-2026.1/lib/libgromacs_mpi_d.so.10.0.0", db.idOf("avx512f").?));
+    try std.testing.expect(!allowed(entries, "/p/software/GROMACS/2025.4-foss-2026.1/lib/libgromacs.so.10.0.0", db.idOf("avx512bw").?));
+    try std.testing.expect(!allowed(entries, "/p/software/GROMACS/2025.4-foss-2026.1/lib/libgromacs.so.10.0.0", db.idOf("avx512vl").?));
     const custom = try parseAllow(a, db, "Foo avx512f,nosuchfeature  # reason\n# comment\n\n");
     try std.testing.expectEqual(@as(usize, 1), custom.len);
     try std.testing.expect(allowed(custom, "/a/software/Foo/1/lib/x.so", db.idOf("avx512f").?));
