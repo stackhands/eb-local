@@ -686,11 +686,20 @@ fn runKvm(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
             .readonly = false,
             .cache = "auto",
         }) catch break :fail false;
-        for (req.share_ro, 0..) |p, i| shares.append(a, .{
-            .tag = std.fmt.allocPrint(a, "ro{d}", .{i}) catch break :fail false,
-            .host = fsx.absPath(a, p) catch break :fail false,
-            .guest = fsx.absPath(a, p) catch break :fail false,
-        }) catch break :fail false;
+        for (req.share_ro, 0..) |p, i| {
+            const abs = fsx.absPath(a, p) catch |e| switch (e) {
+                error.OutOfMemory => break :fail false,
+                else => |se| {
+                    err("cannot resolve the read-only share {s} ({s})", .{ p, sys.describe(se) });
+                    break :fail false;
+                },
+            };
+            shares.append(a, .{
+                .tag = std.fmt.allocPrint(a, "ro{d}", .{i}) catch break :fail false,
+                .host = abs,
+                .guest = abs,
+            }) catch break :fail false;
+        }
         break :fail true;
     };
     if (!build) return status_failed;

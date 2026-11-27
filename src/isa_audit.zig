@@ -753,7 +753,10 @@ pub fn run(a: Allocator, o: Options, path_env: []const u8, tmpdir: []const u8, e
         default_allow;
     const allow = parseAllow(a, db, allow_text) catch oom();
 
-    const root = fsx.absPath(a, o.path) catch oom();
+    const root = fsx.absPath(a, o.path) catch |e| switch (e) {
+        error.OutOfMemory => oom(),
+        else => |se| cli.die("eb-local", "cannot resolve {s} ({s})", .{ o.path, sys.describe(se) }),
+    };
     const st = fsx.statAt(fsx.cwd, root, true) catch |e| cli.die("eb-local", "cannot read {s} ({s})", .{ root, sys.describe(e) });
     var files: std.ArrayList([]const u8) = .empty;
     var errors: std.ArrayList(Problem) = .empty;
