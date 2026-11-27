@@ -1,0 +1,48 @@
+name: arm-mask
+# The cpuid route's aarch64 mask on real Arm silicon. ubuntu-24.04-arm runs on
+# Neoverse cores, so getauxval, /proc/cpuinfo and gcc -mcpu=native here are the
+# real readings the mask rewrites.
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  arm-mask:
+    name: arm-mask
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Allow the user and mount namespaces the mask runs in
+        run: |
+          set -euo pipefail
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Which Arm core this runner is
+        run: |
+          set -euo pipefail
+          uname -m
+          grep -m1 'CPU implementer' /proc/cpuinfo
+          grep -m1 'CPU part' /proc/cpuinfo
+          grep -m1 '^Features' /proc/cpuinfo
+          lscpu | sed -n 's/^Model name: */model name: /p'
+      - name: release build
+        run: zig build --release=safe --prefix "$RUNNER_TEMP/eb-local"
+      - name: doctor reports the cpuid route for aarch64
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/eb-local/bin/eb-local" doctor --cpu-target aarch64/neoverse_n1 || true
+      - name: getauxval, /proc/cpuinfo and gcc -mcpu=native name the target under the mask
+        run: tools/mask/check_arm_mask.sh "$RUNNER_TEMP/eb-local/bin/eb-local" aarch64/neoverse_n1 aarch64/generic
