@@ -1,0 +1,1 @@
+The Message Passing Interface hello defines `_GNU_SOURCE` before its headers. The define declares `sched_getcpu`, so the hello compiles. Inside an allocation, `eb-local doctor --mpi` launches the two ranks.
