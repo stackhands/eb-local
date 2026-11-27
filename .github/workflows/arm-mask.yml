@@ -2,11 +2,7 @@ name: arm-mask
 # The cpuid route's aarch64 mask on real Arm silicon. ubuntu-24.04-arm runs on
 # Neoverse cores, so getauxval, /proc/cpuinfo and gcc -mcpu=native here are the
 # real readings the mask rewrites.
-on:
-  pull_request:
-  push:
-    branches: [main, develop]
-  workflow_dispatch:
+on: [push, pull_request]
 permissions:
   contents: read
 concurrency:
