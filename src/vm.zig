@@ -74,10 +74,12 @@ const no_avx512 = "TCG has no AVX-512, so the guest would be a zen3 or a haswell
 const no_arm_kvm = "KVM on Arm offers the host CPU only; use --mode tcg from an x86_64 host";
 const no_x86_kvm = "an x86_64 target needs an x86_64 host under KVM, or --mode tcg from an aarch64 host";
 
-/// Every target `__vm-run` knows.
+/// Every target `__vm-run` knows. QEMU's EPYC-Milan lacks vaes and vpclmulqdq,
+/// which a real Milan has and EESSI archdetect requires for amd/zen3 (its
+/// spec line is "avx2 fma vaes"), so the zen3 line adds both.
 pub const targets = [_]Target{
     .{ .name = "x86_64/amd/zen2", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen2", .gcc = "znver2", .kvm = "EPYC-Rome," ++ amd_bits, .tcg = "EPYC-Rome" },
-    .{ .name = "x86_64/amd/zen3", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen3", .gcc = "znver3", .kvm = "EPYC-Milan,pcid=off," ++ amd_bits, .tcg = "EPYC-Milan" },
+    .{ .name = "x86_64/amd/zen3", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen3", .gcc = "znver3", .kvm = "EPYC-Milan,pcid=off,vaes=on,vpclmulqdq=on," ++ amd_bits, .tcg = "EPYC-Milan" },
     .{ .name = "x86_64/amd/zen4", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen4", .gcc = "znver4", .kvm = "EPYC-Genoa,flush-l1d=on,la57=off,pcid=off," ++ amd_bits, .tcg_refusal = no_avx512 },
     .{ .name = "x86_64/amd/zen5", .arch = .x86_64, .vendor = "AuthenticAMD", .archspec = "zen5", .gcc = "znver5", .kvm_refusal = no_zen5, .tcg_refusal = no_avx512 },
     .{ .name = "x86_64/intel/haswell", .arch = .x86_64, .vendor = "GenuineIntel", .archspec = "haswell", .gcc = "haswell", .kvm = "Haswell-noTSX-IBRS,vendor=GenuineIntel,pcid=off", .tcg = "Haswell-noTSX-IBRS,vendor=GenuineIntel" },
@@ -908,7 +910,8 @@ test "an AMD target keeps its model, the corrections and enforce" {
     const zen4 = try plan(a, testTarget("x86_64/amd/zen4"), .kvm, .x86_64);
     try testing.expectEqualStrings("EPYC-Genoa,flush-l1d=on,la57=off,pcid=off,srso-user-kernel-no=on,sbpb=on,ibpb-brtype=on,tsa-sq-no=on,tsa-l1-no=on,tsc-deadline=on,enforce", zen4.kvm);
     const zen3 = try plan(a, testTarget("x86_64/amd/zen3"), .kvm, .x86_64);
-    try testing.expectEqualStrings("EPYC-Milan,pcid=off,srso-user-kernel-no=on,sbpb=on,ibpb-brtype=on,tsa-sq-no=on,tsa-l1-no=on,tsc-deadline=on,enforce", zen3.kvm);
+    try testing.expectEqualStrings("EPYC-Milan,pcid=off,vaes=on,vpclmulqdq=on,srso-user-kernel-no=on,sbpb=on,ibpb-brtype=on,tsa-sq-no=on,tsa-l1-no=on,tsc-deadline=on,enforce", zen3.kvm);
+    try testing.expect(std.mem.indexOf(u8, zen3.kvm, "vaes=on") != null);
     const zen2 = try plan(a, testTarget("x86_64/amd/zen2"), .kvm, .x86_64);
     try testing.expect(std.mem.startsWith(u8, zen2.kvm, "EPYC-Rome,srso-user-kernel-no=on"));
     try testing.expect(std.mem.endsWith(u8, zen2.kvm, ",enforce"));
