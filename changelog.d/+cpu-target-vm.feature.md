@@ -1,0 +1,1 @@
+The internal helper `eb-local __vm-run --mode kvm|tcg --cpu-target TARGET -- COMMAND` runs COMMAND inside a QEMU virtual CPU that presents an EESSI target, as the caller, in the caller's working directory, and refuses, before COMMAND starts, when EESSI archdetect, archspec, `gcc -march=native`, the CPU vendor or `/dev/fd` do not name the target.
