@@ -937,6 +937,47 @@ pub var test_fsync_after: u32 = 0;
 /// them succeed. Null fails every one.
 pub var test_fsync_count: ?u32 = null;
 
+/// Set in `main` from `EB_LOCAL_TEST_PREFIX_ERRNO`, only in the test
+/// artifact. The prefix writability check fails with this errno.
+pub var test_prefix_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_LOGS_ERRNO`. The logs-directory
+/// writability check fails with this errno.
+pub var test_logs_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_REDACT_ERRNO`. Replacing a log
+/// during redaction fails with this errno.
+pub var test_redact_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_WORKSPACE_ERRNO`. Creating a
+/// directory inside a new workspace fails with this errno, and the
+/// workspace is removed.
+pub var test_workspace_errno: ?linux.E = null;
+
+/// Set in `main` from `EB_LOCAL_TEST_WRITE_ERRNO`. The next durable
+/// write fails with this errno. One write, then it is clear.
+pub var test_write_errno: ?linux.E = null;
+
+/// The next `EB_LOCAL_TEST_WRITE_ERRNO`, or null. A release build
+/// cannot see it.
+pub fn takeWriteErrno() ?linux.E {
+    if (comptime !(build_options.test_ops or builtin.is_test)) return null;
+    const e = test_write_errno orelse return null;
+    test_write_errno = null;
+    return e;
+}
+
+/// `e` as the `sys.Error` a failed write returns, with `last_errno` set
+/// so the message names that errno.
+pub fn injectedSysError(e: linux.E) sys.Error {
+    sys.last_errno = e;
+    return switch (e) {
+        .NOSPC => error.NoSpace,
+        .ROFS => error.ReadOnly,
+        else => error.Unexpected,
+    };
+}
+
 /// The errno a close or fsync hook names, as `EIO` for `.IO`. Null for a
 /// name that is not an errno and for EINTR, which neither call reports.
 pub fn testErrno(name: []const u8) ?linux.E {
@@ -1034,8 +1075,8 @@ test "acquireBoundedLock uses state.lockExclusive with bounded timeout" {
     defer releaseLock(&holder) catch unreachable;
 
     var msg2: []const u8 = "";
-    try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 40, false, &msg2));
-    try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 40 ms") != null);
+    try testing.expectEqual(LockResult.failed, acquireBoundedLock(a, lock_path, 5, false, &msg2));
+    try testing.expect(std.mem.indexOf(u8, msg2, "timed out after 5 ms") != null);
 
     try releaseLock(&holder);
     var again: ?sys.fd_t = switch (acquireBoundedLock(a, lock_path, 50, false, &msg2)) {

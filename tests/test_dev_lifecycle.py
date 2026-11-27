@@ -196,6 +196,15 @@ class DevLifecycle(unittest.TestCase):
         self.stub.chmod(0o755)
         prior = self.root / "prior bin's\nnext"
         prior.mkdir()
+        # dev prints the Cargo linker lines, which call env, awk and tr.
+        # leave can restore PATH to only the v2 bin directory, so the
+        # three tools live there and the later dev can run them.
+        v2bin = self.root / "v2" / "bin"
+        v2bin.mkdir(parents=True)
+        for name in ("env", "awk", "tr"):
+            tool = v2bin / name
+            tool.write_text(f"#!/bin/sh\nexec /usr/bin/{name} \"$@\"\n", encoding="utf-8")
+            tool.chmod(0o755)
         self.env = {
             "HOME": str(self.root),
             "PATH": f"{prior}:/usr/bin:/bin",
@@ -465,27 +474,35 @@ class DevLifecycle(unittest.TestCase):
             "or": f'eval "$(cat {str(failed_path)!r})" || rc=$?\n',
             "if": f'if eval "$(cat {str(failed_path)!r})"; then rc=0; else rc=$?; fi\n',
         }
-        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
-            for name, invoke in modes.items():
+        shells = [s for s in (shutil.which("bash"), shutil.which("zsh")) if s]
+        prefix = (
+            'module() { eval "$("$PYTHON" "$MODULE_STUB" "$@")"; }\n'
+            + f'eb_local() {{ {self.command()} ; }}\n'
+            + f'printf fail > {str(mode)!r}\n'
+        )
+        after_fail = (
+            '[ "$rc" = 78 ] || exit 20\n'
+            + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+            "then exit 31; fi\n"
+            + 'eval "$(eb_local leave)" || exit 21\n'
+            + '[ "$LOADEDMODULES" = Base/1 ] || exit 22\n'
+            + f'[ "$PATH" = {str(self.root / "legacy" / "bin")!r} ] || exit 24\n'
+        )
+        retry = (
+            f'printf pass > {str(mode)!r}\n'
+            + 'eval "$(eb_local dev --replace)" || exit 23\n'
+            + "if typeset -f eb_local_apply >/dev/null 2>&1; "
+            "then exit 32; fi\n"
+            + 'test -n "$EB_LOCAL_DEV_SAVED" || exit 25\n'
+            + 'eval "$(eb_local leave)" || exit 26\n'
+        )
+        plans = [(shells[0], list(modes.items()), True)]
+        if len(shells) > 1:
+            plans.append((shells[1], [("off", modes["off"])], False))
+        for shell, shapes, do_retry in plans:
+            for name, invoke in shapes:
                 with self.subTest(shell=Path(shell).name, mode=name):
-                    script = (
-                        'module() { eval "$("$PYTHON" "$MODULE_STUB" "$@")"; }\n'
-                        + f'eb_local() {{ {self.command()} ; }}\n'
-                        + f'printf fail > {str(mode)!r}\n'
-                        + invoke
-                        + '[ "$rc" = 78 ] || exit 20\n'
-                        + "if typeset -f eb_local_apply >/dev/null 2>&1; "
-                        "then exit 31; fi\n"
-                        + 'eval "$(eb_local leave)" || exit 21\n'
-                        + '[ "$LOADEDMODULES" = Base/1 ] || exit 22\n'
-                        + f'[ "$PATH" = {str(self.root / "legacy" / "bin")!r} ] || exit 24\n'
-                        + f'printf pass > {str(mode)!r}\n'
-                        + 'eval "$(eb_local dev --replace)" || exit 23\n'
-                        + "if typeset -f eb_local_apply >/dev/null 2>&1; "
-                        "then exit 32; fi\n"
-                        + 'test -n "$EB_LOCAL_DEV_SAVED" || exit 25\n'
-                        + 'eval "$(eb_local leave)" || exit 26\n'
-                    )
+                    script = prefix + invoke + after_fail + (retry if do_retry else "")
                     run = subprocess.run(
                         [shell, "-c", script],
                         cwd=self.root,
@@ -532,9 +549,13 @@ class DevLifecycle(unittest.TestCase):
                 "then exit 30; fi\n"
             ),
         }
-        for shell in filter(None, [shutil.which("bash"), shutil.which("zsh")]):
-            for start, prepare in starts.items():
-                for shape, invoke in modes.items():
+        shells = [s for s in (shutil.which("bash"), shutil.which("zsh")) if s]
+        plans = [(shells[0], list(starts.items()), list(modes.items()))]
+        if len(shells) > 1:
+            plans.append((shells[1], list(starts.items()), [("off", modes["off"])]))
+        for shell, start_rows, shape_rows in plans:
+            for start, prepare in start_rows:
+                for shape, invoke in shape_rows:
                     with self.subTest(
                         shell=Path(shell).name,
                         start=start,

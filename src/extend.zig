@@ -150,17 +150,12 @@ pub fn initPath(a: Allocator, env: *const std.process.Environ.Map) Allocator.Err
     });
 }
 
-/// `$1` is the umask, `$2` is the mode, and the rest are eb's arguments.
-/// EESSI's init is not safe under `nounset`. The compat-layer `ld` goes on
-/// `PATH` even when `rustc` is absent: a failing command substitution under
-/// `pipefail` would exit before the module loads. `WORKING_DIR` is the
-/// caller's: unset, the module's default is `/tmp/$USER`, one per user,
-/// where a shared default would leave every other user's build unable to
-/// write the first one's directories. Once the module has loaded, eb runs
-/// only if EASYBUILD_INSTALLPATH is in the tree the install variable
-/// selects and no EASYBUILD_INSTALLPATH_SOFTWARE or _MODULES moves part of
-/// the install elsewhere.
-pub const script =
+/// Lines that drop a host Cargo linker and point Cargo at `${CC:-gcc}`
+/// when `rustc -vV` prints a host. `script` includes this file, and `dev`
+/// prints the same bytes.
+pub const cargo_linker = @embedFile("cargo-linker.sh");
+
+const script_before =
     \\set -eo pipefail
     \\trap 'trap - INT; kill -s INT "$$"' INT
     \\unset EB_LOCAL_EESSI_EXTEND || true
@@ -212,18 +207,10 @@ pub const script =
     \\    exit 2
     \\  fi
     \\fi
-    \\unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
-    \\  CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER CMAKE_Fortran_COMPILER_LAUNCHER || true
-    \\eval "$(env | awk -F= '/^CARGO_TARGET_[A-Z0-9_]*_(LINKER|RUSTFLAGS)=/{print "unset "$1}')"
-    \\export LINKER=${CC:-gcc}
-    \\_triple=""
-    \\if _host=$(rustc -vV 2>/dev/null); then
-    \\  _triple=$(printf '%s\n' "$_host" | awk '/^host:/{print $2}')
-    \\fi
-    \\_triple_env=$(printf %s "${_triple}" | tr '[:lower:]-' '[:upper:]_')
-    \\if [[ -n ${_triple_env} ]]; then
-    \\  eval "export CARGO_TARGET_${_triple_env}_LINKER=\${CC:-gcc}"
-    \\fi
+    \\
+;
+
+const script_after =
     \\_arch=$(uname -m)
     \\export PATH="${EESSI_EPREFIX:-${repo}/versions/${ver}/compat/linux/${_arch}}/usr/bin:${PATH}"
     \\# Where the module installs, read before it loads: below the tree a user
@@ -292,6 +279,18 @@ pub const script =
     \\trap - INT
     \\exec eb "$@"
 ;
+
+/// `$1` is the umask, `$2` is the mode, and the rest are eb's arguments.
+/// EESSI's init is not safe under `nounset`. The compat-layer `ld` goes on
+/// `PATH` even when `rustc` is absent: a failing command substitution under
+/// `pipefail` would exit before the module loads. `WORKING_DIR` is the
+/// caller's: unset, the module's default is `/tmp/$USER`, one per user,
+/// where a shared default would leave every other user's build unable to
+/// write the first one's directories. Once the module has loaded, eb runs
+/// only if EASYBUILD_INSTALLPATH is in the tree the install variable
+/// selects and no EASYBUILD_INSTALLPATH_SOFTWARE or _MODULES moves part of
+/// the install elsewhere. The Cargo linker lines are `cargo_linker`.
+pub const script = script_before ++ cargo_linker ++ script_after;
 
 /// The argument vector that runs eb through EESSI-extend for `sel`: a bash
 /// with no profile and no rc file running the launcher script, with the
@@ -624,43 +623,38 @@ test "a project prefix is not created" {
     try kept(out.stdout);
 }
 
-test "an empty site install is not a user prefix" {
-    var r = try Run.init();
-    defer r.deinit();
-    try r.fake("2026.06", null);
-    try r.env.put("EESSI_SITE_INSTALL", "");
-    const out = try r.launch(&.{});
-    try ok(out);
-    try noDefaultPrefix(&r);
-    try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
-    try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_SITE_INSTALL").?);
-    try testing.expectEqualStrings("0022", firstLine(out.stdout));
-    try kept(out.stdout);
-}
-
-test "an empty cvmfs install is not a user prefix" {
-    var r = try Run.init();
-    defer r.deinit();
-    try r.fake("2026.06", null);
-    try r.env.put("EESSI_CVMFS_INSTALL", "");
-    const out = try r.launch(&.{});
-    try ok(out);
-    try noDefaultPrefix(&r);
-    try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
-    try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_CVMFS_INSTALL").?);
-    try testing.expectEqualStrings("0022", firstLine(out.stdout));
-}
-
-test "an empty user install does not create the default prefix" {
-    var r = try Run.init();
-    defer r.deinit();
-    try r.fake("2026.06", null);
-    try r.env.put("EESSI_USER_INSTALL", "");
-    const out = try r.launch(&.{});
-    try ok(out);
-    try noDefaultPrefix(&r);
-    try testing.expectEqualStrings("", envVar(out.stdout, "EESSI_USER_INSTALL").?);
-    try testing.expectEqualStrings("0077", firstLine(out.stdout));
+test "an empty install variable is not a user prefix" {
+    const Row = struct {
+        variable: []const u8,
+        umask: []const u8,
+        echoed: bool,
+        default_tree: bool,
+        keep_module: bool,
+    };
+    const rows = [_]Row{
+        .{ .variable = "EESSI_SITE_INSTALL", .umask = "0022", .echoed = true, .default_tree = false, .keep_module = true },
+        .{ .variable = "EESSI_CVMFS_INSTALL", .umask = "0022", .echoed = true, .default_tree = false, .keep_module = false },
+        .{ .variable = "EESSI_USER_INSTALL", .umask = "0077", .echoed = true, .default_tree = false, .keep_module = false },
+    };
+    for (rows) |row| {
+        var r = try Run.init();
+        defer r.deinit();
+        try r.fake("2026.06", null);
+        try r.env.put(row.variable, "");
+        const out = try r.launch(&.{});
+        try ok(out);
+        if (row.default_tree) return error.TestUnexpectedResult else try noDefaultPrefix(&r);
+        if (!std.mem.eql(u8, row.variable, "EESSI_USER_INSTALL")) {
+            try testing.expect(envVar(out.stdout, "EESSI_USER_INSTALL") == null);
+        }
+        if (row.echoed) {
+            try testing.expectEqualStrings("", envVar(out.stdout, row.variable).?);
+        } else {
+            try testing.expect(envVar(out.stdout, row.variable) == null);
+        }
+        try testing.expectEqualStrings(row.umask, firstLine(out.stdout));
+        if (row.keep_module) try kept(out.stdout);
+    }
 }
 
 test "an empty site install with a user prefix is refused" {
@@ -853,6 +847,14 @@ test "the build directory is the caller's WORKING_DIR or one of the user's own" 
     try ok(chosen);
     try testing.expectEqualStrings("/local/alice", envVar(chosen.stdout, "WORKING_DIR").?);
     try testing.expectEqualStrings("/local/alice/easybuild", envVar(chosen.stdout, "EASYBUILD_PREFIX").?);
+}
+
+test "eb includes the cargo linker file once" {
+    try std.testing.expect(std.mem.indexOf(u8, script_before, "CARGO_TARGET_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, script_after, "CARGO_TARGET_") == null);
+    const at = std.mem.indexOf(u8, script, cargo_linker) orelse return error.Missing;
+    try std.testing.expect(std.mem.indexOfPos(u8, script, at + cargo_linker.len, cargo_linker) == null);
+    try std.testing.expect(std.mem.endsWith(u8, cargo_linker, "fi\n"));
 }
 
 test "rustc is optional and a host wrapper does not reach eb" {

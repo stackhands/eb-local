@@ -76,49 +76,64 @@ pub fn emit(a: std.mem.Allocator, value: anytype) void {
     };
 }
 
-test "renderLine replaces non-UTF-8 bytes in nested strings without emitting byte arrays" {
-    const Item = struct { path: []const u8 };
-    const Doc = struct {
-        path: []const u8,
-        items: []const Item,
-        tags: []const []const u8,
-        note: ?[]const u8,
+fn renderLineCase(shape: []const u8) ![]u8 {
+    if (std.mem.eql(u8, shape, "nested")) {
+        const Item = struct { path: []const u8 };
+        const Doc = struct {
+            path: []const u8,
+            items: []const Item,
+            tags: []const []const u8,
+            note: ?[]const u8,
+        };
+        const items = [_]Item{.{ .path = "/tmp/bad-\xff-0.log" }};
+        const tags = [_][]const u8{ "ok", "bad-\xc3\x28" };
+        return try renderLine(std.testing.allocator, Doc{
+            .path = "/tmp/tree-\x80",
+            .items = &items,
+            .tags = &tags,
+            .note = "hi-\xfe",
+        });
+    }
+    if (std.mem.eql(u8, shape, "truncated")) {
+        const Doc = struct { path: []const u8 };
+        return try renderLine(std.testing.allocator, Doc{ .path = "a\xe2\x82b\xff\xf0\x9f\x98" });
+    }
+    if (std.mem.eql(u8, shape, "mutable")) {
+        var mut_buf = [_]u8{ '/', 't', 'm', 'p', '/', 0xff };
+        const Doc = struct { path: []u8 };
+        return try renderLine(std.testing.allocator, Doc{ .path = &mut_buf });
+    }
+    if (std.mem.eql(u8, shape, "array")) {
+        const Doc = struct { tags: [2][]const u8 };
+        return try renderLine(std.testing.allocator, Doc{ .tags = .{ "ok", "bad-\xff" } });
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "renderLine replaces non-UTF-8 bytes" {
+    const Row = struct { shape: []const u8, expected: []const u8 };
+    const rows = [_]Row{
+        .{
+            .shape = "nested",
+            .expected = "{\"path\":\"/tmp/tree-\u{FFFD}\",\"items\":[{\"path\":\"/tmp/bad-\u{FFFD}-0.log\"}],\"tags\":[\"ok\",\"bad-\u{FFFD}(\"],\"note\":\"hi-\u{FFFD}\"}\n",
+        },
+        .{
+            .shape = "truncated",
+            .expected = "{\"path\":\"a\u{FFFD}b\u{FFFD}\u{FFFD}\"}\n",
+        },
+        .{
+            .shape = "mutable",
+            .expected = "{\"path\":\"/tmp/\u{FFFD}\"}\n",
+        },
+        .{
+            .shape = "array",
+            .expected = "{\"tags\":[\"ok\",\"bad-\u{FFFD}\"]}\n",
+        },
     };
-    const items = [_]Item{.{ .path = "/tmp/bad-\xff-0.log" }};
-    const tags = [_][]const u8{ "ok", "bad-\xc3\x28" };
-    const line = try renderLine(std.testing.allocator, Doc{
-        .path = "/tmp/tree-\x80",
-        .items = &items,
-        .tags = &tags,
-        .note = "hi-\xfe",
-    });
-    defer std.testing.allocator.free(line);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(line));
-    try std.testing.expectEqualStrings(
-        "{\"path\":\"/tmp/tree-\u{FFFD}\",\"items\":[{\"path\":\"/tmp/bad-\u{FFFD}-0.log\"}],\"tags\":[\"ok\",\"bad-\u{FFFD}(\"],\"note\":\"hi-\u{FFFD}\"}\n",
-        line,
-    );
-}
-
-test "renderLine replaces truncated multi-byte UTF-8 sequences with one U+FFFD per maximal subpart" {
-    const Doc = struct { path: []const u8 };
-    const line = try renderLine(std.testing.allocator, Doc{ .path = "a\xe2\x82b\xff\xf0\x9f\x98" });
-    defer std.testing.allocator.free(line);
-    try std.testing.expectEqualStrings("{\"path\":\"a\u{FFFD}b\u{FFFD}\u{FFFD}\"}\n", line);
-}
-
-test "renderLine encodes mutable u8 slices as JSON strings rather than byte arrays" {
-    var mut_buf = [_]u8{ '/', 't', 'm', 'p', '/', 0xff };
-    const Doc = struct { path: []u8 };
-    const line = try renderLine(std.testing.allocator, Doc{ .path = &mut_buf });
-    defer std.testing.allocator.free(line);
-    try std.testing.expectEqualStrings("{\"path\":\"/tmp/\u{FFFD}\"}\n", line);
-}
-
-test "renderLine replaces non-UTF-8 bytes in fixed-size arrays" {
-    const Doc = struct { tags: [2][]const u8 };
-    const line = try renderLine(std.testing.allocator, Doc{ .tags = .{ "ok", "bad-\xff" } });
-    defer std.testing.allocator.free(line);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(line));
-    try std.testing.expectEqualStrings("{\"tags\":[\"ok\",\"bad-\u{FFFD}\"]}\n", line);
+    for (rows) |row| {
+        const line = try renderLineCase(row.shape);
+        defer std.testing.allocator.free(line);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(line));
+        try std.testing.expectEqualStrings(row.expected, line);
+    }
 }

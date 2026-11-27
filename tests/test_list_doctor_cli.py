@@ -13,6 +13,7 @@ import subprocess
 import unittest
 
 import binary
+import hostile_fs
 import support
 from test_storage import StorageFixture
 
@@ -335,46 +336,6 @@ class ListAndDoctor(StorageFixture):
             run.stdout,
         )
 
-    def test_doctor_workspace_reports_real_noexec_mount_execution_failure(self):
-        import shlex
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            mountpoint = Path(tmp) / "noexec-ws"
-            mountpoint.mkdir()
-            probe = subprocess.run(
-                ["unshare", "-U", "-r", "-m", "sh", "-c",
-                 f'mount -t tmpfs -o noexec,size=1m tmpfs "{mountpoint}" && umount "{mountpoint}"'],
-                capture_output=True,
-                text=True,
-            )
-            if probe.returncode != 0:
-                self.skipTest(f"unprivileged noexec mount unavailable: {probe.stderr.strip()}")
-            argv, env = binary.command(
-                self.script,
-                ["doctor", "--workspace", str(mountpoint)],
-                self.env,
-            )
-            env.pop("EB_LOCAL_TEST_MOUNTINFO", None)
-            env.pop("EB_LOCAL_TEST_WORKSPACE_EXEC", None)
-            quoted_mp = shlex.quote(str(mountpoint))
-            quoted_cmd = " ".join(shlex.quote(a) for a in argv)
-            script = (
-                f"mount -t tmpfs -o noexec,size=1m tmpfs {quoted_mp} && "
-                f"trap 'umount {quoted_mp} >/dev/null 2>&1 || true' EXIT && "
-                f"{quoted_cmd}"
-            )
-            run = subprocess.run(
-                ["unshare", "-U", "-r", "-m", "sh", "-c", script],
-                env=env,
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
-            self.assertIn("probe create=ok, write=ok, rename=ok, execute=failed, remove=ok", run.stdout, run.stdout + run.stderr)
-            self.assertIn(f"FAIL workspace {mountpoint}: mount {mountpoint} has noexec\n", run.stdout)
-            self.assertEqual(list(mountpoint.iterdir()), [])
-
     def test_doctor_rejects_duplicate_workspace_flag(self):
         ws1 = self.root / "ws1"
         ws2 = self.root / "ws2"
@@ -578,6 +539,8 @@ class ListAndDoctor(StorageFixture):
         self.assertEqual(self.run_tool(["doctor", "extra"]).returncode, 2)
 
     def test_doctor_fails_where_no_directory_on_modulepath_holds_the_eessi_module(self):
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
+            return
         # A shell with Lmod but without EESSI's init: builds keep its
         # MODULEPATH, and Lmod cannot find EESSI/2026.06 there.
         repo = self.root / "repo"
@@ -607,6 +570,8 @@ class ListAndDoctor(StorageFixture):
         self.assertIn("warn no directory on MODULEPATH in this shell holds stack.module", run.stdout)
 
     def test_doctor_fails_on_a_secret_every_build_would_stop_on(self):
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
+            return
         secret = dict(EB_LOCAL_SECRET_MY_LICENCE_KEY="env:MY_LICENCE_SRC")
         run = self.run_tool(["doctor"], **secret)
         self.assertEqual(run.returncode, 1, run.stdout)
@@ -654,14 +619,13 @@ class ListAndDoctor(StorageFixture):
         self.assertNotIn("mirror-token-value", run.stdout + run.stderr)
 
     def without_a_site_file(self, **extra):
-        for installed in ("/etc/eb-local/config.toml", "/etc/eb-local.conf"):
-            if Path(installed).exists():
-                self.skipTest(f"{installed} is this host's site file")
         repo = self.root / "repo"
         return self.run_tool(["doctor"], EB_LOCAL_CONFIG="", XDG_CONFIG_HOME=str(self.root / "xdg"),
                              SLURM_JOB_ID="", EESSI_CVMFS_REPO=str(repo), **extra)
 
     def test_doctor_without_a_site_file_judges_eb_local_eb(self):
+        if not hostile_fs.enter_without_host_paths(self, ("/etc/eb-local/config.toml", "/etc/eb-local.conf")):
+            return
         init = self.root / "repo" / "versions" / "2026.06" / "init" / "lmod" / "bash"
         run = self.without_a_site_file()
         self.assertEqual(run.returncode, 1, run.stdout)

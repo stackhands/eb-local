@@ -322,60 +322,67 @@ test "the environment proxy wins, and a later client file wins over an earlier o
     try testing.expect(from_env.host_injected);
     try testing.expectEqualStrings("http://host:3128", from_env.value);
     try testing.expectEqualStrings("environment CVMFS_HTTP_PROXY", from_env.from);
-}
-
-test "an empty CVMFS_HTTP_PROXY clears an earlier file assignment" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const root = try scratch(a);
-    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
-    try common.atomic.makedirs(try std.fs.path.join(a, &.{ root, "config.d" }));
-    try writeAt(try std.fs.path.join(a, &.{ root, "default.conf" }), "CVMFS_HTTP_PROXY=\"http://old:3128\"\n");
-    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "CVMFS_HTTP_PROXY=\"\"\n");
-
-    var env = std.process.Environ.Map.init(a);
-    const cleared_by_later_file = try readProxy(a, &env, root, "software.eessi.io");
-    try testing.expectEqual(ProxyMode.unset, cleared_by_later_file.mode);
-
-    try writeAt(
-        try std.fs.path.join(a, &.{ root, "config.d", "software.eessi.io.local" }),
-        "CVMFS_HTTP_PROXY=\"http://first:3128\"\nCVMFS_HTTP_PROXY=\n",
-    );
-    const cleared_in_same_file = try readProxy(a, &env, root, "software.eessi.io");
-    try testing.expectEqual(ProxyMode.unset, cleared_in_same_file.mode);
-}
-
-test "export with tab prefix sets CVMFS_HTTP_PROXY" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const root = try scratch(a);
-    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
-    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "export\tCVMFS_HTTP_PROXY=\"http://tab:3128\"\n");
-
-    var env = std.process.Environ.Map.init(a);
-    const got = try readProxy(a, &env, root, "software.eessi.io");
-    try testing.expectEqual(ProxyMode.proxy, got.mode);
-    try testing.expectEqualStrings("http://tab:3128", got.value);
-}
-
-test "quoted CVMFS_HTTP_PROXY trims surrounding spaces and tabs" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const root = try scratch(a);
-    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
-    var env = std.process.Environ.Map.init(a);
-
-    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "CVMFS_HTTP_PROXY=\" DIRECT \"\n");
-    const direct = try readProxy(a, &env, root, "software.eessi.io");
-    try testing.expectEqual(ProxyMode.direct, direct.mode);
-    try testing.expectEqualStrings("DIRECT", direct.value);
-
-    try writeAt(try std.fs.path.join(a, &.{ root, "default.local" }), "CVMFS_HTTP_PROXY=\" \t \"\n");
-    const blank = try readProxy(a, &env, root, "software.eessi.io");
-    try testing.expectEqual(ProxyMode.unset, blank.mode);
+    const File = struct { rel: []const u8, text: []const u8 };
+    const Row = struct {
+        files: []const File,
+        mode: ProxyMode,
+        value: []const u8,
+    };
+    const rows = [_]Row{
+        .{
+            .files = &.{
+                .{ .rel = "default.conf", .text = "CVMFS_HTTP_PROXY=\"http://old:3128\"\n" },
+                .{ .rel = "default.local", .text = "CVMFS_HTTP_PROXY=\"\"\n" },
+            },
+            .mode = .unset,
+            .value = "",
+        },
+        .{
+            .files = &.{
+                .{ .rel = "default.conf", .text = "CVMFS_HTTP_PROXY=\"http://old:3128\"\n" },
+                .{ .rel = "default.local", .text = "CVMFS_HTTP_PROXY=\"\"\n" },
+                .{ .rel = "config.d/software.eessi.io.local", .text = "CVMFS_HTTP_PROXY=\"http://first:3128\"\nCVMFS_HTTP_PROXY=\n" },
+            },
+            .mode = .unset,
+            .value = "",
+        },
+        .{
+            .files = &.{
+                .{ .rel = "default.local", .text = "export\tCVMFS_HTTP_PROXY=\"http://tab:3128\"\n" },
+            },
+            .mode = .proxy,
+            .value = "http://tab:3128",
+        },
+        .{
+            .files = &.{
+                .{ .rel = "default.local", .text = "CVMFS_HTTP_PROXY=\" DIRECT \"\n" },
+            },
+            .mode = .direct,
+            .value = "DIRECT",
+        },
+        .{
+            .files = &.{
+                .{ .rel = "default.local", .text = "CVMFS_HTTP_PROXY=\" \t \"\n" },
+            },
+            .mode = .unset,
+            .value = "",
+        },
+    };
+    for (rows, 0..) |row, n| {
+        const dir = try std.fmt.allocPrint(a, "{s}/row-{d}", .{ root, n });
+        try common.atomic.makedirs(dir);
+        for (row.files) |file| {
+            if (std.fs.path.dirname(file.rel)) |parent| {
+                try common.atomic.makedirs(try std.fs.path.join(a, &.{ dir, parent }));
+            }
+            try writeAt(try std.fs.path.join(a, &.{ dir, file.rel }), file.text);
+        }
+        var row_env = std.process.Environ.Map.init(a);
+        const got = try readProxy(a, &row_env, dir, "software.eessi.io");
+        try testing.expectEqual(row.mode, got.mode);
+        try testing.expectEqualStrings(row.value, got.value);
+        try testing.expect(!got.host_injected);
+    }
 }
 
 test "a parallel read uses srun when it is on PATH, and forks when it is not" {

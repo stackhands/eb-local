@@ -9,6 +9,8 @@ const common = @import("zig_common");
 const sys = common.sys;
 const fsx = common.fsx;
 const proc = common.proc;
+const storage = @import("storage.zig");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 
 /// The commands wrapped when they are on PATH: compiler drivers, then
@@ -245,6 +247,9 @@ pub fn write(a: Allocator, dir: []const u8, found: []const []const u8) Error!voi
 }
 
 fn put(a: Allocator, path: []const u8, bytes: []const u8, mode: u32) Error!void {
+    if (comptime build_options.test_ops) {
+        if (storage.takeWriteErrno()) |e| return storage.injectedSysError(e);
+    }
     if (fsx.openRegular(fsx.cwd, path, false)) |f| {
         defer sys.close(f.fd);
         const old = fsx.readAll(a, f.fd, bytes.len + 1) catch null;

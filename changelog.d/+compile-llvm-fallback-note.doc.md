@@ -1,0 +1,1 @@
+Document in `docs/howto/compile.md` that the European Environment for Scientific Software Installations (EESSI) 2026.06 includes `buildenv/default-foss-2026.1` and has no `default-lfoss` or `default-intel` build environment.

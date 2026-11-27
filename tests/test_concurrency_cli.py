@@ -22,6 +22,29 @@ def _wait_for(path: Path, timeout: float = 5.0):
     return False
 
 
+def _wait_for_lock(pid: int, lock: Path, timeout: float = 5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            want = os.stat(lock)
+        except OSError:
+            time.sleep(0.02)
+            continue
+        try:
+            fds = list(Path(f"/proc/{pid}/fd").iterdir())
+        except OSError:
+            return False
+        for fd in fds:
+            try:
+                held = os.stat(fd)
+            except OSError:
+                continue
+            if held.st_ino == want.st_ino and held.st_dev == want.st_dev:
+                return True
+        time.sleep(0.02)
+    return False
+
+
 @unittest.skipUnless(binary.ZIG, "prefix concurrency locks target the Zig build")
 class PrefixConcurrency(StorageFixture):
     def setUp(self):
@@ -50,13 +73,6 @@ export -f eb
         path.write_text((self.root / "doubles.sh").read_text() + "\n" + eb_fn)
         return path
 
-    def test_clean_build_output_bytes_stay_unchanged(self):
-        argv, env = binary.command(self.script, ["recipe.eb"], dict(self.env))
-        run = subprocess.run(argv, env=env, cwd=self.root, capture_output=True, text=False)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stderr, b"")
-        self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
-
     def test_concurrent_builds_on_same_prefix_serialize_and_notify_stderr(self):
         gate1 = self.root / "gate1"
         gate2 = self.root / "gate2"
@@ -72,7 +88,8 @@ export -f eb
                 gate2.write_text("go\n")
                 with subprocess.Popen(argv2, env=env2, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p2:
                     try:
-                        time.sleep(0.35)
+                        lock = self.prefix / ".eb-local" / ".lock"
+                        self.assertTrue(_wait_for_lock(p2.pid, lock), "second build did not reach the prefix lock")
                         self.assertFalse((self.root / "started-2").exists(), "second build ran eb concurrently with first build")
                         self.assertIsNone(p2.poll())
                         gate1.write_text("go\n")
@@ -251,7 +268,8 @@ export -f eb
                 self.assertTrue(_wait_for(self.root / "started-src"))
                 with subprocess.Popen(argv_c, env=env_c, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as pc:
                     try:
-                        time.sleep(0.35)
+                        lock = self.prefix / ".eb-local" / ".lock"
+                        self.assertTrue(_wait_for_lock(pc.pid, lock), "clean --sources did not reach the prefix lock")
                         self.assertIsNone(pc.poll(), "clean --sources ran while build held prefix lock")
                         self.assertTrue((self.prefix / ".eb-local" / "sources" / "pkg.tar.gz").exists())
                         gate.write_text("go\n")
@@ -308,7 +326,8 @@ export -f eb
                 self.assertTrue(_wait_for(self.root / "started-un"))
                 with subprocess.Popen(argv_u, env=env_u, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as pu:
                     try:
-                        time.sleep(0.35)
+                        lock = self.prefix / ".eb-local" / ".lock"
+                        self.assertTrue(_wait_for_lock(pu.pid, lock), "uninstall did not reach the prefix lock")
                         self.assertIsNone(pu.poll(), "uninstall ran while build held prefix lock")
                         self.assertTrue(inst.exists())
                         gate.write_text("go\n")

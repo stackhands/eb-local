@@ -424,14 +424,23 @@ fn ownInstallVar(c: Ctx, s: config.Settings, p: Place, name: []const u8, value: 
     return if (is_path) "is in your prefix, as EESSI-extend sets it when eb-local env loads it" else "is EESSI-extend's own, set when eb-local env loads it";
 }
 
+fn isModule(module: []const u8, name: []const u8) bool {
+    if (std.mem.eql(u8, module, name)) return true;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    return std.mem.startsWith(u8, module, name) and module.len > name.len and module[name.len] == '/';
+}
+
 /// Whether Lmod lists MODULE, a name or a name and version, as loaded.
 fn moduleLoaded(c: Ctx, module: []const u8) bool {
     var it = std.mem.splitScalar(u8, c.env.get("LOADEDMODULES") orelse "", ':');
-    while (it.next()) |m| {
-        if (std.mem.eql(u8, m, module)) return true;
-        if (std.mem.startsWith(u8, m, module) and m.len > module.len and m[module.len] == '/') return true;
-    }
+    while (it.next()) |m| if (isModule(m, module)) return true;
     return false;
+}
+
+test "isModule matches an unversioned name or the exact configured module" {
+    try std.testing.expect(isModule("EESSI/2026.06", "EESSI"));
+    try std.testing.expect(isModule("EESSI/2026.06", "EESSI/2026.06"));
+    try std.testing.expect(!isModule("EESSI/2026.06/debug", "EESSI/2026.06"));
 }
 
 /// Before `env` or `dev` lines run, optionally refuse when CVMFS has not mounted EESSI.
@@ -469,6 +478,13 @@ const module_missing =
 ;
 
 fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8) []const u8 {
+    return environmentPrelude(c, s, p, pure, setup, true);
+}
+
+/// `load_extend` is false when a dev lock already names the extension, so the
+/// prelude does not load it again. The lock loads that module once, inside
+/// the CPU target guard.
+fn environmentPrelude(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []const u8, load_extend: bool) []const u8 {
     const a = c.a;
     const install = configuredInstall(p);
     var out: std.ArrayList(u8) = .empty;
@@ -516,8 +532,10 @@ fn environmentLines(c: Ctx, s: config.Settings, p: Place, pure: bool, setup: []c
         \\fi
         \\
     );
-    const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
-    if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    if (load_extend) {
+        const exists_dir = if (fsx.statAt(fsx.cwd, p.prefix, true)) |st| st.isDir() else |_| false;
+        if (exists_dir) add(a, &out, str(a, "module load {s}\n", .{q(a, s.extend_module.value)}));
+    }
     // build.site_toolchains under the version the stack set, as a build
     // exports it, so eb run by hand after env or dev accepts them too.
     if (s.site_toolchains.value.len > 0) {
@@ -1399,6 +1417,59 @@ fn validTarget(text: []const u8) bool {
     return any;
 }
 
+fn lockedModule(modules: []const []const u8, wanted: []const u8) ?[]const u8 {
+    for (modules) |m| if (isModule(m, wanted)) return m;
+    return null;
+}
+
+fn hasBuildenvModule(s: config.Settings, modules: []const []const u8) bool {
+    for (modules) |m| {
+        if (std.mem.startsWith(u8, m, "buildenv/")) return true;
+        if (std.mem.eql(u8, m, s.dev_buildenv.value)) return true;
+        for (s.buildenv_for) |b| if (b.value.len > 0 and std.mem.eql(u8, m, b.value)) return true;
+    }
+    return false;
+}
+
+/// Shell that stores `eb-local rpath-wrappers ARGS` in `name` and returns
+/// that command's status when it fails. The lines run inside `eb_local_apply`,
+/// so a failure returns from that function instead of exiting the shell.
+/// `eval "$(...)"` would discard the status and let the function continue.
+fn rpathCapture(a: Allocator, exe: []const u8, args: []const u8, name: []const u8) []const u8 {
+    return str(a, "{s}=$({s} rpath-wrappers {s}) || return $?\n", .{ name, exe, args });
+}
+
+/// The `rpath-wrappers` lines for a locked dev shell. Each command is
+/// captured and checked before it is evaluated, so a failure leaves
+/// `EB_LOCAL_RPATH_WRAPPERS` unset. The caller exports
+/// `EB_LOCAL_DEV_PREFIX` only after these lines, which return on failure.
+/// A lock with no build environment runs only `--for`. That wraps every
+/// name in `rpath.names`, and `rpath.self_linking` is a subset, so a
+/// following `--unwrapped` is not needed. Capturing it before `--for` is
+/// on `PATH` would miss `.eb-local-rpath`, wrap those compilers again,
+/// and leave the first directory behind after `drop_rpath_wrappers`.
+fn lockedRpathWrapperLines(c: Ctx, s: config.Settings, modules: []const []const u8) []const u8 {
+    const a = c.a;
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const exe = q(a, selfExe(&exe_buf) orelse tool);
+    if (hasBuildenvModule(s, modules)) {
+        const cap_unwrapped = rpathCapture(a, exe, "--unwrapped", "_eb_local_unwrapped");
+        return str(a, "{s}{s}{s}", .{
+            \\local _eb_local_unwrapped
+            \\
+            ,
+            cap_unwrapped,
+            \\eval "$_eb_local_unwrapped"
+            \\unset _eb_local_unwrapped
+            \\
+        });
+    }
+    return str(a, "{s}{s}unset eb_local_family\n", .{
+        familyDetectLines(a),
+        rpathEval(a, str(a, "{s} rpath-wrappers --for \"$eb_local_family\"", .{exe})),
+    });
+}
+
 /// `dev --locked`: the lines that load exactly the modules of `eb-local.lock`,
 /// from a purged shell, and that load nothing when this shell's CPU target is
 /// not the lock's, or when the lock records an EESSI version and this shell's
@@ -1422,8 +1493,12 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
     }
     if (!std.mem.eql(u8, lock.stack, s.stack_module.value))
         die("{s} was written with the stack {s}; this configuration loads {s}. Write the lock again, or select that stack", .{ lock_name, lock.stack, s.stack_module.value });
+    const locked_extend = lockedModule(lock.modules, s.extend_module.value);
     var out: std.ArrayList(u8) = .empty;
-    out.appendSlice(a, environmentLines(c, s, installed, true, "")) catch oom();
+    // Skip the prelude's extension load when the lock already names it. The
+    // extension is then loaded once inside the target guard, and the stack
+    // is left off the locked module line because the prelude loaded it.
+    out.appendSlice(a, environmentPrelude(c, s, installed, true, "", locked_extend == null)) catch oom();
     out.appendSlice(a, str(a,
         \\if [ "${{EESSI_SOFTWARE_SUBDIR-}}" != {s} ]; then
         \\    echo "eb-local: {s} was written for the CPU target "{s}", and this shell has ${{EESSI_SOFTWARE_SUBDIR:-none}}; its modules are not loaded." >&2
@@ -1438,13 +1513,26 @@ fn lockedLines(c: Ctx, s: config.Settings, g: Global, installed: Place) u8 {
         \\    echo "eb-local: {s} was written for EESSI "{s}", and this shell has ${{EESSI_VERSION:-none}}; its modules are not loaded." >&2
         \\
     , .{ q(a, lock.eessi_version), lock_name, q(a, lock.eessi_version) })) catch oom();
-    out.appendSlice(a, "else\nmodule load") catch oom();
-    for (lock.modules) |m| out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
-    out.append(a, '\n') catch oom();
+    out.appendSlice(a, "else\n") catch oom();
+    // Lmod resolves every name on one load line before loading any of them,
+    // and the extension is on MODULEPATH only after the stack. Load a
+    // recorded extension on its own line first.
+    if (locked_extend) |m| out.appendSlice(a, str(a, "module load {s}\n", .{q(a, m)})) catch oom();
+    var loaded: usize = 0;
+    for (lock.modules) |m| {
+        if (isModule(m, s.stack_module.value) or isModule(m, s.extend_module.value)) continue;
+        if (loaded == 0) out.appendSlice(a, "module load") catch oom();
+        out.appendSlice(a, str(a, " {s}", .{q(a, m)})) catch oom();
+        loaded += 1;
+    }
+    if (loaded > 0) out.append(a, '\n') catch oom();
+    out.appendSlice(a, drop_rpath_wrappers) catch oom();
+    out.appendSlice(a, lockedRpathWrapperLines(c, s, lock.modules)) catch oom();
     out.appendSlice(a, installed_rpath_settings) catch oom();
     out.appendSlice(a, host_ca_bundle) catch oom();
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    out.appendSlice(a, extend.cargo_linker) catch oom();
     out.appendSlice(a, dev_lang_dirs) catch oom();
     out.appendSlice(a, "fi\n") catch oom();
     const lines = emittedLines(a, envStrict(c, g), out.items);
@@ -1527,6 +1615,8 @@ fn cmdDev(c: Ctx, s: config.Settings, g: Global, extra: []const []const u8) u8 {
     // has picked them.
     const dev_root = std.fs.path.join(a, &.{ installed.prefix, "dev" }) catch oom();
     out.appendSlice(a, str(a, "export EB_LOCAL_DEV_PREFIX={s}\"/${{EESSI_VERSION-}}/${{EESSI_SOFTWARE_SUBDIR-}}${{EESSI_ACCELERATOR_TARGET:+/$EESSI_ACCELERATOR_TARGET}}\"\n", .{q(a, dev_root)})) catch oom();
+    // Same bytes as eb: src/cargo-linker.sh, embedded as extend.cargo_linker.
+    out.appendSlice(a, extend.cargo_linker) catch oom();
     out.appendSlice(a, dev_lang_dirs) catch oom();
     if (g.replace) out.appendSlice(a, record_active_modules) catch oom();
     const lines = emittedLines(a, envStrict(c, g), out.items);
@@ -1696,6 +1786,14 @@ fn rpathEval(a: Allocator, command: []const u8) []const u8 {
     return str(a, "_eb_local_wrap=$({s}) || return $?\neval \"$_eb_local_wrap\"\nunset _eb_local_wrap\n", .{command});
 }
 
+fn familyDetectLines(a: Allocator) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, "eb_local_family=gcc\n") catch oom();
+    for (config.families) |f|
+        out.appendSlice(a, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name })) catch oom();
+    return out.items;
+}
+
 /// The lines that load the build environment. A dev.buildenv the caller
 /// chose is loaded as it is. The default depends on the compilers the
 /// modules brought in, which only the shell knows after it loads them: the
@@ -1737,9 +1835,7 @@ fn buildenvLines(c: Ctx, s: config.Settings) []const u8 {
             o.appendSlice(al, text) catch oom();
         }
     }.f;
-    add(a, &out, "eb_local_family=gcc\n");
-    for (config.families) |f|
-        add(a, &out, str(a, "if [ -n \"${{{s}-}}\" ]; then eb_local_family={s}; fi\n", .{ f.ebroot, f.name }));
+    add(a, &out, familyDetectLines(a));
     add(a, &out, "case $eb_local_family in\n");
     for (config.families, s.buildenv_for) |f, b| {
         // "none" from a site or the environment means the wrappers, with no
@@ -2699,6 +2795,10 @@ fn cmdSite(c: Ctx, o: SiteOpts) u8 {
     if (exists(target) and !o.force) die("{s} exists; --force replaces it", .{target});
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
+    if (comptime build_options.test_ops) {
+        if (storage.takeWriteErrno()) |e|
+            die("cannot write {s}: {s}", .{ target, sys.describeErrno(e) });
+    }
     common.atomic.atomicWrite(a, target, text, .{ .mode = 0o644 }, &why) catch |e|
         die("cannot write {s}: {s}", .{ target, if (why.msg.len > 0) why.msg else storage.describeError(e) });
     say("wrote {s} from template {s}; eb-local config shows what it sets", .{ target, t.name });
@@ -2747,6 +2847,9 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
 const Run = union(enum) {
     exit: u8,
     signal: linux.SIG,
+    /// The process group was still occupied when the SIGKILL deadline
+    /// passed. Callers must not clean logs as though it had been reaped.
+    unreaped,
 };
 
 /// An exit code as it is. A signal is raised again, with the disposition this
@@ -2756,6 +2859,7 @@ const Run = union(enum) {
 fn stop(run: Run) u8 {
     switch (run) {
         .exit => |c| return c,
+        .unreaped => return 1,
         .signal => |sig| {
             var cur: linux.Sigaction = undefined;
             _ = linux.sigaction(sig, null, &cur);
@@ -2795,8 +2899,29 @@ var first_signal = std.atomic.Value(u32).init(0);
 /// interactive cancellation past sub-second responsiveness when a descendant
 /// ignores `SIGINT`, `SIGTERM`, or `SIGHUP`.
 const group_settle_grace_ms: i64 = 500;
+var test_group_grace_ms: i64 = 0;
+
+/// How long to keep sending SIGKILL and reaping after the grace period.
+/// This is the bound `proc.stopGroup` uses. A child in uninterruptible
+/// sleep can sit with SIGKILL pending, and a blocking wait never
+/// returns. A member forked after one signal can miss that signal.
+/// Reaching this deadline without ECHILD is a timeout, not an empty group.
+const group_kill_reap_ms: i64 = 10_000;
+
+/// Pause between kill attempts, so a late fork is signalled again soon.
+const group_kill_slice_ms: i64 = 10;
+
+/// Most `wait4` calls in one `reapPending` pass. `EINTR` and a reaped pid
+/// are retries. A signal storm or a stream of exiting children returns
+/// `.busy` at this cap, or at the deadline, so the caller can pause.
+const reap_pass_cap: u32 = 64;
 
 fn monotonicMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.clock) |clock| return clock.load(.acquire);
+        }
+    }
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.MONOTONIC, &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
@@ -2806,31 +2931,219 @@ fn monotonicMs() i64 {
 /// into a `-Dtest-ops` build. `phase` 0 makes `wait4` report a live child;
 /// `phase` 1 makes it report `ECHILD`. While installed, the scan reports no
 /// live member. `entered` is written once `settleGroup` commits to waiting,
-/// and a byte on `wake` releases that wait.
+/// and a byte on `wake` releases that wait. After the first `SIGKILL`,
+/// `script` replaces `phase` one result at a time. `script_from_start`
+/// uses `script` before that signal as well. `eintr` is `EINTR` and
+/// `reaped` is a collected pid. Both are retries, so one pass may read
+/// several of them. `clock`, when set, replaces the monotonic clock, and
+/// `pauseUntil` jumps it to the wake time.
+const ProbeStep = enum { live, empty, unknown, eintr, reaped };
+
 const SettleProbe = struct {
     phase: *std.atomic.Value(u8),
     entered: i32,
     wake: i32,
     told: std.atomic.Value(u8) = .init(0),
+    /// When false, the grace loop keeps its own deadline instead of
+    /// blocking on `wake`. `phase` still stands in for `wait4`.
+    hold: bool = true,
+    /// Skip the grace wait and go straight to SIGKILL.
+    force_kill: bool = false,
+    /// `wait4` results after the first SIGKILL, in order. Empty keeps `phase`.
+    /// The last entry repeats. `eintr` and `reaped` stay in the reap loop.
+    script: []const ProbeStep = &.{},
+    /// Apply `script` to the grace reaps as well, before the first SIGKILL.
+    script_from_start: bool = false,
+    script_i: std.atomic.Value(u32) = .init(0),
+    /// SIGKILL calls that returned something other than EINTR.
+    kills: std.atomic.Value(u32) = .init(0),
+    /// Block inside the post-kill reap with this 1-based index until
+    /// `release` is set. 0 disables the barrier.
+    barrier_at: u32 = 0,
+    release: std.atomic.Value(u8) = .init(0),
+    /// 0 off, 1 armed, 2 consumed. Armed turns the next scripted empty
+    /// result into one live result: a member forked after SIGKILL.
+    late: std.atomic.Value(u8) = .init(0),
+    /// SIGKILL count when that late member was observed.
+    kills_at_fork: std.atomic.Value(u32) = .init(0),
+    /// Times an unexpected reap errno was reported.
+    reported: std.atomic.Value(u32) = .init(0),
+    /// Times the kill deadline passed on a live child or a busy reap.
+    timeouts: std.atomic.Value(u32) = .init(0),
+    /// Override `group_settle_grace_ms` when non-negative. `force_kill` wins.
+    grace_ms: i64 = -1,
+    /// Override `group_kill_reap_ms` when positive.
+    kill_ms: i64 = 0,
+    /// Monotonic milliseconds. Null uses the real clock.
+    clock: ?*std.atomic.Value(i64) = null,
+    /// `wait4` reads observed through the probe.
+    wait_calls: std.atomic.Value(u32) = .init(0),
+    /// Most `wait4` reads inside one `reapPending` call.
+    max_pass_waits: std.atomic.Value(u32) = .init(0),
+    /// `wait4` reads in the latest `reapPending` call.
+    last_pass_waits: std.atomic.Value(u32) = .init(0),
+    /// `reapPending` calls that read `wait4` at least once.
+    passes: std.atomic.Value(u32) = .init(0),
 };
 
 var settle_probe: ?*SettleProbe = null;
+var settle_entered_fd: i32 = -1;
 
-/// Reap any exited children in process group `pgid` without blocking; return
-/// whether live reparented children of this process remain in `pgid`.
-fn reapGroupState(pgid: linux.pid_t) bool {
-    if (pgid <= 0) return false;
-    if (comptime build_options.test_ops) {
-        if (settle_probe) |probe| return probe.phase.load(.acquire) == 0;
+fn noteSettleEntered() void {
+    if (settle_entered_fd < 0) return;
+    _ = linux.write(settle_entered_fd, "e", 1);
+}
+
+const Reap = union(enum) {
+    /// `wait4` returned ECHILD: no matching child remains.
+    empty,
+    /// A child of this process is still in the group.
+    live,
+    /// `wait4` failed with an errno other than EINTR or ECHILD.
+    unknown: linux.E,
+    /// The pass stopped on `EINTR` or a reaped pid. The cap or the
+    /// deadline was reached, and the group is not drained.
+    busy,
+};
+
+const GroupEnd = enum { drained, timed_out };
+
+/// One `wait4` result. `.retry` is a reaped zombie or EINTR; the caller
+/// calls `wait4` again. Only ECHILD is an empty group.
+const WaitRead = union(enum) { retry, reap: Reap };
+
+fn readWait(rc: usize) WaitRead {
+    switch (linux.errno(rc)) {
+        .SUCCESS => {
+            if (rc == 0) return .{ .reap = .live };
+            return .retry;
+        },
+        .INTR => return .retry,
+        .CHILD => return .{ .reap = .empty },
+        else => |e| return .{ .reap = .{ .unknown = e } },
     }
-    var raw: i32 = 0;
-    while (true) {
-        const rc = linux.wait4(-pgid, &raw, linux.W.NOHANG, null);
-        switch (linux.errno(rc)) {
-            .SUCCESS => if (rc == 0) return true,
-            .INTR => continue,
-            else => return false,
+}
+
+fn probeForceKill() bool {
+    if (comptime !build_options.test_ops) return false;
+    const probe = settle_probe orelse return false;
+    return probe.force_kill;
+}
+
+fn probeUsesScript(probe: *SettleProbe) bool {
+    if (probe.script.len == 0) return false;
+    if (probe.script_from_start) return true;
+    return probe.kills.load(.acquire) != 0;
+}
+
+fn probeRead(probe: *SettleProbe) WaitRead {
+    const seen = probe.wait_calls.fetchAdd(1, .monotonic);
+    // A retry script that ignored the cap would spin. Stop so the test
+    // fails instead of hanging.
+    if (seen >= 1_000_000) return .{ .reap = .empty };
+    if (!probeUsesScript(probe)) {
+        const reap: Reap = if (probe.phase.load(.acquire) == 0) .live else .empty;
+        return .{ .reap = reap };
+    }
+    const n = probe.script.len;
+    const i = probe.script_i.fetchAdd(1, .acq_rel);
+    var step: ProbeStep = if (i < n) probe.script[i] else probe.script[n - 1];
+    if (step == .empty and probe.late.load(.acquire) == 1) {
+        if (probe.late.cmpxchgStrong(1, 2, .acq_rel, .acquire) == null) {
+            probe.kills_at_fork.store(probe.kills.load(.acquire), .release);
+            step = .live;
         }
+    }
+    if (probe.barrier_at != 0 and i + 1 == probe.barrier_at) {
+        _ = linux.write(probe.entered, "b", 1);
+        while (probe.release.load(.acquire) == 0) {
+            var pfd = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+            if (linux.errno(linux.poll(&pfd, 1, 1000)) == .INTR) continue;
+        }
+        var drain = [1]linux.pollfd{.{ .fd = probe.wake, .events = linux.POLL.IN, .revents = 0 }};
+        const got = linux.poll(&drain, 1, 0);
+        if (linux.errno(got) == .SUCCESS and got > 0) {
+            var buf: [16]u8 = undefined;
+            while (linux.errno(linux.read(probe.wake, &buf, buf.len)) == .INTR) {}
+        }
+    }
+    return switch (step) {
+        .live => .{ .reap = .live },
+        .empty => .{ .reap = .empty },
+        .unknown => .{ .reap = .{ .unknown = .IO } },
+        .eintr, .reaped => .retry,
+    };
+}
+
+fn nextWait(pgid: linux.pid_t, raw: *i32) WaitRead {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| return probeRead(probe);
+    }
+    return readWait(linux.wait4(-pgid, raw, linux.W.NOHANG, null));
+}
+
+fn noteReapPass(calls: u32) void {
+    if (comptime !build_options.test_ops) return;
+    const probe = settle_probe orelse return;
+    _ = probe.passes.fetchAdd(1, .monotonic);
+    probe.last_pass_waits.store(calls, .monotonic);
+    const prev = probe.max_pass_waits.load(.monotonic);
+    if (calls > prev) probe.max_pass_waits.store(calls, .monotonic);
+}
+
+/// Reap zombies in `pgid` without blocking. One pass calls `wait4` at
+/// most `reap_pass_cap` times. After `EINTR` and after each reaped pid
+/// it checks `deadline`. The cap or the deadline returns `.busy`, which
+/// is not an empty group.
+fn reapPending(pgid: linux.pid_t, deadline: i64) Reap {
+    if (pgid <= 0) return .empty;
+    var calls: u32 = 0;
+    var raw: i32 = 0;
+    var result: Reap = .busy;
+    while (calls < reap_pass_cap) {
+        calls += 1;
+        switch (nextWait(pgid, &raw)) {
+            .reap => |r| {
+                result = r;
+                break;
+            },
+            .retry => if (monotonicMs() >= deadline) break,
+        }
+    }
+    noteReapPass(calls);
+    return result;
+}
+
+/// Report an unexpected `wait4` errno once per settle. EINTR is retried in
+/// `readWait` and is not an unknown result.
+fn noteUnknown(noted: *bool, pgid: linux.pid_t, reap: Reap) void {
+    const err = switch (reap) {
+        .unknown => |e| e,
+        else => return,
+    };
+    if (noted.*) return;
+    noted.* = true;
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| _ = probe.reported.fetchAdd(1, .monotonic);
+    }
+    // A test binary's stderr is captured, and zig build prints "failed
+    // command" for that capture even when every test passed.
+    if (@import("builtin").is_test) return;
+    warn("cannot reap process group {d} ({s})", .{ pgid, sys.describeErrno(err) });
+}
+
+/// Reap exited children in `pgid` in bounded passes. True only when a
+/// child of this process is still in `pgid`. A pass that returns `.busy`
+/// pauses and tries again until `ECHILD`, a live child, an unexpected
+/// errno, or the deadline.
+fn reapGroupState(pgid: linux.pid_t) bool {
+    const deadline = monotonicMs() + group_kill_reap_ms;
+    while (true) {
+        const reap = reapPending(pgid, deadline);
+        if (reap == .live) return true;
+        if (reap != .busy) return false;
+        if (monotonicMs() >= deadline) return false;
+        pauseUntil(null, @min(deadline, monotonicMs() + group_kill_slice_ms));
     }
 }
 
@@ -2842,10 +3155,12 @@ fn settleScan(pgid: linux.pid_t) bool {
 }
 
 /// Block until the test releases the probe. True when the probe handled the
-/// wait, so the caller checks `wait4` again.
+/// wait, so the caller checks `wait4` again. A probe with `hold` false
+/// does not handle it, and the caller waits out the grace deadline.
 fn probeWait() bool {
     if (comptime !build_options.test_ops) return false;
     const probe = settle_probe orelse return false;
+    if (!probe.hold) return false;
     if (probe.told.swap(1, .acq_rel) == 0) {
         _ = linux.write(probe.entered, "e", 1);
     }
@@ -2868,15 +3183,147 @@ fn drainSignalFd(sfd: sys.fd_t) void {
     }
 }
 
+/// Wait until `until` (monotonic milliseconds), or until `SIGCHLD` is
+/// readable on `sfd`. `EINTR` retries. A failed poll sleeps instead, so a
+/// missing signalfd cannot spin. A null `sfd` always sleeps, so a signal
+/// storm cannot skip the pause between reap passes.
+fn pauseUntil(sfd: ?sys.fd_t, until: i64) void {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.clock) |clock| {
+                const now = clock.load(.acquire);
+                if (now < until) clock.store(until, .release);
+                return;
+            }
+        }
+    }
+    while (true) {
+        const rem = until - monotonicMs();
+        if (rem <= 0) return;
+        if (sfd) |fd| {
+            var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+            const rc = linux.poll(&pfd, 1, @intCast(rem));
+            switch (linux.errno(rc)) {
+                .INTR => continue,
+                .SUCCESS => {
+                    drainSignalFd(fd);
+                    return;
+                },
+                else => {},
+            }
+        }
+        const left = until - monotonicMs();
+        if (left <= 0) return;
+        const sec = @divTrunc(left, 1000);
+        var ts: linux.timespec = .{
+            .sec = @intCast(sec),
+            .nsec = @intCast((left - sec * 1000) * 1_000_000),
+        };
+        if (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) continue;
+        return;
+    }
+}
+
+/// Send one SIGKILL, retrying EINTR until `deadline`. False means the
+/// deadline passed during those retries. Other errnos count as one attempt:
+/// the group may already be gone, and the following reap decides.
+fn sendKill(pgid: linux.pid_t, deadline: i64) bool {
+    while (true) {
+        const kr = linux.kill(-pgid, .KILL);
+        if (linux.errno(kr) != .INTR) {
+            if (comptime build_options.test_ops) {
+                if (settle_probe) |probe| _ = probe.kills.fetchAdd(1, .release);
+            }
+            return true;
+        }
+        if (monotonicMs() >= deadline) return false;
+    }
+}
+
+fn killBudgetMs() i64 {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| if (probe.kill_ms > 0) return probe.kill_ms;
+    }
+    return group_kill_reap_ms;
+}
+
+/// Send SIGKILL to process group `pgid` and reap until `wait4` returns
+/// `ECHILD`, or the kill deadline passes. Each pass signals the group
+/// again, so a member forked after the previous `SIGKILL` is killed too.
+/// `wait4` does not block. `EINTR` or a reaped pid stops the pass at
+/// `reap_pass_cap` or at the deadline and returns `.busy`. The loop
+/// pauses before the next pass. The last reap result is kept. At the
+/// deadline one more bounded reap runs. `ECHILD` is `.drained`. Anything
+/// else is `.timed_out`: a diagnostic is printed, and the caller must
+/// not clean logs or otherwise treat the group as empty.
+fn reapKilledGroup(pgid: linux.pid_t, sfd: ?sys.fd_t, noted: *bool) GroupEnd {
+    if (pgid <= 0) return .drained;
+    const deadline = monotonicMs() + killBudgetMs();
+    var last: Reap = .live;
+    while (true) {
+        if (!sendKill(pgid, deadline)) break;
+        last = reapPending(pgid, deadline);
+        if (last == .empty) return .drained;
+        noteUnknown(noted, pgid, last);
+        const now = monotonicMs();
+        if (now >= deadline) break;
+        const until = @min(deadline, now + group_kill_slice_ms);
+        // A busy pass is a storm of `EINTR` or exiting children. Sleep
+        // even when `SIGCHLD` is already readable, so the next pass does
+        // not start at once.
+        if (last == .busy) {
+            pauseUntil(null, until);
+        } else {
+            pauseUntil(sfd, until);
+        }
+    }
+    last = reapPending(pgid, deadline);
+    if (last == .empty) return .drained;
+    noteUnknown(noted, pgid, last);
+    if (last == .live or last == .busy) noteLiveTimeout(pgid);
+    return .timed_out;
+}
+
+fn noteLiveTimeout(pgid: linux.pid_t) void {
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| _ = probe.timeouts.fetchAdd(1, .monotonic);
+    }
+    // See noteUnknown: a passing test must not write this to stderr.
+    if (@import("builtin").is_test) return;
+    warn("a descendant is still in process group {d} after SIGKILL; it was not reaped", .{pgid});
+}
+
+fn graceBudgetMs() i64 {
+    const override = test_group_grace_ms;
+    if (comptime build_options.test_ops) {
+        if (settle_probe) |probe| {
+            if (probe.force_kill) return 0;
+            if (probe.grace_ms >= 0) return probe.grace_ms;
+        }
+        if (override > 0) return override;
+    }
+    return group_settle_grace_ms;
+}
+
 /// Wait on `SIGCHLD` via `signalfd` and `poll` up to `group_settle_grace_ms`
-/// for reparented descendants in `pgid` to exit, then escalate to `SIGKILL`
-/// (`proc.stopGroup`) and reap remaining zombies.
-fn settleGroup(pgid: linux.pid_t) void {
-    if (pgid <= 0) return;
+/// for reparented descendants in `pgid` to exit, then `SIGKILL` and reap
+/// until none remain or `group_kill_reap_ms` passes. Only `ECHILD` ends the
+/// wait. Any other `wait4` error stays in that bounded retry. Each reap
+/// pass stops at `reap_pass_cap` or at its deadline and returns `.busy`
+/// rather than spinning. The grace loop pauses between those passes.
+/// Grace expiry is not an empty group: it goes on to `SIGKILL`. The kill
+/// deadline without `ECHILD` is `.timed_out`.
+fn settleGroup(pgid: linux.pid_t) GroupEnd {
+    if (pgid <= 0) return .drained;
+    var noted = false;
+    const skip_grace = probeForceKill();
+    const grace_deadline = monotonicMs() + graceBudgetMs();
     // wait4 is authoritative for children of this process. The /proc scan
     // can miss a live member, and returning then orphans it when stop()
-    // re-raises the signal.
-    if (!reapGroupState(pgid) and !settleScan(pgid)) return;
+    // re-raises the signal. Only ECHILD means no child remains.
+    const opened = reapPending(pgid, grace_deadline);
+    noteUnknown(&noted, pgid, opened);
+    if (opened == .empty and !settleScan(pgid)) return .drained;
 
     var chld = linux.sigemptyset();
     linux.sigaddset(&chld, .CHLD);
@@ -2887,29 +3334,30 @@ fn settleGroup(pgid: linux.pid_t) void {
     const sfd_rc = linux.signalfd(-1, &chld, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
     const sfd: ?sys.fd_t = if (linux.errno(sfd_rc) == .SUCCESS) @intCast(sfd_rc) else null;
     defer if (sfd) |fd| sys.close(fd);
+    noteSettleEntered();
 
-    const deadline = monotonicMs() + group_settle_grace_ms;
     while (true) {
         if (sfd) |fd| drainSignalFd(fd);
-        const live = reapGroupState(pgid);
-        if (!live and !settleScan(pgid)) return;
-        const rem = deadline - monotonicMs();
+        const pending = reapPending(pgid, grace_deadline);
+        noteUnknown(&noted, pgid, pending);
+        if (pending == .empty and !settleScan(pgid)) return .drained;
+        if (skip_grace) break;
+        const rem = grace_deadline - monotonicMs();
         if (rem <= 0) break;
-        if (live and probeWait()) continue;
-        if (live and sfd != null) {
+        if (pending == .live and probeWait()) continue;
+        if (pending == .live and sfd != null) {
             var pfd = [1]linux.pollfd{.{ .fd = sfd.?, .events = linux.POLL.IN, .revents = 0 }};
             _ = linux.poll(&pfd, 1, @intCast(rem));
         } else {
-            var empty: [1]linux.pollfd = undefined;
-            _ = linux.poll(&empty, 0, @intCast(@min(rem, 10)));
+            pauseUntil(null, @min(grace_deadline, monotonicMs() + group_kill_slice_ms));
         }
     }
 
-    if (reapGroupState(pgid) or settleScan(pgid)) {
-        _ = linux.kill(-pgid, .CONT);
-        proc.stopGroup(pgid);
-        _ = reapGroupState(pgid);
-    }
+    const after = reapPending(pgid, grace_deadline);
+    noteUnknown(&noted, pgid, after);
+    if (after == .empty and !settleScan(pgid)) return .drained;
+    while (linux.errno(linux.kill(-pgid, .CONT)) == .INTR) {}
+    return reapKilledGroup(pgid, sfd, &noted);
 }
 
 fn selfPgrp() linux.pid_t {
@@ -2997,7 +3445,8 @@ const Guard = struct {
     }
 
     /// Run a program on this terminal and wait for it to exit.
-    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
+    /// `error.ForkFailed` is a `fork` that did not start the program.
+    fn run(g: *const Guard, a: Allocator, argv: []const []const u8, envp: proc.Envp) error{ForkFailed}!Run {
         const zargv = a.allocSentinel(?[*:0]const u8, argv.len, null) catch oom();
         for (argv, 0..) |x, i| zargv[i] = (a.dupeSentinel(u8, x, 0) catch oom()).ptr;
         // Blocked until this process knows the child, and the child has the
@@ -3036,7 +3485,7 @@ const Guard = struct {
             waited_pid.store(@intCast(pid), .seq_cst);
         }
         _ = linux.sigprocmask(linux.SIG.SETMASK, &mask, null);
-        if (pid < 0) die("cannot start {s}", .{argv[0]});
+        if (pid < 0) return error.ForkFailed;
         // Waited for without reaping, so that its pid cannot be reused
         // before the handler forgets it.
         var info: linux.siginfo_t = undefined;
@@ -3062,7 +3511,9 @@ const Guard = struct {
         const status: u32 = @bitCast(raw);
         if (own_group) {
             if (g.received() != null or !linux.W.IFEXITED(status)) {
-                settleGroup(@intCast(pid));
+                // A timeout is not a reaped group. Returning the child's
+                // status here would let the caller clean logs anyway.
+                if (settleGroup(@intCast(pid)) == .timed_out) return .unreaped;
             } else {
                 _ = reapGroupState(@intCast(pid));
             }
@@ -3079,7 +3530,7 @@ const Guard = struct {
 fn runAttached(a: Allocator, argv: []const []const u8, envp: proc.Envp) Run {
     const guard = Guard.hold();
     defer guard.release();
-    const ran = guard.run(a, argv, envp);
+    const ran = guard.run(a, argv, envp) catch die("cannot start {s}", .{argv[0]});
     return if (guard.received()) |sig| .{ .signal = sig } else ran;
 }
 
@@ -3936,6 +4387,7 @@ fn cmdClean(c: Ctx, s: config.Settings, g: Global, o: CleanOpts, json: bool) u8 
             switch (run) {
                 .exit => |rc| if (rc != 0) die("rtrash put exited {d}", .{rc}),
                 .signal => return stop(run),
+                .unreaped => return 1,
             }
             removed_items = targets.len;
         } else {
@@ -4430,7 +4882,7 @@ fn cmdMaskRun(c: Ctx, g: Global, args: []const []const u8) u8 {
     full[0] = exe;
     return switch (runAttached(a, full, envpOf(a, &env))) {
         .exit => |code| code,
-        .signal => 1,
+        .signal, .unreaped => 1,
     };
 }
 
@@ -4536,7 +4988,7 @@ fn maskAfterBuild(c: Ctx, g: Global, plan: MaskPlan, prefix: []const u8, started
             say("eb-local: auditing {s} for instructions {s} lacks", .{ dir, plan.subdir });
             const rc = switch (runAttached(a, &.{ self_exe, "audit-isa", dir, "--target", plan.subdir }, c.envp)) {
                 .exit => |code| code,
-                .signal => 1,
+                .signal, .unreaped => 1,
             };
             audit = if (rc == 0) "pass" else "fail";
             if (rc != 0) {
@@ -4749,6 +5201,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         var zb: [sys.path_max:0]u8 = undefined;
         const zp = sys.z(&zb, p.prefix) catch |e| die("installation prefix {s} is not writable ({s})", .{ p.prefix, storage.describeError(e) });
         const acc_err = linux.errno(linux.faccessat(linux.AT.FDCWD, zp.ptr, linux.W_OK | linux.X_OK, 0));
+        if (comptime build_options.test_ops) {
+            if (storage.test_prefix_errno) |e|
+                die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(e) });
+        }
         if (acc_err != .SUCCESS)
             die("installation prefix {s} is not writable ({s})", .{ p.prefix, sys.describeErrno(acc_err) });
         var buf: [sys.path_max]u8 = undefined;
@@ -4779,6 +5235,12 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     var ws_lock: ?sys.fd_t = ws_held.lock;
     defer storage.releaseLockAfterError(&ws_lock);
     const ws_lock_path = std.fs.path.join(a, &.{ work, ".eb-local.lock" }) catch oom();
+    if (comptime build_options.test_ops) {
+        if (storage.test_workspace_errno) |e| {
+            if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+            die("cannot create {s} ({s})", .{ d.sources, storage.describeError(storage.injectedSysError(e)) });
+        }
+    }
     common.atomic.makedirs(d.sources) catch |e| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
         die("cannot create {s} ({s})", .{ d.sources, storage.describeError(e) });
@@ -4793,6 +5255,12 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
             if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
             die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
         };
+        if (comptime build_options.test_ops) {
+            if (storage.test_logs_errno) |e| {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("logs directory {s} is not writable ({s})", .{ d.logs, sys.describeErrno(e) });
+            }
+        }
         _ = sys.call(linux.faccessat, .{ linux.AT.FDCWD, zl.ptr, linux.W_OK | linux.X_OK, 0 }) catch |e| {
             if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
             die("logs directory {s} is not writable ({s})", .{ d.logs, storage.describeError(e) });
@@ -4920,12 +5388,15 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         return stop(.{ .signal = sig });
     }
     // The guard stays until the logs are clean: a signal stops the build, but
-    // eb-local first waits for EasyBuild, which writes them, to exit.
-    const run_argv = std.mem.concat(a, []const u8, &.{ wrap, buildCommand(a, c, s, p, args) }) catch oom();
-    const ran = guard.run(a, run_argv, envpOf(a, &env));
+    // eb-local first waits for EasyBuild, which writes them, to exit. Logs
+    // are cleaned only after the process group is reaped. A SIGKILL timeout
+    // leaves them in place.
+    const build_argv = std.mem.concat(a, []const u8, &.{ wrap, buildCommand(a, c, s, p, args) }) catch oom();
+    const ran = guard.run(a, build_argv, envpOf(a, &env)) catch die("cannot start {s}", .{build_argv[0]});
     var rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
+        .unreaped => 1,
     };
     var audit_failed = false;
     if (mask_plan) |m| if (rc == 0) {
@@ -4935,7 +5406,13 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         }
     };
 
-    if (values.len > 0) {
+    // Redaction requires ECHILD. A descendant still alive after the SIGKILL
+    // deadline can write a secret into a log that was just cleaned, so a
+    // timed-out reap leaves the logs alone and the build exits 1.
+    if (ran == .unreaped) {
+        if (values.len > 0)
+            warn("build logs were not cleaned of secrets, because a descendant may still write them", .{});
+    } else if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
         secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
@@ -4985,6 +5462,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const code: u8 = switch (ended) {
         .exit => |x| if (x != 0) x else if (audit_failed) 1 else released,
         .signal => 1,
+        .unreaped => 1,
     };
     const final = endLock(endLock(code, &ws_lock, ws_lock_path), &prefix_lock, prefixLockPath(c, p.prefix));
     restoreMask(&mask);
@@ -6181,9 +6659,8 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
     const jobs = std.fs.path.join(a, &.{ root, "jobs" }) catch oom();
     const logs = std.fs.path.join(a, &.{ root, "logs" }) catch oom();
     const recipe = jobNamePart(a, std.fs.path.basename(args[0]));
-    const stamp = nowSecs();
-    const Job = struct { name: []const u8, script: []const u8, path: []const u8, argv: []const []const u8 };
-    var plan: std.ArrayList(Job) = .empty;
+    const stamp = submitStamp(a, c);
+    var plan: std.ArrayList(SubmitJob) = .empty;
     for (chosen.items) |t| {
         const log_out = sbatchValue(a, str(a, "{s}/submit-{s}-%j.out", .{ logs, t.name }));
         const chdir_val = sbatchValue(a, c.cwd);
@@ -6195,13 +6672,19 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
             \\{s}
             \\
         , .{ t.name, recipe, log_out, chdir_val, command });
-        const path = std.fs.path.join(a, &.{ jobs, str(a, "{d}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
-        var argv: std.ArrayList([]const u8) = .empty;
-        argv.append(a, sbatch) catch oom();
-        var words = std.mem.tokenizeScalar(u8, t.sbatch, ' ');
-        while (words.next()) |w| argv.append(a, w) catch oom();
-        argv.append(a, path) catch oom();
-        plan.append(a, .{ .name = t.name, .script = script, .path = path, .argv = argv.items }) catch oom();
+        const preferred = std.fs.path.join(a, &.{ jobs, str(a, "{s}-{s}-{s}.sh", .{ stamp, t.name, recipe }) }) catch oom();
+        // `--print` only stats. A real submit reserves below, and the plan
+        // names that reserved path.
+        const path = if (o.print) chooseSubmitPath(a, preferred) else "";
+        const argv: []const []const u8 = if (o.print) submitArgv(a, sbatch, t.sbatch, path) else &.{};
+        plan.append(a, .{
+            .name = t.name,
+            .script = script,
+            .preferred = preferred,
+            .options = t.sbatch,
+            .path = path,
+            .argv = argv,
+        }) catch oom();
     }
     if (o.print) {
         for (plan.items) |job| {
@@ -6210,55 +6693,206 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         }
         return 0;
     }
-    // Every job is named before the first directory or script exists and
-    // before the first sbatch runs, so a stdout that cannot take the list
-    // changes nothing, and no later line of ours interleaves with sbatch's.
-    {
-        var plan_text: std.ArrayList(u8) = .empty;
-        for (plan.items) |job| plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, std.mem.join(a, " ", job.argv) catch oom() }) catch oom();
-        if (!emit(plan_text.items)) return unlisted("submitted");
-    }
+    // Reserve each final path before the plan is printed. The line then
+    // names the file sbatch receives, including a -2, -3, ... suffix when
+    // the preferred name is taken. The body is written after the plan.
+    const jobs_missing = firstMissingAncestor(jobs);
+    const logs_missing = firstMissingAncestor(logs);
     common.atomic.makedirs(jobs) catch |e| die("cannot create {s} ({s})", .{ jobs, storage.describeError(e) });
     common.atomic.makedirs(logs) catch |e| die("cannot create {s} ({s})", .{ logs, storage.describeError(e) });
+    var fault: SubmitFault = .{ .kind = .create, .path = jobs, .err = error.Unexpected };
+    if (submitReserved(c, plan.items, sbatch, jobs, logs, jobs_missing, logs_missing, &fault)) |status| {
+        return status;
+    } else |err| switch (err) {
+        error.PlanNotPrinted => return unlisted("submitted"),
+        error.OutOfMemory => oom(),
+        error.SubmitFailed => raiseSubmitFault(fault),
+    }
+}
+
+/// The stamp in a retained submit script's name. The test artifact may pin
+/// it, so a collision can be forced; a release build always uses seconds and
+/// the process id.
+fn submitStamp(a: Allocator, c: Ctx) []const u8 {
+    if (comptime build_options.test_ops) {
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_SUBMIT_STAMP"))) |s| {
+            if (std.mem.indexOfAny(u8, s, "/\x00") == null) return s;
+        }
+    }
+    return str(a, "{d}.{d}", .{ nowSecs(), linux.getpid() });
+}
+
+/// A free path for `--print`, which must not create a file. A real submit
+/// reserves with `reserveSubmitScript` instead, so the printed name is the
+/// file that was created.
+fn chooseSubmitPath(a: Allocator, preferred: []const u8) []const u8 {
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        const path = if (n == 0) preferred else submitScriptSuffix(a, preferred, n + 1);
+        if (!exists(path)) return path;
+    }
+    die("cannot write {s}: the name and its suffixes are already taken", .{preferred});
+}
+
+/// `sbatch` plus its options and the script path, as separate words.
+fn submitArgv(a: Allocator, sbatch: []const u8, options: []const u8, path: []const u8) []const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    argv.append(a, sbatch) catch oom();
+    var words = std.mem.tokenizeScalar(u8, options, ' ');
+    while (words.next()) |w| argv.append(a, w) catch oom();
+    argv.append(a, path) catch oom();
+    return argv.items;
+}
+
+/// `preferred` with `-N` before a trailing `.sh`, for the Nth collision.
+fn submitScriptSuffix(a: Allocator, path: []const u8, n: usize) []const u8 {
+    if (std.mem.endsWith(u8, path, ".sh"))
+        return str(a, "{s}-{d}.sh", .{ path[0 .. path.len - 3], n });
+    return str(a, "{s}-{d}", .{ path, n });
+}
+
+/// The nearest missing ancestor of `path`, including `path` when it is missing.
+fn firstMissingAncestor(path: []const u8) ?[]const u8 {
+    var probe: []const u8 = path;
+    var missing: ?[]const u8 = null;
+    while (probe.len > 1) {
+        if (exists(probe)) break;
+        missing = probe;
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+    return missing;
+}
+
+fn pathCovers(parent: []const u8, child: []const u8) bool {
+    if (std.mem.eql(u8, parent, child)) return true;
+    return child.len > parent.len and child[parent.len] == '/' and std.mem.startsWith(u8, child, parent);
+}
+
+const SubmitJob = struct {
+    name: []const u8,
+    script: []const u8,
+    preferred: []const u8,
+    options: []const u8,
+    path: []const u8,
+    argv: []const []const u8,
+};
+
+const SubmitFault = struct {
+    kind: enum { create, mode, taken, open, write, start },
+    path: []const u8,
+    err: anyerror,
+};
+
+fn raiseSubmitFault(f: SubmitFault) noreturn {
+    switch (f.kind) {
+        .create => die("cannot create {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .mode => die("cannot set the mode of {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .taken => die("cannot write {s}: the name and its suffixes are already taken", .{f.path}),
+        .open => die("cannot open {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .write => die("cannot write {s} ({s})", .{ f.path, storage.describeError(f.err) }),
+        .start => die("cannot start {s}", .{f.path}),
+    }
+}
+
+const ExclusiveOpen = union(enum) {
+    fd: sys.fd_t,
+    busy,
+    fail: SubmitFault,
+};
+
+/// Reserve, write, and submit `plan`. An error removes every script this
+/// call reserved and has not handed to sbatch. `error.PlanNotPrinted` also
+/// removes directories this call created, and only those.
+fn submitReserved(
+    c: Ctx,
+    plan: []SubmitJob,
+    sbatch: []const u8,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+    fault: *SubmitFault,
+) error{ SubmitFailed, PlanNotPrinted, OutOfMemory }!u8 {
+    const a = c.a;
+    var handed: usize = 0;
+    var rollback_dirs = false;
+    var created: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        // Cleanup runs before the failure is described. A failed unlink
+        // must not replace the errno of the write, sync or close.
+        const kept = sys.last_errno;
+        defer sys.last_errno = kept;
+        if (rollback_dirs) {
+            undoSubmitReserve(a, jobs_dir, logs_dir, jobs_missing, logs_missing, created.items);
+        } else {
+            dropUnsubmitted(plan, handed);
+            if (handed == 0) {
+                for (created.items) |p| sys.unlinkat(fsx.cwd, p, 0) catch {};
+            }
+        }
+    }
+    for (plan) |*job| {
+        if (plantSubmitRace(c, job.preferred)) |planted| created.append(a, planted) catch return error.OutOfMemory;
+        job.path = reserveSubmitScript(a, job.preferred, fault) catch return error.SubmitFailed;
+        created.append(a, job.path) catch return error.OutOfMemory;
+        job.argv = submitArgv(a, sbatch, job.options, job.path);
+    }
+    {
+        var plan_text: std.ArrayList(u8) = .empty;
+        for (plan) |job| {
+            const line = std.mem.join(a, " ", job.argv) catch return error.OutOfMemory;
+            plan_text.print(a, "eb-local: {s}: {s}\n", .{ job.name, line }) catch return error.OutOfMemory;
+        }
+        if (!emit(plan_text.items)) {
+            rollback_dirs = true;
+            return error.PlanNotPrinted;
+        }
+    }
     var failed = false;
     const guard = Guard.hold();
     defer guard.release();
-    for (plan.items) |job| {
+    for (plan, 0..) |job, index| {
         if (guard.received()) |sig| {
+            dropUnsubmitted(plan, index);
             guard.release();
             return stop(.{ .signal = sig });
         }
-        const path = job.path;
-        var why: common.atomic.Why = .{};
-        defer why.deinit(a);
-        common.atomic.atomicWrite(a, path, job.script, .{ .mode = 0o700 }, &why) catch |e|
-            die("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else common.atomic.describe(e) });
+        writeReservedScript(job.path, job.script, fault) catch return error.SubmitFailed;
         if (guard.received()) |sig| {
-            sys.unlinkat(fsx.cwd, path, 0) catch {};
+            dropUnsubmitted(plan, index);
             guard.release();
             return stop(.{ .signal = sig });
         }
-        const ran = guard.run(a, job.argv, c.envp);
+        const ran = guard.run(a, job.argv, c.envp) catch {
+            fault.* = .{ .kind = .start, .path = job.argv[0], .err = error.Unexpected };
+            return error.SubmitFailed;
+        };
         switch (ran) {
             .exit => |code| {
                 if (code != 0) {
                     if (guard.received()) |sig| {
-                        sys.unlinkat(fsx.cwd, path, 0) catch {};
+                        dropUnsubmitted(plan, index);
                         guard.release();
                         return stop(.{ .signal = sig });
                     }
                     warn("sbatch refused the {s} job (exit {d})", .{ job.name, code });
                     failed = true;
                 }
+                // sbatch ran. This script stays, including when sbatch refused it.
+                handed = index + 1;
                 if (guard.received()) |sig| {
+                    dropUnsubmitted(plan, index + 1);
                     guard.release();
                     return stop(.{ .signal = sig });
                 }
             },
             .signal => |sig| {
-                sys.unlinkat(fsx.cwd, path, 0) catch {};
+                dropUnsubmitted(plan, index);
                 guard.release();
                 return stop(.{ .signal = guard.received() orelse sig });
+            },
+            .unreaped => {
+                failed = true;
             },
         }
     }
@@ -6267,8 +6901,309 @@ fn cmdSubmit(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, o:
         return stop(.{ .signal = sig });
     }
     say("", .{});
-    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs});
+    say("eb-local: each job writes {s}/submit-TARGET-JOBID.out; eb-local list shows the result per target.", .{logs_dir});
     return if (failed) 1 else 0;
+}
+
+/// Drop reserved scripts and directories this call created for a plan that
+/// was not printed. Only this call's files are unlinked. Directories it
+/// created are removed with `rmdir`, deepest first, and a directory that
+/// another submit has filled is left in place.
+fn undoSubmitReserve(
+    a: Allocator,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+    created: []const []const u8,
+) void {
+    for (created) |p| sys.unlinkat(fsx.cwd, p, 0) catch {};
+    removeCreatedSubmitDirs(a, jobs_dir, logs_dir, jobs_missing, logs_missing);
+}
+
+/// Directories this call created, deepest first. Each removal is `rmdir`:
+/// `ENOTEMPTY` leaves the directory and whatever another submit put in it.
+/// This never walks the directory.
+fn removeCreatedSubmitDirs(
+    a: Allocator,
+    jobs_dir: []const u8,
+    logs_dir: []const u8,
+    jobs_missing: ?[]const u8,
+    logs_missing: ?[]const u8,
+) void {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    appendCreatedChain(a, &dirs, jobs_dir, jobs_missing);
+    appendCreatedChain(a, &dirs, logs_dir, logs_missing);
+    std.mem.sort([]const u8, dirs.items, {}, deeperPath);
+    for (dirs.items) |dir| sys.unlinkat(fsx.cwd, dir, linux.AT.REMOVEDIR) catch {};
+}
+
+fn deeperPath(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return lhs.len > rhs.len;
+}
+
+fn appendCreatedChain(a: Allocator, dirs: *std.ArrayList([]const u8), target: []const u8, top: ?[]const u8) void {
+    const root = top orelse return;
+    var probe: []const u8 = target;
+    while (pathCovers(root, probe)) {
+        var seen = false;
+        for (dirs.items) |have| {
+            if (std.mem.eql(u8, have, probe)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) dirs.append(a, probe) catch oom();
+        if (std.mem.eql(u8, probe, root)) break;
+        probe = std.fs.path.dirname(probe) orelse break;
+    }
+}
+
+/// Unlink reserved scripts from `from` on. Those jobs were not submitted.
+fn dropUnsubmitted(jobs: anytype, from: usize) void {
+    if (from >= jobs.len) return;
+    for (jobs[from..]) |job| {
+        if (job.path.len == 0) continue;
+        sys.unlinkat(fsx.cwd, job.path, 0) catch {};
+    }
+}
+
+/// Create an empty `path` with mode 0700. `busy` when that final path already
+/// exists, is a directory, or is a symbolic link: the caller then tries
+/// another name. `O_EXCL` is what makes the collision visible.
+fn openExclusive(path: []const u8) ExclusiveOpen {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+    }, 0o700) catch |e| switch (e) {
+        error.Exists, error.SymLink, error.IsDir => return .busy,
+        else => return .{ .fail = .{ .kind = .create, .path = path, .err = e } },
+    };
+    sys.fchmod(fd, 0o700) catch |e| {
+        sys.close(fd);
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        return .{ .fail = .{ .kind = .mode, .path = path, .err = e } };
+    };
+    return .{ .fd = fd };
+}
+
+/// Create `path` and write `body` with mode 0700. False when that final path
+/// already exists, is a directory, or is a symbolic link.
+fn createExclusiveScript(path: []const u8, body: []const u8) bool {
+    switch (openExclusive(path)) {
+        .busy => return false,
+        .fail => |f| raiseSubmitFault(f),
+        .fd => |fd| {
+            sys.writeAll(fd, body) catch |e| {
+                sys.close(fd);
+                sys.unlinkat(fsx.cwd, path, 0) catch {};
+                die("cannot write {s} ({s})", .{ path, storage.describeError(e) });
+            };
+            sys.close(fd);
+            return true;
+        },
+    }
+}
+
+/// Reserve `preferred`, or that path with a `-2`, `-3`, ... suffix, with
+/// `O_EXCL` and mode 0700. The file is empty until `writeReservedScript`.
+/// An earlier job's script is never replaced.
+fn reserveSubmitScript(a: Allocator, preferred: []const u8, fault: *SubmitFault) error{SubmitFailed}![]const u8 {
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        const path = if (n == 0) preferred else submitScriptSuffix(a, preferred, n + 1);
+        switch (openExclusive(path)) {
+            .busy => {},
+            .fd => |fd| {
+                sys.close(fd);
+                return path;
+            },
+            .fail => |f| {
+                fault.* = f;
+                return error.SubmitFailed;
+            },
+        }
+    }
+    fault.* = .{ .kind = .taken, .path = preferred, .err = error.Unexpected };
+    return error.SubmitFailed;
+}
+
+/// Write `body` into a file `reserveSubmitScript` already created.
+/// The bytes are synced and the close is checked. NFS reports a lost
+/// write from those calls, so either failure is `error.SubmitFailed`
+/// and the script is not handed to sbatch.
+fn writeReservedScript(path: []const u8, body: []const u8, fault: *SubmitFault) error{SubmitFailed}!void {
+    const fd = sys.openat(fsx.cwd, path, .{
+        .ACCMODE = .WRONLY,
+        .TRUNC = true,
+        .NOFOLLOW = true,
+    }, 0) catch |e| {
+        fault.* = .{ .kind = .open, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+    sys.writeAll(fd, body) catch |e| {
+        sys.close(fd);
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+    storage.fsyncWritten(fd) catch |e| {
+        sys.close(fd);
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+    storage.closeWritten(fd) catch |e| {
+        fault.* = .{ .kind = .write, .path = path, .err = e };
+        return error.SubmitFailed;
+    };
+}
+
+/// Write `script` at `preferred`, or at that path with a `-2`, `-3`, ...
+/// suffix when the final path is already taken. An earlier job's script is
+/// never replaced.
+fn retainSubmitScript(a: Allocator, preferred: []const u8, script: []const u8) []const u8 {
+    var fault: SubmitFault = undefined;
+    const path = reserveSubmitScript(a, preferred, &fault) catch raiseSubmitFault(fault);
+    writeReservedScript(path, script, &fault) catch {
+        const kept = sys.last_errno;
+        sys.unlinkat(fsx.cwd, path, 0) catch {};
+        sys.last_errno = kept;
+        raiseSubmitFault(fault);
+    };
+    return path;
+}
+
+/// Test builds only. Plant `preferred` before the exclusive create: another
+/// process took that name after a stat and before `O_EXCL`. Returns the
+/// planted path when this call created it.
+fn plantSubmitRace(c: Ctx, preferred: []const u8) ?[]const u8 {
+    if (comptime !build_options.test_ops) return null;
+    const flag = nonEmpty(c.env.get("EB_LOCAL_TEST_SUBMIT_RACE")) orelse return null;
+    if (std.mem.indexOfAny(u8, flag, "/\x00") != null) return null;
+    if (exists(preferred)) return null;
+    if (!createExclusiveScript(preferred, "#!/bin/bash\n# raced\n")) return null;
+    return preferred;
+}
+
+fn readRetainedScript(a: Allocator, path: []const u8) ![]const u8 {
+    const opened = try fsx.openRegular(fsx.cwd, path, true);
+    defer sys.close(opened.fd);
+    return fsx.readAll(a, opened.fd, 1 << 16);
+}
+
+test "a forced collision keeps both retained submit scripts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-collision-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const preferred = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe.sh", .{root});
+    const first = retainSubmitScript(a, preferred, "#!/bin/bash\n# first\n");
+    const second = retainSubmitScript(a, preferred, "#!/bin/bash\n# second\n");
+    try std.testing.expectEqualStrings(preferred, first);
+    const suffixed = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe-2.sh", .{root});
+    try std.testing.expectEqualStrings(suffixed, second);
+    try std.testing.expectEqualStrings("#!/bin/bash\n# first\n", try readRetainedScript(a, first));
+    try std.testing.expectEqualStrings("#!/bin/bash\n# second\n", try readRetainedScript(a, second));
+    const st = try fsx.statAt(fsx.cwd, first, false);
+    try std.testing.expectEqual(@as(u32, 0o700), st.perm());
+}
+
+test "a candidate created between the stat and the exclusive create is not submitted" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-race-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const preferred = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe.sh", .{root});
+    const chosen = chooseSubmitPath(a, preferred);
+    try std.testing.expectEqualStrings(preferred, chosen);
+    try std.testing.expect(createExclusiveScript(preferred, "#!/bin/bash\n# raced\n"));
+    var fault: SubmitFault = .{ .kind = .create, .path = preferred, .err = error.Unexpected };
+    const reserved = try reserveSubmitScript(a, preferred, &fault);
+    const suffixed = try std.fmt.allocPrint(a, "{s}/1700000000.42-cpu-recipe-2.sh", .{root});
+    try std.testing.expectEqualStrings(suffixed, reserved);
+    const script = "#!/bin/bash\n# second\n";
+    try writeReservedScript(reserved, script, &fault);
+    try std.testing.expectEqualStrings(reserved, suffixed);
+    try std.testing.expectEqualStrings("#!/bin/bash\n# raced\n", try readRetainedScript(a, preferred));
+    try std.testing.expectEqualStrings(script, try readRetainedScript(a, reserved));
+    const st = try fsx.statAt(fsx.cwd, reserved, false);
+    try std.testing.expectEqual(@as(u32, 0o700), st.perm());
+}
+
+test "failure after reservation leaves no reserved files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-reserve-fail-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const keep = try std.fmt.allocPrint(a, "{s}/keep.txt", .{root});
+    try std.testing.expect(createExclusiveScript(keep, "foreign\n"));
+    const first = try std.fmt.allocPrint(a, "{s}/job.sh", .{root});
+    const second = try std.fmt.allocPrint(a, "{s}/job.sh/next.sh", .{root});
+    var jobs = [_]SubmitJob{
+        .{ .name = "cpu", .script = "#!/bin/bash\n", .preferred = first, .options = "", .path = "", .argv = &.{} },
+        .{ .name = "gpu", .script = "#!/bin/bash\n", .preferred = second, .options = "", .path = "", .argv = &.{} },
+    };
+    var map: std.process.Environ.Map = .init(a);
+    const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = root };
+    var fault: SubmitFault = .{ .kind = .create, .path = first, .err = error.Unexpected };
+    try std.testing.expectError(error.SubmitFailed, submitReserved(c, &jobs, "sbatch", root, root, null, null, &fault));
+    try std.testing.expect(!exists(first));
+    try std.testing.expect(!exists(second));
+    try std.testing.expectEqualStrings("foreign\n", try readRetainedScript(a, keep));
+    try std.testing.expect(exists(root));
+}
+
+test "rollback with a foreign file in a newly created directory keeps that file and directory" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/submit-rollback-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    try common.atomic.makedirs(root);
+    const jobs = try std.fmt.allocPrint(a, "{s}/fresh/jobs", .{root});
+    const logs = try std.fmt.allocPrint(a, "{s}/fresh/logs", .{root});
+    const jobs_missing = firstMissingAncestor(jobs);
+    const logs_missing = firstMissingAncestor(logs);
+    try common.atomic.makedirs(jobs);
+    try common.atomic.makedirs(logs);
+    const own = try std.fmt.allocPrint(a, "{s}/own.sh", .{jobs});
+    const kept = try std.fmt.allocPrint(a, "{s}/foreign.sh", .{jobs});
+    try std.testing.expect(createExclusiveScript(kept, "theirs\n"));
+    var plan = [_]SubmitJob{
+        .{ .name = "cpu", .script = "#!/bin/bash\n", .preferred = own, .options = "", .path = "", .argv = &.{} },
+    };
+    var map: std.process.Environ.Map = .init(a);
+    const c: Ctx = .{ .a = a, .io = std.testing.io, .env = &map, .envp = envpOf(a, &map), .cwd = root };
+    const saved = stdout;
+    const full_fd = try sys.openat(linux.AT.FDCWD, "/dev/full", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    defer sys.close(full_fd);
+    const quiet = try sys.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    defer sys.close(quiet);
+    stdout = .{ .tool = tool, .fd = full_fd, .err_fd = quiet };
+    defer stdout = saved;
+    var fault: SubmitFault = .{ .kind = .create, .path = own, .err = error.Unexpected };
+    try std.testing.expectError(error.PlanNotPrinted, submitReserved(c, &plan, "/no/such/sbatch", jobs, logs, jobs_missing, logs_missing, &fault));
+    try std.testing.expect(!exists(own));
+    try std.testing.expectEqualStrings("theirs\n", try readRetainedScript(a, kept));
+    try std.testing.expect(exists(jobs));
+    try std.testing.expect(!exists(logs));
+    const fresh = try std.fmt.allocPrint(a, "{s}/fresh", .{root});
+    try std.testing.expect(exists(fresh));
 }
 
 // ---- uninstall ------------------------------------------------------------
@@ -6617,6 +7552,7 @@ fn cmdUninstall(c: Ctx, s: config.Settings, modules: []const []const u8, o: Unin
                     storage.releaseLockAfterError(&prefix_lock);
                     return stop(run);
                 },
+                .unreaped => return 1,
             }
         }
     } else {
@@ -6785,6 +7721,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
                 storage.releaseLockAfterError(&prefix_lock);
                 return stop(run);
             },
+            .unreaped => return 1,
         }
         if (kind == 0 and literalPath(c, e.original)) makeReadOnly(c, e.original, 0);
     };
@@ -6837,6 +7774,12 @@ fn runMain(init: std.process.Init) u8 {
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_AFTER"))) |v| storage.test_fsync_after = std.fmt.parseInt(u32, v, 10) catch 0;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_FSYNC_COUNT"))) |v| storage.test_fsync_count = std.fmt.parseInt(u32, v, 10) catch null;
         if (nonEmpty(c.env.get("EB_LOCAL_TEST_RECORD_OPEN_ERRNO"))) |v| test_record_open_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_PREFIX_ERRNO"))) |v| storage.test_prefix_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_LOGS_ERRNO"))) |v| storage.test_logs_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_REDACT_ERRNO"))) |v| storage.test_redact_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WORKSPACE_ERRNO"))) |v| storage.test_workspace_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_WRITE_ERRNO"))) |v| storage.test_write_errno = storage.testErrno(v);
+        if (nonEmpty(c.env.get("EB_LOCAL_TEST_GROUP_GRACE_MS"))) |v| test_group_grace_ms = std.fmt.parseInt(i64, v, 10) catch 0;
     }
     // A single program name, then eb's own arguments: an eb-stack target.
     if (extend.engaged(c.env)) {
@@ -7670,10 +8613,10 @@ test "Guard.run does not launch child when a guarded signal already arrived" {
         _ = linux.kill(linux.getpid(), sig);
         const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
         const cmd = try std.fmt.allocPrint(a, "echo ran > '{s}'", .{marker});
-        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env);
+        const ran = guard.run(a, &.{ "/bin/sh", "-c", cmd }, no_env) catch return error.TestUnexpectedResult;
         switch (ran) {
             .signal => |got| try std.testing.expectEqual(sig, got),
-            .exit => return error.TestUnexpectedResult,
+            .exit, .unreaped => return error.TestUnexpectedResult,
         }
         try std.testing.expectError(error.NotFound, fsx.statAt(fsx.cwd, marker, false));
     }
@@ -7731,30 +8674,37 @@ test "settleGroup wakes on SIGCHLD without leaking descriptors" {
     var raw: i32 = 0;
     while (linux.errno(linux.wait4(@intCast(pid), &raw, 0, null)) == .INTR) {}
 
+    var entered_fds: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered_fds, .{ .CLOEXEC = true })));
+    settle_entered_fd = entered_fds[1];
+    defer settle_entered_fd = -1;
+
     const ReleaseCtx = struct {
+        entered_r: i32,
         gate_w: sys.fd_t,
-        baseline_fds: usize,
         fn run(ctx: @This()) void {
-            const deadline = monotonicMs() + 250;
-            while (monotonicMs() < deadline) {
-                if ((testSelfFdCount() catch 0) > ctx.baseline_fds + 1) break;
-                var empty: [1]linux.pollfd = undefined;
-                _ = linux.poll(&empty, 0, 1);
+            var pfd = [1]linux.pollfd{.{ .fd = ctx.entered_r, .events = linux.POLL.IN, .revents = 0 }};
+            const prc = linux.poll(&pfd, 1, 2000);
+            if (linux.errno(prc) == .SUCCESS and pfd[0].revents & linux.POLL.IN != 0) {
+                var byte: [1]u8 = undefined;
+                _ = linux.read(ctx.entered_r, &byte, 1);
             }
+            sys.close(ctx.entered_r);
             sys.close(ctx.gate_w);
         }
     };
     const releaser = try std.Thread.spawn(.{}, ReleaseCtx.run, .{ReleaseCtx{
+        .entered_r = entered_fds[0],
         .gate_w = gate_fds[1],
-        .baseline_fds = fds_before,
     }});
 
     const t0 = monotonicMs();
-    settleGroup(@intCast(pid));
+    try std.testing.expectEqual(GroupEnd.drained, settleGroup(@intCast(pid)));
     const elapsed = monotonicMs() - t0;
     releaser.join();
+    sys.close(entered_fds[1]);
     try std.testing.expect(!proc.groupAlive(@intCast(pid)));
-    try std.testing.expect(elapsed < 350);
+    try std.testing.expect(elapsed < 2000);
     try std.testing.expectEqual(fds_before, try testSelfFdCount());
 }
 
@@ -7788,8 +8738,8 @@ test "settleGroup waits while wait4 reports a child the scan missed" {
     const Runner = struct {
         done_fd: i32,
         fn run(ctx: @This()) void {
-            settleGroup(2147483646);
-            _ = linux.write(ctx.done_fd, "d", 1);
+            const end = settleGroup(2147483646);
+            _ = linux.write(ctx.done_fd, if (end == .drained) "d" else "x", 1);
         }
     };
     const thread = try std.Thread.spawn(.{}, Runner.run, .{Runner{ .done_fd = done[1] }});
@@ -7823,7 +8773,269 @@ test "settleGroup waits while wait4 reports a child the scan missed" {
         if (linux.errno(n) == .INTR) continue;
         try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(n));
         try std.testing.expectEqual(@as(usize, 1), n);
+        try std.testing.expectEqual(@as(u8, 'd'), byte[0]);
         break;
+    }
+}
+
+fn waitErrno(e: linux.E) usize {
+    return @bitCast(-@as(isize, @backingInt(e)));
+}
+
+test "only ECHILD means a process group has no child" {
+    switch (readWait(waitErrno(.CHILD))) {
+        .reap => |r| try std.testing.expect(r == .empty),
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(waitErrno(.INTR))) {
+        .retry => {},
+        .reap => return error.TestUnexpectedResult,
+    }
+    switch (readWait(waitErrno(.IO))) {
+        .reap => |r| switch (r) {
+            .unknown => |err| try std.testing.expectEqual(linux.E.IO, err),
+            else => return error.TestUnexpectedResult,
+        },
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(0)) {
+        .reap => |r| try std.testing.expect(r == .live),
+        .retry => return error.TestUnexpectedResult,
+    }
+    switch (readWait(42)) {
+        .retry => {},
+        .reap => return error.TestUnexpectedResult,
+    }
+}
+
+const ScriptedEnd = struct {
+    done_fd: i32,
+    end: *std.atomic.Value(u8),
+    fn run(ctx: @This()) void {
+        const got = settleGroup(2147483646);
+        ctx.end.store(if (got == .drained) 0 else 1, .release);
+        _ = linux.write(ctx.done_fd, "d", 1);
+    }
+};
+
+fn readReady(fd: i32, timeout_ms: i32) !usize {
+    var pfd = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+    while (true) {
+        const rc = linux.poll(&pfd, 1, timeout_ms);
+        if (linux.errno(rc) == .INTR) continue;
+        try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+        return rc;
+    }
+}
+
+test "settleGroup keeps killing until the scripted reap is empty" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    // Post-kill wait4 stays live twice, then ECHILD. The first live result
+    // blocks in the probe so the test can see that settleGroup has not
+    // returned and has not stopped signalling.
+    const script = [_]ProbeStep{ .live, .live, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var end = std.atomic.Value(u8).init(255);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+        .barrier_at = 1,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+    const thread = try std.Thread.spawn(.{}, ScriptedEnd.run, .{ScriptedEnd{ .done_fd = done[1], .end = &end }});
+    defer {
+        probe.release.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), try readReady(entered[0], 5000));
+    try std.testing.expectEqual(@as(usize, 0), try readReady(done[0], 0));
+    try std.testing.expectEqual(@as(u32, 1), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), probe.script_i.load(.acquire));
+
+    probe.release.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    try std.testing.expectEqual(@as(usize, 1), try readReady(done[0], 5000));
+    try std.testing.expectEqual(@as(u8, 0), end.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.script_i.load(.acquire));
+}
+
+test "settleGroup signals a member forked after SIGKILL" {
+    if (comptime !build_options.test_ops) return;
+
+    var entered: [2]i32 = undefined;
+    var wake: [2]i32 = undefined;
+    var done: [2]i32 = undefined;
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&entered, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&wake, .{ .CLOEXEC = true })));
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(linux.pipe2(&done, .{ .CLOEXEC = true })));
+    defer {
+        sys.close(entered[0]);
+        sys.close(entered[1]);
+        sys.close(wake[0]);
+        sys.close(wake[1]);
+        sys.close(done[0]);
+        sys.close(done[1]);
+    }
+
+    // The script would go live, then empty. At the barrier the test arms a
+    // late fork, which turns that empty into one more live result. The group
+    // must be signalled again after that result and only then reach ECHILD.
+    const script = [_]ProbeStep{ .live, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var end = std.atomic.Value(u8).init(255);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = entered[1],
+        .wake = wake[0],
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+        .barrier_at = 1,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+    const thread = try std.Thread.spawn(.{}, ScriptedEnd.run, .{ScriptedEnd{ .done_fd = done[1], .end = &end }});
+    defer {
+        probe.release.store(1, .release);
+        _ = linux.write(wake[1], "w", 1);
+        thread.join();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), try readReady(entered[0], 5000));
+    try std.testing.expectEqual(@as(usize, 0), try readReady(done[0], 0));
+    const kills_before = probe.kills.load(.acquire);
+    try std.testing.expectEqual(@as(u32, 1), kills_before);
+    probe.late.store(1, .release);
+
+    probe.release.store(1, .release);
+    _ = linux.write(wake[1], "w", 1);
+    try std.testing.expectEqual(@as(usize, 1), try readReady(done[0], 5000));
+    try std.testing.expectEqual(@as(u8, 0), end.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 2), probe.late.load(.acquire));
+    const at_fork = probe.kills_at_fork.load(.acquire);
+    const kills = probe.kills.load(.acquire);
+    try std.testing.expect(at_fork > kills_before);
+    try std.testing.expect(kills > at_fork);
+    try std.testing.expectEqual(@as(u32, 3), kills);
+}
+
+test "settleGroup retries an unexpected reap error until ECHILD" {
+    if (comptime !build_options.test_ops) return;
+
+    const script = [_]ProbeStep{ .unknown, .unknown, .empty };
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = -1,
+        .wake = -1,
+        .hold = false,
+        .force_kill = true,
+        .script = &script,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    try std.testing.expectEqual(GroupEnd.drained, settleGroup(2147483646));
+    try std.testing.expectEqual(@as(u32, 3), probe.kills.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 3), probe.script_i.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), probe.reported.load(.acquire));
+}
+
+test "settleGroup returns at the kill deadline while a member stays unreaped" {
+    if (comptime !build_options.test_ops) return;
+
+    // phase stays 0, so wait4 keeps reporting a live member. SIGKILL
+    // does not clear that answer. The call must return timed_out at the
+    // deadline, which is not a drained group, and must not block in wait4.
+    var phase = std.atomic.Value(u8).init(0);
+    var probe = SettleProbe{
+        .phase = &phase,
+        .entered = -1,
+        .wake = -1,
+        .hold = false,
+    };
+    settle_probe = &probe;
+    defer settle_probe = null;
+
+    const fds_before = try testSelfFdCount();
+    const t0 = monotonicMs();
+    const end = settleGroup(2147483646);
+    const elapsed = monotonicMs() - t0;
+
+    const lower = group_settle_grace_ms + group_kill_reap_ms;
+    try std.testing.expectEqual(GroupEnd.timed_out, end);
+    try std.testing.expectEqual(@as(u32, 1), probe.timeouts.load(.acquire));
+    try std.testing.expect(elapsed + 30 >= lower);
+    try std.testing.expect(elapsed < lower + 2000);
+    try std.testing.expectEqual(fds_before, try testSelfFdCount());
+}
+
+test "settleGroup bounds an EINTR storm and a reaped-pid storm" {
+    if (comptime !build_options.test_ops) return;
+
+    // Each step repeats. The injected clock stands still during a pass
+    // and jumps forward in `pauseUntil`, so a pass runs to the cap and
+    // the deadline is what ends the call.
+    const steps = [_]ProbeStep{ .eintr, .reaped };
+    for (steps) |step| {
+        var clock = std.atomic.Value(i64).init(0);
+        const script = [_]ProbeStep{step};
+        var phase = std.atomic.Value(u8).init(0);
+        var probe = SettleProbe{
+            .phase = &phase,
+            .entered = -1,
+            .wake = -1,
+            .hold = false,
+            .grace_ms = 30,
+            .kill_ms = 30,
+            .script = &script,
+            .script_from_start = true,
+            .clock = &clock,
+        };
+        settle_probe = &probe;
+        defer settle_probe = null;
+
+        const end = settleGroup(2147483646);
+
+        try std.testing.expectEqual(GroupEnd.timed_out, end);
+        const waits = probe.wait_calls.load(.acquire);
+        const passes = probe.passes.load(.acquire);
+        const most = probe.max_pass_waits.load(.acquire);
+        try std.testing.expect(passes > 1);
+        try std.testing.expect(most <= reap_pass_cap);
+        try std.testing.expectEqual(reap_pass_cap, most);
+        // The deadline is already due on the last pass, so that pass
+        // stops after one `EINTR` or reaped pid instead of filling the cap.
+        try std.testing.expectEqual(@as(u32, 1), probe.last_pass_waits.load(.acquire));
+        try std.testing.expect(waits <= passes * reap_pass_cap);
+        try std.testing.expect(waits > reap_pass_cap);
+        try std.testing.expect(clock.load(.acquire) >= probe.grace_ms + probe.kill_ms);
+        try std.testing.expectEqual(@as(u32, 1), probe.timeouts.load(.acquire));
+        try std.testing.expectEqual(@as(u32, 0), probe.reported.load(.acquire));
     }
 }
 

@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import textwrap
+import time
 import unittest
 
 import binary
@@ -266,6 +267,125 @@ class Submit(StorageFixture):
         self.assertEqual(len(calls), 2, calls)
         self.assertTrue(calls[0].startswith("-p cpu "), calls[0])
         self.assertTrue(calls[1].startswith("-p gpu "), calls[1])
+
+    def test_repeated_submit_in_one_second_keeps_each_job_script(self):
+        jobs = self.prefix / ".eb-local" / "jobs"
+        for _ in range(10):
+            if jobs.exists():
+                for path in jobs.iterdir():
+                    path.unlink()
+            second = int(time.time())
+            first = self.run_tool(["submit", "--on", "cpu", "recipe.eb", "--first"], SLURM_JOB_ID="")
+            second_run = self.run_tool(["submit", "--on", "cpu", "recipe.eb", "--second"], SLURM_JOB_ID="")
+            if int(time.time()) == second:
+                break
+        else:
+            self.fail("could not run two submit commands within one second")
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second_run.returncode, 0, second_run.stdout + second_run.stderr)
+        scripts = sorted(jobs.iterdir())
+        self.assertEqual(len(scripts), 2, scripts)
+        commands = [path.read_text().rstrip().splitlines()[-1] for path in scripts]
+        self.assertTrue(any("--first" in command for command in commands), commands)
+        self.assertTrue(any("--second" in command for command in commands), commands)
+
+    def test_forced_submit_script_collision_keeps_both(self):
+        jobs = self.prefix / ".eb-local" / "jobs"
+        jobs.mkdir(parents=True)
+        stamp = "1700000000.42"
+        planted = jobs / f"{stamp}-cpu-recipe.eb.sh"
+        planted.write_text("#!/bin/bash\n# planted\n", encoding="utf-8")
+        planted.chmod(0o700)
+        run = self.run_tool(
+            ["submit", "--on", "cpu", "recipe.eb", "--marker"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_TEST_SUBMIT_STAMP=stamp,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        scripts = sorted(p.name for p in jobs.iterdir())
+        self.assertEqual(scripts, sorted([planted.name, f"{stamp}-cpu-recipe.eb-2.sh"]), scripts)
+        self.assertEqual(planted.read_text(encoding="utf-8"), "#!/bin/bash\n# planted\n")
+        kept = (jobs / f"{stamp}-cpu-recipe.eb-2.sh").read_text(encoding="utf-8")
+        self.assertIn("--marker", kept)
+        self.assertNotIn("# planted", kept)
+        planned = [line for line in run.stdout.splitlines() if line.startswith("eb-local: cpu: ")]
+        self.assertEqual(len(planned), 1, run.stdout)
+        self.assertTrue(planned[0].endswith(str(jobs / f"{stamp}-cpu-recipe.eb-2.sh")), planned[0])
+        self.assertTrue(self.calls()[0].endswith(str(jobs / f"{stamp}-cpu-recipe.eb-2.sh")), self.calls())
+
+    def test_raced_candidate_is_the_path_the_plan_submits(self):
+        # The test build plants the preferred name after a stat would have
+        # chosen it and before the exclusive create. The plan and sbatch
+        # must both name the path that create took.
+        jobs = self.prefix / ".eb-local" / "jobs"
+        stamp = "1700000000.42"
+        run = self.run_tool(
+            ["submit", "--on", "cpu", "recipe.eb", "--marker"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_TEST_SUBMIT_STAMP=stamp,
+            EB_LOCAL_TEST_SUBMIT_RACE="1",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        planted = jobs / f"{stamp}-cpu-recipe.eb.sh"
+        taken = jobs / f"{stamp}-cpu-recipe.eb-2.sh"
+        self.assertEqual(planted.read_text(encoding="utf-8"), "#!/bin/bash\n# raced\n")
+        self.assertNotIn("--marker", planted.read_text(encoding="utf-8"))
+        kept = taken.read_text(encoding="utf-8")
+        self.assertIn("--marker", kept)
+        self.assertNotIn("# raced", kept)
+        self.assertEqual(os.stat(taken).st_mode & 0o777, 0o700)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1, calls)
+        planned = [line for line in run.stdout.splitlines() if line.startswith("eb-local: cpu: ")]
+        self.assertEqual(len(planned), 1, run.stdout)
+        self.assertTrue(planned[0].endswith(" " + str(taken)), planned[0])
+        self.assertFalse(planned[0].endswith(" " + str(planted)), planned[0])
+        self.assertTrue(calls[0].endswith(" " + str(taken)), calls[0])
+
+    def test_print_does_not_create_a_raced_submit_script(self):
+        run = self.run_tool(
+            ["submit", "--print", "--on", "cpu", "recipe.eb"],
+            SLURM_JOB_ID="",
+            EB_LOCAL_TEST_SUBMIT_STAMP="1700000000.42",
+            EB_LOCAL_TEST_SUBMIT_RACE="1",
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.prefix / ".eb-local").exists())
+
+    def test_submit_script_sync_or_close_failure_is_not_success(self):
+        # A lost write shows up from fsync or close. The script must not be
+        # handed to sbatch, and the errno must be the one those calls return.
+        jobs = self.prefix / ".eb-local" / "jobs"
+        calls = self.root / "sbatch-calls"
+
+        def reset():
+            if calls.exists():
+                calls.unlink()
+            if jobs.exists():
+                for path in jobs.iterdir():
+                    path.unlink()
+
+        control = self.run_tool(["submit", "--on", "cpu", "recipe.eb"], SLURM_JOB_ID="")
+        self.assertEqual(control.returncode, 0, control.stdout + control.stderr)
+        self.assertEqual(len(self.calls()), 1)
+        reset()
+
+        for hook in ("EB_LOCAL_TEST_FSYNC_ERRNO", "EB_LOCAL_TEST_CLOSE_ERRNO"):
+            with self.subTest(hook=hook):
+                reset()
+                got = self.run_tool(
+                    ["submit", "--on", "cpu", "recipe.eb"],
+                    SLURM_JOB_ID="",
+                    **{hook: "EIO"},
+                )
+                self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
+                self.assertIn("cannot write ", got.stderr)
+                self.assertIn("[Errno 5] Input/output error", got.stderr)
+                self.assertNotIn("Submitted batch job", got.stdout)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(list(jobs.iterdir()), [])
 
     def test_sbatch_directives_quote_paths_containing_spaces(self):
         spaced_cwd = self.root / "work dir"

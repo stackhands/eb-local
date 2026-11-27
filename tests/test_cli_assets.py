@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for tools/cli_assets.py completion and manpage generation."""
 from pathlib import Path
+import os
 import re
 import shlex
 import subprocess
@@ -107,6 +108,11 @@ class CliAssets(unittest.TestCase):
     def test_hostile_destinations_refuse_and_preserve_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            help_file = root / "help.txt"
+            captured = subprocess.run([str(binary.ZIG), "--help"], capture_output=True, text=True, check=False)
+            self.assertEqual(captured.returncode, 0, captured.stderr)
+            help_file.write_text(captured.stdout)
+            env = dict(os.environ, EB_LOCAL_TEST_CLI_HELP_FILE=str(help_file))
             out_ro = root / "ro-share"
             comps_ro = out_ro / "completions"
             comps_ro.mkdir(parents=True)
@@ -116,6 +122,7 @@ class CliAssets(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     check=False,
+                    env=env,
                 )
             self.assertEqual(cp_ro.returncode, 1, cp_ro.stdout + cp_ro.stderr)
             self.assertNotIn("Traceback", cp_ro.stderr)
@@ -128,6 +135,7 @@ class CliAssets(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                env=env,
             )
             self.assertEqual(cp_dir.returncode, 1, cp_dir.stdout + cp_dir.stderr)
             self.assertNotIn("Traceback", cp_dir.stderr)
@@ -145,6 +153,7 @@ class CliAssets(unittest.TestCase):
                         capture_output=True,
                         text=True,
                         check=False,
+                        env=env,
                     )
                     self.assertEqual(cp_sym.returncode, 1, cp_sym.stdout + cp_sym.stderr)
                     self.assertNotIn("Traceback", cp_sym.stderr)
@@ -153,22 +162,23 @@ class CliAssets(unittest.TestCase):
                     if rel == "man/eb-local.1":
                         self.assertFalse((out_sym / "completions").exists())
 
-    def test_tmpfs_enospc_keeps_destination_clean(self):
-        mnt = hostile_fs.enter_full_tmpfs(self)
-        if mnt is None:
-            return
-        out = mnt / "share"
-        cp = subprocess.run(
-            ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.ZIG}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
-        self.assertNotIn("Traceback", cp.stderr)
-        self.assertIn("cli_assets:", cp.stderr)
-        self.assertFalse(out.exists())
+    def test_enospc_on_the_generator_write_keeps_destination_clean(self):
+        import os
 
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "share"
+            env = dict(os.environ, EB_LOCAL_TEST_CLI_ASSETS_WRITE="ENOSPC")
+            cp = subprocess.run(
+                ["python3", str(TOOL), "--out", str(out), "--tool", f"eb-local::{binary.ZIG}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+            self.assertNotIn("Traceback", cp.stderr)
+            self.assertIn("cli_assets:", cp.stderr)
+            self.assertFalse(out.exists())
 
 if __name__ == "__main__":
     unittest.main()
