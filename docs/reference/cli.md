@@ -249,7 +249,7 @@ After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, eve
 | `--workstation` | Force managed recipe builds to use private local workspace storage on this machine, even when Slurm is present. |
 | `--config FILE` | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of `~/.config/eb-local/config.toml`, when you own it. The other file is still read. |
 | `--explain` | Before an easyconfig, or before `eb`: print what would run, and create and run nothing. |
-| `--variant NAME` | Before an easyconfig: build it as the `perf` or `debug` variant, described in the `--variant` section below. |
+| `--variant NAME` | Before an easyconfig: build it as the `perf` or `debug` variant, described in the `--variant` section below. Before `submit`: `submit` keeps the option and puts it on the batch command. Another command refuses it. |
 | `--cpu-target TARGET` | Before an easyconfig: build for the CPU target TARGET on this machine, described in the `--cpu-target` section below. |
 | `--mask ROUTE` | With `--cpu-target`: `auto`, `cpuid`, `kvm` or `tcg`. |
 | `--mask-allow-archspec-mismatch` | With `--cpu-target` on the kvm or tcg route: accept an archspec name that differs from the target. archspec reports `aarch64` under qemu-user for lack of `evtstrm`, so an aarch64 `--mask tcg` build needs it. |
@@ -320,6 +320,7 @@ The flags reach the C, C++ and Fortran compilers through EasyBuild's toolchain; 
 An easyconfig with the `SYSTEM` toolchain keeps its options and gets only the suffix.
 Dependencies build as usual.
 `--explain` shows the variant as `EB_LOCAL_VARIANT` and `EB_LOCAL_VARIANT_BLOCK`, the lines appended.
+With another command, including `eb`, `env`, `config`, `profiles` and `dev`, it is refused: those would otherwise run as if it were not there, and `eb` would install the optimised module. `submit` keeps it and puts it on the batch command.
 [Build software to profile or debug](../howto/build-for-profiling.md) uses both.
 
 ### `--cpu-target`

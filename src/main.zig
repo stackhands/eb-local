@@ -1377,16 +1377,80 @@ const DevLock = struct {
     modules: []const []const u8,
 };
 
-/// Create `name` in the working directory, or replace it atomically with its mode kept.
+/// Close `fd` when it is still open, remove `tmp`, and restore `sys.last_errno`.
+fn dropUnpublished(fd: ?sys.fd_t, tmp: []const u8) void {
+    const kept = sys.last_errno;
+    if (fd) |open_fd| sys.close(open_fd);
+    sys.unlinkat(fsx.cwd, tmp, 0) catch {};
+    sys.last_errno = kept;
+}
+
+/// Create `name` in the working directory, or replace it.
+/// The bytes are written beside the final name and that name changes only
+/// after the write, sync and close have succeeded. A failure removes the
+/// temporary file and leaves a file that was already there.
 fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
-    if (fsx.statAt(fsx.cwd, name, true)) |_| {
-        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
-    } else |_| {
-        const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
-            die("cannot create {s} ({s})", .{ name, storage.describeError(e) });
-        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
-        storage.closeWritten(fd) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    const existing: ?fsx.Stat = fsx.statAt(fsx.cwd, name, false) catch |e| switch (e) {
+        error.NotFound => null,
+        else => die("cannot write {s} ({s})", .{ name, storage.describeError(e) }),
+    };
+    if (existing) |st| if (!st.isReg()) {
+        const why: sys.Error = if (st.isLink()) error.SymLink else if (st.isDir()) error.IsDir else error.NotRegularFile;
+        die("cannot write {s} ({s})", .{ name, storage.describeError(why) });
+    };
+    var rnd: [6]u8 = undefined;
+    _ = sys.call(linux.getrandom, .{ &rnd, rnd.len, @as(u32, 0) }) catch |e|
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    const tmp = std.fmt.allocPrint(a, ".{s}.{d}.{x}.tmp", .{ name, linux.getpid(), std.mem.readInt(u48, &rnd, .little) }) catch oom();
+    const mode: linux.mode_t = if (existing) |st| @intCast(st.perm()) else 0o644;
+    const fd = sys.openat(fsx.cwd, tmp, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+    }, mode) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    if (existing) |st| {
+        const now = fsx.fstat(fd) catch |e| {
+            dropUnpublished(fd, tmp);
+            die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+        };
+        if (now.uid != st.uid or now.gid != st.gid) {
+            sys.fchown(fd, st.uid, st.gid) catch |e| switch (e) {
+                error.AccessDenied => {},
+                else => {
+                    dropUnpublished(fd, tmp);
+                    die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+                },
+            };
+        }
+        sys.fchmod(fd, mode) catch |e| {
+            dropUnpublished(fd, tmp);
+            die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+        };
     }
+    sys.writeAll(fd, text) catch |e| {
+        dropUnpublished(fd, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    storage.fsyncWritten(fd) catch |e| {
+        dropUnpublished(fd, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    storage.closeWritten(fd) catch |e| {
+        dropUnpublished(null, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    sys.renameat(fsx.cwd, tmp, fsx.cwd, name) catch |e| {
+        dropUnpublished(null, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    const dir = fsx.openDir(fsx.cwd, ".", false) catch |e|
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    storage.fsyncWritten(dir) catch |e| {
+        sys.close(dir);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    sys.close(dir);
 }
 
 /// `dev --lock`: run the dev lines in a bash child and record what loaded.
@@ -2830,7 +2894,7 @@ fn cmdProfiles(c: Ctx, g: Global) u8 {
     const sources = configSources(c, g);
     // Loading checks every profile in every file.
     var d: config.Diagnostic = .{};
-    _ = config.load(a, sources, c.env, .{}, &d) catch |e| switch (e) {
+    _ = config.load(a, sources, c.env, .{ .profile = g.profile, .project = g.project, .buildenv = g.buildenv }, &d) catch |e| switch (e) {
         error.Invalid => die("{s}", .{d.message}),
         error.OutOfMemory => oom(),
     };
@@ -6739,7 +6803,9 @@ fn nodeTypes(s: config.Settings) []const config.NodeType {
 fn sbatchValue(a: Allocator, v: []const u8) []const u8 {
     if (std.mem.indexOfAny(u8, v, "\n\r") != null)
         die("#SBATCH directive value {s} has a newline; #SBATCH directives are single lines", .{qSingleLine(a, v)});
-    if (std.mem.indexOfAny(u8, v, " \t\"\\") == null) return v;
+    // An apostrophe starts a quote in the scheduler's directive scanner,
+    // the same way a double quote does, even when the path has no space.
+    if (std.mem.indexOfAny(u8, v, " \t\"\\'") == null) return v;
     var out: std.ArrayList(u8) = .empty;
     out.append(a, '"') catch oom();
     for (v) |ch| switch (ch) {
@@ -7224,6 +7290,15 @@ fn readRetainedScript(a: Allocator, path: []const u8) ![]const u8 {
     const opened = try fsx.openRegular(fsx.cwd, path, true);
     defer sys.close(opened.fd);
     return fsx.readAll(a, opened.fd, 1 << 16);
+}
+
+test "an sbatch directive value quotes an apostrophe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // No space, tab, double quote, or backslash: those already take the
+    // quoted form. An apostrophe alone still has to be quoted.
+    try std.testing.expectEqualStrings("\"/home/o'brien/work\"", sbatchValue(a, "/home/o'brien/work"));
 }
 
 test "a forced collision keeps both retained submit scripts" {
@@ -8406,6 +8481,11 @@ fn runMain(init: std.process.Init) u8 {
     // would run as if it were not there.
     if (g.explain and command != .build and command != .eb)
         die("--explain goes with a recipe or with eb, not with {s}", .{@tagName(command)});
+    // --variant changes the easyconfig a recipe build compiles, and submit
+    // puts that option on the batch command. Another command would run as
+    // if it were not there, and eb would install the optimised module.
+    if (g.variant != null and command != .build and command != .submit)
+        die("--variant goes with a recipe or with submit, not with {s}", .{@tagName(command)});
     // The cache is a pair of files. It does not read the site file.
     if (command == .@"lmod-cache") return lmodcache.run(init.io, a, c.env, cache);
     if (command == .overlay) {

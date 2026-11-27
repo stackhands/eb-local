@@ -34,6 +34,20 @@ jobs:
         run: |
           ! command -v sbatch
           ! env | grep -q '^SLURM_'
+      - name: fetch the pigz source, checked
+        # The download from zlib.net intermittently gives the runner a file
+        # that fails EasyBuild's checksum; fetch it here with retries and put
+        # the verified tarball where eb-local's source path looks first.
+        run: |
+          want=eb872b4f0e1f0ebe59c9f7bd8c506c4204893ba6a8492de31df416f0d5170fd0
+          dir="$HOME/eessi/.eb-local/sources/p/pigz"
+          mkdir -p "$dir"
+          for i in 1 2 3 4 5 6; do
+            curl -fsSL --retry 3 -o "$dir/pigz-2.8.tar.gz" https://zlib.net/pigz/pigz-2.8.tar.gz || true
+            if [ "$(sha256sum "$dir/pigz-2.8.tar.gz" | cut -d' ' -f1)" = "$want" ]; then exit 0; fi
+            echo "attempt $i: checksum mismatch"; sleep $((i * 10))
+          done
+          exit 1
       - name: build pigz on the runner
         run: |
           export PATH="$RUNNER_TEMP/eb-local/bin:$PATH"

@@ -84,6 +84,46 @@ class WriteCloseErrors(StorageFixture):
         self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
         self.assertIn(f"eb-local: cannot write eb-local.lock ({EIO_TEXT})", got.stderr)
 
+    def test_dev_lock_publishes_only_after_a_durable_close(self):
+        # A lost sync or close must not leave a lock `dev --locked` can read.
+        # A new file stays absent. A replacement keeps the bytes already there.
+        repo = self.fake_eessi()
+        extra = {"SLURM_JOB_ID": "", "EESSI_CVMFS_REPO": str(repo), "BASH_ENV": ""}
+        cwd = self.fresh_dir("lock-durable")
+        first = self.run_bin(["dev", "--lock", "demo/1.0"], cwd=cwd, **extra)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        lock = cwd / "eb-local.lock"
+        kept = lock.read_bytes()
+
+        for hook in HOOKS:
+            with self.subTest(hook=hook, case="new"):
+                slug = "fsync" if "FSYNC" in hook else "close"
+                fresh = self.fresh_dir("lock-durable-new-" + slug)
+                created = self.run_bin(
+                    ["dev", "--lock", "demo/1.0"],
+                    cwd=fresh,
+                    **{hook: "EIO", **extra},
+                )
+                self.assertEqual(created.returncode, 2, created.stdout + created.stderr)
+                self.assertIn(f"eb-local: cannot write eb-local.lock ({EIO_TEXT})", created.stderr)
+                self.assertNotIn("wrote eb-local.lock", created.stderr)
+                self.assertFalse((fresh / "eb-local.lock").exists(), hook)
+                temps = [p.name for p in fresh.iterdir() if p.name.startswith(".eb-local.lock.")]
+                self.assertEqual(temps, [], hook)
+
+        replaced = self.run_bin(
+            ["dev", "--lock", "demo/1.0"],
+            cwd=cwd,
+            EB_LOCAL_TEST_CLOSE_ERRNO="EIO",
+            **extra,
+        )
+        self.assertEqual(replaced.returncode, 2, replaced.stdout + replaced.stderr)
+        self.assertIn(f"eb-local: cannot write eb-local.lock ({EIO_TEXT})", replaced.stderr)
+        self.assertNotIn("wrote eb-local.lock", replaced.stderr)
+        self.assertEqual(lock.read_bytes(), kept)
+        temps = [p.name for p in cwd.iterdir() if p.name.startswith(".eb-local.lock.")]
+        self.assertEqual(temps, [])
+
     def test_doctor_workspace_fails_the_probe_when_its_close_fails(self):
         ws = self.fresh_dir("probe-ws")
         ok = self.run_bin(["doctor", "--workspace", str(ws)], SLURM_JOB_ID="")
