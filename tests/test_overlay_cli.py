@@ -221,6 +221,53 @@ class OverlayMaterialize(unittest.TestCase):
             self.assertIn("No space left on device", got.stderr)
             self.assertFalse(target.exists())
 
+    def test_dotdot_out_dir_creates_only_the_normalized_directory(self):
+        import os
+
+        base_bytes = b"easyblock = 'ConfigureMake'\nname = 'demo'\nversion = '1.0'\n"
+        overlay_text = f'overlay_version = 1\nbase_digest = "{digest_of(base_bytes)}"\n'
+        args = [
+            "materialize",
+            "--overlay",
+            "site.overlay.toml",
+            "--base",
+            "base.eb",
+            "--out-dir",
+            "a/b/../../c",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "base.eb").write_bytes(base_bytes)
+            (root / "site.overlay.toml").write_text(overlay_text, encoding="utf-8")
+            got = run(args, cwd=root)
+            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
+            self.assertEqual(
+                got.stdout,
+                "wrote c/materialized-base.eb and c/provenance.toml\n",
+            )
+            self.assertFalse((root / "a").exists())
+            self.assertTrue((root / "c" / "materialized-base.eb").is_file())
+            self.assertTrue((root / "c" / "provenance.toml").is_file())
+
+            failed = root / "failed"
+            failed.mkdir()
+            got_fail = run(
+                [
+                    "materialize",
+                    "--overlay",
+                    "site.overlay.toml",
+                    "--base",
+                    "base.eb",
+                    "--out-dir",
+                    "failed/a/b/../../c",
+                ],
+                cwd=root,
+                env=dict(os.environ, EB_LOCAL_TEST_WRITE_ERRNO="ENOSPC"),
+            )
+            self.assertEqual(got_fail.returncode, 1, got_fail.stdout + got_fail.stderr)
+            self.assertIn("No space left on device", got_fail.stderr)
+            self.assertEqual(list(failed.iterdir()), [])
+
     def test_dry_run_validates_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

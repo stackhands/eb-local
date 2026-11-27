@@ -1,0 +1,1 @@
+An output path with `..` made `overlay materialize` create directories the files never used. A failed write removed only the first missing path and left the real output directory behind. The command now normalizes that path before it creates any directory.

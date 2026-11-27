@@ -907,7 +907,11 @@ pub fn runMaterialize(io: std.Io, a: Allocator, opts: MaterializeOptions) u8 {
     defer a.free(recipe);
     const overlay_digest = sha256Hex(a, overlay_text) catch return 1;
     const base_digest = sha256Hex(a, base_text) catch return 1;
-    const out_dir = if (opts.out_dir.len > 0) opts.out_dir else std.fs.path.dirname(opts.overlay_path) orelse ".";
+    // `a/b/../../c` is `c`. Creating each segment first would leave `a/b`
+    // behind, and a failed write would delete `a` while `c` stayed.
+    const raw_out = if (opts.out_dir.len > 0) opts.out_dir else std.fs.path.dirname(opts.overlay_path) orelse ".";
+    const out_dir = common.fsx.normPath(a, raw_out) catch return 1;
+    defer a.free(out_dir);
     const base_name = std.fs.path.basename(opts.base_path);
     const recipe_name = std.fmt.allocPrint(a, "materialized-{s}", .{base_name}) catch return 1;
     const recipe_path = std.fs.path.join(a, &.{ out_dir, recipe_name }) catch return 1;
