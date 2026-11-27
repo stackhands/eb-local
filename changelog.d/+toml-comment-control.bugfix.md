@@ -1,0 +1,1 @@
+A comment could hold a bare carriage return, the delete character, or another C0 control except tab, line feed and the null byte. The comment still ended at the next line feed. The reader dropped a key in that span and the file still loaded. `parse` already refused a null byte before it read the comment. `skipComment` rejects those control bytes and reports the line.
