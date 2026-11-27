@@ -79,22 +79,22 @@ class CpuTargetCli(unittest.TestCase):
 
     def test_a_short_name_two_architectures_share_is_refused(self):
         r = self.run_cli("--cpu-target", "generic", "--explain", "x.eb")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 2)
         self.assertIn("more than one CPU target", r.stderr)
 
     def test_an_unknown_target_is_refused(self):
         r = self.run_cli("--cpu-target", "zen9", "--explain", "x.eb")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 2)
         self.assertIn("not a CPU target eb-local knows", r.stderr)
 
     def test_mask_takes_four_routes(self):
         r = self.run_cli("--cpu-target", "zen4", "--mask", "vm", "--explain", "x.eb")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 2)
         self.assertIn("--mask takes auto, cpuid, kvm or tcg", r.stderr)
 
     def test_cpu_target_needs_a_value(self):
         r = self.run_cli("--cpu-target")
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 2)
         self.assertIn("--cpu-target needs a value", r.stderr)
 
     def test_doctor_names_what_it_checks(self):
