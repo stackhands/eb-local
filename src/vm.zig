@@ -432,6 +432,41 @@ fn readSmall(a: Allocator, path: []const u8) ?[]u8 {
     return fsx.readAll(a, fd, 1 << 20) catch null;
 }
 
+/// Bytes of a failed guest's `console.log` printed after its path.
+const console_tail_len: usize = 2000;
+
+/// The last `console_tail_len` bytes of a regular file, or the whole file
+/// when it is shorter. The read starts at the end, so a console log past
+/// the one mebibyte `readSmall` accepts still yields its tail. Null when
+/// the file cannot be read.
+fn consoleTail(a: Allocator, path: []const u8) ?[]u8 {
+    const fd = sys.openat(fsx.cwd, path, .{}, 0) catch return null;
+    defer sys.close(fd);
+    const st = fsx.fstat(fd) catch return null;
+    if (!st.isReg()) return null;
+    const take: usize = if (st.size > console_tail_len) console_tail_len else @intCast(st.size);
+    const offset: linux.off_t = if (st.size > console_tail_len) -@as(linux.off_t, @intCast(console_tail_len)) else 0;
+    const whence: u32 = if (st.size > console_tail_len) linux.SEEK.END else linux.SEEK.SET;
+    _ = sys.call(linux.lseek, .{ fd, offset, whence }) catch return null;
+    const buf = a.alloc(u8, take) catch return null;
+    var got: usize = 0;
+    while (got < take) {
+        const n = sys.read(fd, buf[got..]) catch {
+            a.free(buf);
+            return null;
+        };
+        if (n == 0) break;
+        got += n;
+    }
+    if (got == take) return buf;
+    const exact = a.dupe(u8, buf[0..got]) catch {
+        a.free(buf);
+        return null;
+    };
+    a.free(buf);
+    return exact;
+}
+
 fn writeFile(path: []const u8, bytes: []const u8, mode: linux.mode_t) !void {
     const fd = try sys.openat(fsx.cwd, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, mode);
     defer sys.close(fd);
@@ -784,10 +819,8 @@ fn runKvm(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
     const code = exitStatus(outcome);
     if (code == status_failed) {
         err("the guest reported no status (QEMU {s}); console log: {s}/console.log", .{ if (termStatus(raw) == 0) "exited 0" else "failed", rundir });
-        if (readSmall(a, std.fs.path.join(a, &.{ rundir, "console.log" }) catch return status_failed)) |c| {
-            const tail = if (c.len > 2000) c[c.len - 2000 ..] else c;
-            cli.err("{s}\n", .{tail});
-        }
+        const log_path = std.fs.path.join(a, &.{ rundir, "console.log" }) catch return status_failed;
+        if (consoleTail(a, log_path)) |tail| cli.err("{s}\n", .{tail});
         if (qemuRefusedModel(raw)) err("QEMU refused the CPU model {s}: this host lacks a feature it needs (enforce is on, and the helper never falls back to the host CPU)", .{cpu});
         return status_failed;
     }
@@ -1131,6 +1164,54 @@ test "only the named variables reach the guest" {
     try testing.expect(!envForwarded("SSH_AUTH_SOCK"));
     try testing.expect(!envForwarded("DISPLAY"));
     try testing.expect(!envForwarded("EB_LOCAL_VM_KERNEL"));
+}
+
+test "a console log past one mebibyte yields its final bytes" {
+    const a = testing.allocator;
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-vmlog-");
+    defer a.free(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const path = try std.fs.path.join(a, &.{ root, "console.log" });
+    defer a.free(path);
+    const marker = "TAIL-MARKER\n";
+    const total = (1 << 20) + 80;
+    const body = try a.alloc(u8, total);
+    defer a.free(body);
+    @memset(body, 'x');
+    @memcpy(body[0..4], "HEAD");
+    @memcpy(body[total - marker.len ..], marker);
+    try writeFile(path, body, 0o644);
+
+    const tail = consoleTail(a, path);
+    try testing.expect(tail != null);
+    const got = tail.?;
+    defer a.free(got);
+    try testing.expectEqual(console_tail_len, got.len);
+    try testing.expect(std.mem.endsWith(u8, got, marker));
+    try testing.expect(std.mem.indexOf(u8, got, "HEAD") == null);
+}
+
+test "a console log within one mebibyte keeps its final bytes" {
+    const a = testing.allocator;
+    const root = try fsx.mkdtemp(a, "/tmp", "eb-local-vmlog-");
+    defer a.free(root);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const path = try std.fs.path.join(a, &.{ root, "console.log" });
+    defer a.free(path);
+
+    try writeFile(path, "short\n", 0o644);
+    const whole = consoleTail(a, path).?;
+    defer a.free(whole);
+    try testing.expectEqualStrings("short\n", whole);
+
+    var mid: [5000]u8 = undefined;
+    @memset(&mid, 'm');
+    @memcpy(mid[mid.len - 6 ..], "MIDDLE");
+    try writeFile(path, &mid, 0o644);
+    const tail = consoleTail(a, path).?;
+    defer a.free(tail);
+    try testing.expectEqual(console_tail_len, tail.len);
+    try testing.expect(std.mem.endsWith(u8, tail, "MIDDLE"));
 }
 
 test "the guest scripts check every detector and refuse" {
