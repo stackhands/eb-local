@@ -1343,16 +1343,80 @@ const DevLock = struct {
     modules: []const []const u8,
 };
 
-/// Create `name` in the working directory, or replace it atomically with its mode kept.
+/// Close `fd` when it is still open, remove `tmp`, and restore `sys.last_errno`.
+fn dropUnpublished(fd: ?sys.fd_t, tmp: []const u8) void {
+    const kept = sys.last_errno;
+    if (fd) |open_fd| sys.close(open_fd);
+    sys.unlinkat(fsx.cwd, tmp, 0) catch {};
+    sys.last_errno = kept;
+}
+
+/// Create `name` in the working directory, or replace it.
+/// The bytes are written beside the final name and that name changes only
+/// after the write, sync and close have succeeded. A failure removes the
+/// temporary file and leaves a file that was already there.
 fn writeCwdFile(a: Allocator, name: []const u8, text: []const u8) void {
-    if (fsx.statAt(fsx.cwd, name, true)) |_| {
-        fsx.replaceContents(a, fsx.cwd, name, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
-    } else |_| {
-        const fd = sys.openat(fsx.cwd, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true }, 0o644) catch |e|
-            die("cannot create {s} ({s})", .{ name, storage.describeError(e) });
-        sys.writeAll(fd, text) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
-        storage.closeWritten(fd) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    const existing: ?fsx.Stat = fsx.statAt(fsx.cwd, name, false) catch |e| switch (e) {
+        error.NotFound => null,
+        else => die("cannot write {s} ({s})", .{ name, storage.describeError(e) }),
+    };
+    if (existing) |st| if (!st.isReg()) {
+        const why: sys.Error = if (st.isLink()) error.SymLink else if (st.isDir()) error.IsDir else error.NotRegularFile;
+        die("cannot write {s} ({s})", .{ name, storage.describeError(why) });
+    };
+    var rnd: [6]u8 = undefined;
+    _ = sys.call(linux.getrandom, .{ &rnd, rnd.len, @as(u32, 0) }) catch |e|
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    const tmp = std.fmt.allocPrint(a, ".{s}.{d}.{x}.tmp", .{ name, linux.getpid(), std.mem.readInt(u48, &rnd, .little) }) catch oom();
+    const mode: linux.mode_t = if (existing) |st| @intCast(st.perm()) else 0o644;
+    const fd = sys.openat(fsx.cwd, tmp, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .EXCL = true,
+        .NOFOLLOW = true,
+    }, mode) catch |e| die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    if (existing) |st| {
+        const now = fsx.fstat(fd) catch |e| {
+            dropUnpublished(fd, tmp);
+            die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+        };
+        if (now.uid != st.uid or now.gid != st.gid) {
+            sys.fchown(fd, st.uid, st.gid) catch |e| switch (e) {
+                error.AccessDenied => {},
+                else => {
+                    dropUnpublished(fd, tmp);
+                    die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+                },
+            };
+        }
+        sys.fchmod(fd, mode) catch |e| {
+            dropUnpublished(fd, tmp);
+            die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+        };
     }
+    sys.writeAll(fd, text) catch |e| {
+        dropUnpublished(fd, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    storage.fsyncWritten(fd) catch |e| {
+        dropUnpublished(fd, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    storage.closeWritten(fd) catch |e| {
+        dropUnpublished(null, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    sys.renameat(fsx.cwd, tmp, fsx.cwd, name) catch |e| {
+        dropUnpublished(null, tmp);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    const dir = fsx.openDir(fsx.cwd, ".", false) catch |e|
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    storage.fsyncWritten(dir) catch |e| {
+        sys.close(dir);
+        die("cannot write {s} ({s})", .{ name, storage.describeError(e) });
+    };
+    sys.close(dir);
 }
 
 /// `dev --lock`: run the dev lines in a bash child and record what loaded.
