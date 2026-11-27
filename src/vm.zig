@@ -289,13 +289,29 @@ pub fn virtiofsdArgv(a: Allocator, virtiofsd: []const u8, rundir: []const u8, s:
     return v.toOwnedSlice(a);
 }
 
+const MountWriteError = Allocator.Error || error{BadField};
+
+/// One mounts record: each field is a single shell word, so a path may
+/// contain spaces and quotes. The guest reads the line with `set --`.
+/// A field `oneLinePath` rejects is refused before it is quoted.
+fn appendMount(a: Allocator, out: *std.ArrayList(u8), fields: []const []const u8) MountWriteError!void {
+    for (fields) |f| if (!oneLinePath(f)) return error.BadField;
+    for (fields, 0..) |f, i| {
+        if (i != 0) try out.append(a, ' ');
+        try out.appendSlice(a, try shellQuote(a, f));
+    }
+    try out.append(a, '\n');
+}
+
 /// The guest init's `mounts` file: one line per mount, parent paths first.
-pub fn mountsFile(a: Allocator, shares: []const Share, cvmfs_root: bool) Allocator.Error![]u8 {
+/// A newline, a carriage return or a NUL byte in any field fails the file.
+pub fn mountsFile(a: Allocator, shares: []const Share, cvmfs_root: bool) MountWriteError![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    if (cvmfs_root) try out.appendSlice(a, "tmpfs cvmfs /cvmfs\n");
+    errdefer out.deinit(a);
+    if (cvmfs_root) try appendMount(a, &out, &.{ "tmpfs", "cvmfs", "/cvmfs" });
     for (shares) |s| {
         if (s.guest.len == 0) continue;
-        try out.print(a, "virtiofs {s} {s} {s}\n", .{ s.tag, s.guest, if (s.readonly) "ro" else "rw" });
+        try appendMount(a, &out, &.{ "virtiofs", s.tag, s.guest, if (s.readonly) "ro" else "rw" });
     }
     return out.toOwnedSlice(a);
 }
@@ -536,9 +552,15 @@ fn waitForSocket(path: []const u8) bool {
     return false;
 }
 
-/// The directories to mount writable and read-only: the working directory,
-/// the caller's `--share`s and the directories its environment names, each
-/// only when it exists and no wider share holds it.
+/// True when `p` can be one field of a mounts line. A newline, a carriage
+/// return or a NUL byte would split that line or end the string.
+fn oneLinePath(p: []const u8) bool {
+    return std.mem.indexOfAny(u8, p, "\n\r\x00") == null;
+}
+
+/// The directories to mount writable: the working directory, the caller's
+/// `--share`s and the directories its environment names, each only when
+/// it exists and no wider share holds it.
 fn writableShares(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, extra: []const []const u8) ![]const []const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     try list.append(a, cwd);
@@ -551,7 +573,7 @@ fn writableShares(a: Allocator, env: *const std.process.Environ.Map, cwd: []cons
     var ok: std.ArrayList([]const u8) = .empty;
     for (list.items) |p| {
         if (p.len == 0 or p[0] != '/' or std.mem.eql(u8, p, "/")) continue;
-        if (std.mem.indexOfAny(u8, p, " \t\n\\\"'") != null) continue;
+        if (!oneLinePath(p)) continue;
         if (isDir(p)) try ok.append(a, try fsx.absPath(a, p));
     }
     return dedupePaths(a, ok.items);
@@ -686,11 +708,15 @@ fn runKvm(a: Allocator, env: *const std.process.Environ.Map, cwd: []const u8, re
             .readonly = false,
             .cache = "auto",
         }) catch break :fail false;
-        for (req.share_ro, 0..) |p, i| shares.append(a, .{
-            .tag = std.fmt.allocPrint(a, "ro{d}", .{i}) catch break :fail false,
-            .host = fsx.absPath(a, p) catch break :fail false,
-            .guest = fsx.absPath(a, p) catch break :fail false,
-        }) catch break :fail false;
+        for (req.share_ro, 0..) |p, i| {
+            const host = fsx.absPath(a, p) catch break :fail false;
+            if (!oneLinePath(host)) continue;
+            shares.append(a, .{
+                .tag = std.fmt.allocPrint(a, "ro{d}", .{i}) catch break :fail false,
+                .host = host,
+                .guest = host,
+            }) catch break :fail false;
+        }
         break :fail true;
     };
     if (!build) return status_failed;
@@ -1036,7 +1062,148 @@ test "mounts list the tmpfs under /cvmfs first, then each guest path" {
         .{ .tag = "rw0", .host = "/home/u", .guest = "/home/u", .readonly = false },
     };
     const text = try mountsFile(a, &shares, true);
-    try testing.expectEqualStrings("tmpfs cvmfs /cvmfs\nvirtiofs cvmfs0 /cvmfs/software.eessi.io ro\nvirtiofs rw0 /home/u rw\n", text);
+    try testing.expectEqualStrings("'tmpfs' 'cvmfs' '/cvmfs'\n'virtiofs' 'cvmfs0' '/cvmfs/software.eessi.io' 'ro'\n'virtiofs' 'rw0' '/home/u' 'rw'\n", text);
+}
+
+test "a guest mount keeps a path with a space and an apostrophe" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parent = try fsx.mkdtemp(a, "/tmp", "eb-local-share-");
+    defer fsx.deleteTree(a, fsx.cwd, parent) catch {};
+    const dir = try std.fmt.allocPrint(a, "{s}/My Recipes/it's", .{parent});
+    try common.atomic.makedirs(dir);
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    const got = try writableShares(a, &env, dir, &.{});
+    const abs = try fsx.absPath(a, dir);
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings(abs, got[0]);
+    const text = try mountsFile(a, &.{.{ .tag = "rw0", .host = abs, .guest = abs, .readonly = false }}, false);
+    try testing.expect(std.mem.indexOf(u8, text, try shellQuote(a, abs)) != null);
+    try testing.expect(std.mem.indexOf(u8, guest_init, "eval \"set -- $line\" || continue") != null);
+    try expectMountPath(text, abs);
+    // A non-UTF-8 byte stays one field, the same way a non-ASCII path does.
+    const raw = "/opt/caf\xc3\xa9/\xff x";
+    const raw_text = try mountsFile(a, &.{.{ .tag = "rw0", .host = raw, .guest = raw, .readonly = false }}, false);
+    try expectMountPath(raw_text, raw);
+}
+
+fn expectMountPath(text: []const u8, want: []const u8) !void {
+    const script =
+        \\line=$1
+        \\line=${line%$'\n'}
+        \\eval "set -- $line" || exit 9
+        \\printf '%s' "$3"
+    ;
+    const ran = try std.process.run(testing.allocator, std.testing.io, .{
+        .argv = &.{ "/bin/bash", "--noprofile", "--norc", "-c", script, "bash", text },
+    });
+    defer testing.allocator.free(ran.stdout);
+    defer testing.allocator.free(ran.stderr);
+    try testing.expect(ran.term.success());
+    try testing.expectEqualStrings(want, ran.stdout);
+}
+
+/// The read/eval loop in `guest-init.sh`, from the embedded script.
+fn guestMountLoop() []const u8 {
+    const start_s = "while IFS= read -r line";
+    const end_s = "done < /run/ebvm/mounts";
+    const start = std.mem.indexOf(u8, guest_init, start_s) orelse unreachable;
+    const tail = guest_init[start..];
+    const rel = std.mem.indexOf(u8, tail, end_s) orelse unreachable;
+    return tail[0 .. rel + end_s.len];
+}
+
+/// Run that loop under bash. `mount` and `mkdir` record arguments instead of mounting.
+fn runGuestMountLoop(a: Allocator, dir: []const u8, mounts: []const u8, marker: []const u8) ![]const []const u8 {
+    const loop = guestMountLoop();
+    const needle = "done < /run/ebvm/mounts";
+    const redirected = try std.mem.concat(a, u8, &.{ loop[0 .. loop.len - needle.len], "done < \"$MOUNTS\"\n" });
+    const loop_path = try std.fmt.allocPrint(a, "{s}/loop.sh", .{dir});
+    const mounts_path = try std.fmt.allocPrint(a, "{s}/mounts", .{dir});
+    const out_dir = try std.fmt.allocPrint(a, "{s}/out", .{dir});
+    try writeFile(loop_path, redirected, 0o644);
+    try writeFile(mounts_path, mounts, 0o644);
+    try common.atomic.makedirs(out_dir);
+    const harness =
+        \\OUT=$1
+        \\LOOP=$2
+        \\MARKER=$3
+        \\MOUNTS=$4
+        \\n=0
+        \\mount() {
+        \\  local arg
+        \\  for arg in "$@"; do
+        \\    printf '%s' "$arg" > "$OUT/$n"
+        \\    n=$((n + 1))
+        \\  done
+        \\}
+        \\mkdir() { return 0; }
+        \\. "$LOOP"
+        \\if [ -e "$MARKER" ]; then
+        \\  echo payload-ran >&2
+        \\  exit 9
+        \\fi
+    ;
+    const ran = try std.process.run(testing.allocator, std.testing.io, .{
+        .argv = &.{ "/bin/bash", "--noprofile", "--norc", "-c", harness, "bash", out_dir, loop_path, marker, mounts_path },
+    });
+    defer testing.allocator.free(ran.stdout);
+    defer testing.allocator.free(ran.stderr);
+    if (!ran.term.success()) std.debug.print("guest loop stderr:\n{s}\n", .{ran.stderr});
+    try testing.expect(ran.term.success());
+    var got: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        const p = try std.fmt.allocPrint(a, "{s}/{d}", .{ out_dir, i });
+        const bytes = readSmall(a, p) orelse break;
+        try got.append(a, bytes);
+    }
+    return got.toOwnedSlice(a);
+}
+
+test "the guest init loop returns every quoted field unchanged" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parent = try fsx.mkdtemp(a, "/tmp", "eb-local-quote-");
+    defer fsx.deleteTree(a, fsx.cwd, parent) catch {};
+    const marker = try std.fmt.allocPrint(a, "{s}/pwned", .{parent});
+    // Apostrophe, dollar, backslash, backtick, and non-ASCII bytes, plus a command that must not run.
+    const tag = "it's $\\`\xc3\xa9\xff";
+    const guest = try std.fmt.allocPrint(a, "/opt/{s}/`touch {s}`/$(touch {s})", .{ tag, marker, marker });
+    const text = try mountsFile(a, &.{.{ .tag = tag, .host = guest, .guest = guest, .readonly = false }}, true);
+    const loop = guestMountLoop();
+    try testing.expect(std.mem.indexOf(u8, guest_init, loop) != null);
+    try testing.expect(std.mem.indexOf(u8, loop, "eval \"set -- $line\" || continue") != null);
+    const got = try runGuestMountLoop(a, parent, text, marker);
+    const want = [_][]const u8{
+        "-t", "tmpfs",    "cvmfs", "/cvmfs",
+        "-t", "virtiofs", "-o",    "rw",
+        tag,  guest,
+    };
+    try testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try testing.expectEqualSlices(u8, w, g);
+}
+
+test "a newline in a cvmfs repo or share writes no mounts line" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The same shape `runKvm` builds from `EB_LOCAL_VM_CVMFS_REPOS`, and a share path.
+    // `mountsFile` fails, so `runKvm` returns `status_failed` (125) before it writes the file.
+    const repo = "software.eessi.io\n;touch /tmp/pwned;\n x";
+    var rit = std.mem.tokenizeAny(u8, repo, ": ,");
+    const first = rit.next() orelse return error.TestUnexpectedResult;
+    const guest = try std.fmt.allocPrint(a, "/cvmfs/{s}", .{first});
+    try testing.expectError(error.BadField, mountsFile(a, &.{.{ .tag = "cvmfs0", .host = guest, .guest = guest }}, true));
+    const whole = try std.fmt.allocPrint(a, "/cvmfs/{s}", .{repo});
+    try testing.expectError(error.BadField, mountsFile(a, &.{.{ .tag = "cvmfs0", .host = whole, .guest = whole }}, false));
+    const share = "/home/u/My Recipes\n;touch /tmp/pwned;";
+    try testing.expectError(error.BadField, mountsFile(a, &.{.{ .tag = "rw0", .host = share, .guest = share, .readonly = false }}, false));
+    try testing.expectError(error.BadField, mountsFile(a, &.{.{ .tag = "rw0", .host = "/opt/a\rb", .guest = "/opt/a\rb", .readonly = false }}, false));
+    try testing.expectError(error.BadField, mountsFile(a, &.{.{ .tag = "rw\x00", .host = "/opt/a", .guest = "/opt/a", .readonly = false }}, false));
 }
 
 test "paths inside another share are dropped" {

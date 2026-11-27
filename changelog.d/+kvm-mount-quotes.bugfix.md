@@ -1,0 +1,1 @@
+A Kernel-based Virtual Machine (KVM) guest kept a build directory on the read-only host root when its path held a space or an apostrophe. On the base, `writableShares` dropped that path before the mounts file was written. Now `mountsFile` quotes each field. The guest reads each line back as words. A field with a newline is refused.

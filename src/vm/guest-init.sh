@@ -22,7 +22,15 @@ ip link set lo up 2>/dev/null
 # ttyS1 and ttyS2 carry the command's stdout and stderr; raw keeps newlines unchanged.
 stty -F /dev/ttyS1 raw -echo 2>/dev/null
 stty -F /dev/ttyS2 raw -echo 2>/dev/null
-while read -r kind a b c; do
+# Each field is one shell word. eb-local quotes it, so a path may contain a space.
+# A line that does not parse must not keep the previous word.
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -z "$line" ] && continue
+  eval "set -- $line" || continue
+  kind=$1
+  a=$2
+  b=$3
+  c=${4-}
   case $kind in
     tmpfs) mount -t tmpfs "$a" "$b" ;;
     virtiofs)
