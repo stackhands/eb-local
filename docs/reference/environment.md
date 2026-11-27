@@ -45,8 +45,11 @@ The site settings, `storage.*`, `build.site_toolchains` and `build.node_types`, 
 | `EB_LOCAL_CONFIG` | Names a configuration file to read when `--config` does not. |
 | `EB_LOCAL_PIN_BUILDENV_PYTHON` | `1` prepends the stable private compatibility-layer `python3` directory after `dev` loads a build environment. |
 | `EB_LOCAL_KEEP_WORK` | `1` keeps the workspace of a build that succeeds. |
-| `EB_LOCAL_CPU_TARGET`, `EB_LOCAL_MASK_ROUTE`, `EB_LOCAL_PROBE`, `EB_LOCAL_SELF`, `EB_LOCAL_HOOKS_FILE`, `EB_LOCAL_BASE_HOOKS` | Set by a build with `--cpu-target` for its script, as the target, the route, the CPUID probe, this program, the EasyBuild hooks file and the hooks the stack set; a value in your shell is dropped. |
+| `EB_LOCAL_CPU_TARGET`, `EB_LOCAL_MASK_ROUTE`, `EB_LOCAL_ALLOW_ARCHSPEC`, `EB_LOCAL_PROBE`, `EB_LOCAL_SELF`, `EB_LOCAL_HOOKS_FILE`, `EB_LOCAL_BASE_HOOKS` | Set by a build with `--cpu-target` for its script, as the target, the route, whether the preflight accepts another archspec name (1 with `--mask-allow-archspec-mismatch`), the CPUID probe, this program, the EasyBuild hooks file and the hooks the stack set; a value in your shell is dropped. |
 | `EB_LOCAL_VARIANT`, `EB_LOCAL_VARIANT_BLOCK` | Set by a build with `--variant` for its script, which unsets them; a value in your shell is dropped. |
+| `EB_LOCAL_QEMU_DIR`, `EB_LOCAL_VIRTIOFSD` | Where the internal `__vm-run` finds `qemu-system-ARCH`, `qemu-ARCH` and `virtiofsd`: a directory searched before `PATH`, and the path of `virtiofsd`. |
+| `EB_LOCAL_VM_KERNEL`, `EB_LOCAL_VM_DIR`, `EB_LOCAL_VM_KEEP` | `__vm-run` under `kvm`: the kernel image to boot, with virtiofs and virtio-pci built in, where the running kernel's image is not readable; the directory for the job, on the root file system; `1` keeps the job directory. |
+| `EB_LOCAL_VM_CVMFS_REPOS`, `EB_LOCAL_VM_GCC` | `__vm-run`: the CernVM-FS repositories to mount in the guest, default `software.eessi.io`; the compiler the CPU check asks, in place of the `GCCcore` module's. |
 | `EB_LOCAL_LOCK_TIMEOUT_MS` | Positive integer milliseconds to wait for a busy `flock` lock before exiting non-zero; default `300000`. |
 | `EB_LOCAL_EESSI_EXTEND` | Set, not empty and not `0`, it sends every argument to `eb`, as after `eb-local eb --`. An eb-stack EESSI target runs eb-local this way. |
 | `EB_LOCAL_ENV_STRICT` | Set, not empty and not `0` or `false`, `env` and `dev` prepend the same CVMFS check as `--strict` before their load lines. |

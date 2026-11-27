@@ -10,7 +10,7 @@ The repository's shell shim delegates every command to this Zig program.
 eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
 eb-local [OPTION]... --variant perf|debug <easyconfig> [eb options]
-eb-local [OPTION]... --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+eb-local [OPTION]... --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
@@ -58,7 +58,7 @@ directory you own.
                                        build that easyconfig with debug symbols and frame
                                        pointers (perf) or unoptimised (debug), as a module
                                        whose version ends in -perf or -debug
-  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
                                        build for another CPU target on this machine: TARGET is
                                        an EESSI subdirectory (x86_64/amd/zen4) or its last
                                        component (zen4). The build sees that CPU through the
@@ -250,6 +250,7 @@ After =eb=, every word goes to =eb= except =-h= and =--help=; after =eb --=, eve
 | =--variant NAME=       | Before an easyconfig: build it as the =perf= or =debug= variant, described in the =--variant= section below. |
 | =--cpu-target TARGET= | Before an easyconfig: build for the CPU target TARGET on this machine, described in the =--cpu-target= section below. |
 | =--mask ROUTE=         | With =--cpu-target=: =auto=, =cpuid=, =kvm= or =tcg=. |
+| =--mask-allow-archspec-mismatch= | With =--cpu-target= on the kvm or tcg route: accept an archspec name that differs from the target. archspec reports =aarch64= under qemu-user for lack of =evtstrm=, so an aarch64 =--mask tcg= build needs it. |
 | =--no-audit=           | With =--cpu-target=: skip the instruction audit after the build. |
 | =-h=, =--help=, =help= | Print the usage on stdout and exit 0.                                                                                                                                          |
 | =--version=            | Print the version line on stdout and exit 0.                                                                                                                                   |
@@ -363,7 +364,7 @@ After a successful build, =eb-local audit-isa DIR --target TARGET= runs on each 
 Each installed directory gets =easybuild/eb-local-build-mode.json=, with =cpu_target=, =route=, =profile=, =host_cpu=, =kernel=, =eb_local_version= and =isa_audit= (=pass=, =fail= or =skipped=).
 
 =--explain= shows the route and the variables it sets, =EB_LOCAL_CPU_TARGET= and =EESSI_SOFTWARE_SUBDIR_OVERRIDE=.
-The =sbatch= lines of =submit=, and the replay hints, carry =--cpu-target=, =--mask= and =--no-audit=.
+The =sbatch= lines of =submit=, and the replay hints, carry =--cpu-target=, =--mask=, =--mask-allow-archspec-mismatch= and =--no-audit=.
 =eb-local doctor --cpu-target TARGET= reports whether CPUID faulting works here, whether =/dev/kvm= and the QEMU binaries exist, and which route =auto= would take.
 
 ** eb
@@ -486,6 +487,44 @@ The names it wraps are =gcc=, =g++=, =c++=, =cc=, =gfortran=, =clang=, =clang++=
 Without =--unwrapped=, finding nothing to wrap is exit 1.
 
 A wrapper adds a run path, when its command links, for each directory named with =-L= or =--library-path=, for the directory of each existing =lib*.so= or =lib*.so.N= file named by its absolute path, and for each =LIBRARY_PATH= entry when it wraps a compiler driver. The arguments in a response file, =@FILE=, count as its own; one it cannot read is passed on unchanged.
+
+** __vm-run
+
+Internal: eb-local runs it for the builds that mask the CPU view, and it is not in =--help=; its options can change in any release.
+
+#+begin_example
+eb-local __vm-run --mode kvm|tcg --cpu-target TARGET [--memory MiB] [--cpus N]
+                  [--share DIR] [--share-ro DIR] [--allow-archspec-mismatch] -- COMMAND [ARG...]
+#+end_example
+
+Run COMMAND, in the working directory, as the caller's user and group, with the environment variables EasyBuild and EESSI read, inside a virtual CPU that presents TARGET, an EESSI software subdirectory such as =x86_64/amd/zen4=, =x86_64/intel/icelake= or =aarch64/neoverse_n1=.
+Before COMMAND starts, the guest checks that the CPU vendor, EESSI archdetect, archspec and =gcc -march=native= (=gcc -mcpu=native= on aarch64) all name TARGET, and that =/dev/fd= exists, and COMMAND does not run when one does not.
+=--mode kvm= is for a target of the host's architecture and boots the host kernel under QEMU with KVM, a named CPU model and =enforce=; it never uses the host CPU.
+=--mode tcg= is for a target of the other architecture and runs COMMAND in qemu user mode with =QEMU_CPU= set, on the EESSI compatibility layer of that architecture.
+[[file:../howto/build-under-qemu.org][Build under a virtual CPU with QEMU]] describes both and what each needs.
+
+| Option                      | Meaning                                                                                                                         |
+|-----------------------------+---------------------------------------------------------------------------------------------------------------------------------|
+| =--mode kvm=, =--mode tcg=  | The kind of virtual CPU.                                                                                                        |
+| =--cpu-target TARGET=       | The target to present; =x86_64/amd/zen2=, =zen3=, =zen4=, =x86_64/intel/haswell=, =skylake_avx512=, =cascadelake=, =icelake=, =sapphirerapids=, =aarch64/neoverse_n1=, =neoverse_v1= or =a64fx=. |
+| =--memory MiB=              | Guest memory under =kvm=, at least 256; default 8192. =tcg= has none to set.                                                    |
+| =--cpus N=                  | Guest CPUs under =kvm=; default the CPUs this process may run on.                                                               |
+| =--share DIR=               | Also mount DIR writable in the guest, under =kvm=. The working directory and the directories named by =HOME=, =TMPDIR=, =XDG_CACHE_HOME=, =WORKING_DIR=, =EASYBUILD_PREFIX=, =EASYBUILD_BUILDPATH=, =EASYBUILD_INSTALLPATH=, =EASYBUILD_SOURCEPATH=, =EASYBUILD_REPOSITORYPATH= and the =EESSI_*_INSTALL= variables are mounted writable already. |
+| =--share-ro DIR=            | Also mount DIR read-only in the guest, under =kvm=, for a directory on a file system other than =/= that COMMAND needs.          |
+| =--allow-archspec-mismatch= | Run COMMAND although archspec names another CPU than TARGET, and say so on stderr. The other checks still refuse.              |
+
+The guest receives =PATH=, =HOME=, =USER=, =LOGNAME=, =LANG=, =LC_*=, =TERM=, =TZ=, =TMPDIR=, =MODULEPATH=, =LOADEDMODULES=, =_LMFILES_=, =LMOD*=, =XDG_*=, =EASYBUILD_*=, =EESSI_*=, =EB_*=, =SLURM_*=, =WORKING_DIR= and =SOURCE_DATE_EPOCH=, and no other variable; under =tcg= the compatibility layer's directories come first in =PATH=.
+
+Exit status:
+
+| Status | Meaning                                                                                                                                            |
+|--------+----------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0 to 255 | COMMAND's own status, or 128 and the signal number when a signal ended it.                                                                       |
+| 2      | Refused before anything started: wrong options, an unknown target, a target the mode cannot present, or a missing tool, with the reason on stderr.  |
+| 125    | The VM or the emulation failed and COMMAND reported no status; the console log of a failed =kvm= run is kept and its path printed.                |
+| 126    | The guest refused: its CPU view does not name TARGET. COMMAND did not run, and stderr says which check failed.                                      |
+
+A COMMAND that itself exits 2, 125 or 126 cannot be told from the helper's own statuses by the number alone; the helper's statuses come with a line on stderr that starts with =eb-local: vm-run:=.
 
 ** check
 

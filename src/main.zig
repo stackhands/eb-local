@@ -41,6 +41,8 @@ pub const mpi = @import("mpi.zig");
 pub const cpumask = @import("cpumask.zig");
 /// `eb-local overlay`: declarative site overlays for upstream easyconfigs.
 pub const recipe_overlay = @import("recipe_overlay.zig");
+/// `eb-local __vm-run`: a command under a virtual CPU that presents a target.
+pub const vm = @import("vm.zig");
 /// `--json` for scriptable commands.
 const jsonout = @import("jsonout.zig");
 const Allocator = std.mem.Allocator;
@@ -63,7 +65,7 @@ const usage_text =
     \\                                       build that easyconfig with debug symbols and frame
     \\                                       pointers (perf) or unoptimised (debug), as a module
     \\                                       whose version ends in -perf or -debug
-    \\  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+    \\  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
     \\                                       build for another CPU target on this machine: TARGET is
     \\                                       an EESSI subdirectory (x86_64/amd/zen4) or its last
     \\                                       component (zen4). The build sees that CPU through the
@@ -734,6 +736,8 @@ const Global = struct {
     mask: cpumask.Mode = .auto,
     /// `--no-audit`: skip the instruction audit after a `--cpu-target` build.
     no_audit: bool = false,
+    /// `--mask-allow-archspec-mismatch`: the kvm and tcg routes accept an archspec name that differs from the target's.
+    mask_allow_archspec: bool = false,
     /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
@@ -4642,8 +4646,16 @@ const build_script_tail =
     \\                *) pf_flag=-march pf_key=-march= ;;
     \\            esac
     \\            pf_gcc=$(gcc "$pf_flag=native" -Q --help=target 2>/dev/null | awk -v k="$pf_key" '$1 == k { v = $2 } END { print v }') || pf_gcc=
-    \\            pf_probe=$("${EB_LOCAL_PROBE:-/nonexistent}" 2>/dev/null) || pf_probe=
-    \\            "$EB_LOCAL_SELF" __mask-preflight "$EB_LOCAL_CPU_TARGET" "$EB_LOCAL_MASK_ROUTE" "$pf_fd" "$pf_ad" "$pf_sp" "$pf_gcc" "$pf_probe" || exit 1
+    \\            # The cpuid route compiles a probe; a virtual machine's CPUID is the
+    \\            # guest's own, so its vendor is what /proc/cpuinfo reports there.
+    \\            if [ "$EB_LOCAL_MASK_ROUTE" = cpuid ]; then
+    \\                pf_probe=$("${EB_LOCAL_PROBE:-/nonexistent}" 2>/dev/null) || pf_probe=
+    \\            else
+    \\                pf_probe=vendor=$(sed -n 's/^vendor_id[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null | head -n 1)
+    \\            fi
+    \\            pf_allow=
+    \\            [ "${EB_LOCAL_ALLOW_ARCHSPEC:-}" = 1 ] && pf_allow=allow-archspec
+    \\            "$EB_LOCAL_SELF" __mask-preflight "$EB_LOCAL_CPU_TARGET" "$EB_LOCAL_MASK_ROUTE" "$pf_fd" "$pf_ad" "$pf_sp" "$pf_gcc" "$pf_probe" ${pf_allow:+"$pf_allow"} || exit 1
     \\            ;;
     \\    esac
     \\fi
@@ -4753,11 +4765,74 @@ const MaskPlan = struct {
     subdir: []const u8,
     route: cpumask.Route,
     profile: ?cpumask.Profile,
+    /// Pass `--allow-archspec-mismatch` to `__vm-run` and the preflight.
+    allow_archspec: bool = false,
 };
 
+/// The words that run COMMAND in a virtual machine presenting `subdir`: this
+/// program's `__vm-run` helper with the route as its mode.
+fn vmPrefix(a: Allocator, self_exe: []const u8, route: cpumask.Route, subdir: []const u8, allow_archspec: bool) []const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    out.appendSlice(a, &.{ self_exe, "__vm-run", "--mode", @tagName(route), "--cpu-target", subdir }) catch oom();
+    if (allow_archspec) out.append(a, "--allow-archspec-mismatch") catch oom();
+    out.append(a, "--") catch oom();
+    return out.items;
+}
+
+/// What a build says when `__vm-run` ends with one of its own statuses, or
+/// null for any other status. 2 is a refused request, 125 a virtual machine
+/// that did not run the command, 126 a guest CPU that did not read as the
+/// target. A build command that exits with one of these is reported the same
+/// way, because the helper's statuses and the command's share one range.
+fn vmStatusMessage(a: Allocator, route: cpumask.Route, subdir: []const u8, code: u8) ?[]const u8 {
+    return switch (code) {
+        2 => str(a, "the {s} route refused the request for {s}; the line above says why", .{ @tagName(route), subdir }),
+        125 => str(a, "the {s} route could not run the build for {s}: the virtual machine failed to start or reported no status; its console log is named above", .{ @tagName(route), subdir }),
+        126 => str(a, "the {s} guest did not read as {s}, so the build command did not run{s}", .{
+            @tagName(route),
+            subdir,
+            if (route == .tcg) "; if the line above is an archspec name under qemu-user, --mask-allow-archspec-mismatch accepts it" else "",
+        }),
+        else => null,
+    };
+}
+
+test "vmPrefix names the helper, mode, target and the opt-in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = vmPrefix(a, "/bin/eb-local", .kvm, "x86_64/intel/icelake", false);
+    const want_plain = [_][]const u8{ "/bin/eb-local", "__vm-run", "--mode", "kvm", "--cpu-target", "x86_64/intel/icelake", "--" };
+    try std.testing.expectEqual(want_plain.len, plain.len);
+    for (want_plain, plain) |w, g| try std.testing.expectEqualStrings(w, g);
+    const opt = vmPrefix(a, "/bin/eb-local", .tcg, "aarch64/neoverse_n1", true);
+    const want_opt = [_][]const u8{ "/bin/eb-local", "__vm-run", "--mode", "tcg", "--cpu-target", "aarch64/neoverse_n1", "--allow-archspec-mismatch", "--" };
+    try std.testing.expectEqual(want_opt.len, opt.len);
+    for (want_opt, opt) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "vmStatusMessage maps the helper's own statuses and passes others" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect(vmStatusMessage(a, .kvm, "x86_64/amd/zen4", 2) != null);
+    try std.testing.expect(vmStatusMessage(a, .kvm, "x86_64/amd/zen4", 125) != null);
+    const m126 = vmStatusMessage(a, .tcg, "aarch64/neoverse_n1", 126).?;
+    try std.testing.expect(std.mem.indexOf(u8, m126, "--mask-allow-archspec-mismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, vmStatusMessage(a, .kvm, "x86_64/amd/zen4", 126).?, "--mask-allow-archspec-mismatch") == null);
+    try std.testing.expect(vmStatusMessage(a, .kvm, "x86_64/amd/zen4", 0) == null);
+    try std.testing.expect(vmStatusMessage(a, .kvm, "x86_64/amd/zen4", 1) == null);
+}
+
 /// Whether this binary has the `__vm-run` helper the kvm and tcg routes call.
+/// The helper is dispatched before argument parsing and is not a `Command`, so
+/// it is present whenever `vm.zig` is part of this program.
 fn vmHelperKnown() bool {
-    return subcommand("__vm-run") != null;
+    return @hasDecl(vm, "run");
+}
+
+test "the build that includes vm.zig offers the kvm and tcg routes" {
+    try std.testing.expect(vmHelperKnown());
 }
 
 /// Whether this binary has the `audit-isa` command the audit step calls.
@@ -4791,7 +4866,11 @@ fn maskDecide(c: Ctx, g: Global, want_audit: bool) MaskPlan {
     const profile = cpumask.findProfile(cpumask.builtinProfiles(c.a), subdir);
     const host = cpumask.readHost(c.a, hostSubdir(c), vmHelperKnown()) orelse die("--cpu-target works on x86_64 and aarch64 machines only", .{});
     return switch (cpumask.choose(c.a, g.mask, subdir, profile, host)) {
-        .route => |r| .{ .subdir = subdir, .route = r, .profile = profile },
+        .route => |r| blk: {
+            if (g.mask_allow_archspec and r != .kvm and r != .tcg)
+                die("--mask-allow-archspec-mismatch applies to the kvm and tcg routes; {s} builds with the {s} route", .{ subdir, @tagName(r) });
+            break :blk .{ .subdir = subdir, .route = r, .profile = profile, .allow_archspec = g.mask_allow_archspec };
+        },
         .refuse => |m| die("--cpu-target {s}: {s}; nothing was built.", .{ subdir, m }),
     };
 }
@@ -4816,7 +4895,7 @@ fn maskMaterialize(c: Ctx, plan: MaskPlan, dir: []const u8) union(enum) { ok: Ma
     var rules_path: []const u8 = "";
     var prefix: []const []const u8 = &.{};
     if (plan.route == .kvm or plan.route == .tcg) {
-        prefix = &.{ self_exe, "__vm-run", "--mode", @tagName(plan.route), "--cpu-target", plan.subdir, "--" };
+        prefix = vmPrefix(a, self_exe, plan.route, plan.subdir, plan.allow_archspec);
     }
     if (plan.route == .cpuid) {
         const profile = plan.profile.?;
@@ -4835,7 +4914,7 @@ fn maskMaterialize(c: Ctx, plan: MaskPlan, dir: []const u8) union(enum) { ok: Ma
         const setpriv = proc.which(a, "setpriv", path_env) catch null;
         prefix = cpumask.namespaceWords(a, unshare, setpriv, fake);
     }
-    const vars = cpumask.maskVariables(a, plan.profile orelse .{ .subdir = plan.subdir, .arch = cpumask.archOf(plan.subdir) orelse .x86_64 }, libs, rules_path, hooks, self_exe, plan.route);
+    const vars = cpumask.maskVariables(a, plan.profile orelse .{ .subdir = plan.subdir, .arch = cpumask.archOf(plan.subdir) orelse .x86_64 }, libs, rules_path, hooks, self_exe, plan.route, plan.allow_archspec);
     return .{ .ok = .{ .vars = vars, .prefix = prefix } };
 }
 
@@ -4843,12 +4922,12 @@ fn maskMaterialize(c: Ctx, plan: MaskPlan, dir: []const u8) union(enum) { ok: Ma
 /// build script saw inside the mask, checked against the target. Prints one
 /// line per check and exits 1 when any fails.
 fn cmdMaskPreflight(c: Ctx, args: []const []const u8) u8 {
-    if (args.len != 7) die("__mask-preflight takes TARGET ROUTE DEVFD ARCHDETECT ARCHSPEC GCC PROBE", .{});
+    if (args.len != 7 and args.len != 8) die("__mask-preflight takes TARGET ROUTE DEVFD ARCHDETECT ARCHSPEC GCC PROBE [allow-archspec]", .{});
     const a = c.a;
     const target = args[0];
     const route = std.meta.stringToEnum(cpumask.Route, args[1]) orelse die("__mask-preflight: unknown route {s}", .{args[1]});
     const profile = cpumask.findProfile(cpumask.builtinProfiles(a), target) orelse die("no mask profile for {s}", .{target});
-    var obs: cpumask.Observed = .{ .devfd = std.mem.eql(u8, args[2], "yes") };
+    var obs: cpumask.Observed = .{ .devfd = std.mem.eql(u8, args[2], "yes"), .archspec_allowed = args.len == 8 and std.mem.eql(u8, args[7], "allow-archspec") };
     if (args[3].len > 0) obs.archdetect = args[3];
     if (args[4].len > 0) obs.archspec = std.mem.trim(u8, args[4], " \t\r\n");
     if (args[5].len > 0) obs.gcc = std.mem.trim(u8, args[5], " \t\r\n");
@@ -5283,6 +5362,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         }
     }
     const started: i64 = nowSecs();
+    // File times have one-second resolution, so a log written in the second before
+    // the build began can carry a time one second below `started`; redaction reaches back that far.
+    const redact_since = started - 1;
 
     for (leftover_vars) |v| if (c.env.get(v)) |val| {
         if (ownInstallVar(c, s, p, v, val) == null)
@@ -5349,7 +5431,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
     _ = env.swapRemove("EB_LOCAL_VARIANT");
     _ = env.swapRemove("EB_LOCAL_VARIANT_BLOCK");
-    for ([_][]const u8{ "EB_LOCAL_CPU_TARGET", "EB_LOCAL_MASK_ROUTE", "EB_LOCAL_PROBE", "EB_LOCAL_SELF", "EB_LOCAL_HOOKS_FILE", "EB_LOCAL_BASE_HOOKS" }) |name| _ = env.swapRemove(name);
+    for ([_][]const u8{ "EB_LOCAL_CPU_TARGET", "EB_LOCAL_MASK_ROUTE", "EB_LOCAL_ALLOW_ARCHSPEC", "EB_LOCAL_PROBE", "EB_LOCAL_SELF", "EB_LOCAL_HOOKS_FILE", "EB_LOCAL_BASE_HOOKS" }) |name| _ = env.swapRemove(name);
     for (shell_startup) |name| _ = env.swapRemove(name);
     for (s.secrets.items) |sec| if (config.withheldSource(s, sec)) |name| {
         _ = env.swapRemove(name);
@@ -5407,6 +5489,9 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
         .signal => 1,
         .unreaped => 1,
     };
+    if (mask_plan) |m| if ((m.route == .kvm or m.route == .tcg) and rc != 0) {
+        if (vmStatusMessage(a, m.route, m.subdir, rc)) |why| warn("--cpu-target {s}: {s}", .{ m.subdir, why });
+    };
     var audit_failed = false;
     if (mask_plan) |m| if (rc == 0) {
         if (!maskAfterBuild(c, g, m, p.prefix, started)) {
@@ -5424,10 +5509,10 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     } else if (values.len > 0) {
         var report: secrets.RedactReport = .{};
         const tools: secrets.Tools = .{ .path = c.env.get("PATH") orelse "/usr/bin:/bin", .envp = c.envp };
-        secrets.redactTree(a, d.logs, started, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
+        secrets.redactTree(a, d.logs, redact_since, values, .all, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ d.logs, storage.describeError(e) });
         // EasyBuild keeps a copy of its log in each installation's easybuild/.
         const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
-        secrets.redactTree(a, versions, started, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ versions, storage.describeError(e) });
+        secrets.redactTree(a, versions, redact_since, values, .easybuild_dirs, tools, &report) catch |e| warn("cannot check {s} for secret values ({s}); inspect it before sharing", .{ versions, storage.describeError(e) });
         for (report.too_deep.items) |f| warn("{s} is too deep to check for secret values; inspect it before sharing", .{f});
         if (report.files > 0) say("eb-local: removed secret values from {d} log file(s)", .{report.files});
         for (report.too_large.items) |f| warn("{s} is too large to check for secret values; inspect it before sharing", .{f});
@@ -6570,6 +6655,7 @@ fn maskOptionWords(a: Allocator, g: Global) []const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     out.appendSlice(a, &.{ "--cpu-target", qSingleLine(a, t) }) catch oom();
     if (g.mask != .auto) out.appendSlice(a, &.{ "--mask", @tagName(g.mask) }) catch oom();
+    if (g.mask_allow_archspec) out.append(a, "--mask-allow-archspec-mismatch") catch oom();
     if (g.no_audit) out.append(a, "--no-audit") catch oom();
     return out.items;
 }
@@ -7798,6 +7884,14 @@ fn runMain(init: std.process.Init) u8 {
         return cmdExtend(c, loadSettings(c, .{}), forwarded);
     }
 
+    // The internal helper `__vm-run` is not a documented command: it has no
+    // place in the help, and its options are its own.
+    if (argv_all.len > 1 and std.mem.eql(u8, argv_all[1], "__vm-run")) {
+        const rest = a.alloc([]const u8, argv_all.len - 2) catch oom();
+        for (argv_all[2..], 0..) |arg, n| rest[n] = arg;
+        return vm.run(a, c.env, cwd, rest);
+    }
+
     var args: []const [:0]const u8 = argv_all[1..];
     var command: Command = .build;
     // The helpers a build calls on this program itself; they are not part of its interface.
@@ -7927,6 +8021,8 @@ fn runMain(init: std.process.Init) u8 {
         } else if ((std.mem.eql(u8, x, "--mask") or joined(x, "--mask") != null) and command == .build and rest.items.len == 0) {
             const v = if (joined(x, "--mask")) |j| j else value(args, &i, "--mask");
             g.mask = std.meta.stringToEnum(cpumask.Mode, v) orelse die("--mask takes auto, cpuid, kvm or tcg", .{});
+        } else if (std.mem.eql(u8, x, "--mask-allow-archspec-mismatch") and command == .build and rest.items.len == 0) {
+            g.mask_allow_archspec = true;
         } else if (std.mem.eql(u8, x, "--no-audit") and command == .build and rest.items.len == 0) {
             g.no_audit = true;
         } else if (command == .build and rest.items.len == 0 and subcommand(x) != null) {
@@ -8402,6 +8498,7 @@ test {
     _ = cvmfs;
     _ = mpi;
     _ = recipe_overlay;
+    _ = vm;
     _ = isa_audit;
 }
 

@@ -70,6 +70,10 @@ The audit, =eb-local audit-isa DIR --target TARGET=, looks for instructions the 
 | =this CPU lacks avx512_fp16= | A mask removes features and cannot add them. =sapphirerapids= needs a host that has AVX512-FP16 and AMX. |
 | =no mask profile exists for ...= | Only the virtual machine routes can present that target. |
 | =preflight FAILED: archspec names ...= | An easyblock that asks archspec would build for another CPU than the tree is labelled for. |
+| =the kvm route could not run the build ...= | =__vm-run= exited 125: the virtual machine failed to start or reported no status. The console log path is in the lines above. |
+| =the tcg guest did not read as ...= | =__vm-run= exited 126: the guest CPU did not read as the target, and the build command did not run. |
+| =the kvm route refused the request ...= | =__vm-run= exited 2: it refused the request; the line above says why. |
+| =--mask-allow-archspec-mismatch= | Under =--mask tcg= archspec reads =aarch64= for =aarch64/neoverse_n1=, because qemu-user's feature line lacks =evtstrm=. The option passes =--allow-archspec-mismatch= to =__vm-run= and lets the preflight accept that name. An easyblock that keys on archspec then sees a generic Arm CPU, so give it only for a recipe that does not. |
 | =/dev/fd is missing= | EESSI's =eessi_archdetect.sh= fails without it and EESSI falls back to the generic target. |
 | =__vm-run= | This eb-local has no virtual machine helper; the =kvm= and =tcg= routes refuse. |
 
