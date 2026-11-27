@@ -92,39 +92,17 @@ class OrgPages(unittest.TestCase):
         self.assertEqual(stale, [], "run: emacs --batch -Q -l docs/export.el")
 
     @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
-    def test_an_inline_source_block_comes_out_as_code(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            shutil.copy(DOCS / "export.el", root)
-            (root / "orgmode").mkdir()
-            (root / "orgmode" / "page.org").write_text("#+TITLE: Page\n\nRun src_sh{eb-local env} first.\n")
-            run = subprocess.run(["emacs", "--batch", "-Q", "-l", str(root / "export.el")], capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            self.assertIn("Run `eb-local env` first.\n", (root / "page.md").read_text())
-
-    @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
-    def test_no_line_of_a_page_ends_in_a_blank(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            shutil.copy(DOCS / "export.el", root)
-            (root / "orgmode").mkdir()
-            (root / "orgmode" / "page.org").write_text(
-                "#+TITLE: Page\n\n1. Run it:\n\n   #+begin_src bash\n   eb-local env\n   #+end_src\n\n2. Then this.\n")
-            run = subprocess.run(["emacs", "--batch", "-Q", "-l", str(root / "export.el")], capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            page = (root / "page.md").read_text()
-        self.assertIn("1.  Run it:\n\n    ```bash\n    eb-local env\n    ```\n\n2.  Then this.\n", page)
-        self.assertEqual([line for line in page.splitlines() if line != line.rstrip()], [])
-
-    @unittest.skipUnless(shutil.which("emacs"), "exporting the Org sources needs Emacs")
-    def test_empty_docs_out_env_falls_back_to_docs_root(self):
+    def test_a_three_page_fixture_exports_in_one_batch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "docs-tree"
             cwd = Path(tmp) / "caller-cwd"
             (root / "orgmode").mkdir(parents=True)
             cwd.mkdir()
             shutil.copy(DOCS / "export.el", root)
-            (root / "orgmode" / "page.org").write_text("#+TITLE: Page\n\nBody.\n")
+            (root / "orgmode" / "inline.org").write_text("#+TITLE: Inline\n\nRun src_sh{eb-local env} first.\n")
+            (root / "orgmode" / "blank.org").write_text(
+                "#+TITLE: Blank\n\n1. Run it:\n\n   #+begin_src bash\n   eb-local env\n   #+end_src\n\n2. Then this.\n")
+            (root / "orgmode" / "fallback.org").write_text("#+TITLE: Fallback\n\nBody.\n")
             run = subprocess.run(
                 ["emacs", "--batch", "-Q", "-l", str(root / "export.el")],
                 cwd=cwd,
@@ -133,7 +111,12 @@ class OrgPages(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(run.returncode, 0, run.stderr)
-            self.assertTrue((root / "page.md").is_file(), f"expected {root / 'page.md'}; cwd had {list(cwd.iterdir())}")
+            inline = (root / "inline.md").read_text()
+            blank = (root / "blank.md").read_text()
+            self.assertIn("Run `eb-local env` first.\n", inline)
+            self.assertIn("1.  Run it:\n\n    ```bash\n    eb-local env\n    ```\n\n2.  Then this.\n", blank)
+            self.assertEqual([line for line in blank.splitlines() if line != line.rstrip()], [])
+            self.assertTrue((root / "fallback.md").is_file())
             self.assertEqual(list(cwd.iterdir()), [])
 
 

@@ -502,17 +502,16 @@ class SitesCli(StorageFixture):
                 self.assertIn("is a symbolic link", got.stderr)
                 self.assertEqual(real_target.read_text(encoding="utf-8"), "keep\n")
 
-    def test_site_install_tmpfs_enospc_keeps_destination_clean(self):
-        mnt = hostile_fs.enter_full_tmpfs(self)
-        if mnt is None:
-            return
-        target = mnt / "config.toml"
-        got = self.run_tool(["site", "install", "slurm", *PATHS, "--to", str(target)])
+    def test_enospc_on_site_install_write_keeps_destination_clean(self):
+        target = self.root / "config.toml"
+        got = self.run_tool(
+            ["site", "install", "slurm", *PATHS, "--to", str(target)],
+            EB_LOCAL_TEST_WRITE_ERRNO="ENOSPC",
+        )
         self.assertEqual(got.returncode, 2, got.stdout + got.stderr)
         self.assertEqual(got.stdout, "")
         self.assertIn("No space left on device", got.stderr)
         self.assertFalse(target.exists())
-        self.assertEqual([p.name for p in mnt.iterdir()], ["fill"])
 
     def test_legacy_conf_rejects_bom_and_bad_comment_bytes(self):
         cases = {

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "eb-local audit-isa --json",
+  "type": "object",
+  "required": ["schema_version", "kind", "target", "arch", "files_audited", "files_skipped", "instructions", "zmm", "violation_count", "dispatch_count", "failed", "files", "unclassified", "errors"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "audit-isa" },
+    "target": { "type": "string" },
+    "arch": { "enum": ["x86_64", "aarch64"] },
+    "files_audited": { "type": "integer", "minimum": 0 },
+    "files_skipped": { "type": "integer", "minimum": 0 },
+    "instructions": { "type": "integer", "minimum": 0 },
+    "zmm": { "type": "integer", "minimum": 0 },
+    "violation_count": { "type": "integer", "minimum": 0 },
+    "dispatch_count": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "boolean" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "instructions", "zmm", "findings"],
+        "properties": {
+          "path": { "type": "string" },
+          "instructions": { "type": "integer", "minimum": 0 },
+          "zmm": { "type": "integer", "minimum": 0 },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["feature", "count", "address", "instruction", "dispatch"],
+              "properties": {
+                "feature": { "type": "string" },
+                "count": { "type": "integer", "minimum": 1 },
+                "address": { "type": "string" },
+                "instruction": { "type": "string" },
+                "dispatch": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "unclassified": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "count"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "enum": ["feature", "mnemonic"] },
+          "count": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "message"],
+        "properties": { "path": { "type": "string" }, "message": { "type": "string" } },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

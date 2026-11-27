@@ -11,6 +11,8 @@ The repository's shell shim delegates every command to this Zig program.
 ```text
 eb-local [OPTION]... <easyconfig> [eb options]
 eb-local [OPTION]... --explain <easyconfig> [eb options]
+eb-local [OPTION]... --variant perf|debug <easyconfig> [eb options]
+eb-local [OPTION]... --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
 eb-local eb [--] [eb options]
 eb-local --explain eb [--] [eb options]
 eb-local [OPTION]... env [--strict] [--json]
@@ -19,9 +21,10 @@ eb-local [OPTION]... leave
 eb-local rpath-wrappers [--for FAMILY | --unwrapped]
 eb-local check [--recursive] [--quiet] [--json] FILE...
 eb-local check (--module NAME/VERSION... | --dev | --prefix DIR) [--recursive] [--quiet] [--json]
+eb-local audit-isa PATH --target TARGET [--json] [--allow FILE] [--objdump PATH]
 eb-local [OPTION]... submit [--on NAME,...] [--print] <easyconfig> [eb options]
 eb-local [OPTION]... list [--json | --missing] [NAME[/VERSION]...]
-eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+eb-local [OPTION]... doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling] [--cpu-target TARGET]
 eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR --timestamp FILE [--spider CMD] [--verify]
 eb-local lmod-cache --prefix DIR [--eessi-version VER] [--update-cmd CMD] [--dry-run]
 eb-local modulerc --module-tree DIR [--default MODULE]...
@@ -53,6 +56,18 @@ directory you own.
   eb-local --explain <easyconfig> [eb options]
                                        the commands that build runs, as shell lines,
                                        its checks as comments; creates and runs nothing
+  eb-local --variant perf|debug <easyconfig> [eb options]
+                                       build that easyconfig with debug symbols and frame
+                                       pointers (perf) or unoptimised (debug), as a module
+                                       whose version ends in -perf or -debug
+  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--mask-allow-archspec-mismatch] [--no-audit] <easyconfig> [eb options]
+                                       build for another CPU target on this machine: TARGET is
+                                       an EESSI subdirectory (x86_64/amd/zen4) or its last
+                                       component (zen4). The build sees that CPU through the
+                                       route --mask picks, refuses to go on when the EESSI
+                                       detection, archspec, gcc and CPUID do not all name the
+                                       target, and audits the installed binaries for
+                                       instructions the target lacks
   eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
                                        At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
                                        EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
@@ -94,6 +109,13 @@ directory you own.
                                        the same for every ELF file in those installations,
                                        the dev tree, or DIR; a file that is not ELF is skipped.
                                        --quiet prints a file only when it has a problem
+  eb-local audit-isa PATH --target TARGET [--json] [--allow FILE] [--objdump PATH]
+                                       every instruction under PATH that needs a CPU feature
+                                       TARGET, an EESSI subdirectory such as x86_64/amd/zen3
+                                       or aarch64/neoverse_n1, lacks, per ELF file, with counts;
+                                       exit 1 when there is one. --allow FILE replaces the list
+                                       of packages with run-time dispatch; --objdump names the
+                                       disassembler
   eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
                                        one batch job per node type the site file lists
                                        in build.node_types, each building the recipe for
@@ -105,7 +127,7 @@ directory you own.
                                        what this node's target lacks; --json prints one
                                        line of JSON with schema_version 1; --missing
                                        lists only modules missing on this node's target
-  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi]
+  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling] [--cpu-target TARGET]
                                        what in this shell, node or configuration would
                                        stop a build or a module load; changes nothing;
                                        --json prints one line of JSON with schema_version 1.
@@ -116,6 +138,10 @@ directory you own.
                                        metadata from N tasks inside an allocation.
                                        --mpi reports libfabric and UCX, and inside an
                                        allocation runs a two-rank hello per approved transport
+                                       --profiling reports whether perf may sample and
+                                       debuggers attach, and finds perf, valgrind and gdb
+                                       --cpu-target TARGET reports whether this machine can
+                                       present TARGET, and by which route
   eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
                       --timestamp FILE [--spider CMD] [--verify]
                                        write Lmod's spiderT.lua for those module
@@ -223,6 +249,11 @@ After `eb`, every word goes to `eb` except `-h` and `--help`; after `eb --`, eve
 | `--workstation` | Force managed recipe builds to use private local workspace storage on this machine, even when Slurm is present. |
 | `--config FILE` | Read FILE in place of the site file when root or the owner of this program owns it; otherwise in place of `~/.config/eb-local/config.toml`, when you own it. The other file is still read. |
 | `--explain` | Before an easyconfig, or before `eb`: print what would run, and create and run nothing. |
+| `--variant NAME` | Before an easyconfig: build it as the `perf` or `debug` variant, described in the `--variant` section below. Before `submit`: `submit` keeps the option and puts it on the batch command. Another command refuses it. |
+| `--cpu-target TARGET` | Before an easyconfig: build for the CPU target TARGET on this machine, described in the `--cpu-target` section below. |
+| `--mask ROUTE` | With `--cpu-target`: `auto`, `cpuid`, `kvm` or `tcg`. |
+| `--mask-allow-archspec-mismatch` | With `--cpu-target` on the kvm or tcg route: accept an archspec name that differs from the target. archspec reports `aarch64` under qemu-user for lack of `evtstrm`, so an aarch64 `--mask tcg` build needs it. |
+| `--no-audit` | With `--cpu-target`: skip the instruction audit after the build. |
 | `-h`, `--help`, `help` | Print the usage on stdout and exit 0. |
 | `--version` | Print the version line on stdout and exit 0. |
 | `--json` | On `list`, `check`, `doctor`, `modulerc`, `clean`, `config`, `profiles`, and `site list`: print one line of JSON with `schema_version` 1 on stdout instead of the text report. Not with `config --env` or `config --get`. |
@@ -235,10 +266,10 @@ The version line names the program, its version, the target and optimize mode of
 Built with `zig build --release=safe -Dcommit=0123abc`, it prints:
 
 ```text
-eb-local 3.5.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
+eb-local 3.6.0 (x86_64-linux-musl, safe, zig 0.17.1, 0123abc)
 ```
 
-Between `v3.4.0` and `v3.5.0` the command line adds `--workstation`; no flag was removed or renamed.
+Between `v3.5.0` and `v3.6.0` the command line adds `--variant`, `--cpu-target`, `--mask`, `--mask-allow-archspec-mismatch`, `--no-audit`, `doctor --profiling` and the `audit-isa` command; no flag was removed or renamed.
 
 ## Commands
 
@@ -274,6 +305,69 @@ With `build.node_types` in the site file, the comments also hold an `sbatch` lin
 
 The script does what you would type to use EESSI-extend by hand: clear the install variables a login shell may carry, set one of `EESSI_USER_INSTALL` or `EESSI_PROJECT_INSTALL`, load `EESSI/2026.06`, then `EESSI-extend`, which reads that variable as it loads, check that the install path EESSI-extend set is in `<prefix>/versions`, and run `eb`.
 With `W` set to a workspace a build made, which holds `build`, `cache`, `cargo`, `source-index` and `tmp`, such as one a failed build kept or one kept with `EB_LOCAL_KEEP_WORK=1`, `bash` runs the printed text as a build runs its script; the checks before it and the cleaning of logs after it are eb-local's own.
+
+### `--variant`
+
+`--variant perf` and `--variant debug` build the easyconfig named first, and only that one, with other compiler flags, and install it as its own module beside the optimised one.
+eb-local copies the easyconfig into the workspace, with `eb --copy-ec` when it is given by name, appends a few lines to the copy, and builds the copy.
+
+| Variant | Toolchain options added | Module version ends in |
+|---|---|---|
+| `perf` | `debug` (`-g`), and `-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer` in the C, C++ and Fortran flags; the optimisation stays | `-perf` |
+| `debug` | `debug` (`-g`) and `noopt` (`-O0`) | `-debug` |
+
+The flags reach the C, C++ and Fortran compilers through EasyBuild's toolchain; Rust, Go and other compilers do not get them.
+An easyconfig with the `SYSTEM` toolchain keeps its options and gets only the suffix.
+Dependencies build as usual.
+`--explain` shows the variant as `EB_LOCAL_VARIANT` and `EB_LOCAL_VARIANT_BLOCK`, the lines appended.
+With another command, including `eb`, `env`, `config`, `profiles` and `dev`, it is refused: those would otherwise run as if it were not there, and `eb` would install the optimised module. `submit` keeps it and puts it on the batch command.
+[Build software to profile or debug](../howto/build-for-profiling.md) uses both.
+
+### `--cpu-target`
+
+`--cpu-target TARGET` builds the easyconfig for another CPU target than this machine's, and installs it where EESSI-extend puts software for that target.
+TARGET is an EESSI software subdirectory such as `x86_64/amd/zen4`, `x86_64/intel/icelake` or `aarch64/neoverse_n1`, or its last component when only one subdirectory ends in it (`zen4`; `generic` needs the architecture too).
+[Build for another CPU target](../howto/build-for-another-cpu.md) walks through a build.
+
+`--mask` picks how the build sees the target CPU.
+
+| `--mask` | Route | Reaches |
+|---|---|---|
+| `auto` | `cpuid` when this host can present TARGET that way, else `kvm` for the same architecture, else `tcg`; the host's own target needs no mask |  |
+| `cpuid` | CPUID faulting (x86\_64) or a masked `getauxval` (aarch64), and a `/proc/cpuinfo` of the target bound in a user and mount namespace | x86\_64 targets with a profile, on a host that traps CPUID (Intel since Linux 4.12, AMD since 6.17); aarch64 targets with a profile on an aarch64 host |
+| `kvm` | `eb-local __vm-run --mode kvm`, a virtual machine with the target's CPU model | the host's architecture |
+| `tcg` | `eb-local __vm-run --mode tcg`, an emulated CPU | any architecture, slowly |
+
+The `kvm` and `tcg` routes refuse, naming `__vm-run`, in an eb-local that does not have the helper.
+
+The profiles for the `cpuid` route are in `share/eb-local/mask/profiles.conf`, which `tools/mask/gen_profiles.py` writes from `tools/mask/targets.toml` and the CPUID rule files in `tools/mask/rules`.
+They cover `x86_64/amd/zen2`, `zen3`, `zen4`, `x86_64/intel/skylake_avx512`, `cascadelake`, `icelake`, `sapphirerapids`, `aarch64/neoverse_n1` and `aarch64/generic`.
+A mask only removes what the host has: `sapphirerapids` needs a host with AVX512-FP16 and AMX, so an AMD host refuses it.
+
+The `cpuid` route runs the whole build in an unprivileged user and mount namespace that keeps your user id, with the target's `/proc/cpuinfo` bound over the real one, and a library in `LD_PRELOAD` that answers every CPUID as the target.
+The library is compiled with the host's `cc` on first use into `$XDG_CACHE_HOME/eb-local/mask-KEY` (`~/.cache/eb-local/mask-KEY`), where KEY is a hash of its source, the compiler's target triple and the C library's version.
+A host without CPUID faulting is refused; the build never falls back to a native one.
+`--cpu-target` with the target this host already is needs no mask.
+
+All routes set `EESSI_SOFTWARE_SUBDIR_OVERRIDE` to TARGET for the build, and run EasyBuild with the hooks of the EESSI stack plus one rule: GROMACS gets `-DGMX_SIMD` from TARGET (`AVX_512` for the AVX-512 targets, `AVX2_256` for zen2 and zen3), unless its configure options set it.
+GROMACS chooses the SIMD level of a CPU with an Intel brand string by timing AVX-512 FMA loops, and a Zen 5 host measures one unit and picks `AVX2_256`, so without the rule the Ice Lake tree on such a host holds an AVX2 build.
+
+Before `eb` starts, in the mask, the build checks and refuses to go on unless each of these names TARGET:
+
+| Check | Source |
+|---|---|
+| `/dev/fd` exists | without it EESSI's `eessi_archdetect.sh` fails and EESSI picks the generic target |
+| EESSI archdetect | `eessi_archdetect.sh cpupath`, first entry |
+| archspec | `archspec.cpu.host()`, when the EESSI Python imports it |
+| gcc | the `-march` (x86\_64) or `-mcpu` (aarch64) of `gcc -march=native` |
+| CPUID vendor, faulting | a probe run in the mask |
+
+After a successful build, `eb-local audit-isa DIR --target TARGET` runs on each directory the build installed, and a non-zero result fails the run; `--no-audit` skips it, and is required in an eb-local that has no `audit-isa`.
+Each installed directory gets `easybuild/eb-local-build-mode.json`, with `cpu_target`, `route`, `profile`, `host_cpu`, `kernel`, `eb_local_version` and `isa_audit` (`pass`, `fail` or `skipped`).
+
+`--explain` shows the route and the variables it sets, `EB_LOCAL_CPU_TARGET` and `EESSI_SOFTWARE_SUBDIR_OVERRIDE`.
+The `sbatch` lines of `submit`, and the replay hints, carry `--cpu-target`, `--mask`, `--mask-allow-archspec-mismatch` and `--no-audit`.
+`eb-local doctor --cpu-target TARGET` reports whether CPUID faulting works here, whether `/dev/kvm` and the QEMU binaries exist, and which route `auto` would take.
 
 ### eb
 
@@ -398,6 +492,44 @@ Without `--unwrapped`, finding nothing to wrap is exit 1.
 
 A wrapper adds a run path, when its command links, for each directory named with `-L` or `--library-path`, for the directory of each existing `lib*.so` or `lib*.so.N` file named by its absolute path, and for each `LIBRARY_PATH` entry when it wraps a compiler driver. The arguments in a response file, `@FILE`, count as its own; one it cannot read is passed on unchanged.
 
+### \_\_vm-run
+
+Internal: eb-local runs it for the builds that mask the CPU view, and it is not in `--help`; its options can change in any release.
+
+```text
+eb-local __vm-run --mode kvm|tcg --cpu-target TARGET [--memory MiB] [--cpus N]
+                  [--share DIR] [--share-ro DIR] [--allow-archspec-mismatch] -- COMMAND [ARG...]
+```
+
+Run COMMAND, in the working directory, as the caller's user and group, with the environment variables EasyBuild and EESSI read, inside a virtual CPU that presents TARGET, an EESSI software subdirectory such as `x86_64/amd/zen4`, `x86_64/intel/icelake` or `aarch64/neoverse_n1`.
+Before COMMAND starts, the guest checks that the CPU vendor, EESSI archdetect, archspec and `gcc -march=native` (`gcc -mcpu=native` on aarch64) all name TARGET, and that `/dev/fd` exists, and COMMAND does not run when one does not.
+`--mode kvm` is for a target of the host's architecture and boots the host kernel under QEMU with KVM, a named CPU model and `enforce`; it never uses the host CPU.
+`--mode tcg` is for a target of the other architecture and runs COMMAND in qemu user mode with `QEMU_CPU` set, on the EESSI compatibility layer of that architecture.
+[Build under a virtual CPU with QEMU](../howto/build-under-qemu.md) describes both and what each needs.
+
+| Option | Meaning |
+|---|---|
+| `--mode kvm`, `--mode tcg` | The kind of virtual CPU. |
+| `--cpu-target TARGET` | The target to present; `x86_64/amd/zen2`, `zen3`, `zen4`, `x86_64/intel/haswell`, `skylake_avx512`, `cascadelake`, `icelake`, `sapphirerapids`, `aarch64/neoverse_n1`, `neoverse_v1` or `a64fx`. |
+| `--memory MiB` | Guest memory under `kvm`, at least 256; default 8192. `tcg` has none to set. |
+| `--cpus N` | Guest CPUs under `kvm`; default the CPUs this process may run on. |
+| `--share DIR` | Also mount DIR writable in the guest, under `kvm`. The working directory and the directories named by `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `WORKING_DIR`, `EASYBUILD_PREFIX`, `EASYBUILD_BUILDPATH`, `EASYBUILD_INSTALLPATH`, `EASYBUILD_SOURCEPATH`, `EASYBUILD_REPOSITORYPATH` and the `EESSI_*_INSTALL` variables are mounted writable already. |
+| `--share-ro DIR` | Also mount DIR read-only in the guest, under `kvm`, for a directory on a file system other than `/` that COMMAND needs. |
+| `--allow-archspec-mismatch` | Run COMMAND although archspec names another CPU than TARGET, and say so on stderr. The other checks still refuse. |
+
+The guest receives `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `TZ`, `TMPDIR`, `MODULEPATH`, `LOADEDMODULES`, `_LMFILES_`, `LMOD*`, `XDG_*`, `EASYBUILD_*`, `EESSI_*`, `EB_*`, `SLURM_*`, `WORKING_DIR` and `SOURCE_DATE_EPOCH`, and no other variable; under `tcg` the compatibility layer's directories come first in `PATH`.
+
+Exit status:
+
+| Status | Meaning |
+|---|---|
+| 0 to 255 | COMMAND's own status, or 128 and the signal number when a signal ended it. |
+| 2 | Refused before anything started: wrong options, an unknown target, a target the mode cannot present, or a missing tool, with the reason on stderr. |
+| 125 | The VM or the emulation failed and COMMAND reported no status; the console log of a failed `kvm` run is kept and its path printed. |
+| 126 | The guest refused: its CPU view does not name TARGET. COMMAND did not run, and stderr says which check failed. |
+
+A COMMAND that itself exits 2, 125 or 126 cannot be told from the helper's own statuses by the number alone; the helper's statuses come with a line on stderr that starts with `eb-local: vm-run:`.
+
 ### check
 
 For each `FILE`, print its machine, its program interpreter (the loader), its `RPATH` or `RUNPATH`, and where each library it needs resolves, ignoring `LD_LIBRARY_PATH`, then one line for all of them:
@@ -437,6 +569,46 @@ It exits 0 when there are no problems, 1 when there are, and 2 when a named file
 A file that is not ELF is not a failure of a tree audit.
 With `--json`, these codes are unchanged; only the summary on stdout is JSON.
 
+### audit-isa
+
+For each ELF file under `PATH`, an installed software prefix or one file, run `objdump` on it and print every instruction that needs a CPU feature the `TARGET` does not have, per file and feature, with a count, the address of the first one and its text.
+`TARGET` is an EESSI software subdirectory: `x86_64/generic`, `x86_64/amd/zen2` to `zen5`, `x86_64/intel/haswell`, `skylake_avx512`, `cascadelake`, `icelake`, `sapphirerapids`, `aarch64/generic`, `neoverse_n1`, `neoverse_v1`, `neoverse_v2`, `a64fx`, `nvidia/grace`, `google/axion` and `aws/graviton2` to `graviton4`.
+A trailing part of a subdirectory that only one ends with, such as `zen3` or `intel/icelake`, names it too.
+
+```text
+$ eb-local audit-isa /apps/software/GROMACS/2025.4 --target x86_64/amd/zen3
+eb-local audit-isa: target x86_64/amd/zen3, 14 ELF files, 3790170 instructions
+violation: avx512f x139682 in /apps/software/GROMACS/2025.4/lib64/libgromacs.so, first at 0x1a2b40: vaddps zmm0,zmm1,zmm2
+eb-local audit-isa: 139682 zmm instructions
+eb-local audit-isa: 139682 instruction(s) beyond x86_64/amd/zen3 in 1 file(s)
+```
+
+| Option | Meaning |
+|---|---|
+| `--target` | The CPU target to audit against. Required. |
+| `--json` | One line of JSON with `schema_version` 1 and `kind` `audit-isa`. The shape is in [audit-isa.schema.json](json/audit-isa.schema.json). |
+| `--allow FILE` | Replace the list of packages with run-time dispatch. One `PACKAGE feature[,feature...]` per line; `#` starts a comment. |
+| `--objdump PATH` | The disassembler, a name on `PATH` or a path. Without it, the first candidate for the file's architecture that reads it. |
+
+Each instruction's mnemonic, encoding (legacy, VEX, EVEX or XOP) and the widest vector register it names select the CPU features it needs from a table generated from the iced-x86 instruction database.
+On aarch64 the table is a list of mnemonic and operand rules for SVE, SVE2, BF16, I8MM, dot product, atomics, crypto, half-precision and pointer authentication outside the hint space.
+The features of each target come from archspec's `microarchitectures.json` and, for x86-64, from the features GCC's `-march` option enables for the same CPU.
+The sources and their versions are in the header of `src/isa/targets.tsv`; `tools/isa_tables/gen.py` writes the tables.
+The shadow-stack instructions `RDSSP` and `INCSSP`, which run as no-operations without a shadow stack, are not violations.
+A feature the tables cannot judge, and a vector mnemonic they do not list, are printed as `unclassified` and never fail the audit.
+
+Code that selects its instruction set at run time holds wider instructions behind a CPU check.
+A violation on a listed feature in a file under `/software/PACKAGE/` is printed as `dispatch`, counted apart, and does not fail the audit.
+The default list, from audits of EESSI trees, names TBB and libomp (RTM, WAITPKG), FFmpeg and x264 (FMA4, XOP), zlib's zlib-ng kernels (AVX-512), OpenSSL, libfabric's DSA provider, NumPy's dispatch kernels and others; `--allow` replaces it.
+
+The audit reads which instructions the file holds, not the vector length an SVE program runs with.
+It decodes executable sections linearly, so data inside one can show as an instruction.
+It needs an `objdump` that reads the file's architecture: binutils' `objdump` (`objdump -i` lists `elf64-x86-64` or `elf64-littleaarch64`), `aarch64-linux-gnu-objdump`, or `llvm-objdump`.
+Files of the other architecture, files that are not ELF, and symbolic links are skipped.
+
+It exits 0 when no instruction exceeds the target, 1 when one does, and 2 when the command line is wrong, no disassembler reads the architecture, or `objdump` fails on a file.
+With `--json` the codes are the same.
+
 ### submit
 
 Send one batch job for each node type in `build.node_types`, each running this eb-local with the same easyconfig, options and configuration.
@@ -466,6 +638,7 @@ The shape is in [list.schema.json](json/list.schema.json).
 Print one line for each check of what would stop a build, `eb-local eb` or a module load, each starting `ok`, `info`, `warn` or `FAIL`, then a line that says whether anything stops a build.
 It checks the site file, the secrets a build reads (never their values), the prefix and its permissions, install variables and `LD_LIBRARY_PATH` left in the shell, the EESSI init `eb-local eb` sources, whether an explicitly exported install variable disagrees with the configured destination, the allocation's node-local mount, whether EESSI is loaded and your modules are on `MODULEPATH`, the Lmod init a build sources where the shell has no module command, eessi-arch-guard, and rtrash.
 With `--workspace PATH`, it also creates, writes, renames, executes and removes a small probe in that existing directory.
+With `--cpu-target TARGET`, it also reports whether this machine can present that CPU target: whether CPUID faulting works, whether `/dev/kvm` and the QEMU binaries exist, whether a mask profile exists for TARGET, and which route `--mask auto` takes.
 It reports the file-system type, whether the storage is node-local or shared, free bytes and inodes, a `noexec` mount, and whether the effective `XDG_CACHE_HOME` (or `$HOME/.cache` when unset) is inside the workspace.
 The check does not create a build workspace and never starts a build.
 It names an entry of `PERL5LIB`, `PYTHONPATH`, `R_LIBS*`, `JULIA_LOAD_PATH`, `JULIA_DEPOT_PATH`, `NODE_PATH`, `CMAKE_PREFIX_PATH` or `PKG_CONFIG_PATH`, and a compiler-wrapper variable (`CC`, `CXX`, `FC`, `F77`, `F90`, `F95`, `CPP`, the `OMPI_`, `MPICH_` and `I_MPI_` forms, `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_TARGET_*_LINKER`, `R_MAKEVARS_USER`, `R_MAKEVARS_SITE`, `CCACHE_*`, `SCCACHE_*` and `CMAKE_*_COMPILER_LAUNCHER`), that resolves outside the approved prefixes. `RUSTFLAGS` and `CARGO_TARGET_*_RUSTFLAGS` are flag strings, not paths, so they are not named.
@@ -487,6 +660,10 @@ The hello for `ofi` is run with `OMPI_MCA_pml` set to cm and `OMPI_MCA_mtl` set 
 The hello for `ucx` is run with `OMPI_MCA_pml` set to ucx and `OMPI_MCA_mtl` set to ^ofi.
 Those variables are set only on that hello. A build does not set them, and it does not set `FI_PROVIDER`.
 Outside an allocation the hello is not compiled.
+With `--profiling`, it reports whether `perf` can sample your own processes: `kernel.perf_event_paranoid` of 2 or less is `ok`, more is `warn`.
+It reports `kernel.yama.ptrace_scope`: 0 is `ok`, 1, where a debugger can start a program but not attach to one already running, is `info`, and 2 or 3 is `warn`.
+It names `perf`, `valgrind` and `gdb` where they are on `PATH`, and says `module spider NAME` for each one that is not.
+None of these lines is a `FAIL`, since a build needs none of them.
 Where the shell has a module command, a build keeps it and its `MODULEPATH`, and adds EESSI's `init/modules` when no directory there holds `stack.module`, so doctor checks that one of them does.
 Inside a job with EESSI loaded, it asks eessi-arch-guard, where that is on `PATH`, as a build asks it, and shows the target it selects; a guard that cannot select one is a `warn`, since a build's own run of it decides.
 With a site file, what stops a build is a `FAIL`, and what stops only `eb-local eb` is a `warn`; without one, builds cannot run, so what stops `eb-local eb` is the `FAIL`.
@@ -500,6 +677,7 @@ It changes nothing, and exits 1 when a line says `FAIL`.
 | `--cvmfs` | Check the CernVM-FS client. Off unless this flag, or `--cvmfs-parallel`, is given. |
 | `--cvmfs-parallel N` | Also read repository metadata from N tasks, 1 to 8, inside an allocation. Implies `--cvmfs`. |
 | `--mpi` | Report libfabric, UCX and Slurm binding, and run a two-rank hello per site-approved transport inside an allocation. Off unless this flag is given. |
+| `--profiling` | Report `kernel.perf_event_paranoid` and `kernel.yama.ptrace_scope`, and where `perf`, `valgrind` and `gdb` are on `PATH`. Off unless this flag is given. |
 
 `--json` prints one line of JSON with `schema_version` 1, `kind` `doctor`, `site_file`, `failed`, `lines` (`level` and `text`), and `summary`.
 The shape is in [doctor.schema.json](json/doctor.schema.json).
@@ -675,8 +853,8 @@ A value with a quote, a backslash or a control character is refused.
 | Status | Meaning |
 |---|---|
 | 0 | Done, or nothing to do. |
-| 1 | `check` found a problem; `doctor` printed a `FAIL`; `config --check` could not read a secret or use the project directory; `lmod-cache --verify` failed or `lmod-cache --prefix` found no target; `modulerc --check` would update the file; `overlay materialize --check` would update the outputs; `clean` or `uninstall` had something to remove and no way to, or `clean` failed to remove some items or build workspaces; `rpath-wrappers` found nothing to wrap; `submit`: `sbatch` refused a job. |
-| 2 | Refused, with the reason on stderr after `eb-local:`, or the command line was wrong; a build outside a Slurm job; `check` could not read a file. |
+| 1 | `check` found a problem; `doctor` printed a `FAIL`; `config --check` could not read a secret or use the project directory; `lmod-cache --verify` failed or `lmod-cache --prefix` found no target; `modulerc --check` would update the file; `overlay materialize --check` would update the outputs; `clean` or `uninstall` had something to remove and no way to, or `clean` failed to remove some items or build workspaces; `audit-isa` found an instruction beyond the target; `rpath-wrappers` found nothing to wrap; `submit`: `sbatch` refused a job. |
+| 2 | Refused, with the reason on stderr after `eb-local:`, or the command line was wrong; a build outside a Slurm job; `check` could not read a file; `audit-isa` found no disassembler for the architecture or `objdump` failed. |
 | 3 | `eb` or `--explain eb`: more than one install variable is set. |
 | N | A build or `eb`: `eb` exited N. |
 

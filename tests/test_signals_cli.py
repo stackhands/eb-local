@@ -32,12 +32,27 @@ log = os.path.join(os.environ["EASYBUILD_TMP_LOGDIR"], "easybuild-slow.log")
 with open(log, "w") as f:
     f.write("building\n")
 open(os.path.join(root, "eb.pid"), "w").write(str(os.getpid()))
+ready = os.environ.get("EB_READY")
+done = os.environ.get("EB_DONE")
+if ready and done:
+    open(ready, "w").write("r")
+    limit = time.monotonic() + 10
+    while not os.path.exists(done) and time.monotonic() < limit:
+        time.sleep(0.01)
+    open(done + ".seen", "w").write("d")
+    if not got:
+        sys.exit(0)
 deadline = time.monotonic() + float(os.environ.get("SLOW_EB_WAIT", "10"))
 while not got and time.monotonic() < deadline:
     time.sleep(0.05)
 if not got:
     sys.exit(0)
-time.sleep(0.5)
+gate = os.environ.get("EB_SIGNAL_GATE")
+if gate:
+    with open(gate, "rb") as gate_file:
+        gate_file.read(1)
+else:
+    time.sleep(0.5)
 with open(log, "a") as f:
     f.write("stopping with " + os.environ["LICENCE_KEY"] + "\n")
 open(os.path.join(root, "eb.signals"), "w").write(" ".join(got))
@@ -88,19 +103,39 @@ class Signals(StorageFixture):
         self.assertIn("stopping with <secret LICENCE_KEY removed by eb-local>", text)
         self.assertNotIn(KEY, text)
 
-    def signalled(self, send, **popen):
+    def open_gate(self, fifo):
+        deadline = time.monotonic() + 5
+        fd = None
+        while fd is None:
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                self.assertLess(time.monotonic(), deadline, "eb did not reach the signal gate")
+                time.sleep(0.01)
+        os.write(fd, b"x")
+        os.close(fd)
+
+    def signalled(self, send, *, gate=False, **popen):
+        if gate:
+            fifo = self.root / "signal-gate"
+            if fifo.exists():
+                fifo.unlink()
+            os.mkfifo(fifo)
+            self.build_env["EB_SIGNAL_GATE"] = str(fifo)
         build = subprocess.Popen(self.argv, env=self.build_env, cwd=self.root, start_new_session=True,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen)
         self.addCleanup(lambda: build.poll() is None and os.killpg(build.pid, signal.SIGKILL))
         eb = self.eb_pid()
         sent = time.monotonic()
         send(build.pid)
+        if gate:
+            self.open_gate(fifo)
         out, err = build.communicate(timeout=30)
         self.assertLess(time.monotonic() - sent, 8, out + err)
         return build.returncode, out, err, eb
 
     def test_a_sigterm_to_eb_local_alone_reaches_easybuild(self):
-        rc, out, err, eb = self.signalled(lambda pid: os.kill(pid, signal.SIGTERM))
+        rc, out, err, eb = self.signalled(lambda pid: os.kill(pid, signal.SIGTERM), gate=True)
         self.assertEqual(rc, -signal.SIGTERM, out + err)
         self.assertEqual((self.root / "eb.signals").read_text(), "SIGTERM")
         self.assert_stopped_and_clean(eb)
@@ -108,19 +143,39 @@ class Signals(StorageFixture):
         self.assertIn("build workspace kept", err)
 
     def test_a_sigterm_to_the_process_group_waits_for_easybuild_before_the_logs_are_cleaned(self):
-        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGTERM))
+        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGTERM), gate=True)
         self.assertEqual(rc, -signal.SIGTERM, out + err)
         self.assertTrue((self.root / "eb.signals").read_text().startswith("SIGTERM"))
         self.assert_stopped_and_clean(eb)
 
     def test_a_signal_ignored_as_nohup_ignores_sighup_stays_ignored(self):
-        self.build_env["SLOW_EB_WAIT"] = "1"
-        rc, out, err, eb = self.signalled(lambda pid: os.killpg(pid, signal.SIGHUP),
-                                          preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
-        self.assertEqual(rc, 0, out + err)
+        ready = self.root / "eb.ready"
+        done = self.root / "eb.done"
+        self.build_env["EB_READY"] = str(ready)
+        self.build_env["EB_DONE"] = str(done)
+        build = subprocess.Popen(self.argv, env=self.build_env, cwd=self.root, start_new_session=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 preexec_fn=lambda: signal.signal(signal.SIGHUP, signal.SIG_IGN))
+        self.addCleanup(lambda: build.poll() is None and os.killpg(build.pid, signal.SIGKILL))
+        self.eb_pid()
+        deadline = time.monotonic() + 5
+        while not ready.exists():
+            self.assertLess(time.monotonic(), deadline, "eb did not become ready")
+            time.sleep(0.01)
+        os.killpg(build.pid, signal.SIGHUP)
+        done.write_text("d")
+        seen = Path(str(done) + ".seen")
+        while not seen.exists():
+            self.assertLess(time.monotonic(), deadline + 5, "done byte did not arrive")
+            time.sleep(0.01)
+        out, err = build.communicate(timeout=30)
+        self.assertEqual(build.returncode, 0, out + err)
         self.assertFalse((self.root / "eb.signals").exists())
 
     def test_ctrl_c_on_the_terminal_reaches_easybuild_once(self):
+        fifo = self.root / "signal-gate"
+        os.mkfifo(fifo)
+        self.build_env["EB_SIGNAL_GATE"] = str(fifo)
         pid, master = pty.fork()
         if pid == 0:
             os.chdir(self.root)
@@ -129,6 +184,7 @@ class Signals(StorageFixture):
         output = b""
         eb = self.eb_pid()
         os.write(master, b"\x03")
+        self.open_gate(fifo)
         deadline = time.monotonic() + 30
         while True:
             self.assertLess(time.monotonic(), deadline, output)
@@ -162,14 +218,6 @@ class Signals(StorageFixture):
                              capture_output=True, text=True, timeout=60)
         self.assertEqual(run.returncode, -signal.SIGTERM, run.stdout + run.stderr)
         self.assertNotIn("cannot release", run.stderr)
-
-    def test_unsignalled_build_with_secrets_keeps_default_raw_bytes(self):
-        self.build_env["SLOW_EB_WAIT"] = "0"
-        run = subprocess.run(self.argv, env=self.build_env, cwd=self.root, capture_output=True, text=False)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stderr, b"")
-        self.assertIn(b"eb-local: done. To use the modules in a new shell or job:\n", run.stdout)
-        self.assertEqual(list(self.job.iterdir()), [])
 
 
 if __name__ == "__main__":

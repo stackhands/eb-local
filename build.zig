@@ -1,5 +1,17 @@
 const std = @import("std");
 
+/// The mask sources and data that cpumask.zig embeds, as imports of `mod`.
+fn addMaskFiles(b: *std.Build, mod: *std.Build.Module) void {
+    const files = [_][2][]const u8{
+        .{ "mask_profiles", "share/eb-local/mask/profiles.conf" },
+        .{ "mask_cpuidmask_c", "share/eb-local/mask/cpuidmask.c" },
+        .{ "mask_armmask_c", "share/eb-local/mask/armmask.c" },
+        .{ "mask_probe_c", "share/eb-local/mask/cpuid-probe.c" },
+        .{ "mask_hooks_py", "share/eb-local/mask/eb_local_hooks.py" },
+    };
+    for (files) |f| mod.addAnonymousImport(f[0], .{ .root_source_file = b.path(f[1]) });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .default_target = .{ .abi = .musl, .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
@@ -28,8 +40,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = options.createModule() },
         },
     });
+    addMaskFiles(b, mod);
     const exe = b.addExecutable(.{ .name = "eb-local", .root_module = mod, .linkage = .static });
     b.installArtifact(exe);
+    // The sources and profiles the binary embeds, for reading and for builds
+    // that compile the preload library by hand.
+    b.installDirectory(.{ .source_dir = b.path("share/eb-local/mask"), .install_dir = .prefix, .install_subdir = "share/eb-local/mask" });
 
     // The Zig autodoc site, into <prefix>/docs, which the documentation
     // serves at api/. A compile of its own: asking the installed binary for
@@ -58,19 +74,17 @@ pub fn build(b: *std.Build) void {
         suite_options.addOption([]const u8, "commit", commit);
         suite_options.addOption(bool, "test_ops", true);
         const suite_common = b.dependency("zig_common", .{ .target = target, .optimize = .Debug });
-        break :blk b.addExecutable(.{
-            .name = "eb-local",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = target,
-                .optimize = .Debug,
-                .imports = &.{
-                    .{ .name = "zig_common", .module = suite_common.module("zig_common") },
-                    .{ .name = "build_options", .module = suite_options.createModule() },
-                },
-            }),
-            .linkage = .static,
+        const suite_mod = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{
+                .{ .name = "zig_common", .module = suite_common.module("zig_common") },
+                .{ .name = "build_options", .module = suite_options.createModule() },
+            },
         });
+        addMaskFiles(b, suite_mod);
+        break :blk b.addExecutable(.{ .name = "eb-local", .root_module = suite_mod, .linkage = .static });
     };
     const suite = b.addSystemCommand(&.{ "bash", "-c", "EB_LOCAL_BIN=\"$(realpath \"$0\")\" exec python3 -m unittest discover -s tests" });
     suite.addArtifactArg(suite_exe);

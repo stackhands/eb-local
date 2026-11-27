@@ -2,6 +2,8 @@
 const std = @import("std");
 const common = @import("zig_common");
 const jsonout = @import("jsonout.zig");
+const storage = @import("storage.zig");
+const build_options = @import("build_options");
 
 /// One `module_alias` directive.
 pub const Alias = struct {
@@ -189,6 +191,13 @@ pub fn run(io: std.Io, a: std.mem.Allocator, opts: Options) u8 {
     };
     var why: common.atomic.Why = .{};
     defer why.deinit(a);
+    if (comptime build_options.test_ops) {
+        if (storage.takeWriteErrno()) |e| {
+            fail("cannot write {s}: {s}", .{ path, common.sys.describeErrno(e) });
+            if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
+            return 1;
+        }
+    }
     common.atomic.atomicWrite(a, path, text, .{ .mode = 0o644 }, &why) catch |err| {
         fail("cannot write {s}: {s}", .{ path, if (why.msg.len > 0) why.msg else @errorName(err) });
         if (first_missing) |dir| common.fsx.deleteTree(a, common.fsx.cwd, dir) catch {};
