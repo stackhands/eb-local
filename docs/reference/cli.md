@@ -598,7 +598,7 @@ A feature the tables cannot judge, and a vector mnemonic they do not list, are p
 
 Code that selects its instruction set at run time holds wider instructions behind a CPU check.
 A violation on a listed feature in a file under `/software/PACKAGE/` is printed as `dispatch`, counted apart, and does not fail the audit.
-The default list, from audits of EESSI trees, names TBB and libomp (RTM, WAITPKG), FFmpeg and x264 (FMA4, XOP), OpenSSL, libfabric's DSA provider, NumPy's dispatch kernels and others; `--allow` replaces it.
+The default list, from audits of EESSI trees, names TBB and libomp (RTM, WAITPKG), FFmpeg and x264 (FMA4, XOP), zlib's zlib-ng kernels (AVX-512), OpenSSL, libfabric's DSA provider, NumPy's dispatch kernels and others; `--allow` replaces it.
 
 The audit reads which instructions the file holds, not the vector length an SVE program runs with.
 It decodes executable sections linearly, so data inside one can show as an instruction.

@@ -82,7 +82,7 @@ The audit, =eb-local audit-isa DIR --target TARGET=, looks for instructions the 
 GROMACS chooses the SIMD level of a CPU whose brand string says Intel by timing AVX-512 FMA loops.
 A Zen 5 core measures one unit and GROMACS picks =AVX2_256=, so an Ice Lake tree built there would be an AVX2 build, unlike the tree EESSI ships.
 A =--cpu-target= build adds =-DGMX_SIMD= from the target to every GROMACS configure line (=AVX_512= for =skylake_avx512=, =cascadelake=, =icelake=, =sapphirerapids=, =zen4= and =zen5=; =AVX2_256= for =haswell=, =zen2= and =zen3=), unless the easyconfig sets it.
-The EasyBuild log of the build says =eb-local: setting GMX_SIMD=...=.
+The EasyBuild log of the build says =eb-local: setting GMX_SIMD=LEVEL for CPU target TARGET=.
 
 * What the mask does not reach
 
