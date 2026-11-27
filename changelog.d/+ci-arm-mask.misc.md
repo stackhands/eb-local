@@ -1,1 +1,0 @@
-The `arm-mask` workflow runs the aarch64 mask on a real Neoverse core (`ubuntu-24.04-arm`): `getauxval`, `/proc/cpuinfo` and `gcc -mcpu=native` name the target under `__mask-run`, and a recipe builds for `aarch64/neoverse_n1` with EESSI mounted, the preflight and the ISA audit on.

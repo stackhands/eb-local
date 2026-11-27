@@ -1,1 +1,0 @@
-A `--cpu-target aarch64/neoverse_v1` or `aarch64/a64fx` build under `--mask tcg` stopped before `eb` started with `no mask profile`. The preflight in the virtual machine now takes the vendor and compiler names of a target that has no `cpuid` profile from the `__vm-run` target table.

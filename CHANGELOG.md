@@ -15,6 +15,7 @@
 
 ### Fixes
 
+- A `--cpu-target aarch64/neoverse_v1` or `aarch64/a64fx` build under `--mask tcg` stopped before `eb` started with `no mask profile`. The preflight in the virtual machine now takes the vendor and compiler names of a target that has no `cpuid` profile from the `__vm-run` target table.
 - A failed sync or close while writing `eb-local.lock` leaves the previous lock in place. A new lock is published only after its bytes are durable, and a failed write removes its temporary file.
 - A failed sync or close while writing a submit script is an error, and that script is not handed to sbatch.
 - A signalled build keeps killing and reaping descendants until none remain or ten seconds pass, and if one remains it reports that, exits 1, and does not clean the logs.
@@ -30,6 +31,7 @@
 - `--variant` now works only with a recipe build or `submit`. Other commands refuse it instead of running as if it were absent.
 - `audit-isa` stops with `cannot resolve PATH` when the working directory is gone and PATH is relative, and `__vm-run` reports `cannot resolve the read-only share PATH` and exits 125 in that case, where each reported out of memory or gave no reason.
 - `doctor.approved_prefixes` refuses a path with a parent component or a spelling of the root directory, so `eb-local doctor` and a build with `build.clear_foreign_prefixes` do not treat that spelling as an approved prefix.
+- `eb-local __vm-run --mode kvm --cpu-target x86_64/amd/zen3` refused with status 126 because the guest read as `x86_64/amd/zen2`: QEMU's EPYC-Milan model has no `vaes`, which EESSI archdetect requires. The zen3 guest now adds `vaes` and `vpclmulqdq`.
 - `eb-local submit` keeps every job script, prints the path it submits, and writes the new script beside one whose path is already taken.
 
 ### Documentation
@@ -54,6 +56,7 @@
   outside `python3 -m unittest discover -s tests`. `tests/site` is not a
   package, so the zero-skip `zig` job does not collect them. Running the
   file fails when the Zig build or the EESSI init file is absent.
+- The `arm-mask` workflow runs the aarch64 mask on a real Neoverse core (`ubuntu-24.04-arm`): `getauxval`, `/proc/cpuinfo` and `gcc -mcpu=native` name the target under `__mask-run`, and a recipe builds for `aarch64/neoverse_n1` with EESSI mounted, the preflight and the ISA audit on.
 - The `live-eessi` job in the `zig` workflow runs `tests/site/test_dev_locked_eessi.py` on an EESSI 2026.06 mount.
 
 
