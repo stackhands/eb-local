@@ -1088,6 +1088,10 @@ test "the allow list names packages and features" {
     try std.testing.expect(!allowed(entries, "/cvmfs/x/software/OpenSSL/3.0/lib/libcrypto.so", db.idOf("avx512f").?));
     try std.testing.expect(!allowed(entries, "/cvmfs/x/software/Other/1.0/lib/libx.so", rtm));
     try std.testing.expect(allowed(entries, "/p/software/x264/1/bin/x264", xop));
+    const avx512bw = db.idOf("avx512bw").?;
+    try std.testing.expect(allowed(entries, "/p/software/zlib/2.3.2/lib/libz.so.1.3.1.zlib-ng", avx512bw));
+    try std.testing.expect(allowed(entries, "/p/software/zlib/2.3.2/lib/libz.so.1.3.1.zlib-ng", db.idOf("avx512vnni").?));
+    try std.testing.expect(!allowed(entries, "/p/software/zlib/2.3.2/lib/libz.so.1.3.1.zlib-ng", db.idOf("avx512fp16").?));
     const custom = try parseAllow(a, db, "Foo avx512f,nosuchfeature  # reason\n# comment\n\n");
     try std.testing.expectEqual(@as(usize, 1), custom.len);
     try std.testing.expect(allowed(custom, "/a/software/Foo/1/lib/x.so", db.idOf("avx512f").?));
