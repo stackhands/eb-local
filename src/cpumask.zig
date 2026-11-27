@@ -437,7 +437,9 @@ pub fn preflight(a: Allocator, p: Profile, route: Route, obs: Observed) []const 
     } else add(&out, a, true, "archspec is not importable here; not checked", .{});
     const want_gcc = if (p.arch == .x86_64) p.gcc_march else p.gcc_cpu;
     const gcc_what = if (p.arch == .x86_64) "-march" else "-mcpu";
-    if (obs.gcc) |g| {
+    if (obs.gcc) |gcc_full| {
+        // aarch64 GCC appends the extensions it enables: neoverse-n1+crc+crypto.
+        const g = if (p.arch == .aarch64) gcc_full[0 .. std.mem.indexOfScalar(u8, gcc_full, '+') orelse gcc_full.len] else gcc_full;
         if (std.mem.eql(u8, g, want_gcc)) {
             add(&out, a, true, "gcc {s}=native is {s}", .{ gcc_what, want_gcc });
         } else add(&out, a, false, "gcc {s}=native is '{s}', not {s}", .{ gcc_what, g, want_gcc });
@@ -1087,6 +1089,10 @@ test "the archspec opt-in reaches the guest variables and relaxes only the archs
     var allowed = seen;
     allowed.archspec_allowed = true;
     try testing.expect(!refused(preflight(a, n1, .tcg, allowed)));
+    allowed.gcc = "neoverse-n1+crc+crypto";
+    try testing.expect(!refused(preflight(a, n1, .tcg, allowed)));
+    allowed.gcc = "neoverse-v1+crc";
+    try testing.expect(refused(preflight(a, n1, .tcg, allowed)));
     allowed.gcc = "neoverse-v1";
     try testing.expect(refused(preflight(a, n1, .tcg, allowed)));
 }
