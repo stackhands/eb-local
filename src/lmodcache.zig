@@ -975,6 +975,16 @@ fn validMarker(marker: []const u8) bool {
     return true;
 }
 
+/// Lmod prints a modulerc alias as `name(@target)` with no spaces.
+fn terseAliasName(token: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, token, "(@") orelse return null;
+    if (at == 0 or token[token.len - 1] != ')') return null;
+    const alias = token[0..at];
+    const target = token[at + 2 .. token.len - 1];
+    if (!config.validModule(alias) or !config.validModule(target)) return null;
+    return alias;
+}
+
 /// Module names from `module --terse avail`, sorted and deduplicated.
 fn normalizeInventory(a: std.mem.Allocator, text: []const u8) InventoryError![]const []const u8 {
     var names: std.ArrayList([]const u8) = .empty;
@@ -986,7 +996,8 @@ fn normalizeInventory(a: std.mem.Allocator, text: []const u8) InventoryError![]c
         if (std.mem.eql(u8, line, "No module(s) or extension(s) found!")) continue;
         if (line.len > 1 and line[line.len - 1] == '/' and config.validModule(line[0 .. line.len - 1])) continue;
         var fields = std.mem.tokenizeAny(u8, line, " \t");
-        const name = fields.next() orelse continue;
+        const token = fields.next() orelse continue;
+        const name = terseAliasName(token) orelse token;
         if (!config.validModule(name)) return error.InvalidInventory;
         var saw_alias = false;
         while (fields.next()) |marker| {
@@ -1731,6 +1742,22 @@ test "normalizeInventory skips directory headers and accepts loaded and alias li
     try std.testing.expectEqualStrings("pigz/2.8", items[3]);
     try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "Lmod has detected the following error:\n"));
     try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "GSL/default ->\n"));
+}
+
+test "normalizeInventory accepts Lmod terse modulerc alias lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const items = try normalizeInventory(
+        a,
+        "/modules:\nGSL/\nGSL/2.8\nGSL/default(@GSL/2.8)\na13(@a/13.2.345)\n",
+    );
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqualStrings("GSL/2.8", items[0]);
+    try std.testing.expectEqualStrings("GSL/default", items[1]);
+    try std.testing.expectEqualStrings("a13", items[2]);
+    try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "GSL/default(@\n"));
+    try std.testing.expectError(error.InvalidInventory, normalizeInventory(a, "(@GSL/2.8)\n"));
 }
 
 test "makeVerifyDir creates a private verification directory under cache_dir" {

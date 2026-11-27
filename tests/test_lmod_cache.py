@@ -164,6 +164,25 @@ class LmodCache(unittest.TestCase):
             self.assertEqual(bad.returncode, 1, bad.stderr)
             self.assertIn("cannot parse the candidate cache inventory", bad.stderr)
 
+    def test_verify_accepts_lmod_terse_modulerc_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, cache, stamp = self.single_target(root)
+            env = self.verify_env(
+                root,
+                "/modules:\nGSL/\nGSL/2.8\nGSL/default(@GSL/2.8)\na13(@a/13.2.345)\n",
+                "a13(@a/13.2.345)\n/modules:\nGSL/default(@GSL/2.8)\nGSL/2.8\n",
+            )
+            got = run([*args, "--verify"], env=env)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertEqual((cache / "spiderT.lua").read_text(), "spider-cache\n")
+            self.assertLess(stamp.stat().st_mtime, (cache / "spiderT.lua").stat().st_mtime)
+
+            bad_env = self.verify_env(root, "GSL/default(@\n", "GSL/2.8\n")
+            bad = run([*args, "--verify"], env=bad_env)
+            self.assertEqual(bad.returncode, 1, bad.stderr)
+            self.assertIn("cannot parse the candidate cache inventory", bad.stderr)
+
     def test_verify_refuses_a_bad_candidate(self):
         rows = [
             ("GSL/2.7\n", "GSL/2.7\nGSL/2.8\n", None, "inventories differ; the cache was not changed"),
