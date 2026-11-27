@@ -5027,7 +5027,7 @@ fn reportCpuTarget(c: Ctx, text: []const u8, out: *std.ArrayList(u8), json_lines
 fn installedSince(c: Ctx, prefix: []const u8, subdir: []const u8, started: i64) []const []const u8 {
     const a = c.a;
     var trees: std.ArrayList([]const u8) = .empty;
-    findTrees(c, std.fs.path.join(a, &.{ prefix, "versions" }) catch oom(), &trees, 0);
+    findTrees(c, std.fs.path.join(a, &.{ prefix, "versions" }) catch oom(), &trees, 0, false);
     var out: std.ArrayList([]const u8) = .empty;
     for (trees.items) |tree| {
         if (!std.mem.eql(u8, treeTarget(tree), subdir)) continue;
@@ -5568,24 +5568,28 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
 // ---- list -----------------------------------------------------------------
 
 /// Each installation tree EESSI-extend made below PATH: one per EESSI version
-/// and CPU target, holding software/ and modules/all/. Symbolic links are not
-/// followed.
-fn findTrees(c: Ctx, path: []const u8, out: *std.ArrayList([]const u8), depth: usize) void {
+/// and CPU target, holding software/ and modules/. Symbolic links are not
+/// followed. With `accel`, a tree's `accel/` overlay is another tree, the
+/// same way EESSI lays out a GPU target under the CPU directory.
+fn findTrees(c: Ctx, path: []const u8, out: *std.ArrayList([]const u8), depth: usize, accel: bool) void {
     if (depth > 12) return;
     const fd = fsx.openDir(fsx.cwd, path, false) catch return;
     defer sys.close(fd);
     if (isDirAt(fd, "software") and isDirAt(fd, "modules")) {
         out.append(c.a, path) catch oom();
+        // software/ and modules/ hold the installation. Only accel/ is another tree.
+        if (accel and isDirAt(fd, "accel"))
+            findTrees(c, std.fs.path.join(c.a, &.{ path, "accel" }) catch oom(), out, depth + 1, true);
         return;
     }
     var it = fsx.DirIter.init(c.a, fd) catch return;
     while (it.next() catch null) |e| {
         if (!isDirAt(fd, e.name)) continue;
-        findTrees(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), out, depth + 1);
+        findTrees(c, std.fs.path.join(c.a, &.{ path, e.name }) catch oom(), out, depth + 1, accel);
     }
 }
 
-/// The CPU target a tree is for: what follows software/linux/ in its path.
+/// The target a tree is for: what follows software/linux/ in its path.
 fn treeTarget(tree: []const u8) []const u8 {
     const key = "/software/linux/";
     const i = std.mem.lastIndexOf(u8, tree, key) orelse return tree;
@@ -5678,7 +5682,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     const p = place(c, s);
     const versions = std.fs.path.join(a, &.{ p.prefix, "versions" }) catch oom();
     var trees: std.ArrayList([]const u8) = .empty;
-    if (literalPath(c, versions)) findTrees(c, versions, &trees, 0);
+    if (literalPath(c, versions)) findTrees(c, versions, &trees, 0, true);
     std.mem.sort([]const u8, trees.items, {}, lessThanStr);
 
     var several_versions = false;
@@ -5716,16 +5720,27 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
     }
     std.mem.sort(Listed, rows.items, {}, listedLess);
 
-    // This node's target, when EESSI is loaded.
+    // This node's target, when EESSI is loaded. An accelerator overlay is
+    // its own tree, so the loaded target is the CPU subdirectory plus
+    // EESSI_ACCELERATOR_TARGET when that names one.
     const raw_here = nonEmpty(c.env.get("EESSI_SOFTWARE_SUBDIR"));
     const here_target = if (raw_here) |ht| blk: {
         const trimmed = std.mem.trimEnd(u8, ht, "/");
         break :blk if (trimmed.len > 0) trimmed else ht;
     } else null;
+    const raw_accel = nonEmpty(c.env.get("EESSI_ACCELERATOR_TARGET"));
+    const accel_target = if (raw_accel) |av| blk: {
+        const trimmed = std.mem.trim(u8, av, "/");
+        break :blk if (trimmed.len > 0) trimmed else null;
+    } else null;
+    const node_target = if (here_target) |ht| blk: {
+        if (accel_target) |ac| break :blk str(a, "{s}/{s}", .{ ht, ac });
+        break :blk ht;
+    } else null;
     const here_version = nonEmpty(c.env.get("EESSI_VERSION"));
     var here: ?usize = null;
-    if (here_target) |ht| for (trees.items, 0..) |t, ti| {
-        if (!std.mem.eql(u8, treeTarget(t), ht)) continue;
+    if (node_target) |nt| for (trees.items, 0..) |t, ti| {
+        if (!std.mem.eql(u8, treeTarget(t), nt)) continue;
         if (here_version) |hv| if (!std.mem.eql(u8, treeVersion(versions, t), hv)) continue;
         here = ti;
     };
@@ -5748,10 +5763,10 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
         if (here) |hi| {
             for (rows.items) |r| if (std.mem.indexOfScalar(usize, r.at.items, hi) == null)
                 missing_on_node.append(a, r.module) catch oom();
-        } else if (here_target) |ht| {
+        } else if (node_target) |nt| {
             for (rows.items) |r| missing_on_node.append(a, r.module) catch oom();
             if (rows.items.len > 0)
-                hint = str(a, "Nothing is built for this node's target, {s}, yet; build in an allocation on this node type.", .{ht});
+                hint = str(a, "Nothing is built for this node's target, {s}, yet; build in an allocation on this node type.", .{nt});
         } else {
             hint = "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.";
         }
@@ -5771,7 +5786,7 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
             .empty = trees.items.len == 0 or rows.items.len == 0,
             .targets = targets.items,
             .modules = modules.items,
-            .node_target = here_target,
+            .node_target = node_target,
             .missing_on_node = missing_on_node.items,
             .hint = hint,
         });
@@ -5814,13 +5829,13 @@ fn cmdList(c: Ctx, s: config.Settings, filters: []const []const u8, json: bool, 
         var missing: std.ArrayList([]const u8) = .empty;
         for (rows.items) |r| if (std.mem.indexOfScalar(usize, r.at.items, hi) == null) missing.append(a, r.module) catch oom();
         if (missing.items.len == 0) {
-            add(a, &out, str(a, "Every module listed is built for this node's target, {s} (*).\n", .{here_target.?}));
+            add(a, &out, str(a, "Every module listed is built for this node's target, {s} (*).\n", .{node_target.?}));
         } else {
-            add(a, &out, str(a, "Not built for this node's target, {s} (*): {s}.\n", .{ here_target.?, std.mem.join(a, ", ", missing.items) catch oom() }));
+            add(a, &out, str(a, "Not built for this node's target, {s} (*): {s}.\n", .{ node_target.?, std.mem.join(a, ", ", missing.items) catch oom() }));
             add(a, &out, "Build them in an allocation on this node type; each target needs its own build.\n");
         }
-    } else if (here_target) |ht| {
-        add(a, &out, str(a, "Nothing is built for this node's target, {s}, yet; build in an allocation on this node type.\n", .{ht}));
+    } else if (node_target) |nt| {
+        add(a, &out, str(a, "Nothing is built for this node's target, {s}, yet; build in an allocation on this node type.\n", .{nt}));
     } else {
         add(a, &out, "Load EESSI (eval \"$(eb-local env)\") to see what this node's CPU target lacks.\n");
     }
@@ -7544,7 +7559,7 @@ fn uninstallPlan(c: Ctx, p: Place, versions: []const u8, modules: []const []cons
         const trimmed = std.mem.trimEnd(u8, raw_target, "/");
         if (std.mem.indexOfScalar(u8, trimmed, '/') == null) {
             var trees: std.ArrayList([]const u8) = .empty;
-            findTrees(c, versions, &trees, 0);
+            findTrees(c, versions, &trees, 0, false);
             std.mem.sort([]const u8, trees.items, {}, lessThanStr);
             var matched: std.ArrayList([]const u8) = .empty;
             for (trees.items) |tree| {

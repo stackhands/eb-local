@@ -622,9 +622,11 @@ It exits 1 when =sbatch= refuses a job, and 2 when the site file has no =build.n
 
 Print each module installed in the prefix, or the project directory, with a column for each CPU target it has a tree for, =x= where the module is built for that target and =-= where it is not.
 With EESSI loaded, the column of this node's target is marked =*=, and the modules it lacks are named.
+A directory under =accel/= is its own column.
+The loaded software subdirectory plus =EESSI_ACCELERATOR_TARGET= is this node's target, and trailing slashes are ignored.
 A =NAME= keeps the modules of that name, and a =NAME/VERSION= that module.
 
-=--missing= prints only the sorted =NAME/VERSION= lines missing on the loaded CPU target, or nothing when every matching module is built there, and exits 2 when EESSI is not loaded.
+=--missing= prints only the sorted =NAME/VERSION= lines missing on the loaded target, or nothing when every matching module is built there, and exits 2 when EESSI is not loaded.
 =--missing= and =--json= cannot be used together.
 =--json= prints one line of JSON with =schema_version= 1, =kind= =list=, the =prefix=, =filters=, =empty=, CPU =targets=, =modules= with a =built= boolean per target, =missing_on_node=, and nullable =node_target= and =hint=.
 The shape is in [[file:json/list.schema.json][list.schema.json]].

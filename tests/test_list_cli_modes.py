@@ -122,6 +122,59 @@ class ListCliModes(unittest.TestCase):
         self.assertEqual(doc["missing_on_node"], ["Demo/1.0"])
         self.assertIn("Nothing is built for this node's target, x86_64/amd/zen4, yet", doc["hint"])
 
+    def test_accelerator_overlay_is_listed_and_selects_the_loaded_target(self):
+        cpu = self.prefix / "versions" / "2026.06" / "software" / "linux" / "x86_64" / "amd" / "zen4"
+        accel = cpu / "accel" / "nvidia" / "cc90"
+
+        def install(tree, module):
+            name, version = module.split("/")
+            (tree / "software" / name / version).mkdir(parents=True)
+            lua = tree / "modules" / "all" / name / f"{version}.lua"
+            lua.parent.mkdir(parents=True)
+            lua.write_text("-- m\n", encoding="utf-8")
+
+        install(cpu, "GSL/2.8")
+        install(cpu, "pigz/2.8")
+        install(accel, "CUDA/12.0")
+        install(accel, "GSL/2.8")
+
+        plain = self.run_list([])
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertIn("3 module(s) for 2 CPU target(s)", plain.stdout)
+        self.assertEqual(plain.stdout.splitlines()[1].split(), ["MODULE", "zen4", "cc90"])
+        self.assertIn("CUDA/12.0", plain.stdout)
+
+        cpu_node = self.run_list([], EESSI_VERSION="2026.06", EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4")
+        self.assertEqual(cpu_node.returncode, 0, cpu_node.stderr)
+        self.assertEqual(cpu_node.stdout.splitlines()[1].split(), ["MODULE", "zen4*", "cc90"])
+        self.assertIn("Not built for this node's target, x86_64/amd/zen4 (*): CUDA/12.0.", cpu_node.stdout)
+
+        gpu = self.run_list(
+            ["--json"],
+            EESSI_VERSION="2026.06",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4",
+            EESSI_ACCELERATOR_TARGET="accel/nvidia/cc90/",
+        )
+        self.assertEqual(gpu.returncode, 0, gpu.stderr)
+        doc = json.loads(gpu.stdout)
+        self.assertEqual(doc["node_target"], "x86_64/amd/zen4/accel/nvidia/cc90")
+        self.assertEqual([row["label"] for row in doc["targets"]], ["zen4", "cc90"])
+        self.assertEqual([row["here"] for row in doc["targets"]], [False, True])
+        self.assertEqual([row["name"] for row in doc["modules"]], ["CUDA/12.0", "GSL/2.8", "pigz/2.8"])
+        built = {row["name"]: row["built"] for row in doc["modules"]}
+        self.assertEqual(built["CUDA/12.0"], [False, True])
+        self.assertEqual(built["GSL/2.8"], [True, True])
+        self.assertEqual(built["pigz/2.8"], [True, False])
+        self.assertEqual(doc["missing_on_node"], ["pigz/2.8"])
+
+        missing = self.run_list(
+            ["--missing"],
+            EESSI_VERSION="2026.06",
+            EESSI_SOFTWARE_SUBDIR="x86_64/amd/zen4/",
+            EESSI_ACCELERATOR_TARGET="accel/nvidia/cc90/",
+        )
+        self.assertEqual((missing.returncode, missing.stdout), (0, "pigz/2.8\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
