@@ -23,6 +23,8 @@ pub const storage = @import("storage.zig");
 pub const rpath = @import("rpath.zig");
 /// `eb-local check`: what a program needs, and where it finds it.
 pub const elfcheck = @import("elfcheck.zig");
+/// `eb-local audit-isa`: instructions a CPU target cannot run.
+pub const isa_audit = @import("isa_audit.zig");
 /// `eb-local eb`: EasyBuild through EESSI-extend, without a site file.
 pub const extend = @import("extend.zig");
 /// `eb-local lmod-cache`: the spider cache Lmod trusts.
@@ -35,6 +37,8 @@ pub const foreign = @import("foreign.zig");
 pub const cvmfs = @import("cvmfs.zig");
 /// MPI transport checks for `doctor --mpi`. A build does not call them.
 pub const mpi = @import("mpi.zig");
+/// `--cpu-target`: targets, profiles, routes and the preflight decision.
+pub const cpumask = @import("cpumask.zig");
 /// `eb-local overlay`: declarative site overlays for upstream easyconfigs.
 pub const recipe_overlay = @import("recipe_overlay.zig");
 /// `eb-local __vm-run`: a command under a virtual CPU that presents a target.
@@ -61,6 +65,14 @@ const usage_text =
     \\                                       build that easyconfig with debug symbols and frame
     \\                                       pointers (perf) or unoptimised (debug), as a module
     \\                                       whose version ends in -perf or -debug
+    \\  eb-local --cpu-target TARGET [--mask auto|cpuid|kvm|tcg] [--no-audit] <easyconfig> [eb options]
+    \\                                       build for another CPU target on this machine: TARGET is
+    \\                                       an EESSI subdirectory (x86_64/amd/zen4) or its last
+    \\                                       component (zen4). The build sees that CPU through the
+    \\                                       route --mask picks, refuses to go on when the EESSI
+    \\                                       detection, archspec, gcc and CPUID do not all name the
+    \\                                       target, and audits the installed binaries for
+    \\                                       instructions the target lacks
     \\  eb-local eb [--] [eb options]        load EESSI-extend and run eb; configured prefix, no Slurm job.
     \\                                       At most one of EESSI_USER_INSTALL, EESSI_PROJECT_INSTALL,
     \\                                       EESSI_SITE_INSTALL, EESSI_CVMFS_INSTALL may be set, and a
@@ -102,6 +114,13 @@ const usage_text =
     \\                                       the same for every ELF file in those installations,
     \\                                       the dev tree, or DIR; a file that is not ELF is skipped.
     \\                                       --quiet prints a file only when it has a problem
+    \\  eb-local audit-isa PATH --target TARGET [--json] [--allow FILE] [--objdump PATH]
+    \\                                       every instruction under PATH that needs a CPU feature
+    \\                                       TARGET, an EESSI subdirectory such as x86_64/amd/zen3
+    \\                                       or aarch64/neoverse_n1, lacks, per ELF file, with counts;
+    \\                                       exit 1 when there is one. --allow FILE replaces the list
+    \\                                       of packages with run-time dispatch; --objdump names the
+    \\                                       disassembler
     \\  eb-local submit [--on NAME,...] [--print] <easyconfig> [eb options]
     \\                                       one batch job per node type the site file lists
     \\                                       in build.node_types, each building the recipe for
@@ -113,7 +132,7 @@ const usage_text =
     \\                                       what this node's target lacks; --json prints one
     \\                                       line of JSON with schema_version 1; --missing
     \\                                       lists only modules missing on this node's target
-    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling]
+    \\  eb-local doctor [--json] [--strict] [--workspace PATH] [--cvmfs] [--cvmfs-parallel N] [--mpi] [--profiling] [--cpu-target TARGET]
     \\                                       what in this shell, node or configuration would
     \\                                       stop a build or a module load; changes nothing;
     \\                                       --json prints one line of JSON with schema_version 1.
@@ -126,6 +145,8 @@ const usage_text =
     \\                                       allocation runs a two-rank hello per approved transport
     \\                                       --profiling reports whether perf may sample and
     \\                                       debuggers attach, and finds perf, valgrind and gdb
+    \\                                       --cpu-target TARGET reports whether this machine can
+    \\                                       present TARGET, and by which route
     \\  eb-local lmod-cache --modulepath DIR[:DIR] --cache-dir DIR
     \\                      --timestamp FILE [--spider CMD] [--verify]
     \\                                       write Lmod's spiderT.lua for those module
@@ -590,7 +611,10 @@ fn replay(a: Allocator, command: []const u8, s: config.Settings, g: Global, cano
     if (s.profile) |p| parts.appendSlice(a, &.{ "--profile", q(a, p) }) catch oom();
     if (s.project.value != null) parts.appendSlice(a, &.{ "--project", q(a, canonical_prefix) }) catch oom();
     parts.append(a, command) catch oom();
-    if (std.mem.eql(u8, command, "--explain")) if (g.variant) |v| parts.appendSlice(a, &.{ "--variant", v }) catch oom();
+    if (std.mem.eql(u8, command, "--explain")) {
+        if (g.variant) |v| parts.appendSlice(a, &.{ "--variant", v }) catch oom();
+        parts.appendSlice(a, maskOptionWords(a, g)) catch oom();
+    }
     if (std.mem.eql(u8, command, "dev")) {
         if (g.pure) parts.append(a, "--pure") catch oom();
         if (g.replace) parts.append(a, "--replace") catch oom();
@@ -706,6 +730,12 @@ const Global = struct {
     workstation: bool = false,
     /// `--variant NAME`: build the named easyconfig as that variant.
     variant: ?[]const u8 = null,
+    /// `--cpu-target TARGET`: build for this CPU target.
+    cpu_target: ?[]const u8 = null,
+    /// `--mask`: how `--cpu-target` presents the target.
+    mask: cpumask.Mode = .auto,
+    /// `--no-audit`: skip the instruction audit after a `--cpu-target` build.
+    no_audit: bool = false,
     /// `env --strict`: refuse to print load lines when the EESSI init path is absent.
     env_strict: bool = false,
     /// One line of JSON on stdout instead of the human report.
@@ -4597,6 +4627,28 @@ const build_script_tail =
     \\    set -- "$out" "$@"
     \\fi
     \\unset EB_LOCAL_VARIANT EB_LOCAL_VARIANT_BLOCK
+    \\# --cpu-target: EasyBuild runs the site's hooks and one more rule (the
+    \\# GROMACS SIMD level follows the target). When the build presents another
+    \\# CPU, every detector the build uses must name the target before eb starts.
+    \\if [ -n "${EB_LOCAL_CPU_TARGET:-}" ]; then
+    \\    export EB_LOCAL_BASE_HOOKS=${EASYBUILD_HOOKS-}
+    \\    export EASYBUILD_HOOKS=$EB_LOCAL_HOOKS_FILE
+    \\    case ${EB_LOCAL_MASK_ROUTE:-} in
+    \\        cpuid | kvm | tcg)
+    \\            pf_fd=no
+    \\            [ -d /dev/fd ] && pf_fd=yes
+    \\            pf_ad=$(env -u EESSI_SOFTWARE_SUBDIR_OVERRIDE bash "${EESSI_INIT_DIR_PATH:-${EESSI_PREFIX:-/nonexistent}/init}/eessi_archdetect.sh" cpupath 2>/dev/null) || pf_ad=
+    \\            pf_sp=$(python3 -c 'import archspec.cpu as c; print(c.host())' 2>/dev/null) || pf_sp=
+    \\            case $EB_LOCAL_CPU_TARGET in
+    \\                aarch64/*) pf_flag=-mcpu pf_key=-mcpu= ;;
+    \\                *) pf_flag=-march pf_key=-march= ;;
+    \\            esac
+    \\            pf_gcc=$(gcc "$pf_flag=native" -Q --help=target 2>/dev/null | awk -v k="$pf_key" '$1 == k { v = $2 } END { print v }') || pf_gcc=
+    \\            pf_probe=$("${EB_LOCAL_PROBE:-/nonexistent}" 2>/dev/null) || pf_probe=
+    \\            "$EB_LOCAL_SELF" __mask-preflight "$EB_LOCAL_CPU_TARGET" "$EB_LOCAL_MASK_ROUTE" "$pf_fd" "$pf_ad" "$pf_sp" "$pf_gcc" "$pf_probe" || exit 1
+    \\            ;;
+    \\    esac
+    \\fi
     \\trap - INT
     \\exec eb "$@"
 ;
@@ -4696,12 +4748,291 @@ fn buildCommand(a: Allocator, c: Ctx, s: config.Settings, p: Place, args: []cons
     return argv.items;
 }
 
+// ---- --cpu-target ---------------------------------------------------------
+
+/// The route chosen for a `--cpu-target` build.
+const MaskPlan = struct {
+    subdir: []const u8,
+    route: cpumask.Route,
+    profile: ?cpumask.Profile,
+};
+
+/// Whether this binary has the `__vm-run` helper the kvm and tcg routes call.
+fn vmHelperKnown() bool {
+    return subcommand("__vm-run") != null;
+}
+
+/// Whether this binary has the `audit-isa` command the audit step calls.
+fn auditKnown() bool {
+    return subcommand("audit-isa") != null;
+}
+
+/// The EESSI subdirectory this host detects, from the archdetect script of
+/// the EESSI version the build uses, or null when it cannot run.
+fn hostSubdir(c: Ctx) ?[]const u8 {
+    const repo = nonEmpty(c.env.get("EESSI_CVMFS_REPO")) orelse "/cvmfs/software.eessi.io";
+    const ver = nonEmpty(c.env.get("EESSI_VERSION")) orelse "2026.06";
+    const script = str(c.a, "{s}/versions/{s}/init/eessi_archdetect.sh", .{ repo, ver });
+    if (!exists(script)) return null;
+    const bash = (proc.which(c.a, "bash", c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse return null;
+    const r = proc.run(c.a, bash, &.{ bash, "--noprofile", "--norc", script, "cpupath" }, c.envp, .{ .stdout_limit = 4096, .timeout_ms = 60_000 }) catch return null;
+    if (r.term.code() != 0) return null;
+    const out = std.mem.trim(u8, r.stdout, " \t\r\n");
+    return c.a.dupe(u8, out[0 .. std.mem.indexOfScalar(u8, out, ':') orelse out.len]) catch oom();
+}
+
+/// The route for `--cpu-target`, or the reason there is none.
+fn maskDecide(c: Ctx, g: Global, want_audit: bool) MaskPlan {
+    const text = g.cpu_target.?;
+    const subdir = switch (cpumask.resolveTarget(c.a, text)) {
+        .subdir => |sd| sd,
+        .refused => |m| die("--cpu-target {s}: {s}", .{ text, m }),
+    };
+    if (want_audit and !g.no_audit and !auditKnown())
+        die("--cpu-target audits the installed tree with `eb-local audit-isa`, which this build of eb-local does not have; nothing was built. Give --no-audit to build without the audit.", .{});
+    const profile = cpumask.findProfile(cpumask.builtinProfiles(c.a), subdir);
+    const host = cpumask.readHost(c.a, hostSubdir(c), vmHelperKnown()) orelse die("--cpu-target works on x86_64 and aarch64 machines only", .{});
+    return switch (cpumask.choose(c.a, g.mask, subdir, profile, host)) {
+        .route => |r| .{ .subdir = subdir, .route = r, .profile = profile },
+        .refuse => |m| die("--cpu-target {s}: {s}; nothing was built.", .{ subdir, m }),
+    };
+}
+
+/// What a masked build adds to its command and environment.
+const Masked = struct {
+    vars: []const [2][]const u8,
+    /// The words in front of the build command.
+    prefix: []const []const u8,
+};
+
+/// Make the files `plan` needs in `dir` and the command words and variables
+/// that apply them, or the reason they cannot be made.
+fn maskMaterialize(c: Ctx, plan: MaskPlan, dir: []const u8) union(enum) { ok: Masked, failed: []const u8 } {
+    const a = c.a;
+    common.atomic.makedirs(dir) catch |e| return .{ .failed = str(a, "cannot create {s} ({s})", .{ dir, sys.describe(e) }) };
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const self_exe = a.dupe(u8, selfExe(&exe_buf) orelse return .{ .failed = "cannot find this program's own path" }) catch oom();
+    const hooks = str(a, "{s}/eb_local_hooks.py", .{dir});
+    if (!cpumask.writeFile(a, hooks, cpumask.hooks_py, 0o644)) return .{ .failed = str(a, "cannot write {s}", .{hooks}) };
+    var libs: cpumask.Libs = .{ .preload = "", .probe = "", .dir = "" };
+    var rules_path: []const u8 = "";
+    var prefix: []const []const u8 = &.{};
+    if (plan.route == .kvm or plan.route == .tcg) {
+        prefix = &.{ self_exe, "__vm-run", "--mode", @tagName(plan.route), "--cpu-target", plan.subdir, "--" };
+    }
+    if (plan.route == .cpuid) {
+        const profile = plan.profile.?;
+        const cache = rpath.cacheHome(a, c.env) catch return .{ .failed = "the cpuid route keeps its compiled library under $XDG_CACHE_HOME or $HOME/.cache, and neither is set" };
+        var why: []const u8 = "";
+        libs = cpumask.ensureLibs(a, c.envp, c.env.get("PATH") orelse "/usr/bin:/bin", cache, &why) orelse return .{ .failed = why };
+        const host_text = cpumask.readFile(a, "/proc/cpuinfo", 4 << 20) orelse return .{ .failed = "cannot read /proc/cpuinfo" };
+        const fake = str(a, "{s}/cpuinfo", .{dir});
+        if (!cpumask.writeFile(a, fake, cpumask.maskedCpuinfo(a, profile, host_text), 0o644)) return .{ .failed = str(a, "cannot write {s}", .{fake}) };
+        if (profile.arch == .x86_64) {
+            rules_path = str(a, "{s}/rules", .{dir});
+            if (!cpumask.writeFile(a, rules_path, cpumask.rulesFile(a, profile), 0o644)) return .{ .failed = str(a, "cannot write {s}", .{rules_path}) };
+        }
+        const path_env = c.env.get("PATH") orelse "/usr/bin:/bin";
+        const unshare = (proc.which(a, "unshare", path_env) catch null) orelse return .{ .failed = "unshare is not on PATH; the cpuid route needs it for a user and mount namespace" };
+        const setpriv = proc.which(a, "setpriv", path_env) catch null;
+        prefix = cpumask.namespaceWords(a, unshare, setpriv, fake);
+    }
+    const vars = cpumask.maskVariables(a, plan.profile orelse .{ .subdir = plan.subdir, .arch = cpumask.archOf(plan.subdir) orelse .x86_64 }, libs, rules_path, hooks, self_exe, plan.route);
+    return .{ .ok = .{ .vars = vars, .prefix = prefix } };
+}
+
+/// `__mask-preflight TARGET ROUTE DEVFD ARCHDETECT ARCHSPEC GCC PROBE`: what the
+/// build script saw inside the mask, checked against the target. Prints one
+/// line per check and exits 1 when any fails.
+fn cmdMaskPreflight(c: Ctx, args: []const []const u8) u8 {
+    if (args.len != 7) die("__mask-preflight takes TARGET ROUTE DEVFD ARCHDETECT ARCHSPEC GCC PROBE", .{});
+    const a = c.a;
+    const target = args[0];
+    const route = std.meta.stringToEnum(cpumask.Route, args[1]) orelse die("__mask-preflight: unknown route {s}", .{args[1]});
+    const profile = cpumask.findProfile(cpumask.builtinProfiles(a), target) orelse die("no mask profile for {s}", .{target});
+    var obs: cpumask.Observed = .{ .devfd = std.mem.eql(u8, args[2], "yes") };
+    if (args[3].len > 0) obs.archdetect = args[3];
+    if (args[4].len > 0) obs.archspec = std.mem.trim(u8, args[4], " \t\r\n");
+    if (args[5].len > 0) obs.gcc = std.mem.trim(u8, args[5], " \t\r\n");
+    var it = std.mem.tokenizeAny(u8, args[6], " \t\r\n");
+    while (it.next()) |tok| {
+        const eq = std.mem.indexOfScalar(u8, tok, '=') orelse continue;
+        if (std.mem.eql(u8, tok[0..eq], "vendor")) obs.vendor = tok[eq + 1 ..];
+        if (std.mem.eql(u8, tok[0..eq], "faulting")) obs.faulting = std.mem.eql(u8, tok[eq + 1 ..], "on");
+    }
+    const findings = cpumask.preflight(a, profile, route, obs);
+    for (findings) |f| {
+        if (f.ok) say("eb-local: preflight ok: {s}", .{f.text}) else say("eb-local: preflight FAILED: {s}", .{f.text});
+    }
+    if (cpumask.refused(findings)) {
+        cli.err("eb-local: the build does not see {s}; nothing was built.\n", .{target});
+        return 1;
+    }
+    return 0;
+}
+
+/// `__mask-run [--cpu-target T] [--mask M] -- COMMAND...`: run COMMAND the way
+/// a `--cpu-target` build runs eb, with the same view of the CPU and no build.
+fn cmdMaskRun(c: Ctx, g: Global, args: []const []const u8) u8 {
+    if (g.cpu_target == null) die("__mask-run needs --cpu-target", .{});
+    if (args.len == 0) die("__mask-run needs a command after --", .{});
+    const a = c.a;
+    const plan = maskDecide(c, g, false);
+    const tmp = nonEmpty(c.env.get("TMPDIR")) orelse "/tmp";
+    const dir = fsx.mkdtemp(a, tmp, "eb-local-mask-") catch |e| die("cannot make a directory in {s} ({s})", .{ tmp, @errorName(e) });
+    defer fsx.deleteTree(a, fsx.cwd, dir) catch {};
+    const masked = switch (maskMaterialize(c, plan, dir)) {
+        .ok => |m| m,
+        .failed => |why| die("{s}", .{why}),
+    };
+    var env = c.env.clone(a) catch oom();
+    for (masked.vars) |kv| env.put(kv[0], kv[1]) catch oom();
+    const argv = std.mem.concat(a, []const u8, &.{ masked.prefix, args }) catch oom();
+    const exe = if (argv[0].len > 0 and argv[0][0] == '/') argv[0] else (proc.which(a, argv[0], c.env.get("PATH") orelse "/usr/bin:/bin") catch null) orelse die("{s}: not found", .{argv[0]});
+    const full = a.dupe([]const u8, argv) catch oom();
+    full[0] = exe;
+    return switch (runAttached(a, full, envpOf(a, &env))) {
+        .exit => |code| code,
+        .signal, .unreaped => 1,
+    };
+}
+
+/// `doctor --cpu-target TARGET`: whether this machine can present TARGET, and
+/// by which route.
+fn reportCpuTarget(c: Ctx, text: []const u8, out: *std.ArrayList(u8), json_lines: ?*std.ArrayList(DoctorLine)) void {
+    const a = c.a;
+    const path_env = c.env.get("PATH") orelse "";
+    const host = cpumask.readHost(a, hostSubdir(c), vmHelperKnown()) orelse {
+        note(a, out, json_lines, "warn", "--cpu-target works on x86_64 and aarch64 machines only", .{});
+        return;
+    };
+    note(a, out, json_lines, "info", "host: {s}, {s}, kernel {s}", .{ @tagName(host.arch), cpumask.hostModel(a), cpumask.kernelRelease(a) });
+    if (host.subdir) |h| note(a, out, json_lines, "info", "EESSI detects this host as {s}", .{h}) else note(a, out, json_lines, "info", "the EESSI archdetect script was not found; the host's own target is not known", .{});
+    if (host.arch == .x86_64) {
+        if (host.faulting) {
+            note(a, out, json_lines, "ok  ", "CPUID faulting is available: the cpuid route can present another x86_64 CPU", .{});
+        } else note(a, out, json_lines, "info", "CPUID faulting is not available (AMD CPUs need Linux 6.17 or later); the cpuid route is out", .{});
+    } else note(a, out, json_lines, "info", "aarch64 has no CPUID trap; the cpuid route masks getauxval and /proc/cpuinfo", .{});
+    if (host.kvm) {
+        note(a, out, json_lines, "ok  ", "/dev/kvm is usable: the kvm route can run a CPU model of this architecture", .{});
+    } else note(a, out, json_lines, "info", "/dev/kvm is not usable by this user; the kvm route is out", .{});
+    for ([_][]const u8{ "qemu-system-x86_64", "qemu-system-aarch64" }) |name| {
+        if (proc.which(a, name, path_env) catch null) |exe| {
+            note(a, out, json_lines, "ok  ", "{s}: {s}", .{ name, exe });
+        } else note(a, out, json_lines, "info", "{s} is not on PATH; the tcg route for that architecture is out", .{name});
+    }
+    for ([_][]const u8{ "cc", "unshare", "mount" }) |name| {
+        if (proc.which(a, name, path_env) catch null) |exe| {
+            note(a, out, json_lines, "ok  ", "{s}: {s}", .{ name, exe });
+        } else note(a, out, json_lines, "warn", "{s} is not on PATH; the cpuid route needs it", .{name});
+    }
+    if (vmHelperKnown()) note(a, out, json_lines, "ok  ", "this eb-local has the virtual machine routes (__vm-run)", .{}) else note(a, out, json_lines, "info", "this eb-local has no __vm-run helper: the kvm and tcg routes refuse", .{});
+    if (auditKnown()) note(a, out, json_lines, "ok  ", "this eb-local has audit-isa", .{}) else note(a, out, json_lines, "info", "this eb-local has no audit-isa: a --cpu-target build needs --no-audit", .{});
+    const subdir = switch (cpumask.resolveTarget(a, text)) {
+        .subdir => |sd| sd,
+        .refused => |m| {
+            note(a, out, json_lines, "warn", "{s}", .{m});
+            return;
+        },
+    };
+    const profile = cpumask.findProfile(cpumask.builtinProfiles(a), subdir);
+    if (profile != null) {
+        note(a, out, json_lines, "ok  ", "a mask profile exists for {s}", .{subdir});
+    } else note(a, out, json_lines, "info", "no mask profile exists for {s}; only the virtual machine routes can present it", .{subdir});
+    switch (cpumask.choose(a, .auto, subdir, profile, host)) {
+        .route => |r| note(a, out, json_lines, "ok  ", "--mask auto builds {s} by the {s} route", .{ subdir, @tagName(r) }),
+        .refuse => |m| note(a, out, json_lines, "warn", "{s} cannot be built here: {s}", .{ subdir, m }),
+    }
+}
+
+/// The software directories (NAME/VERSION) below the tree for `subdir` that
+/// this build made, by the time their directories were created.
+fn installedSince(c: Ctx, prefix: []const u8, subdir: []const u8, started: i64) []const []const u8 {
+    const a = c.a;
+    var trees: std.ArrayList([]const u8) = .empty;
+    findTrees(c, std.fs.path.join(a, &.{ prefix, "versions" }) catch oom(), &trees, 0);
+    var out: std.ArrayList([]const u8) = .empty;
+    for (trees.items) |tree| {
+        if (!std.mem.eql(u8, treeTarget(tree), subdir)) continue;
+        const software = std.fs.path.join(a, &.{ tree, "software" }) catch oom();
+        const sfd = fsx.openDir(fsx.cwd, software, false) catch continue;
+        defer sys.close(sfd);
+        var names = fsx.DirIter.init(a, sfd) catch continue;
+        while (names.next() catch null) |n| {
+            if (n.name.len == 0 or n.name[0] == '.' or !isDirAt(sfd, n.name)) continue;
+            const name_path = std.fs.path.join(a, &.{ software, a.dupe(u8, n.name) catch oom() }) catch oom();
+            const nfd = fsx.openDir(fsx.cwd, name_path, false) catch continue;
+            defer sys.close(nfd);
+            var vers = fsx.DirIter.init(a, nfd) catch continue;
+            while (vers.next() catch null) |v| {
+                if (v.name.len == 0 or v.name[0] == '.' or !isDirAt(nfd, v.name)) continue;
+                const vp = std.fs.path.join(a, &.{ name_path, a.dupe(u8, v.name) catch oom() }) catch oom();
+                const st = fsx.statAt(fsx.cwd, vp, false) catch continue;
+                if (st.ctime.sec >= started - 1) out.append(a, vp) catch oom();
+            }
+        }
+    }
+    return out.items;
+}
+
+fn setMode(path: []const u8, mode: u32) void {
+    var zb: [sys.path_max:0]u8 = undefined;
+    const z = sys.z(&zb, path) catch return;
+    _ = linux.fchmodat(linux.AT.FDCWD, z.ptr, @as(linux.mode_t, @intCast(mode)));
+}
+
+/// After a successful `--cpu-target` build: audit what it installed for
+/// instructions the target lacks, and write the provenance record into each
+/// installed directory. Returns false when the audit fails.
+fn maskAfterBuild(c: Ctx, g: Global, plan: MaskPlan, prefix: []const u8, started: i64) bool {
+    const a = c.a;
+    const installed = installedSince(c, prefix, plan.subdir, started);
+    var exe_buf: [sys.path_max]u8 = undefined;
+    const self_exe = selfExe(&exe_buf) orelse "";
+    var failed = false;
+    const model = cpumask.hostModel(a);
+    const kernel = cpumask.kernelRelease(a);
+    if (installed.len == 0) warn("--cpu-target {s}: the build installed nothing new below {s}, so there is nothing to audit or record", .{ plan.subdir, prefix });
+    for (installed) |dir| {
+        var audit: []const u8 = "skipped";
+        if (!g.no_audit) {
+            say("eb-local: auditing {s} for instructions {s} lacks", .{ dir, plan.subdir });
+            const rc = switch (runAttached(a, &.{ self_exe, "audit-isa", dir, "--target", plan.subdir }, c.envp)) {
+                .exit => |code| code,
+                .signal, .unreaped => 1,
+            };
+            audit = if (rc == 0) "pass" else "fail";
+            if (rc != 0) {
+                failed = true;
+                cli.err("eb-local: the ISA audit of {s} for {s} failed\n", .{ dir, plan.subdir });
+            }
+        }
+        const eb_dir = std.fs.path.join(a, &.{ dir, "easybuild" }) catch oom();
+        if (!isDir(eb_dir)) continue;
+        const text = cpumask.provenanceJson(a, .{
+            .target = plan.subdir,
+            .route = plan.route,
+            .profile = if (plan.profile) |pr| pr.subdir else "",
+            .host_cpu = model,
+            .kernel = kernel,
+            .version = version,
+            .audit = audit,
+        });
+        // EasyBuild leaves an installation read-only; the record goes in and the mode goes back.
+        const old_mode: ?u32 = if (fsx.statAt(fsx.cwd, eb_dir, false)) |st| st.perm() else |_| null;
+        if (old_mode) |m| setMode(eb_dir, m | 0o200);
+        if (!cpumask.writeProvenance(a, eb_dir, text)) warn("cannot write the build-mode record in {s}", .{eb_dir});
+        if (old_mode) |m| setMode(eb_dir, m);
+    }
+    return !failed;
+}
+
 /// What a build runs: its script, after the variables eb-local sets for it
 /// and a `set --` line with its arguments, and the checks eb-local makes
 /// first as comments. Nothing is created and nothing runs, so it also works
 /// outside an allocation. $W stands for the workspace a build makes in the
 /// selected local workspace root.
-fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 {
+fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8, mask_plan: ?MaskPlan) u8 {
     const a = c.a;
     const p = place(c, s);
     const install = configuredInstall(p);
@@ -4756,6 +5087,18 @@ fn explainBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8)
     if (g.variant) |v| {
         out.print(a, "export EB_LOCAL_VARIANT={s}\n", .{q(a, v)}) catch oom();
         out.print(a, "export EB_LOCAL_VARIANT_BLOCK={s}\n", .{q(a, variantBlock(v).?)}) catch oom();
+    }
+    if (mask_plan) |m| {
+        out.print(a, "# --cpu-target {s}: the {s} route", .{ m.subdir, @tagName(m.route) }) catch oom();
+        switch (m.route) {
+            .native => out.appendSlice(a, "; this host already is the target, so nothing is masked.\n") catch oom(),
+            .cpuid => out.appendSlice(a, ".\n# The build runs in a user and mount namespace that keeps your uid, with a /proc/cpuinfo\n# of the target bound over the real one, and a preload library (compiled with this host's cc\n# on first use) that answers every CPUID as the target. Before eb starts, EESSI archdetect,\n# archspec, gcc -march=native and the CPUID vendor must all name the target.\n") catch oom(),
+            .kvm, .tcg => out.print(a, ".\n# The build runs in a virtual machine: eb-local __vm-run --mode {s} --cpu-target {s} -- COMMAND...\n", .{ @tagName(m.route), m.subdir }) catch oom(),
+        }
+        out.print(a, "export EESSI_SOFTWARE_SUBDIR_OVERRIDE={s}\n", .{q(a, m.subdir)}) catch oom();
+        out.print(a, "export EB_LOCAL_CPU_TARGET={s}\n", .{q(a, m.subdir)}) catch oom();
+        if (!g.no_audit) out.print(a, "# After a successful build: eb-local audit-isa DIR --target {s}, for each installed directory.\n", .{m.subdir}) catch oom();
+        out.appendSlice(a, "# Each installed directory gets easybuild/eb-local-build-mode.json: route, profile, host CPU, kernel, eb-local version, audit result.\n") catch oom();
     }
     out.print(a, "umask {o:0>3}\n", .{buildUmask(p)}) catch oom();
     const argv = buildCommand(a, c, s, p, args);
@@ -4818,7 +5161,8 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     }
     if (g.variant != null and !std.mem.endsWith(u8, args[0], ".eb"))
         die("--variant needs the easyconfig as the first argument; got '{s}'", .{args[0]});
-    if (g.explain) return explainBuild(c, s, g, args);
+    const mask_plan: ?MaskPlan = if (g.cpu_target != null) maskDecide(c, g, true) else null;
+    if (g.explain) return explainBuild(c, s, g, args, mask_plan);
     if (!localStorage(s, c, g) and nonEmpty(c.env.get("SLURM_JOB_ID")) == null) {
         warn("not inside a Slurm job: SLURM_JOB_ID is unset or empty; nothing was built.", .{});
         if (s.node_local_root.value.len == 0) {
@@ -5007,6 +5351,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     _ = env.swapRemove("EB_LOCAL_SITE_TOOLCHAINS");
     _ = env.swapRemove("EB_LOCAL_VARIANT");
     _ = env.swapRemove("EB_LOCAL_VARIANT_BLOCK");
+    for ([_][]const u8{ "EB_LOCAL_CPU_TARGET", "EB_LOCAL_MASK_ROUTE", "EB_LOCAL_PROBE", "EB_LOCAL_SELF", "EB_LOCAL_HOOKS_FILE", "EB_LOCAL_BASE_HOOKS" }) |name| _ = env.swapRemove(name);
     for (shell_startup) |name| _ = env.swapRemove(name);
     for (s.secrets.items) |sec| if (config.withheldSource(s, sec)) |name| {
         _ = env.swapRemove(name);
@@ -5033,6 +5378,20 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     for (buildVariables(a, work, d)) |kv| env.put(kv[0], kv[1]) catch oom();
     for (s.eessi.items) |v| env.put(v.name, v.value) catch oom();
     for (values) |v| env.put(v.name, v.value) catch oom();
+    var wrap: []const []const u8 = &.{};
+    if (mask_plan) |m| {
+        switch (maskMaterialize(c, m, std.fs.path.join(a, &.{ work, "mask" }) catch oom())) {
+            .ok => |masked| {
+                for (masked.vars) |kv| env.put(kv[0], kv[1]) catch oom();
+                wrap = masked.prefix;
+            },
+            .failed => |why| {
+                if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
+                die("--cpu-target {s}: {s}; nothing was built.", .{ m.subdir, why });
+            },
+        }
+        say("eb-local: --cpu-target {s}, {s} route{s}", .{ m.subdir, @tagName(m.route), if (m.route == .cpuid) " (CPUID faulting, namespaced /proc/cpuinfo)" else "" });
+    }
 
     if (guard.received()) |sig| {
         if (storage.ownWorkspace(job_root, work, callerUid(c))) storage.removeTree(a, work) catch {};
@@ -5043,12 +5402,19 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     // eb-local first waits for EasyBuild, which writes them, to exit. Logs
     // are cleaned only after the process group is reaped. A SIGKILL timeout
     // leaves them in place.
-    const build_argv = buildCommand(a, c, s, p, args);
+    const build_argv = std.mem.concat(a, []const u8, &.{ wrap, buildCommand(a, c, s, p, args) }) catch oom();
     const ran = guard.run(a, build_argv, envpOf(a, &env)) catch die("cannot start {s}", .{build_argv[0]});
-    const rc: u8 = if (guard.received() != null) 1 else switch (ran) {
+    var rc: u8 = if (guard.received() != null) 1 else switch (ran) {
         .exit => |code| code,
         .signal => 1,
         .unreaped => 1,
+    };
+    var audit_failed = false;
+    if (mask_plan) |m| if (rc == 0) {
+        if (!maskAfterBuild(c, g, m, p.prefix, started)) {
+            audit_failed = true;
+            rc = 1;
+        }
     };
 
     // Redaction requires ECHILD. A descendant still alive after the SIGKILL
@@ -5105,7 +5471,7 @@ fn cmdBuild(c: Ctx, s: config.Settings, g: Global, args: []const []const u8) u8 
     const mask = blockPassedOn();
     const ended: Run = if (guard.received()) |sig| .{ .signal = sig } else ran;
     const code: u8 = switch (ended) {
-        .exit => |x| if (x != 0) x else released,
+        .exit => |x| if (x != 0) x else if (audit_failed) 1 else released,
         .signal => 1,
         .unreaped => 1,
     };
@@ -5448,6 +5814,8 @@ const DoctorOpts = struct {
     mpi: bool = false,
     /// `--profiling`: report what perf, valgrind and debuggers may do here.
     profiling: bool = false,
+    /// `--cpu-target TARGET`: report whether this machine can present TARGET.
+    cpu_target: ?[]const u8 = null,
     /// `--workspace`: exercise and describe this existing build workspace.
     workspace: ?[]const u8 = null,
 };
@@ -6119,6 +6487,7 @@ fn cmdDoctor(c: Ctx, s: config.Settings, g: Global, opts: DoctorOpts) u8 {
     }
     if (opts.mpi) reportMpi(c, s, &out, lines_ptr);
     if (opts.profiling) reportProfiling(c, &out, lines_ptr);
+    if (opts.cpu_target) |t| reportCpuTarget(c, t, &out, lines_ptr);
     if (opts.workspace) |workspace| {
         if (reportWorkspace(c, s, workspace, &out, lines_ptr)) failed = true;
     }
@@ -6193,6 +6562,18 @@ fn appendConfigurationOptions(c: Ctx, s: config.Settings, g: Global, p: Place, l
     if (s.profile) |pr| line.appendSlice(a, &.{ "--profile", qSingleLine(a, pr) }) catch oom();
     if (p.project) line.appendSlice(a, &.{ "--project", qSingleLine(a, p.prefix) }) catch oom();
     if (g.variant) |v| line.appendSlice(a, &.{ "--variant", v }) catch oom();
+    line.appendSlice(a, maskOptionWords(a, g)) catch oom();
+}
+
+/// `--cpu-target`, `--mask` and `--no-audit` as the command line that
+/// reproduces them, empty without a target.
+fn maskOptionWords(a: Allocator, g: Global) []const []const u8 {
+    const t = g.cpu_target orelse return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    out.appendSlice(a, &.{ "--cpu-target", qSingleLine(a, t) }) catch oom();
+    if (g.mask != .auto) out.appendSlice(a, &.{ "--mask", @tagName(g.mask) }) catch oom();
+    if (g.no_audit) out.append(a, "--no-audit") catch oom();
+    return out.items;
 }
 
 /// The command a batch job runs to build: this program, the options that
@@ -7361,7 +7742,7 @@ fn cmdRestore(c: Ctx, s: config.Settings, modules: []const []const u8, dry_run: 
 
 // ---- entry ----------------------------------------------------------------
 
-const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, list, doctor, @"lmod-cache", modulerc, overlay, submit };
+const Command = enum { build, eb, env, dev, leave, clean, config, profiles, uninstall, restore, site, @"rpath-wrappers", check, @"audit-isa", list, doctor, @"lmod-cache", modulerc, overlay, submit };
 
 /// The command a word names, other than the default build.
 fn subcommand(word: []const u8) ?Command {
@@ -7429,7 +7810,16 @@ fn runMain(init: std.process.Init) u8 {
 
     var args: []const [:0]const u8 = argv_all[1..];
     var command: Command = .build;
+    // The helpers a build calls on this program itself; they are not part of its interface.
+    var hidden: enum { none, mask_run, mask_preflight } = .none;
     if (args.len > 0) {
+        const first: []const u8 = args[0];
+        if (std.mem.eql(u8, first, "__mask-run") or std.mem.eql(u8, first, "__mask-preflight")) {
+            hidden = if (first[7] == 'r') .mask_run else .mask_preflight;
+            args = args[1..];
+        }
+    }
+    if (args.len > 0 and hidden == .none) {
         const first: []const u8 = args[0];
         if (std.mem.eql(u8, first, "help") or std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
             return if (emit(usage_text)) 0 else 1;
@@ -7459,6 +7849,9 @@ fn runMain(init: std.process.Init) u8 {
     var check_dev = false;
     var check_prefix: ?[]const u8 = null;
     var check_modules: std.ArrayList([]const u8) = .empty;
+    var audit_target: ?[]const u8 = null;
+    var audit_allow: ?[]const u8 = null;
+    var audit_objdump: ?[]const u8 = null;
     var as_env = false;
     var config_get: ?[]const u8 = null;
     var site: SiteOpts = .{};
@@ -7476,6 +7869,7 @@ fn runMain(init: std.process.Init) u8 {
     var doctor_parallel: ?u8 = null;
     var doctor_mpi = false;
     var doctor_profiling = false;
+    var doctor_cpu_target: ?[]const u8 = null;
     var doctor_workspace: ?[]const u8 = null;
     var list_missing = false;
     var overlay_action: []const u8 = "";
@@ -7501,6 +7895,10 @@ fn runMain(init: std.process.Init) u8 {
     }.get;
     while (i < args.len) : (i += 1) {
         const x: []const u8 = args[i];
+        if (hidden == .mask_run and std.mem.eql(u8, x, "--")) {
+            for (args[i + 1 ..]) |arg| rest.append(a, arg) catch oom();
+            break;
+        }
         if (command == .eb and std.mem.eql(u8, x, "--")) {
             // eb's own --help, and any option eb-local also knows, is eb's.
             for (args[i..]) |arg| rest.append(a, arg) catch oom();
@@ -7534,6 +7932,13 @@ fn runMain(init: std.process.Init) u8 {
             const v = if (joined(x, "--variant")) |j| j else value(args, &i, "--variant");
             if (variantBlock(v) == null) die("--variant takes perf or debug", .{});
             g.variant = v;
+        } else if ((std.mem.eql(u8, x, "--cpu-target") or joined(x, "--cpu-target") != null) and command == .build and rest.items.len == 0) {
+            g.cpu_target = if (joined(x, "--cpu-target")) |j| j else value(args, &i, "--cpu-target");
+        } else if ((std.mem.eql(u8, x, "--mask") or joined(x, "--mask") != null) and command == .build and rest.items.len == 0) {
+            const v = if (joined(x, "--mask")) |j| j else value(args, &i, "--mask");
+            g.mask = std.meta.stringToEnum(cpumask.Mode, v) orelse die("--mask takes auto, cpuid, kvm or tcg", .{});
+        } else if (std.mem.eql(u8, x, "--no-audit") and command == .build and rest.items.len == 0) {
+            g.no_audit = true;
         } else if (command == .build and rest.items.len == 0 and subcommand(x) != null) {
             // Global options may come first: eb-local --profile gpu dev.
             command = subcommand(x).?;
@@ -7572,6 +7977,31 @@ fn runMain(init: std.process.Init) u8 {
                     check_modules.append(a, x) catch oom();
                 } else rest.append(a, x) catch oom();
             },
+            .@"audit-isa" => {
+                if (std.mem.eql(u8, x, "--json")) {
+                    g.json_out = true;
+                } else if (std.mem.eql(u8, x, "--target")) {
+                    if (audit_target != null) die("audit-isa takes one --target", .{});
+                    audit_target = value(args, &i, "--target");
+                } else if (joined(x, "--target")) |v| {
+                    if (audit_target != null) die("audit-isa takes one --target", .{});
+                    audit_target = v;
+                } else if (std.mem.eql(u8, x, "--allow")) {
+                    if (audit_allow != null) die("audit-isa takes one --allow", .{});
+                    audit_allow = value(args, &i, "--allow");
+                } else if (joined(x, "--allow")) |v| {
+                    if (audit_allow != null) die("audit-isa takes one --allow", .{});
+                    audit_allow = v;
+                } else if (std.mem.eql(u8, x, "--objdump")) {
+                    if (audit_objdump != null) die("audit-isa takes one --objdump", .{});
+                    audit_objdump = value(args, &i, "--objdump");
+                } else if (joined(x, "--objdump")) |v| {
+                    if (audit_objdump != null) die("audit-isa takes one --objdump", .{});
+                    audit_objdump = v;
+                } else if (x.len > 0 and x[0] == '-') {
+                    die("audit-isa does not know '{s}'", .{x});
+                } else rest.append(a, x) catch oom();
+            },
             .env => {
                 if (std.mem.eql(u8, x, "--strict")) {
                     g.env_strict = true;
@@ -7602,13 +8032,17 @@ fn runMain(init: std.process.Init) u8 {
                     doctor_mpi = true;
                 } else if (std.mem.eql(u8, x, "--profiling")) {
                     doctor_profiling = true;
+                } else if (std.mem.eql(u8, x, "--cpu-target")) {
+                    doctor_cpu_target = value(args, &i, "--cpu-target");
+                } else if (joined(x, "--cpu-target")) |v| {
+                    doctor_cpu_target = v;
                 } else if (std.mem.eql(u8, x, "--workspace")) {
                     if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = value(args, &i, "--workspace");
                 } else if (joined(x, "--workspace")) |v| {
                     if (doctor_workspace != null) die("doctor takes one --workspace", .{});
                     doctor_workspace = v;
-                } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel, --mpi and --profiling; got '{s}'", .{x});
+                } else die("doctor takes --json, --strict, --workspace, --cvmfs, --cvmfs-parallel, --mpi, --profiling and --cpu-target; got '{s}'", .{x});
             },
             .@"lmod-cache" => {
                 if (std.mem.eql(u8, x, "--modulepath")) {
@@ -7889,6 +8323,17 @@ fn runMain(init: std.process.Init) u8 {
         if (only_unwrapped and family.len > 0) die("rpath-wrappers takes --for FAMILY or --unwrapped, not both", .{});
         return cmdRpathWrappers(c, family, only_unwrapped);
     }
+    if (command == .@"audit-isa") {
+        if (rest.items.len != 1) die("audit-isa takes one PATH, the installed prefix to audit", .{});
+        const want = audit_target orelse die("audit-isa needs --target TARGET, an EESSI subdirectory such as x86_64/amd/zen3", .{});
+        return isa_audit.run(a, .{
+            .path = rest.items[0],
+            .target = want,
+            .json = g.json_out,
+            .allow = audit_allow,
+            .objdump = audit_objdump,
+        }, c.env.get("PATH") orelse "", nonEmpty(c.env.get("TMPDIR")) orelse "/tmp", c.envp);
+    }
     if (command == .check) {
         const modes: usize = @as(usize, @intFromBool(check_dev)) + @intFromBool(check_prefix != null) + @intFromBool(check_modules.items.len > 0);
         if (modes > 1 or (modes == 1 and rest.items.len > 0))
@@ -7906,6 +8351,8 @@ fn runMain(init: std.process.Init) u8 {
         return if (g.explain) explainExtend(c, s, rest.items) else cmdExtend(c, s, rest.items);
     }
     if (command == .leave) return cmdLeave(c);
+    if (hidden == .mask_preflight) return cmdMaskPreflight(c, rest.items);
+    if (hidden == .mask_run) return cmdMaskRun(c, g, rest.items);
     const s = loadSettings(c, g);
     return switch (command) {
         .env => cmdEnv(c, s, g),
@@ -7927,9 +8374,9 @@ fn runMain(init: std.process.Init) u8 {
             if (list_missing and g.json_out) die("list takes --missing or --json, not both", .{});
             break :blk cmdList(c, s, rest.items, g.json_out, list_missing);
         },
-        .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .profiling = doctor_profiling, .workspace = doctor_workspace }),
+        .doctor => cmdDoctor(c, s, g, .{ .strict = doctor_strict, .cvmfs = doctor_cvmfs, .parallel = doctor_parallel, .mpi = doctor_mpi, .profiling = doctor_profiling, .cpu_target = doctor_cpu_target, .workspace = doctor_workspace }),
         .submit => cmdSubmit(c, s, g, rest.items, submit),
-        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"lmod-cache", .modulerc, .overlay => unreachable,
+        .eb, .leave, .profiles, .site, .@"rpath-wrappers", .check, .@"audit-isa", .@"lmod-cache", .modulerc, .overlay => unreachable,
     };
 }
 
@@ -7961,6 +8408,7 @@ test {
     _ = mpi;
     _ = recipe_overlay;
     _ = vm;
+    _ = isa_audit;
 }
 
 test "a build script selects no MPI transport" {
