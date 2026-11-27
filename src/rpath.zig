@@ -89,7 +89,13 @@ pub const script =
     \\        -L | --library-path) want_dir=1 ;;
     \\        -L*) dirs+=("${arg#-L}") ;;
     \\        --library-path=*) dirs+=("${arg#--library-path=}") ;;
-    \\        /?*/lib*.so | /?*/lib*.so.[0-9]*) [ -f "$arg" ] && dirs+=("${arg%/*}") ;;
+    \\        # The file name must start with lib. A directory named lib is not enough:
+    \\        # lib64/plugin.so is a plugin, and a run path there is searched first.
+    \\        /?*)
+    \\            case ${arg##*/} in
+    \\                lib*.so | lib*.so.[0-9]*) [ -f "$arg" ] && dirs+=("${arg%/*}") ;;
+    \\            esac
+    \\            ;;
     \\    esac
     \\    case $arg in
     \\        -v | -V | --version | -qversion | --help | --help=* | -dumpversion | -dumpfullversion | -dumpmachine | -print-* | --print-* | '-###') ;;
@@ -384,6 +390,88 @@ test "a compiler is unwrapped unless a wrapper of eb-local's or EasyBuild's come
 
 test "wrapper script recognizes --help=class flags as info-only" {
     try std.testing.expect(std.mem.indexOf(u8, script, "--help | --help=*") != null);
+}
+
+test "a shared object whose file name does not start with lib adds no run path" {
+    const Io = struct {
+        fn writeBytes(path: []const u8, bytes: []const u8, mode: u32) !void {
+            const fd = try sys.openat(fsx.cwd, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, mode);
+            defer sys.close(fd);
+            try sys.writeAll(fd, bytes);
+        }
+
+        fn wrapStdout(exe: []const u8, argv: []const []const u8, envp: proc.Envp) ![]u8 {
+            const r = try proc.run(std.testing.allocator, exe, argv, envp, .{
+                .stdout_limit = 1 << 16,
+                .stderr_limit = 4096,
+                .timeout_ms = 10_000,
+            });
+            defer std.testing.allocator.free(r.stderr);
+            errdefer std.testing.allocator.free(r.stdout);
+            switch (r.term) {
+                .exited => |code| if (code != 0) {
+                    std.debug.print("wrapper exit {d} stderr:\n{s}\n", .{ code, r.stderr });
+                    return error.TestUnexpectedResult;
+                },
+                .signaled => |sig| {
+                    std.debug.print("wrapper signal {d} stderr:\n{s}\n", .{ sig, r.stderr });
+                    return error.TestUnexpectedResult;
+                },
+            }
+            return r.stdout;
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cwd_buf: [sys.path_max]u8 = undefined;
+    const cwd = try fsx.realpath(fsx.cwd, ".", &cwd_buf);
+    const root = try std.fmt.allocPrint(a, "{s}/.zig-cache/rpath-soname-{d}", .{ cwd, linux.getpid() });
+    defer fsx.deleteTree(std.testing.allocator, fsx.cwd, root) catch {};
+    const wrap = try std.fs.path.join(a, &.{ root, "wrap" });
+    const real = try std.fs.path.join(a, &.{ root, "real" });
+    const lib64 = try std.fs.path.join(a, &.{ root, "lib64" });
+    const ver = try std.fs.path.join(a, &.{ root, "ver" });
+    try common.atomic.makedirs(wrap);
+    try common.atomic.makedirs(real);
+    try common.atomic.makedirs(lib64);
+    try common.atomic.makedirs(ver);
+
+    const wrap_gcc = try std.fs.path.join(a, &.{ wrap, "gcc" });
+    const real_gcc = try std.fs.path.join(a, &.{ real, "gcc" });
+    try Io.writeBytes(wrap_gcc, script, 0o755);
+    try Io.writeBytes(real_gcc, "#!/bin/bash\nprintf '%s\\n' \"$@\"\n", 0o755);
+    try Io.writeBytes(try std.fs.path.join(a, &.{ wrap, marker }), "", 0o644);
+
+    const plugin = try std.fs.path.join(a, &.{ lib64, "plugin.so" });
+    const libfoo = try std.fs.path.join(a, &.{ lib64, "libfoo.so" });
+    const versioned = try std.fs.path.join(a, &.{ ver, "libdemo.so.1" });
+    try Io.writeBytes(plugin, "", 0o644);
+    try Io.writeBytes(libfoo, "", 0o644);
+    try Io.writeBytes(versioned, "", 0o644);
+
+    var envb: common.env.Builder = .init(std.testing.allocator);
+    defer envb.deinit();
+    try envb.set("PATH", try std.fmt.allocPrint(a, "{s}:{s}", .{ wrap, real }));
+    const envp = try envb.envp();
+
+    const plugin_out = try Io.wrapStdout(wrap_gcc, &.{ wrap_gcc, "main.c", plugin }, envp);
+    defer std.testing.allocator.free(plugin_out);
+    const lib64_flag = try std.fmt.allocPrint(a, "-Wl,-rpath,{s}", .{lib64});
+    if (std.mem.indexOf(u8, plugin_out, lib64_flag) != null) {
+        std.debug.print("unexpected run path in:\n{s}\n", .{plugin_out});
+    }
+    try std.testing.expect(std.mem.indexOf(u8, plugin_out, lib64_flag) == null);
+
+    const lib_out = try Io.wrapStdout(wrap_gcc, &.{ wrap_gcc, "main.c", libfoo }, envp);
+    defer std.testing.allocator.free(lib_out);
+    try std.testing.expect(std.mem.indexOf(u8, lib_out, lib64_flag) != null);
+
+    const ver_out = try Io.wrapStdout(wrap_gcc, &.{ wrap_gcc, "main.c", versioned }, envp);
+    defer std.testing.allocator.free(ver_out);
+    const ver_flag = try std.fmt.allocPrint(a, "-Wl,-rpath,{s}", .{ver});
+    try std.testing.expect(std.mem.indexOf(u8, ver_out, ver_flag) != null);
 }
 
 test "write rolls back newly created parent on makedirs failure and keeps dangling symlink" {
