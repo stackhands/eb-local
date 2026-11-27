@@ -6700,7 +6700,9 @@ fn nodeTypes(s: config.Settings) []const config.NodeType {
 fn sbatchValue(a: Allocator, v: []const u8) []const u8 {
     if (std.mem.indexOfAny(u8, v, "\n\r") != null)
         die("#SBATCH directive value {s} has a newline; #SBATCH directives are single lines", .{qSingleLine(a, v)});
-    if (std.mem.indexOfAny(u8, v, " \t\"\\") == null) return v;
+    // An apostrophe starts a quote in the scheduler's directive scanner,
+    // the same way a double quote does, even when the path has no space.
+    if (std.mem.indexOfAny(u8, v, " \t\"\\'") == null) return v;
     var out: std.ArrayList(u8) = .empty;
     out.append(a, '"') catch oom();
     for (v) |ch| switch (ch) {
@@ -7185,6 +7187,15 @@ fn readRetainedScript(a: Allocator, path: []const u8) ![]const u8 {
     const opened = try fsx.openRegular(fsx.cwd, path, true);
     defer sys.close(opened.fd);
     return fsx.readAll(a, opened.fd, 1 << 16);
+}
+
+test "an sbatch directive value quotes an apostrophe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // No space, tab, double quote, or backslash: those already take the
+    // quoted form. An apostrophe alone still has to be quoted.
+    try std.testing.expectEqualStrings("\"/home/o'brien/work\"", sbatchValue(a, "/home/o'brien/work"));
 }
 
 test "a forced collision keeps both retained submit scripts" {
