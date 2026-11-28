@@ -1,0 +1,1 @@
+statfs reports a used-up quota as a negative available-block count. eb-local read that count as unsigned, so a prefix with no free space passed the check and the build started. A negative count is now no free bytes.
