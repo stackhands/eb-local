@@ -45,6 +45,7 @@ pub const Summary = struct {
 };
 
 const hello_source =
+    \\#define _GNU_SOURCE
     \\#include <mpi.h>
     \\#include <sched.h>
     \\#include <stdio.h>
@@ -364,4 +365,32 @@ test "an unwritable work directory or symlink at hello.c does not report OutOfMe
     const ro_hello = try runHello(a, .ofi, "/bin/true", "/bin/true", ro_dir, &env, no_env);
     try testing.expect(ro_hello.source_error != null);
     try testing.expect(!ro_hello.ran);
+}
+
+test "the hello compiles where an implicit declaration is an error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try scratch(a);
+    defer fsx.deleteTree(a, fsx.cwd, root) catch {};
+    const inc = try std.fs.path.join(a, &.{ root, "include" });
+    try common.atomic.makedirs(inc);
+    try install(try std.fs.path.join(a, &.{ inc, "mpi.h" }),
+        \\int MPI_Init(int *argc, char ***argv);
+        \\int MPI_Comm_rank(int comm, int *rank);
+        \\int MPI_Comm_size(int comm, int *size);
+        \\int MPI_Finalize(void);
+        \\#define MPI_COMM_WORLD 0
+        \\
+    );
+    const src = try std.fs.path.join(a, &.{ root, "hello.c" });
+    try install(src, hello_source);
+    const obj = try std.fs.path.join(a, &.{ root, "hello.o" });
+    const cc = (try proc.which(a, "cc", "/usr/bin:/bin")).?;
+    const no_env: proc.Envp = &[_:null]?[*:0]const u8{};
+    const compiled = try proc.run(a, cc, &.{
+        cc, "-I", inc, "-Werror=implicit-function-declaration", "-c", src, "-o", obj,
+    }, no_env, .{ .stderr_limit = 8192, .timeout_ms = 60_000 });
+    defer compiled.deinit(a);
+    try testing.expectEqual(@as(u32, 0), compiled.term.code());
 }
